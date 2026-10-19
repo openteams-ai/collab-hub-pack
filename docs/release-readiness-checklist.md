@@ -192,12 +192,12 @@ If "product owner" has not been named for a pack, the tech lead acts as product 
 - `[GA]` `NetworkPolicy` or equivalent restricts unnecessary pod-to-pod communication (if applicable)
 
 ### Release Engineering
-- `[B]` Chart is publishable to `nebari-dev.github.io/helm-repository`
+- `[B]` Chart is publishable to `oci://ghcr.io/openteams-ai/charts`
 - `[B]` Release workflow is configured and at least one pre-1.0 release has been published
 - `[B]` `appVersion` in `Chart.yaml` matches the upstream application version being wrapped
 - `[GA]` Chart version is set to `1.0.0` and follows the [version tagging convention](#version-tagging-convention)
 - `[GA]` Custom container images (if any) are published and accessible
-- `[GA]` Chart syncs to `nebari-dev/helm-repository` and publishes to `quay.io/nebari/charts` after release
+- `[GA]` Chart publishes to `oci://ghcr.io/openteams-ai/charts` and is attached to a GitHub Release after release
 - `[GA]` Upgrade smoke test in CI: `helm install` + `helm upgrade` succeeds without errors
 
 ### Pre-sales Verification

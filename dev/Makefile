@@ -257,6 +257,8 @@ BACKEND  ?= none
 LOCATION ?=
 # The Track: the SQLite file in .local/ at level 1, or Postgres at level 2 (TRACK=$(PG_URL) after `make postgres`).
 TRACK    ?= $(LOCAL)/track.sqlite
+# psycopg, only for a Track on Postgres: a SQLite one needs nothing more, on any Python psycopg has no wheel for yet.
+TRACK_EXTRA = $(if $(filter postgres%,$(TRACK)),--extra postgres)
 
 # No container. Without a LOCATION the fake Cogs under cogs/ answer in the same
 # process. With LOCATION=local each step's worker is a real process: the Cog
@@ -267,7 +269,7 @@ TRACK    ?= $(LOCAL)/track.sqlite
 op: ## Run a fake Op and print its Track (OP=echo|needs-review|fails|slow|spender, LOCATION=local for real worker processes)
 	@if [ "$(LOCATION)" = local ] && ! command -v pixi >/dev/null; then \
 		echo "LOCATION=local runs each fake Cog in its own pixi environment: install pixi (https://pixi.sh), or run without LOCATION"; exit 1; fi
-	cd $(ROOT)/execution && LOCATION=$(LOCATION) uv run --quiet --extra postgres --with pyyaml python $(CURDIR)/op.py $(OP) \
+	cd $(ROOT)/execution && LOCATION=$(LOCATION) uv run --quiet $(TRACK_EXTRA) --with pyyaml python $(CURDIR)/op.py $(OP) \
 		--backend $(BACKEND) --track $(TRACK)
 
 # A fake Op launched through the run API (POST /v1/runs on `make api`, or `make api-pg`), as any
@@ -300,7 +302,7 @@ MODELS        ?= $(LOCAL)/models.toml
 controller: models | $(LOCAL)/frames ## The run controller: picks up what /v1/runs and `make submit` record (TRACK, CONTROLLER_ID)
 	@[ "$(ENVIRONMENT)" = host ] || command -v pixi >/dev/null || { \
 		echo "the controller runs each Cog in its own pixi environment: install pixi (https://pixi.sh), or ENVIRONMENT=host"; exit 1; }
-	cd $(ROOT)/execution && uv run --quiet --extra postgres python -m collab_hub_execution.controller \
+	cd $(ROOT)/execution && uv run --quiet $(TRACK_EXTRA) python -m collab_hub_execution.controller \
 		--track $(TRACK) --id $(CONTROLLER_ID) $(foreach dir,$(subst :, ,$(COGS)),--packages $(dir)) \
 		--work-dir $(LOCAL)/runs --backend $(BACKEND) --location local --environment $(ENVIRONMENT) \
 		--interaction-timeout 0 --models $(MODELS) $(if $(HEALTH_PORT),--health-port $(HEALTH_PORT))

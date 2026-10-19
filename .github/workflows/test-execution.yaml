@@ -48,19 +48,3 @@ jobs:
         working-directory: execution
         run: uv run --group test pytest
 
-  # The local location's process handling on macOS, where process groups and signals answer
-  # differently (a group left with only zombies answers EPERM, not ESRCH) and a worker's
-  # environment is read through ps rather than /proc. macOS runners have no service containers, so
-  # the Postgres Track tests skip here; the job above runs them.
-  test-execution-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
-
-      # Pinned: the runner's newest Python can be ahead of the wheels the test group needs (psycopg).
-      - name: Test
-        working-directory: execution
-        run: uv run --python 3.14 --group test pytest

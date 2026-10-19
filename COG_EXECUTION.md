@@ -305,7 +305,7 @@ Each phase is one pull request from the branch it names, numbered in build order
 | 10 | #177 | Hermes as a Cog, launched from the `collab-hub` CLI on a local hub and talked to from Toad: an example | `feat/cog-local-example` | 6, 9 | M | merged, #178 |
 | 11 | #121 | Run controller and run pickup | `feat/cog-run-controller` | 8, 9, 10 | M | in review, #186 |
 | 12 | #103, first half | The hub run API: launch, list and terminate runs | `feat/cog-run-launch` | 10, 11 | M | in review, #202 |
-| 13 | #211 | Run the Cogs launched through a deployed hub, as processes in its pod | `feat/cog-hub-pod-runs` | 11, 12 | M | in review |
+| 13 | #211 | Run the Cogs launched through a deployed hub, as processes in its pod | `feat/cog-hub-pod-runs` | 11, 12 | M | in review, #212 |
 | 14 | #107 | Add a Worker SDK with Harness adapters, ACP first | `feat/cog-worker-sdk` | 2, 9 | M | not started |
 | 15 | #108 | Publish a Hermes harness Cog, launched by the hub as a local process | `feat/hermes-acp-harness` | 9, 12, 14 | M | not started |
 | 16 | #126, first half | Launch, list and terminate Cogs from the `collab-hub` CLI | `feat/cli-launch` | 6, 10, 12 | S | not started |
@@ -644,7 +644,7 @@ State a Cog for execution, see what is running, stop it — as endpoints Collab 
 - [x] A member of another organization can neither see nor cancel a run, and unauthenticated requests are refused under the hardened path map.
 
 #### Phase 13 — Cogs run on a deployed hub, as processes in its pod
-**Issue** #211 · **Branch** `feat/cog-hub-pod-runs` · **Depends on** Phases 11, 12 · **Size** M · **Status** in review
+**Issue** #211 · **Branch** `feat/cog-hub-pod-runs` · **Depends on** Phases 11, 12 · **Size** M · **Status** in review, #212
 
 A deployed hub runs what is launched through it, so a Cog launched from a laptop with the `collab-hub` CLI runs on a hub like a development server. Phase 12 serves the run API on a deployed hub and ships the run controller in its image, and nothing deployed runs a controller, so every launch stays `SUBMITTED`. This phase runs one beside the API, as a first step: each Cog is a process of the hub's pod, the `local` location, which is not isolated from the hub and so is for a development hub; Phase 22's `remote` location, a pod per worker under a least-privilege controller, replaces it.
 

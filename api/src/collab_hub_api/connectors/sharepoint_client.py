@@ -16,7 +16,12 @@ import httpx
 from .connector_text import sanitize_connector_text, sanitize_github_api_text
 from .http_stream import read_capped
 from .models import SharePointItemMetadata, SharePointReadResponse, SharePointSearchHit
-from .sharepoint_text import PdfExtractionError, extract_pdf_text_async
+from .sharepoint_text import (
+    ExtractionBusy,
+    PdfExtractionError,
+    extract_pdf_text_async,
+    extraction_permit,
+)
 
 # Microsoft Search pages by ``from``/``size`` offsets (no cursor). Graph refuses
 # deep offsets anyway; this cap keeps a page token from walking forever.
@@ -101,6 +106,12 @@ class SharePointSearchError(ValueError):
     """Raised for caller-correctable SharePoint parameters -> 422."""
 
 
+class SharePointBusy(RuntimeError):
+    """A document read was not admitted within the bounded wait; the caller should retry shortly."""
+
+    retry_after_seconds = 5
+
+
 class SharePointUnsupportedItem(RuntimeError):
     """The item exists but cannot be returned as text; the reason is the message."""
 
@@ -130,6 +141,7 @@ class SharePointClient:
         include_personal_onedrive: bool = False,
         extraction_timeout_seconds: float = 30.0,
         extraction_memory_limit_bytes: int = 256 * 1024 * 1024,
+        extraction_wait_seconds: float = 10.0,
     ):
         self.access_token = access_token
         self.api_base_url = api_base_url.rstrip("/")
@@ -139,6 +151,7 @@ class SharePointClient:
         self.include_personal_onedrive = include_personal_onedrive
         self.extraction_timeout_seconds = extraction_timeout_seconds
         self.extraction_memory_limit_bytes = extraction_memory_limit_bytes
+        self.extraction_wait_seconds = extraction_wait_seconds
 
     async def verify_access(self) -> SharePointAccessCheck:
         # Two-step capability probe (contract 4): /me proves the token brokers;
@@ -267,27 +280,46 @@ class SharePointClient:
             return text[:max_chars], byte_truncated or len(text) > max_chars
 
         if mime_type == "application/pdf" or extension == "pdf":
-            body, byte_truncated = await self._download(
-                content_path, max_bytes=self.max_download_bytes, operation="download"
+            return await self._document_text(
+                content_path, max_chars, operation="download", too_large="File is larger than the read limit."
             )
-            if byte_truncated:
-                raise SharePointUnsupportedItem("File is larger than the read limit.")
-            return await self._pdf_text(body, max_chars)
 
         if extension in _PDF_CONVERTIBLE_EXTENSIONS or mime_type in _PDF_CONVERTIBLE_MIME_TYPES:
-            body, byte_truncated = await self._download(
+            return await self._document_text(
                 content_path,
+                max_chars,
                 params={"format": "pdf"},
-                max_bytes=self.max_download_bytes,
                 operation="convert",
+                too_large="The converted document is larger than the read limit.",
             )
-            if byte_truncated:
-                raise SharePointUnsupportedItem("The converted document is larger than the read limit.")
-            return await self._pdf_text(body, max_chars)
 
         raise SharePointUnsupportedItem(
             f"This file type cannot be read as text ({mime_type or extension or 'unknown type'})."
         )
+
+    async def _document_text(
+        self,
+        content_path: str,
+        max_chars: int,
+        *,
+        operation: str,
+        too_large: str,
+        params: dict[str, str] | None = None,
+    ) -> tuple[str, bool]:
+        # One admission permit spans the download (or conversion) and the parse,
+        # so a read that is waiting its turn holds no body: the pod's cost for
+        # document reads is one body plus one worker at a time. A read that is
+        # not admitted within the bounded wait answers busy instead of queueing.
+        try:
+            async with extraction_permit(self.extraction_wait_seconds):
+                body, byte_truncated = await self._download(
+                    content_path, params=params, max_bytes=self.max_download_bytes, operation=operation
+                )
+                if byte_truncated:
+                    raise SharePointUnsupportedItem(too_large)
+                return await self._pdf_text(body, max_chars)
+        except ExtractionBusy as exc:
+            raise SharePointBusy("The hub is busy reading other documents. Try again in a few seconds.") from exc
 
     async def _pdf_text(self, data: bytes, max_chars: int) -> tuple[str, bool]:
         try:

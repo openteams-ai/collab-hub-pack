@@ -210,6 +210,8 @@ spec:
               value: {{ .Values.connectors.sharepoint.extractionTimeoutSeconds | quote }}
             - name: COLLAB_HUB_API__CONNECTORS__SHAREPOINT__EXTRACTION_MEMORY_LIMIT_BYTES
               value: {{ .Values.connectors.sharepoint.extractionMemoryLimitBytes | int64 | quote }}
+            - name: COLLAB_HUB_API__CONNECTORS__SHAREPOINT__EXTRACTION_WAIT_SECONDS
+              value: {{ .Values.connectors.sharepoint.extractionWaitSeconds | quote }}
             - name: COLLAB_HUB_API__CONNECTORS__SHAREPOINT__INCLUDE_PERSONAL_ONEDRIVE
               value: {{ .Values.connectors.sharepoint.includePersonalOnedrive | quote }}
             {{- with .Values.frames.auth.idToken.jwksUrl }}

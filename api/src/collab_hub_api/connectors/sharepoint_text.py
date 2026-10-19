@@ -5,6 +5,9 @@ import json
 import math
 import sys
 import threading
+import weakref
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 # PDF text extraction for the SharePoint read route.
 #
@@ -32,9 +35,60 @@ import threading
 # callers of extract_pdf_text (the worker itself, and tests).
 _PDFIUM_LOCK = threading.Lock()
 
-# One parse at a time across the API process. With a per-worker memory ceiling
-# this is also the bound on what extraction can cost the pod at once.
-_PARSE_GATE = asyncio.Semaphore(1)
+# Two gates, one permit each, bound what document reads cost the API process:
+#
+# * "admission" is taken by the SharePoint client BEFORE a PDF or Office body
+#   is downloaded or converted and held until the parse ends, so a read that
+#   is waiting its turn holds no body. The pod's cost for document reads is
+#   one body plus one worker at a time, however many reads arrive. The wait
+#   is bounded (ExtractionBusy), and the permit is released on failure and
+#   on cancellation.
+# * "parse" is taken around the worker itself: belt and braces for a caller
+#   that reaches extract_pdf_text_async without a permit.
+#
+# asyncio primitives bind to the first loop that waits on them, so the gates
+# are kept per event loop (one loop per API process; one per test).
+_GATES: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Semaphore]] = weakref.WeakKeyDictionary()
+
+
+def _gate(name: str) -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    gates = _GATES.get(loop)
+    if gates is None:
+        gates = _GATES[loop] = {}
+    gate = gates.get(name)
+    if gate is None:
+        gate = gates[name] = asyncio.Semaphore(1)
+    return gate
+
+
+class ExtractionBusy(RuntimeError):
+    """Another document read holds the admission permit and the bounded wait ran out."""
+
+
+@asynccontextmanager
+async def extraction_permit(wait_seconds: float) -> AsyncIterator[None]:
+    """Admit one PDF/Office read at a time, from before its download to after its parse.
+
+    Raises :class:`ExtractionBusy` when the permit is not free within
+    ``wait_seconds``. The permit is released however the body ends, including
+    cancellation: a client that gives up while waiting takes nothing with it.
+    """
+    gate = _gate("admission")
+    if not gate.locked():
+        await gate.acquire()  # free, and nobody queued ahead: taken without suspending
+    elif wait_seconds <= 0:
+        raise ExtractionBusy("another document is being read")
+    else:
+        try:
+            await asyncio.wait_for(gate.acquire(), wait_seconds)
+        except TimeoutError:
+            raise ExtractionBusy("another document is being read") from None
+    try:
+        yield
+    finally:
+        gate.release()
+
 
 _WORKER_MODULE = "collab_hub_api.connectors.sharepoint_pdf_worker"
 # Largest reply the parent will read from a worker: max_chars of text plus the
@@ -125,7 +179,7 @@ async def extract_pdf_text_async(
     read starts clean. Raises :class:`PdfExtractionError` when the worker could
     not read the file, hit its memory ceiling, or died.
     """
-    async with _PARSE_GATE:
+    async with _gate("parse"):
         return await _run_worker(
             data,
             max_chars=max_chars,

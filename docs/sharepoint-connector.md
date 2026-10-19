@@ -41,8 +41,9 @@ refresh token.
 **IdP contract the connector relies on** (reviewable artifact:
 `docs/keycloak-microsoft-idp-partial-import.json`):
 
-- **Alias `microsoft`.** apollo-desktop's `SharePointConnectorLogin` hardcodes
-  it. Display name is free (the dev realm shows "Microsoft").
+- **Alias `microsoft`.** The Hub derives the alias the desktop links from
+  `brokerTokenUrl` (`.../broker/microsoft/token`), so the IdP alias must match
+  the broker URL. Display name is free (the dev realm shows "Microsoft").
 - **Provider type `microsoft`** (built-in) with **Tenant ID** set to the Entra
   directory id. It defaults to the multi-tenant `common` endpoint, which a
   single-tenant app registration rejects.
@@ -107,6 +108,7 @@ connectors:
     includePersonalOnedrive: false
     extractionTimeoutSeconds: 30     # a parse past this is killed; the file reads as unsupported
     extractionMemoryLimitBytes: 268435456  # 256 MiB worker ceiling; stay inside the pod's 512Mi
+    extractionWaitSeconds: 10        # wait for the one-at-a-time document reader; past it: 503 + Retry-After
 ```
 
 These map to `COLLAB_HUB_API__CONNECTORS__SHAREPOINT__*` env vars in the API
@@ -148,16 +150,25 @@ carries `content_trust: "external_untrusted"`.
   (real URLs and emails masked, dotted names like `report.docx` kept).
 - **Document text is produced in the Hub**, not the desktop: Graph converts
   Office files to PDF server-side; the Hub extracts text with PDFium
-  (`pypdfium2`, the same engine apollo-desktop's OCR sidecar uses). The parse
-  never runs in the API process: each one runs in a separate worker process
-  (`sharepoint_pdf_worker`), one at a time, under `extractionTimeoutSeconds`
-  (the worker is killed and reaped when it overruns) and
+  (`pypdfium2`, the same engine the Collab desktop app's OCR sidecar uses). The
+  parse never runs in the API process: each one runs in a separate worker
+  process (`sharepoint_pdf_worker`) under `extractionTimeoutSeconds` (the
+  worker is killed and reaped when it overruns) and
   `extractionMemoryLimitBytes` (an address-space ceiling set inside the worker
   before PDFium loads, plus a CPU ceiling as a second line). An adverse file
   costs one dead worker and an `unsupported` answer; the Hub keeps serving.
-  Other bounds: `maxDownloadBytes` before download (streamed through
-  `read_capped`), 200 pages, and `max_chars`. Scanned, image-only PDFs extract
-  to nothing and are reported as unsupported; OCR is out of scope.
+- **Document reads are admitted one at a time, before anything is downloaded.**
+  One permit spans a PDF or Office read from before its download (or
+  conversion) to after its parse, so a read waiting its turn holds no body:
+  the pod's cost for document reads is one body plus one worker at a time,
+  however many reads arrive. The wait is bounded by `extractionWaitSeconds`;
+  past it the route answers `503` with `Retry-After` and the desktop tool
+  relays "busy, try again". The permit is released on failure and when the
+  caller gives up. Text files skip the permit: they are streamed only up to
+  a few bytes per requested character. Other bounds: `maxDownloadBytes`
+  before download (streamed through `read_capped`), 200 pages, and
+  `max_chars`. Scanned, image-only PDFs extract to nothing and are reported
+  as unsupported; OCR is out of scope.
 - `/content` answers `302` to a pre-authenticated download host. The Hub follows
   it by hand: each hop must be https (or the configured Graph origin, for local
   fakes), and the Graph token is sent only on the first request (asserted by tests).

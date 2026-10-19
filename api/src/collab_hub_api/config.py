@@ -806,6 +806,10 @@ class SharePointConnectorConfig(BaseModel):
     # inside the pod's memory headroom (the chart's default limit is 512Mi).
     extraction_timeout_seconds: float = 30.0
     extraction_memory_limit_bytes: int = Field(default=256 * 1024 * 1024, ge=1)
+    # Document reads (PDF and Office) are admitted one at a time, from before
+    # the download to after the parse, so a waiting read holds no body. A read
+    # not admitted within this wait answers 503 with Retry-After.
+    extraction_wait_seconds: float = Field(default=10.0, ge=0)
     # Search covers SharePoint document libraries. The user's personal OneDrive
     # is reachable with the same scopes; it is excluded unless a hub opts in,
     # so a daily digest never surfaces someone's private drafts by default.

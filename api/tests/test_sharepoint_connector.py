@@ -1034,7 +1034,10 @@ async def test_sharepoint_read_of_an_adverse_pdf_fails_within_budget_and_the_hub
         assert elapsed < budget + 15
         assert workers and all(process.returncode is not None for process in workers)
 
-        served["content"] = _minimal_pdf("Policy text")
+    # The next ordinary read works: no worker, permit or body is left behind.
+    # (On a default budget: this proves clean state, not speed under test load.)
+    served["content"] = _minimal_pdf("Policy text")
+    async with _client(make_app(_config(tmp_path))) as client:
         response = await client.post(_read_path(), headers=_auth_header(), json={})
     body = response.json()
     assert body["unsupported"] is False
@@ -1161,3 +1164,143 @@ async def test_a_reply_larger_than_one_pipe_read_is_assembled_whole(monkeypatch)
         b"%PDF-", max_chars=250000, max_pages=1, timeout_seconds=30, memory_limit_bytes=1 << 20
     )
     assert (len(text), truncated) == (250000, True)
+
+
+# --- admission: one document read at a time, decided before any download ----
+
+
+def _document_handler(bodies: dict[str, bytes | None]):
+    """Metadata + download for several PDF items; records every download with its time.
+
+    A ``None`` body makes that item's download fail with a Graph 500.
+    """
+    downloads: list[tuple[str, float]] = []
+
+    def handler(request: httpx.Request) -> Response:
+        path = request.url.path
+        if request.url.host == "contoso.sharepoint.test":
+            item_id = path.rsplit("/", 1)[-1]
+            downloads.append((item_id, time.monotonic()))
+            body = bodies[item_id]
+            if body is None:
+                return Response(500, content=b"storage error")
+            return Response(200, content=body, headers={"Content-Type": "application/pdf"})
+        for item_id in bodies:
+            if f"/items/{item_id}/content" in path:
+                return Response(302, headers={"Location": f"{DOWNLOAD_HOST}/download/{item_id}"})
+            if f"/items/{item_id}" in path:
+                return Response(200, json=_resource(item_id, f"doc-{item_id[-1]}.pdf", mime="application/pdf"))
+        return _ok_handler(request)
+
+    return handler, downloads
+
+
+def _hold_worker(monkeypatch, seconds: float) -> dict:
+    """Stand-in worker that keeps its permit for ``seconds``; ``hold["on"] = False`` restores the real one."""
+    real = sharepoint_text.worker_command
+    hold = {"on": True}
+    script = (
+        "import json, sys, time; sys.stdin.buffer.read(); "
+        f"time.sleep({seconds}); print(json.dumps({{'text': 'Held text', 'truncated': False}}))"
+    )
+    monkeypatch.setattr(
+        sharepoint_text,
+        "worker_command",
+        lambda **kwargs: [sys.executable, "-c", script] if hold["on"] else real(**kwargs),
+    )
+    return hold
+
+
+def _item_ids(suffixes: str) -> list[str]:
+    return [ITEM_ID[:-1] + suffix for suffix in suffixes]
+
+
+async def test_document_reads_are_admitted_one_at_a_time_before_any_download(tmp_path, monkeypatch):
+    # With one read holding the worker, concurrent document reads must not each
+    # download a body and wait with it. Past the bounded wait they answer busy
+    # (503 + Retry-After) having downloaded nothing; the worker is reaped; an
+    # ordinary read and another Hub route work afterwards.
+    workers = _spy_on_workers(monkeypatch)
+    hold = _hold_worker(monkeypatch, 2.0)
+    ids = _item_ids("ABC")
+    bodies = {item_id: _minimal_pdf(f"Document {item_id[-1]}") for item_id in ids}
+    handler, downloads = _document_handler(bodies)
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path, extraction_wait_seconds=0.5))
+    async with _client(app) as client:
+        responses = await asyncio.gather(
+            *[client.post(_read_path(item_id), headers=_auth_header(), json={}) for item_id in ids]
+        )
+        assert sorted(r.status_code for r in responses) == [200, 503, 503]
+        for refused in (r for r in responses if r.status_code == 503):
+            assert refused.headers["Retry-After"] == "5"
+            assert "busy" in refused.json()["detail"]
+        admitted = next(r for r in responses if r.status_code == 200)
+        assert admitted.json()["text"] == "Held text"
+        assert len(downloads) == 1  # the refused reads stockpiled nothing
+        assert len(workers) == 1 and workers[0].returncode is not None
+
+        hold["on"] = False
+        later = await client.post(_read_path(ids[1]), headers=_auth_header(), json={})
+        assert later.status_code == 200
+        assert f"Document {ids[1][-1]}" in later.json()["text"]
+        assert (await client.get("/health")).status_code == 200
+        assert (await client.get("/v1/connectors", headers=_auth_header())).status_code == 200
+
+
+async def test_a_waiting_document_read_downloads_only_once_admitted(tmp_path, monkeypatch):
+    # Inside the wait, a read is queued without a body: its download starts
+    # only after the current read's parse has ended.
+    _hold_worker(monkeypatch, 1.0)
+    ids = _item_ids("AB")
+    handler, downloads = _document_handler({item_id: _minimal_pdf("x") for item_id in ids})
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path, extraction_wait_seconds=10))
+    async with _client(app) as client:
+        first = asyncio.create_task(client.post(_read_path(ids[0]), headers=_auth_header(), json={}))
+        await asyncio.sleep(0.3)  # the first read holds the permit and the worker
+        second = await client.post(_read_path(ids[1]), headers=_auth_header(), json={})
+        assert (await first).status_code == 200
+    assert second.status_code == 200
+    assert [item_id for item_id, _ in downloads] == ids
+    assert downloads[1][1] - downloads[0][1] >= 0.9  # fetched only after the first parse ended
+
+
+async def test_a_read_that_gives_up_waiting_releases_the_permit(tmp_path, monkeypatch):
+    hold = _hold_worker(monkeypatch, 1.0)
+    ids = _item_ids("ABC")
+    handler, downloads = _document_handler({item_id: _minimal_pdf("x") for item_id in ids})
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path, extraction_wait_seconds=10))
+    async with _client(app) as client:
+        first = asyncio.create_task(client.post(_read_path(ids[0]), headers=_auth_header(), json={}))
+        await asyncio.sleep(0.3)
+        with pytest.raises(TimeoutError):  # the caller gives up while waiting its turn
+            await asyncio.wait_for(client.post(_read_path(ids[1]), headers=_auth_header(), json={}), 0.3)
+        assert (await first).status_code == 200
+        hold["on"] = False
+        third = await client.post(_read_path(ids[2]), headers=_auth_header(), json={})
+        assert third.status_code == 200  # the permit the abandoned read waited for is free
+    assert [item_id for item_id, _ in downloads] == [ids[0], ids[2]]
+
+
+async def test_a_failed_download_releases_the_permit(tmp_path, monkeypatch):
+    ids = _item_ids("AB")
+    handler, _downloads = _document_handler({ids[0]: None, ids[1]: _minimal_pdf("After failure")})
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path, extraction_wait_seconds=0))  # a leaked permit would answer 503 at once
+    async with _client(app) as client:
+        failed = await client.post(_read_path(ids[0]), headers=_auth_header(), json={})
+        assert failed.status_code == 502
+        after = await client.post(_read_path(ids[1]), headers=_auth_header(), json={})
+    assert after.status_code == 200
+    assert "After failure" in after.json()["text"]
+
+
+async def test_extraction_permit_is_one_at_a_time_with_a_bounded_wait():
+    async with sharepoint_text.extraction_permit(0):
+        with pytest.raises(sharepoint_text.ExtractionBusy):
+            async with sharepoint_text.extraction_permit(0.05):
+                pass
+    async with sharepoint_text.extraction_permit(0):  # released once the body ends
+        pass

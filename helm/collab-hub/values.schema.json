@@ -961,6 +961,10 @@
               "type": "integer",
               "minimum": 1
             },
+            "extractionWaitSeconds": {
+              "type": "number",
+              "minimum": 0
+            },
             "includePersonalOnedrive": {
               "type": "boolean"
             }

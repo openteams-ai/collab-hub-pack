@@ -106,6 +106,7 @@ from collab_hub_api.connectors.notion_client import (
 )
 from collab_hub_api.connectors.notion_tokens import NotionTokenProvider
 from collab_hub_api.connectors.sharepoint_client import (
+    SharePointBusy,
     SharePointClient,
     SharePointSearchError,
     SharePointUpstreamError,
@@ -1057,6 +1058,14 @@ async def read_sharepoint_item(
     client = await _sharepoint_client(request, config)
     try:
         return await client.read_item(drive_id=drive_id, item_id=item_id, max_chars=body.max_chars)
+    except SharePointBusy as exc:
+        # Document reads are admitted one at a time; past the bounded wait the
+        # caller is told to retry rather than queued with a body in memory.
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            str(exc),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
     except SharePointUpstreamError as exc:
         logger.info(
             "sharepoint_item_read_upstream_error",
@@ -1294,6 +1303,7 @@ def _new_sharepoint_client(token: str, config: ConnectorsConfig) -> SharePointCl
         include_personal_onedrive=config.sharepoint.include_personal_onedrive,
         extraction_timeout_seconds=config.sharepoint.extraction_timeout_seconds,
         extraction_memory_limit_bytes=config.sharepoint.extraction_memory_limit_bytes,
+        extraction_wait_seconds=config.sharepoint.extraction_wait_seconds,
     )
 
 

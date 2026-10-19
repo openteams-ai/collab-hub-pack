@@ -665,6 +665,10 @@ connectors:
     # -- Memory ceiling (bytes) for that worker. Keep it inside the pod's
     # headroom: the chart's default memory limit is 512Mi.
     extractionMemoryLimitBytes: 268435456
+    # -- Document reads (PDF and Office) are admitted one at a time, from before
+    # the download to after the parse, so a waiting read never holds a body. A
+    # read not admitted within this many seconds answers 503 with Retry-After.
+    extractionWaitSeconds: 10
     # -- Whether search also returns files from each user's personal OneDrive.
     # Off: SharePoint document libraries only, so a daily digest never surfaces
     # someone's private drafts by default.

@@ -60,6 +60,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
 
+      # Pinned: the runner's newest Python can be ahead of the wheels the test group needs (psycopg).
       - name: Test
         working-directory: execution
-        run: uv run --group test pytest
+        run: uv run --python 3.14 --group test pytest

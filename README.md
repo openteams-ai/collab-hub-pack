@@ -42,12 +42,12 @@ The API is a FastAPI service exposing:
 
 ## Quickstart
 
-Install the versioned chart from the latest [release](../../releases/latest)
-(pinned to an immutable image):
+Install a versioned chart (pinned to an immutable image) from GHCR; the
+[releases](../../releases) list the versions and attach the same chart:
 
 ```sh
 helm install collab-hub-pack \
-  https://github.com/openteams-ai/collab-hub-pack/releases/download/v0.1.0/collab-hub-0.1.0.tgz \
+  oci://ghcr.io/openteams-ai/charts/collab-hub --version <version> \
   --namespace nebari-nexus --create-namespace \
   --values values-example.yaml
 ```

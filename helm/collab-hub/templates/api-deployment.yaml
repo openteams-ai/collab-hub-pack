@@ -27,6 +27,11 @@ spec:
     metadata:
       labels:
         {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 8 }}
+      {{- if and $controller.enabled $controller.models }}
+      annotations:
+        # The controller reads its models block once, at start: a new block rolls the pod.
+        checksum/run-models: {{ $controller.models | sha256sum }}
+      {{- end }}
     spec:
       serviceAccountName: {{ include "collab-hub.api-service-account-name" . }}
       {{- with .Values.api.deployment.securityContext.pod }}
@@ -493,6 +498,8 @@ spec:
               value: {{ $controller.interactionTimeoutSeconds | quote }}
             - name: COLLAB_CONTROLLER_WAIT
               value: {{ $controller.waitSeconds | quote }}
+            - name: COLLAB_CONTROLLER_WORKER_START_TIMEOUT
+              value: {{ $controller.workerStartSeconds | quote }}
             - name: COLLAB_CONTROLLER_HEALTH_HOST
               value: "0.0.0.0"
             - name: COLLAB_CONTROLLER_HEALTH_PORT

@@ -12,6 +12,7 @@ happens to contain the right name. Needs PyYAML.
 from __future__ import annotations
 
 import json
+import re
 import sys
 
 import yaml
@@ -30,6 +31,7 @@ class Rendered:
         pod = deployment["spec"]["template"]["spec"]
         container = pod["containers"][0]
         self.containers = {c["name"]: c for c in pod["containers"]}
+        self.annotations = deployment["spec"]["template"]["metadata"].get("annotations") or {}
         self.configmaps = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "ConfigMap"}
         self.env = {e["name"]: e for e in container["env"]}
         self.mounts = {m["name"]: m for m in container.get("volumeMounts", [])}
@@ -158,6 +160,9 @@ def case_run_controller(r: Rendered) -> None:
     assert env["COLLAB_CONTROLLER_TRACK"]["valueFrom"]["secretKeyRef"] == {"name": "hub-db", "key": "url"}
     assert env["COLLAB_CONTROLLER_ID"]["value"] == "hub" and env["COLLAB_CONTROLLER_WAIT"]["value"] == "600"
     assert env["COLLAB_CONTROLLER_MODELS"]["value"] == "/etc/collab-hub/runs/models.toml"
+    assert env["COLLAB_CONTROLLER_WORKER_START_TIMEOUT"]["value"] == "900"
+    # The pod rolls when its models block changes: the controller reads it once, at start.
+    assert re.fullmatch(r"[0-9a-f]{64}", r.annotations.get("checksum/run-models", "")), r.annotations
     assert env["ANTHROPIC_API_KEY"]["valueFrom"]["secretKeyRef"]["name"] == "claude"
     # Liveness only: a readiness probe would hold the pod out while the controller waits for its id.
     assert "livenessProbe" in controller and "readinessProbe" not in controller and "startupProbe" not in controller

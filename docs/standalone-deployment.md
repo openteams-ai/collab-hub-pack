@@ -446,7 +446,8 @@ runs:
   default, a Cog runs in the environment its lock pins, which pixi builds the
   first time the Cog is launched: it downloads the packages, so the pod needs
   egress to conda-forge and PyPI, and Hermes's first launch takes a few
-  minutes. Environments and each run's output are kept on an `emptyDir`
+  minutes, within `workerStartSeconds` (900 by default), how long a worker
+  may take to start. Environments and each run's output are kept on an `emptyDir`
   (`cacheSizeLimit`), so a new pod builds them again.
 - **Its Track** is the hub's database (`frames.postgres`), the one the API
   records runs in; the chart refuses the controller without it.
@@ -458,7 +459,9 @@ runs:
   waiting never holds the API out of service.
 - **Models and keys.** `models` is the hub's models block, in TOML
   ([runs.md](cog-execution/runs.md#configuration-health-and-models)), rendered
-  into a ConfigMap. A key is named by `auth_ref = "env:NAME"` and arrives in
+  into a ConfigMap; the controller reads it once, at start, so a changed block
+  rolls the pod (a checksum of it is on the pod template). A key is named by
+  `auth_ref = "env:NAME"` and arrives in
   `extraEnv` from a Secret; it is handed to the workers of the Cogs bound to
   that model, and to no other.
 - **Not isolated.** A Cog's worker is a process of the API's pod, run as the

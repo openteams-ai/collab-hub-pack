@@ -398,6 +398,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--health-port", type=int, default=int(env("COLLAB_CONTROLLER_HEALTH_PORT", "0")),
                         help="serve /healthz and /readyz on this port; none when 0")
     parser.add_argument("--health-host", default=env("COLLAB_CONTROLLER_HEALTH_HOST", "127.0.0.1"))
+    parser.add_argument("--worker-start-timeout", type=float, metavar="SECONDS",
+                        default=float(env("COLLAB_CONTROLLER_WORKER_START_TIMEOUT", "120")),
+                        help="how long a worker may take to start and answer /healthz, which includes pixi building "
+                             "a Cog's environment the first time it is launched")
     parser.add_argument("--wait", type=float, default=float(env("COLLAB_CONTROLLER_WAIT", "0")), metavar="SECONDS",
                         help="how long to wait at start for the Track's tables (the API's migrations create them) "
                              "and for this controller's id (held by the one a rollout replaces); 0 refuses at "
@@ -479,6 +483,7 @@ def main(argv: list[str] | None = None) -> int:
         location_settings={"packages": args.packages, "allow": args.allow, "work_dir": args.work_dir,
                            "environment": args.environment,
                            "interaction_timeout": args.interaction_timeout or None,
+                           "ready_timeout": args.worker_start_timeout,
                            "deliver": deliver})
     controller = RunController(runner, poll_interval=args.poll_interval)
     controller.start()

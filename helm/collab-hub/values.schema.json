@@ -1089,6 +1089,11 @@
             "resources": {
               "type": "object",
               "description": "Resources for the controller container."
+            },
+            "workerStartSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Seconds a worker may take to start, building a Cog's environment on its first launch included."
             }
           },
           "additionalProperties": false

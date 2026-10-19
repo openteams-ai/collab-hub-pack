@@ -431,11 +431,13 @@ def test_every_option_reads_its_variable_and_the_command_line_wins(monkeypatch, 
     for name, value in {"TRACK": str(tmp_path / "t.sqlite"), "WORK_DIR": str(tmp_path / "runs"),
                         "PACKAGES": os.pathsep.join(["/a", "/b"]), "ALLOW": "echo,slow", "ENVIRONMENT": "host",
                         "POLL_INTERVAL": "0.5", "INTERACTION_TIMEOUT": "0", "HEALTH_PORT": "8770",
+                        "WORKER_START_TIMEOUT": "900",
                         "ID": "one"}.items():
         monkeypatch.setenv(f"COLLAB_CONTROLLER_{name}", value)
     args = parse_args([])
     assert (args.packages, args.allow, args.environment, args.poll_interval, args.interaction_timeout,
-            args.health_port, args.id) == (["/a", "/b"], ["echo", "slow"], "host", 0.5, 0.0, 8770, "one")
+            args.health_port, args.id, args.worker_start_timeout) == (
+        ["/a", "/b"], ["echo", "slow"], "host", 0.5, 0.0, 8770, "one", 900.0)
     args = parse_args(["--packages", "/c", "--environment", "pixi"])
     assert args.packages == ["/c"] and args.environment == "pixi"
     monkeypatch.setenv("COLLAB_CONTROLLER_ENVIRONMENT", "docker")

@@ -19,11 +19,16 @@ on:
     paths:
       - "api/**"
       - "execution/**"
+      # The Cogs the image ships (runs.controller in the chart).
+      - "cogs/hermes/**"
+      - "examples/cog-local/cogs/hello/**"
       - ".github/workflows/build-images.yaml"
   pull_request:
     paths:
       - "api/**"
       - "execution/**"
+      - "cogs/hermes/**"
+      - "examples/cog-local/cogs/hello/**"
   workflow_dispatch:
 
 jobs:

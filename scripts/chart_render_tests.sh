@@ -63,6 +63,13 @@ refused "feature flags: a non-boolean value is refused" "/features/cogs_ui" --se
 check "run controller off: one container, no Cog packages for the API" no-run-controller
 check "run controller on: a sidecar on the hub's database, liveness only, its models from a ConfigMap" run-controller \
   -f "$TESTDATA/run-controller.yaml"
+# A changed models block rolls the pod: the controller reads it once, at start.
+checksum() { $HELM template t "$CHART" -f "$TESTDATA/run-controller.yaml" "$@" | grep 'checksum/run-models' ; }
+if [ "$(checksum)" != "$(checksum --set-string runs.controller.models='[models.other]')" ] && [ -n "$(checksum)" ]; then
+  pass "run controller: a new models block changes the pod template"
+else
+  fail "run controller: a new models block changes the pod template" "the checksum did not change"
+fi
 refused "run controller: refused without the hub's database" "needs frames.postgres" --set runs.controller.enabled=true
 # Frames on S3, so the chart's own storage rules allow more than one API pod and it is this rule that refuses.
 SHARED_FRAMES='--set frames.storage.backend=s3 --set frames.s3.bucket=frames --set frames.activeState.backend=postgres'

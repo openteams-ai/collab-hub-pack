@@ -474,3 +474,55 @@ def test_a_postgres_with_part_of_a_track_is_refused_naming_what_is_missing():
     finally:
         with psycopg.connect(TEST_PG, autocommit=True) as admin:
             admin.execute("DROP DATABASE IF EXISTS track_partial WITH (FORCE)")
+
+
+def test_a_controller_told_to_wait_takes_its_id_over_once_the_one_holding_it_stops(tmp_path):
+    # A rollout: the new pod's controller starts while the old one still holds the id, and waits for it
+    # rather than exiting; once the old one stops, it takes the id and its runs over.
+    track_path = tmp_path / "track.sqlite"
+    SqliteTrackStore.ensure_schema(track_path)
+    track = SqliteTrackStore(track_path)
+    controllers = _Controllers(tmp_path, str(track_path))
+    try:
+        old, _ = controllers.start("hub")
+        intents.submit(track, OpDefinition("slow", (OpStep("a", "slow", "run", {"seconds": 60}),)), by=BY)
+        _until(lambda: "interaction_started" in _types(track, "slow"), "the slow step never started")
+        port = _free_port()
+        new = subprocess.Popen([*controllers.base, "--id", "hub", "--wait", "60", "--health-port", str(port)],
+                               stderr=subprocess.DEVNULL, start_new_session=True)
+        controllers.processes.append(new)
+        time.sleep(2)
+        # Waiting, not refused: alive, so a liveness probe leaves it be, and not ready, saying for what.
+        assert new.poll() is None and _get(port, "/healthz")[0] == 200
+        status, waiting = _get(port, "/readyz")
+        assert status == 503 and "holds the id 'hub'" in waiting["error"]
+        old.terminate()
+        old.wait(30)
+        _until(lambda: _get(port, "/readyz")[0] == 200, "the waiting controller never took the id", within=60)
+        _until(lambda: intents.describe(track, "slow").state is RunState.INTERRUPTED,
+               "the new controller did not take the old one's run")
+    finally:
+        controllers.close()
+
+
+def test_a_controller_told_to_wait_still_refuses_a_taken_id_once_its_wait_is_over(tmp_path):
+    track_path = tmp_path / "track.sqlite"
+    controllers = _Controllers(tmp_path, str(track_path))
+    try:
+        controllers.start("hub")
+        started = time.monotonic()
+        second = subprocess.run([*controllers.base, "--id", "hub", "--wait", "2"], capture_output=True, text=True,
+                                timeout=60)
+        assert second.returncode == 1 and "a controller named 'hub' is running" in second.stderr
+        assert time.monotonic() - started >= 2
+    finally:
+        controllers.close()
+
+
+def test_a_track_url_of_another_kind_is_refused_not_taken_for_a_file(tmp_path, monkeypatch):
+    from collab_hub_execution.controller import open_track
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit, match="postgresql://"):
+        open_track("mysql://hub/runs")
+    assert list(tmp_path.iterdir()) == []  # no file named after the URL

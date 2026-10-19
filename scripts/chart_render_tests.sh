@@ -58,6 +58,20 @@ refused() { # <label> <needle> <helm args...>: the chart must refuse to render, 
   fi
 }
 refused "feature flags: a non-boolean value is refused" "/features/cogs_ui" --set-string features.cogs_ui=maybe
+
+# The run controller beside the API (runs.controller): off by default, a second container when on.
+check "run controller off: one container, no Cog packages for the API" no-run-controller
+check "run controller on: a sidecar on the hub's database, liveness only, its models from a ConfigMap" run-controller \
+  -f "$TESTDATA/run-controller.yaml"
+refused "run controller: refused without the hub's database" "needs frames.postgres" --set runs.controller.enabled=true
+# Frames on S3, so the chart's own storage rules allow more than one API pod and it is this rule that refuses.
+SHARED_FRAMES='--set frames.storage.backend=s3 --set frames.s3.bucket=frames --set frames.activeState.backend=postgres'
+refused "run controller: refused with two API pods" "needs exactly one API pod" -f "$TESTDATA/run-controller.yaml" \
+  $SHARED_FRAMES --set api.deployment.replicaCount=2
+refused "run controller: refused with autoscaling" "needs exactly one API pod" -f "$TESTDATA/run-controller.yaml" \
+  $SHARED_FRAMES --set api.autoscaling.enabled=true
+refused "run controller: an environment it cannot run is refused" "environment" \
+  -f "$TESTDATA/run-controller.yaml" --set runs.controller.environment=docker
 refused "feature flags: a dashed name is refused" "cogs-ui" --set features.cogs-ui=true
 refused "feature flags: a name with a double underscore is refused" "cogs__ui" --set features.cogs__ui=true
 refused "feature flags: an uppercase name is refused" "Cogs_ui" --set features.Cogs_ui=true

@@ -21,7 +21,7 @@ it holds for as long as it runs — a lock beside a SQLite Track, an advisory lo
 on Postgres — so two live controllers never share one. When it starts, it
 records ``interrupted`` for every run it picked up and did not finish, and
 reaps any of their ``local`` workers left alive. Under ``dbos`` and
-``temporal`` the engine takes ownership after pickup (Phases 26 and 32).
+``temporal`` the engine takes ownership after pickup (Phases 27 and 33).
 
 **Models.** ``--models FILE`` is the hub's ``models:`` block: the models it
 offers and which Cog talks to which; each worker receives its Cog's model, and
@@ -44,6 +44,7 @@ import socket
 import sys
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -260,12 +261,12 @@ class RunController:
                 "error": self.last_error}
 
 
-def serve_health(controller: RunController, host: str, port: int) -> ThreadingHTTPServer:
-    """``GET /healthz`` and ``GET /readyz`` for the controller, on a thread of their own."""
+def serve_health(health: Callable[[], dict[str, Any]], host: str, port: int) -> ThreadingHTTPServer:
+    """``GET /healthz`` and ``GET /readyz`` from ``health()``, on a thread of their own."""
 
     class Health(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
-            state = controller.health()
+            state = health()
             wanted = {"/healthz": "live", "/readyz": "ready"}.get(self.path)
             if wanted is None:
                 code, body = 404, {"error": "not found"}
@@ -310,6 +311,8 @@ def open_track(spec: str) -> tuple[TrackStore, Any]:
             raise SystemExit(f"this Postgres has no Track, or part of one (missing {', '.join(missing)}): the hub's "
                              "migrations create its tables (start the API on it once, e.g. `make -C dev api-pg`)")
         return PostgresTrackStore(pool), pool
+    if "://" in spec:
+        raise SystemExit(f"the Track is a SQLite file or a postgresql:// URL, not {spec.split('://')[0]}://...")
     path = Path(spec)
     SqliteTrackStore.ensure_schema(path)
     return SqliteTrackStore(path), None
@@ -395,6 +398,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--health-port", type=int, default=int(env("COLLAB_CONTROLLER_HEALTH_PORT", "0")),
                         help="serve /healthz and /readyz on this port; none when 0")
     parser.add_argument("--health-host", default=env("COLLAB_CONTROLLER_HEALTH_HOST", "127.0.0.1"))
+    parser.add_argument("--wait", type=float, default=float(env("COLLAB_CONTROLLER_WAIT", "0")), metavar="SECONDS",
+                        help="how long to wait at start for the Track's tables (the API's migrations create them) "
+                             "and for this controller's id (held by the one a rollout replaces); 0 refuses at "
+                             "once")
     args = parser.parse_args(argv)
     # Repeatable options: the command line's, or else their variables'.
     args.packages = args.packages or _listed("COLLAB_CONTROLLER_PACKAGES", os.pathsep)
@@ -410,6 +417,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if not args.packages:
         parser.error("--packages is required")
     return args
+
+
+def _patiently(attempt, refusal: type[BaseException], deadline: float, waiting_for: str, starting: dict):
+    """``attempt()``, tried again every few seconds while it is refused and ``deadline`` has not passed.
+
+    How a controller started beside its API waits for what the API brings: the
+    Track's tables, which its migrations create, and, in a rollout, the id the
+    controller it replaces still holds until that one stops.
+    """
+    while True:
+        try:
+            return attempt()
+        except refusal:
+            if time.monotonic() >= deadline:
+                raise
+            starting["waiting"] = waiting_for
+            _log.info("waiting: %s", waiting_for)
+            time.sleep(min(5.0, max(0.1, deadline - time.monotonic())))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -428,9 +453,23 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         deliver = models.delivery()
 
-    track, keep_open = open_track(args.track)
+    # Health is served from the start: a controller waiting for its Track or its id is alive, and not
+    # ready, so a liveness probe leaves it to wait (a readiness probe on it would hold its pod back).
+    starting: dict[str, Any] = {"controller": None, "waiting": None}
+
+    def health() -> dict[str, Any]:
+        if starting["controller"] is not None:
+            return starting["controller"].health()
+        return {"controller": args.id, "live": True, "ready": False, "error": starting["waiting"] or "starting"}
+
+    if args.health_port:
+        serve_health(health, args.health_host, args.health_port)
+    deadline = time.monotonic() + args.wait
+    track, keep_open = _patiently(lambda: open_track(args.track), SystemExit, deadline,
+                                  "the Track's tables are not there yet", starting)
     try:
-        still_held = hold_id(args.track, args.id)
+        still_held = _patiently(lambda: hold_id(args.track, args.id), IdTaken, deadline,
+                                f"another controller holds the id {args.id!r}", starting)
     except IdTaken as exc:
         print(f"error: {exc}: each controller on a Track has its own --id", file=sys.stderr)
         return 1
@@ -442,9 +481,8 @@ def main(argv: list[str] | None = None) -> int:
                            "interaction_timeout": args.interaction_timeout or None,
                            "deliver": deliver})
     controller = RunController(runner, poll_interval=args.poll_interval)
-    if args.health_port:
-        serve_health(controller, args.health_host, args.health_port)
     controller.start()
+    starting["controller"] = controller
 
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):

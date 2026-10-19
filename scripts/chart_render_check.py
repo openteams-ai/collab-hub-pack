@@ -29,6 +29,8 @@ class Rendered:
         deployment = next(d for d in docs if d.get("kind") == "Deployment")
         pod = deployment["spec"]["template"]["spec"]
         container = pod["containers"][0]
+        self.containers = {c["name"]: c for c in pod["containers"]}
+        self.configmaps = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "ConfigMap"}
         self.env = {e["name"]: e for e in container["env"]}
         self.mounts = {m["name"]: m for m in container.get("volumeMounts", [])}
         self.volumes = {v["name"]: v for v in pod.get("volumes", [])}
@@ -145,7 +147,37 @@ def case_features(r: Rendered) -> None:
     }, flags
 
 
+def case_run_controller(r: Rendered) -> None:
+    # The API is told where the Cogs are; the controller is a second container of the same pod.
+    assert r.value("COLLAB_HUB_API__RUNS__PACKAGES") == "/opt/collab-hub/cogs"
+    controller = r.containers.get("run-controller")
+    assert controller is not None, f"no run-controller container: {sorted(r.containers)}"
+    assert controller["command"] == ["collab-hub-run-controller"]
+    assert controller["image"] == r.containers["api"]["image"], "the controller runs another image"
+    env = {e["name"]: e for e in controller["env"]}
+    assert env["COLLAB_CONTROLLER_TRACK"]["valueFrom"]["secretKeyRef"] == {"name": "hub-db", "key": "url"}
+    assert env["COLLAB_CONTROLLER_ID"]["value"] == "hub" and env["COLLAB_CONTROLLER_WAIT"]["value"] == "600"
+    assert env["COLLAB_CONTROLLER_MODELS"]["value"] == "/etc/collab-hub/runs/models.toml"
+    assert env["ANTHROPIC_API_KEY"]["valueFrom"]["secretKeyRef"]["name"] == "claude"
+    # Liveness only: a readiness probe would hold the pod out while the controller waits for its id.
+    assert "livenessProbe" in controller and "readinessProbe" not in controller and "startupProbe" not in controller
+    assert controller["securityContext"]["readOnlyRootFilesystem"] is True
+    mounts = {m["name"]: m["mountPath"] for m in controller["volumeMounts"]}
+    assert mounts == {"run-cache": "/var/cache/collab-hub", "run-tmp": "/tmp", "run-models": "/etc/collab-hub/runs"}
+    assert "frames-storage" not in mounts, "the controller reaches the API's frames"
+    assert r.volumes["run-models"]["configMap"]["name"] == "t-collab-hub-run-models"
+    assert 'auth_ref = "env:ANTHROPIC_API_KEY"' in r.configmaps["t-collab-hub-run-models"]["data"]["models.toml"]
+
+
+def case_no_run_controller(r: Rendered) -> None:
+    assert sorted(r.containers) == ["api"], sorted(r.containers)
+    assert "COLLAB_HUB_API__RUNS__PACKAGES" not in r.env
+    assert not r.configmaps.get("t-collab-hub-run-models")
+
+
 CASES = {
+    "run-controller": case_run_controller,
+    "no-run-controller": case_no_run_controller,
     "features": case_features,
     "default": case_default,
     "fixture": case_fixture,

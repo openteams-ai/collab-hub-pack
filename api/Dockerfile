@@ -1,6 +1,7 @@
 FROM python:3.14-slim-trixie AS python
 FROM ghcr.io/astral-sh/uv:0.12.7 AS uv
 FROM node:24-bookworm-slim AS node
+FROM ghcr.io/prefix-dev/pixi:0.79.0-bookworm-slim AS pixi
 
 # The admin panel is a built bundle, so it is built here rather than committed.
 # `npm ci --ignore-scripts` installs exactly what package-lock.json pins and
@@ -44,6 +45,22 @@ FROM python AS runtime
 
 RUN groupadd --gid 1000 nonroot && \
     useradd --shell "$(which bash)" --uid 1000 --gid 1000 nonroot
+
+# The Cogs this hub launches when a run controller runs beside the API (runs.controller in the chart),
+# and pixi, which runs each Cog's `serve` in the environment its own lock pins. The packages are read
+# only: pixi keeps every environment, and its downloads, under /var/cache/collab-hub, which the chart
+# mounts writable, and builds a Cog's environment the first time that Cog is launched.
+COPY --from=pixi /usr/local/bin/pixi /usr/local/bin/pixi
+COPY --from=projectroot cogs/hermes/pixi.toml cogs/hermes/pixi.lock cogs/hermes/serve.py cogs/hermes/hermes_acp.py \
+     /opt/collab-hub/cogs/hermes/
+COPY --from=projectroot examples/cog-local/cogs/hello/pixi.toml examples/cog-local/cogs/hello/pixi.lock \
+     examples/cog-local/cogs/hello/serve.py /opt/collab-hub/cogs/hello/
+RUN mkdir -p /opt/pixi && \
+    printf 'detached-environments = "/var/cache/collab-hub/pixi-envs"\n' > /opt/pixi/config.toml
+ENV PIXI_HOME=/opt/pixi \
+    PIXI_CACHE_DIR=/var/cache/collab-hub/pixi-cache \
+    COLLAB_HUB_COGS=/opt/collab-hub/cogs
+
 USER nonroot
 
 WORKDIR /var/collab-hub-api

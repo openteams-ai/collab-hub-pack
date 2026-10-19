@@ -121,6 +121,9 @@ jobs:
         # a CA bundle, indexer on: the shape docs/cog-registry.md documents.
         run: helm template helm/collab-hub -f helm/collab-hub/ci/cogs-values.yaml | kubeconform -strict -ignore-missing-schemas -
 
+      - name: Validate rendered manifests (run controller beside the API)
+        run: helm template helm/collab-hub -f scripts/testdata/chart/run-controller.yaml | kubeconform -strict -ignore-missing-schemas -
+
       - name: Install PyYAML for the render assertions
         run: python3 -m pip install --quiet pyyaml
 

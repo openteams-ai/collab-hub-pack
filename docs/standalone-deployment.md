@@ -412,6 +412,63 @@ refuses them two ways:
 Gateway-only installs are unaffected in both cases — that is where the dev and
 smoke-test workflows that need these switches actually run.
 
+## Running Cogs beside the API
+
+The run API (`/v1/runs`) is always served, on the hub's database. Something
+must also run what it launches: a run controller. `runs.controller.enabled`
+runs one in the API's pod, as a second container of the same image
+(`collab-hub-run-controller`), and it runs each Cog launched through the API
+as a process of that pod, the `local` agent location
+([runs.md](cog-execution/runs.md#agent-locations)).
+
+```yaml
+runs:
+  controller:
+    enabled: true
+    models: |
+      [models.default]
+      provider = "anthropic"
+      model = "claude-opus-5-5"
+      auth_ref = "env:ANTHROPIC_API_KEY"
+
+      [cogs]
+      hermes = "default"
+    extraEnv:
+      - name: ANTHROPIC_API_KEY
+        valueFrom:
+          secretKeyRef: {name: claude, key: api-key}
+```
+
+- **What it runs.** The Cog packages the image ships under
+  `/opt/collab-hub/cogs`: `hello`, the smallest Cog that holds a session, and
+  `hermes`, the Hermes harness Cog. The API is told the same directory, so
+  `collab-hub cog list --launchable` names them. With `environment: pixi`, the
+  default, a Cog runs in the environment its lock pins, which pixi builds the
+  first time the Cog is launched: it downloads the packages, so the pod needs
+  egress to conda-forge and PyPI, and Hermes's first launch takes a few
+  minutes. Environments and each run's output are kept on an `emptyDir`
+  (`cacheSizeLimit`), so a new pod builds them again.
+- **Its Track** is the hub's database (`frames.postgres`), the one the API
+  records runs in; the chart refuses the controller without it.
+- **One API pod.** Each pod would run a controller under the same id, so the
+  chart refuses the controller with `replicaCount` above 1 or autoscaling on.
+  In a rollout, the new pod's controller waits (`waitSeconds`) until the old
+  pod's has stopped, then takes its id, and records the runs the old one left
+  unfinished `interrupted`. It has a liveness probe and no readiness probe, so
+  waiting never holds the API out of service.
+- **Models and keys.** `models` is the hub's models block, in TOML
+  ([runs.md](cog-execution/runs.md#configuration-health-and-models)), rendered
+  into a ConfigMap. A key is named by `auth_ref = "env:NAME"` and arrives in
+  `extraEnv` from a Secret; it is handed to the workers of the Cogs bound to
+  that model, and to no other.
+- **Not isolated.** A Cog's worker is a process of the API's pod, run as the
+  same user: it shares that pod's network and filesystem with the API and the
+  controller, and although it inherits none of their environment, it could
+  read it, the database URL among it, through `/proc`. Run only Cogs you
+  trust this way, on a development hub. The `remote` location, a pod per worker under a
+  least-privilege controller, is a later phase of
+  [`COG_EXECUTION.md`](../COG_EXECUTION.md).
+
 ## Configuring the admin panel
 
 The admin panel at `/admin` ships in the image: the Docker build copies the

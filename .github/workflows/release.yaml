@@ -96,6 +96,10 @@ jobs:
 
       - uses: azure/setup-helm@v5
         if: steps.exists.outputs.exists == 'false'
+        with:
+          # Pinned to match lint.yaml: when the latest-release lookup fails the
+          # action falls back to Helm 3.
+          version: v4.3.0
 
       - name: Package the chart
         if: steps.exists.outputs.exists == 'false'

@@ -1,5 +1,5 @@
 {
-  "_comment": "Keycloak partial-import for the Microsoft identity provider used by the Collab SharePoint connector. Import into the hub's realm (Realm settings -> Action -> Partial import, or kcadm). Fill in the two REPLACE_ id values from the Entra app registration; inject clientSecret from your secret store rather than committing it. Alias MUST stay 'microsoft' (apollo-desktop's SharePointConnectorLogin hardcodes it). tenantId is required because the Entra app is single-tenant (Keycloak >= 23 exposes it on the built-in Microsoft provider). See docs/sharepoint-connector.md.",
+  "_comment": "Keycloak partial-import for the Microsoft identity provider used by the Collab SharePoint connector. Import into the hub's realm (Realm settings -> Action -> Partial import, or kcadm). Fill in the two REPLACE_ id values from the Entra app registration; inject clientSecret from your secret store rather than committing it. Alias MUST match the hub's brokerTokenUrl (which ends in /broker/microsoft/token): the hub derives the alias the desktop links from that URL. tenantId is required because the Entra app is single-tenant (Keycloak >= 23 exposes it on the built-in Microsoft provider). See docs/sharepoint-connector.md.",
   "identityProviders": [
     {
       "alias": "microsoft",

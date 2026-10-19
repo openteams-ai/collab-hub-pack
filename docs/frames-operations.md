@@ -137,7 +137,7 @@ Two consequences to plan for:
   service-account subjects are all valid, and the server does not infer identity
   from syntax. (Whether a subject is a real member is a membership question, not
   a syntax one; the scoped member check arrives with
-  [#99](https://github.com/nebari-dev/collab-hub-pack/issues/99).) Clients
+  [#99](https://github.com/openteams-ai/collab-hub-pack/issues/99).) Clients
   need a member picker that submits subject ids before this is turned on.
   Removal routes (`DELETE .../owners/{id}`) and reads of stored records are
   *not* validated, so principals written before the pin still load and can be
@@ -641,7 +641,7 @@ Migration version 8 adds `collab_audit_events_actor_idx` on `(actor, id DESC)`
 and `collab_audit_events_action_idx` on `(action, id DESC)`, which serve the
 actor and action filters; the unfiltered listing uses the primary key.
 Retention and erasure-request handling are tracked for resolution before GA
-in [#113](https://github.com/nebari-dev/collab-hub-pack/issues/113).
+in [#113](https://github.com/openteams-ai/collab-hub-pack/issues/113).
 
 #### Actions the admin panel and sign-in sync record
 
@@ -733,9 +733,9 @@ that one is the note that you did it, and the `UPDATE` is the state change.
 it, because a failed retry removes no membership somebody already holds.
 
 There is no automated sweep yet
-([#180](https://github.com/nebari-dev/collab-hub-pack/issues/180) records
+([#180](https://github.com/openteams-ai/collab-hub-pack/issues/180) records
 what is owed; the operator surface that finishes one is
-[#176](https://github.com/nebari-dev/collab-hub-pack/issues/176)).
+[#176](https://github.com/openteams-ai/collab-hub-pack/issues/176)).
 
 #### The audit trail for a grant (`service_access.grant`)
 

@@ -1,9 +1,9 @@
 # Collab Hub
 
 ![Status: Beta](https://img.shields.io/badge/status-beta-orange)
-[![Lint](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/lint.yaml/badge.svg)](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/lint.yaml)
-[![Test](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/test.yaml/badge.svg)](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/test.yaml)
-[![Dev Environment](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/dev-env.yaml/badge.svg)](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/dev-env.yaml)
+[![Lint](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/lint.yaml/badge.svg)](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/lint.yaml)
+[![Test](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/test.yaml/badge.svg)](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/test.yaml)
+[![Dev Environment](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/dev-env.yaml/badge.svg)](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/dev-env.yaml)
 
 > **Beta** — stable enough to deploy in your own environment with engineering
 > support. APIs and chart values may still change between releases. See the
@@ -47,7 +47,7 @@ Install the versioned chart from the latest [release](../../releases/latest)
 
 ```sh
 helm install collab-hub-pack \
-  https://github.com/nebari-dev/collab-hub-pack/releases/download/v0.1.0/collab-hub-0.1.0.tgz \
+  https://github.com/openteams-ai/collab-hub-pack/releases/download/v0.1.0/collab-hub-0.1.0.tgz \
   --namespace nebari-nexus --create-namespace \
   --values values-example.yaml
 ```
@@ -141,4 +141,4 @@ offers.
 See [CONTRIBUTING.md](CONTRIBUTING.md). Contributions are accepted under the
 [Apache-2.0 license](LICENSE). Report
 security issues privately via GitHub's
-[Report a vulnerability](https://github.com/nebari-dev/collab-hub-pack/security/advisories/new).
+[Report a vulnerability](https://github.com/openteams-ai/collab-hub-pack/security/advisories/new).

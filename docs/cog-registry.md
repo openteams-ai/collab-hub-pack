@@ -7,7 +7,7 @@ private CA is trusted (**CA bundle**), and how often the index is rebuilt
 (**indexer**). The adapters themselves — what "Harbor" and "static" mean and
 why the registry stays swappable — are documented in
 `api/src/collab_hub_api/cogs/registry.py`; the configuration surface is
-[#87](https://github.com/nebari-dev/collab-hub-pack/issues/87).
+[#87](https://github.com/openteams-ai/collab-hub-pack/issues/87).
 
 > **Status.** This page describes the configuration surface, the chart
 > wiring, and the [read API](#read-api) clients discover Cogs through. The
@@ -16,9 +16,9 @@ why the registry stays swappable — are documented in
 > separately. The API validates the block at startup and refuses to start on
 > the errors described below.
 
-[#84]: https://github.com/nebari-dev/collab-hub-pack/issues/84
-[#85]: https://github.com/nebari-dev/collab-hub-pack/issues/85
-[#86]: https://github.com/nebari-dev/collab-hub-pack/issues/86
+[#84]: https://github.com/openteams-ai/collab-hub-pack/issues/84
+[#85]: https://github.com/openteams-ai/collab-hub-pack/issues/85
+[#86]: https://github.com/openteams-ai/collab-hub-pack/issues/86
 
 Two rules shape everything below:
 

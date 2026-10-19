@@ -311,8 +311,10 @@ class LocalProcessCogExecutor:
                 os.killpg(pgid, 0)
                 time.sleep(0.05)
             os.killpg(pgid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass  # the group has exited
+        except (ProcessLookupError, PermissionError):
+            # The group has exited. macOS answers EPERM, not ESRCH, for a group left with only zombies,
+            # to the probe and to SIGKILL alike.
+            pass
         return True
 
     # --- teardown ----------------------------------------------------------------------------

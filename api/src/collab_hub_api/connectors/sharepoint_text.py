@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 # server-side; PDFs are downloaded as-is. Either way the Hub turns PDF bytes
 # into bounded plain text here, so raw provider bytes never leave the Hub --
 # the same rule Drive and Gmail follow. The engine is PDFium (via pypdfium2),
-# the same library apollo-desktop's OCR sidecar uses for attached PDFs.
+# the same library the Collab desktop app's OCR sidecar uses for attached PDFs.
 #
 # This parses untrusted input, and the bounds come in two layers. The byte
 # size was capped before download, and the page count and character budget are

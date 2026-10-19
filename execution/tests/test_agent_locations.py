@@ -48,7 +48,7 @@ def test_the_location_setting_takes_two_values_and_local_is_built(tmp_path):
 
 
 def test_a_location_not_built_yet_is_refused_when_the_runner_starts():
-    with pytest.raises(LocationNotImplemented, match="Phase 21"):
+    with pytest.raises(LocationNotImplemented, match="Phase 22"):
         LifecycleRunner(track=InMemoryTrackStore(), location="remote")
 
 

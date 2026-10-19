@@ -21,8 +21,8 @@ does.
 | Backend | Setting | Built | A run in flight when its host stops |
 |---|---|---|---|
 | `none` | `backend="none"` (the default) | yes | is recorded `interrupted` when a host starts, and never resumes; a person retries it |
-| `dbos` | `backend="dbos"` | Phase 26 of the plan (#104) | resumes from its last completed step, on Postgres or SQLite |
-| `temporal` | `backend="temporal"` | Phase 32 (#110) | resumes, its steps run as Temporal activities |
+| `dbos` | `backend="dbos"` | Phase 27 of the plan (#104) | resumes from its last completed step, on Postgres or SQLite |
+| `temporal` | `backend="temporal"` | Phase 33 (#110) | resumes, its steps run as Temporal activities |
 
 The setting is the only switch: nothing imports a backend, and a runner
 configured with a backend that is not built yet refuses to start
@@ -39,12 +39,12 @@ and asks the executor to tear it down. An executor holds no lifecycle logic.
 | Location | Setting | Built | A worker is | For |
 |---|---|---|---|---|
 | `local` | `location="local"` | yes | a process on the controller's host: the Cog package's `serve` task, in the package's own pixi environment, on a loopback port | development and the desktop |
-| `remote` | `location="remote"` | Phase 21 of the plan (#6) | a workload on a cluster, reached over the cluster's network | a Kubernetes hub, always |
+| `remote` | `location="remote"` | Phase 22 of the plan (#6) | a workload on a cluster, reached over the cluster's network | a Kubernetes hub, always |
 
 The setting is the only switch: nothing imports an executor, and a runner
 configured with a location that is not built yet refuses to start
 (`LocationNotImplemented`). The Kubernetes executor that exists today is what
-`remote` will select; until Phase 21 it is handed to a runner directly, as the
+`remote` will select; until Phase 22 it is handed to a runner directly, as the
 in-memory executor of the tests is.
 
 **What a local worker is given.** Its environment, and nothing else of its
@@ -74,7 +74,7 @@ that declares a `serve` task and the `pixi.lock` that pins its environment,
 both files of the package itself: a package without its lock, or with a
 symbolic link in place of either, is refused, and pixi runs it `--locked`. It
 is identified on the Track by its name and the sha256 of its manifest and lock, so a development run is never mistaken for a
-published Cog. Resolving a published reference is Phase 22.
+published Cog. Resolving a published reference is Phase 23.
 
 **The run token.** One per worker, minted when it is materialized. The
 controller presents it as a bearer token on `/invoke`; the worker will present
@@ -142,7 +142,7 @@ under the same id refuses to start, and one that loses its hold stops.
   another refuses to (`RunOwnedElsewhere`). A run nobody has picked up is
   cancelled by whichever controller gets there first, with the same
   conditional write. Under `dbos` and `temporal` the engine takes ownership
-  after pickup, and decides which replica resumes a run (Phases 26 and 32).
+  after pickup, and decides which replica resumes a run (Phases 27 and 33).
 - **A retry hands the run to the controller that retries it**, named on
   `retry_requested`.
 - **When a controller starts**, it records `interrupted` for every run it
@@ -193,7 +193,7 @@ container: `COLLAB_CONTROLLER_TRACK`, `COLLAB_CONTROLLER_ID`,
 `COLLAB_CONTROLLER_ALLOW` a comma-separated one. The command line wins.
 
 The **`models:` block** is the models the hub offers and which Cog talks to
-which, in TOML, until a Cog's own binding resolves it (Phase 24, whose
+which, in TOML, until a Cog's own binding resolves it (Phase 25, whose
 inventory is generated from it):
 
 ```toml

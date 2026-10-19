@@ -90,7 +90,7 @@ and silently drops a row at worst, so each of those carriers has an explicit
 merge rule chosen for its data — see :mod:`.writers`.
 
 **Not in scope: relocating frame objects.** Partitioning storage by
-organization (nebari-dev/collab-hub-pack#46) moves the same objects this tool
+organization (openteams-ai/collab-hub-pack#46) moves the same objects this tool
 rewrites — but they are separate operations with separate failure modes, and
 fusing them into one window would mean
 a mapping error and a path error share a blast radius.

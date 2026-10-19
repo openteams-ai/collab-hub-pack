@@ -1093,9 +1093,8 @@ Frames and the user directory work immediately. Three things do not:
 ## Running Cogs and Ops
 
 A Cog runs through the hub at level 1: `make api` serves the run API
-(`/v1/runs`, behind the `cog_runs` feature flag, which this target sets),
-`make controller` advances the runs it accepts, and the `collab-hub` CLI
-launches them. This section is where the rest arrives, one target at a time, under the rule
+(`/v1/runs`, over the SQLite Track in `.local/`), `make controller` advances
+the runs it accepts, and the `collab-hub` CLI launches them. This section is where the rest arrives, one target at a time, under the rule
 [ADR-0002](../docs/adr/0002-lifecycle-runner-durability-and-placement.md) D9
 sets for every Cog execution change. In the same PR, what a change adds is:
 
@@ -1145,8 +1144,9 @@ The API records the submission and nothing else; the controller reads it from
 the Track, runs the Cog package's `serve` task in its own pixi environment, and
 records what happened; the CLI reads the run back through the API. `run list`,
 `run show` and `run terminate` are the other commands.
-`make api-oidc` serves the run API too, with real sign-in through Keycloak,
-and `make controller` works beside either. [`examples/cog-local`](../examples/cog-local/README.md)
+`make api-oidc` serves the run API too, with real sign-in through Keycloak, on
+the hub's own Postgres, so its controller is `make controller
+TRACK=postgresql://collab:collab@127.0.0.1:5432/collab`. [`examples/cog-local`](../examples/cog-local/README.md)
 walks a Cog through its whole life on them — sign in, launch, list, talk to it
 from Toad over ACP, stop it — and `make -C ../examples/cog-local demo` runs it
 end to end and checks it.
@@ -1178,22 +1178,30 @@ output is under `.local/runs/`.
 nothing else: stop it mid-run, `kill -9` included, and its next start records
 that run `interrupted`.
 
-### Run pickup — `make controller` and `make submit`
+### The run API and run pickup — `make api`, `make controller`, `make submit`
 
-Level 1, no container; level 2 for Postgres. `make submit OP=<name>` records an
-Op from `ops/` on the Track and nothing else, the way the run API does, then
-follows it until it ends or waits at a Gate, and says which controller picked
-it up. `make controller` picks it up:
+Level 1, no container; level 2 for Postgres. `make submit OP=<name>` launches an
+Op from `ops/` through the run API (`POST /v1/runs` on `make api`), as any
+client does, then follows it until it ends or waits at a Gate, prints its
+events, and says which controller picked it up. `make controller` picks it up,
+and `make run-events RUN=` streams a run's events as they land
+(`GET /v1/runs/{id}/events`, server-sent events) until it ends:
 
 ```sh
-make controller ENVIRONMENT=host HEALTH_PORT=8770   # terminal 1; ENVIRONMENT=host needs no pixi
-make submit OP=echo                                 # terminal 2: "picked up by: dev", COMPLETED
+make api                                            # terminal 1: the run API, over .local/track.sqlite
+make controller ENVIRONMENT=host HEALTH_PORT=8770   # terminal 2; ENVIRONMENT=host needs no pixi
+make submit OP=echo                                 # terminal 3: "picked up by: dev", COMPLETED
+make run-events RUN=run-...                         # every event of the run, then `end`
 curl -s localhost:8770/readyz                       # {"controller": "dev", "live": true, "ready": true, ...}
 ```
 
+At level 2, `make api-pg` serves the run API on the hub's own Postgres, as a
+deployed hub does: its Track's tables come from the hub's migrations. Run the
+controller on the same database, `make controller TRACK=postgresql://collab:collab@127.0.0.1:5432/collab`.
+
 | Variable | Default | What |
 |---|---|---|
-| `TRACK` | `.local/track.sqlite` | the Track: a SQLite file, or `postgresql://...` (after `make postgres` and one `make api-pg`, whose migrations create its tables) |
+| `TRACK` | `.local/track.sqlite` | the controller's Track: the SQLite file `make api` uses, or `postgresql://...`, the database `make api-pg` uses (its migrations create the Track's tables) |
 | `CONTROLLER_ID` | `dev` | the controller's name, held while it runs, recorded on each run it picks up |
 | `ENVIRONMENT` | `pixi` | `host` runs a package's `serve` task directly, without its pixi environment |
 | `HEALTH_PORT` | none | serves `/healthz` and `/readyz` |
@@ -1312,7 +1320,8 @@ list against Postgres.
 | Connector says `unavailable`, names a missing role | The broker `read-token` role was never granted | `make broker-role` |
 | `make op LOCATION=local` says to install pixi | The `local` location runs each Cog in its own pixi environment | Install [pixi](https://pixi.sh), or drop `LOCATION` to run the fake Cogs in process |
 | `make op LOCATION=local` fails a step with `WorkerStartFailed` | The worker exited or never answered `/healthz`; the reason on the Track ends with its last lines of stderr | Read `stderr.log` in the directory the run's `worker_started` names as `logs`, under `.local/runs/` |
-| `collab-hub cog launch` answers 404 | The hub's run API is off: it is behind the `cog_runs` feature flag | Use `make api`, which sets it; another target needs `COLLAB_HUB_API__FEATURES__COG_RUNS=true` and `COLLAB_HUB_API__RUNS__TRACK_PATH` |
+| `collab-hub cog launch` answers 503 `runs_unavailable` | The API has no Track: no database and no `runs.track_path` | `make api`, which sets the SQLite one, or `make api-pg`, which uses Postgres |
+| `collab-hub cog launch` is refused, naming no Cog it can launch | The API was given no Cog package directories (`runs.packages`) | `make api` and `make api-pg` give it `COGS`; another target needs `COLLAB_HUB_API__RUNS__PACKAGES` |
 | A launched run stays `SUBMITTED` | No controller is watching the Track | `make controller` in another terminal |
 | `make controller` says a controller named `dev` is running | One controller per id on a Track | Stop the other one, or give this one its own `CONTROLLER_ID` |
 | A run stays `RUNNING` after its controller was killed | Its controller owns it, and records it `interrupted` only when it starts again | Start that controller again, under the same `CONTROLLER_ID` |

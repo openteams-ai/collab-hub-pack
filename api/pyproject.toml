@@ -11,6 +11,9 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "boto3>=1.35.0",
+    # The run API (/v1/runs) writes intent to the Track and reads runs from it. Its run router is the
+    # one module of the API that imports it, and it never constructs an executor (ADR-0002 D4).
+    "collab-hub-execution",
     "fastapi>=0.136.3",
     "httpx>=0.28.0",
     "l2sl>=0.4.0",
@@ -25,14 +28,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-# The run API (/v1/runs, behind the cog_runs feature flag) uses the execution
-# package. It is a group, not a dependency, until the flag is retired: the
-# image does not ship it, and a deployment without the flag never imports it.
-runs = [
-    "collab-hub-execution",
-]
 test = [
-    { include-group = "runs" },
     "diff-cover>=9.0.0",
     "httpx>=0.28.0",
     "pytest>=8.3.0",

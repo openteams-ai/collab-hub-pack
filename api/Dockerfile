@@ -21,10 +21,16 @@ FROM python AS builder
 WORKDIR /var/collab-hub-api
 
 COPY pyproject.toml uv.lock ./
+# The execution package (the run API's Track and intents, and the run controller's
+# entrypoint, collab-hub-run-controller) is a path dependency at ../execution: it
+# comes from the repository root through the projectroot context, and is installed
+# into the virtual environment as a package, not linked to this source.
+COPY --from=projectroot execution/pyproject.toml /var/execution/pyproject.toml
+COPY --from=projectroot execution/src /var/execution/src
 RUN --mount=from=uv,source=/uv,target=/bin/uv \
     uv sync \
     --no-progress --link-mode=copy --compile-bytecode \
-    --frozen --python=$(which python) --no-default-groups --no-install-project
+    --frozen --python=$(which python) --no-default-groups --no-install-project --no-editable
 
 COPY src ./src
 RUN --mount=from=uv,source=/uv,target=/bin/uv \

@@ -14,20 +14,20 @@ redirections.
 ## What you need
 
 - Python 3.11 or later, and `pip` (or [uv](https://docs.astral.sh/uv/)).
-- A hub with Cog runs turned on: the API's `cog_runs`
-  [feature flag](feature-flags.md), and a run controller beside it
+- A hub whose run API has Cogs to launch, and a run controller beside it
   ([`cog-execution/runs.md`](cog-execution/runs.md#the-run-controller-and-the-run-api)).
-  Without the flag, `/v1/runs` answers 404; without a controller, a launched
-  run stays `SUBMITTED`.
+  Every hub serves the run API, `/v1/runs`, on its own database. What it can
+  launch are the Cog packages its controller is given, which `cog list
+  --launchable` names; without a controller, a launched run stays `SUBMITTED`.
 
-  **The published API image cannot serve these yet.** The image
-  (`ghcr.io/nebari-dev/collab-hub-pack/api`) does not ship the execution
-  package the run API imports, so with `cog_runs` on it fails at startup, and
-  the Helm chart runs no controller ([`feature-flags.md`](feature-flags.md)).
-  These steps work against a hub run from a checkout of this repository:
-  [`dev/`](../dev/README.md#running-cogs-and-ops), or
-  [`examples/cog-local`](../examples/cog-local/README.md). The image and the
-  chart gain both in later phases of
+  **A hub deployed with the Helm chart launches nothing yet.** The chart runs
+  no run controller and gives the API no Cog packages, so `cog list
+  --launchable` is empty there and a launch is refused naming none. The Cogs
+  `cog list` shows are the hub's catalog, which is not launchable by name
+  until a Cog is installed by its digest. These steps work against a hub run
+  from a checkout of this repository: [`dev/`](../dev/README.md#running-cogs-and-ops),
+  or [`examples/cog-local`](../examples/cog-local/README.md). The chart gains
+  a controller, and Cogs that run as pods, in later phases of
   [`COG_EXECUTION.md`](../COG_EXECUTION.md).
 - An account in the hub's realm.
 - To chat with a Cog from a terminal interface:

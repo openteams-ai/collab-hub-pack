@@ -182,6 +182,7 @@ version = "0.0.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
+    { name = "collab-hub-execution" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "l2sl" },
@@ -196,11 +197,7 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
-runs = [
-    { name = "collab-hub-execution" },
-]
 test = [
-    { name = "collab-hub-execution" },
     { name = "diff-cover" },
     { name = "httpx" },
     { name = "pytest" },
@@ -211,6 +208,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", specifier = ">=1.35.0" },
+    { name = "collab-hub-execution", editable = "../execution" },
     { name = "fastapi", specifier = ">=0.136.3" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "l2sl", specifier = ">=0.4.0" },
@@ -225,9 +223,7 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-runs = [{ name = "collab-hub-execution", editable = "../execution" }]
 test = [
-    { name = "collab-hub-execution", editable = "../execution" },
     { name = "diff-cover", specifier = ">=9.0.0" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "pytest", specifier = ">=8.3.0" },

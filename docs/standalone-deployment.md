@@ -212,6 +212,11 @@ combination, but not restating the list is the better habit.)
   the CLI signs in with and whether dev auth is on — nothing the realm's own
   discovery document does not already publish. `GET /v1/me`, which the CLI's
   `whoami` reads, stays behind the default like every other route.
+- `/v1/runs/**`, the run API, needs no entry either, and is never made public:
+  every run route also carries its own auth dependency, and scopes each run to
+  the organization that launched it, another organization's run being a 404. A
+  request without credentials is a 401 there under the hardened map
+  ([runs.md](cog-execution/runs.md#the-run-controller-and-the-run-api)).
 - The API routes under `/v1` need no entry: the default covers them, and each
   also carries its own auth dependency, so a `public` entry does not make
   frames or tasks anonymous. The one exception is the Cog catalog: a `public`

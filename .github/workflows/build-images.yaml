@@ -9,7 +9,7 @@ name: Build Docker Images
 # that same commit.
 #
 # A dev server deploys a commit of main by its image, sha-<short>: every push to
-# main that touches api/ or this file builds one, and the summary of that run
+# main that touches api/, execution/ or this file builds one, and the summary of that run
 # names the tag. For a commit that touched neither, run this workflow by hand
 # on main (workflow_dispatch).
 
@@ -18,10 +18,12 @@ on:
     branches: [main]
     paths:
       - "api/**"
+      - "execution/**"
       - ".github/workflows/build-images.yaml"
   pull_request:
     paths:
       - "api/**"
+      - "execution/**"
   workflow_dispatch:
 
 jobs:

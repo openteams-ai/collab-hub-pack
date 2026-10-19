@@ -85,10 +85,11 @@ controllers, one picks up each run
   starts again, and continues only when someone retries it. `dbos` (#104) is
   the backend that resumes runs; see
   [`docs/cog-execution/runs.md`](docs/cog-execution/runs.md).
-- **The run API is behind a feature flag.** `/v1/runs` keeps its Track in a
-  SQLite file, workers run as local processes, and the `cog_runs` flag is off
-  by default; the run controller also runs on Postgres, with several replicas.
-  See [`examples/cog-local`](examples/cog-local/README.md).
+- **A deployed hub launches no Cog yet.** Every hub serves the run API
+  (`/v1/runs`) on its own database, and the image ships the run controller
+  (`collab-hub-run-controller`), but the chart runs no controller and gives the
+  API no Cog packages: workers run as local processes beside a controller, which
+  is for development. See [`examples/cog-local`](examples/cog-local/README.md).
 
 ## Local development
 

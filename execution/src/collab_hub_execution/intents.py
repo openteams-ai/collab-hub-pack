@@ -12,8 +12,9 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
+from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
@@ -193,9 +194,14 @@ class _Kept:
     view: RunView | None = None
     turns: dict[str, TurnView] | None = None
     unreadable: str | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    """Held while this one run is read and rebuilt: reads of different runs never wait on each other."""
 
 
 _NEVER_SUBMITTED = _Kept(events=[])
+KEPT_RUNS = 10_000
+"""How many runs a :class:`RunViews` keeps at most; the least recently read are let go, and read again
+in full should they be asked for."""
 
 
 class RunViews:
@@ -207,25 +213,43 @@ class RunViews:
     replayed is set aside, logged once, and left out of :meth:`views`: one
     unreadable run never hides every other. Safe to share between threads.
 
-    What is kept stays bounded by what is useful: a run id with no events
-    leaves nothing behind, and a run that has ended keeps its view and its turns
-    but lets its events go, read again in full only should it ever move.
-    :meth:`forget` drops a run altogether.
+    Each run is read under a lock of its own, so one run's read never waits for
+    another's, and the store's query runs outside the lock that guards which
+    runs are kept. What is kept stays bounded: a run id with no events leaves
+    nothing behind, a run that has ended keeps its view and its turns but lets
+    its events go, and past ``kept`` runs the least recently read are let go,
+    to be read again in full should they be asked for. :meth:`forget` drops a
+    run altogether.
     """
 
-    def __init__(self, track: TrackStore) -> None:
+    def __init__(self, track: TrackStore, *, kept: int = KEPT_RUNS) -> None:
         self.track = track
         self._lock = threading.Lock()
-        self._kept: dict[str, _Kept] = {}
+        self._kept: OrderedDict[str, _Kept] = OrderedDict()
+        self._most = kept
 
-    def _refresh(self, run_id: str) -> _Kept:
+    def _entry(self, run_id: str) -> tuple[_Kept, bool]:
+        """The run's entry, made fresh when it has none; and whether it was."""
         with self._lock:
             kept = self._kept.get(run_id)
-            if kept is None:
+            if kept is not None:
+                self._kept.move_to_end(run_id)
+                return kept, False
+            kept = self._kept[run_id] = _Kept(events=[])
+            while len(self._kept) > self._most:
+                self._kept.popitem(last=False)
+            return kept, True
+
+    def _refresh(self, run_id: str) -> _Kept:
+        kept, new = self._entry(run_id)
+        with kept.lock:
+            if new or kept.built_at == -1:
                 fresh = self.track.replay(run_id)
                 if not fresh:
-                    return _NEVER_SUBMITTED  # nothing to keep for an id nobody submitted
-                kept = self._kept[run_id] = _Kept(events=[])
+                    with self._lock:
+                        if self._kept.get(run_id) is kept:
+                            del self._kept[run_id]  # nothing to keep for an id nobody submitted
+                    return _NEVER_SUBMITTED
             else:
                 fresh = self.track.replay(run_id, after_sequence=kept.last_sequence)
                 if fresh and kept.events is None:
@@ -256,6 +280,26 @@ class RunViews:
             return tuple(upgrade(event) for event in self.track.replay(run_id))
         return tuple(kept.events)
 
+    def after(self, run_id: str, sequence: int) -> tuple[tuple[TrackEvent, ...], RunView | None]:
+        """The run's events after ``sequence`` and its view, from one read: the view is of those events.
+
+        So a run that reads as ended has its last event among them, or before
+        ``sequence``: nothing can land between the two. ``RunUnreadable`` for a
+        run that cannot be read.
+        """
+        kept = self._refresh(run_id)
+        if kept.unreadable is not None:
+            raise RunUnreadable(f"run {run_id!r} cannot be read: {kept.unreadable}")
+        with kept.lock:
+            view, kept_events, last = kept.view, kept.events, kept.last_sequence
+        if kept_events is None:
+            # Ended, its events let go: they are read from the store, up to what the view was built on.
+            tail = tuple(upgrade(event) for event in self.track.replay(run_id, after_sequence=sequence)
+                         if (event.sequence or 0) <= last)
+        else:
+            tail = tuple(event for event in kept_events if (event.sequence or 0) > sequence)
+        return tail, view
+
     def view(self, run_id: str) -> RunView | None:
         """The run's view; ``None`` for a run never submitted. :class:`RunUnreadable` for one that cannot be read."""
         kept = self._refresh(run_id)
@@ -265,7 +309,7 @@ class RunViews:
 
     def turns(self, run_id: str) -> dict[str, TurnView]:
         kept = self._refresh(run_id)
-        with self._lock:
+        with kept.lock:
             if kept.turns is None:
                 kept.turns = turns(kept.events or [])
             return kept.turns

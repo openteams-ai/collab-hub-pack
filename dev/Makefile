@@ -124,14 +124,15 @@ DEV_AUTH_ENV := \
 LEVEL1_ENV := \
   COLLAB_HUB_API__COGS__CATALOG__BACKEND=memory
 
-# Level 1 only: the run API (/v1/runs), behind its feature flag, over the SQLite
-# Track `make controller` watches. PACKAGES are the directories a Cog package
-# may be launched from, the same ones the controller is given.
+# The run API (/v1/runs). PACKAGES are the directories a Cog package may be
+# launched from, the same ones the controller is given. At level 1 its Track is
+# the SQLite file `make controller` watches; at level 2 (`make api-pg`, no
+# TRACK_PATH), and at level 3 (`make api-oidc`), it is the hub's own Postgres, as on a deployed hub.
 COGS ?= $(CURDIR)/cogs:$(ROOT)/cogs:$(ROOT)/examples/cog-local/cogs
+RUNS_PACKAGES_ENV := COLLAB_HUB_API__RUNS__PACKAGES=$(COGS)
 RUNS_ENV := \
-  COLLAB_HUB_API__FEATURES__COG_RUNS=true \
   COLLAB_HUB_API__RUNS__TRACK_PATH=$(LOCAL)/track.sqlite \
-  COLLAB_HUB_API__RUNS__PACKAGES=$(COGS)
+  $(RUNS_PACKAGES_ENV)
 
 # Real bearer verification against the local Keycloak realm.
 #
@@ -224,7 +225,7 @@ KC_CONNECTOR_ENV := \
         keycloak-admin realm-import broker-role idp-google idp-github idp-list \
         token sub whoami seed-org psql \
         kind-up kind-cluster kind-image kind-redeploy kind-forward kind-logs \
-        kind-smoke kind-down test lint clean op submit controller models fake-model
+        kind-smoke kind-down test lint clean op submit run-events controller models fake-model
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "; \
@@ -241,11 +242,11 @@ help: ## Show this help
 
 api: | $(LOCAL)/frames ## The API alone: no containers, dev auth, local-FS frames, in-memory stores
 	cd $(API_DIR) && env $(BASE_ENV) $(DEV_AUTH_ENV) $(LEVEL1_ENV) $(RUNS_ENV) \
-		uv run --group runs python -m collab_hub_api
+		uv run python -m collab_hub_api
 
 api-watch: | $(LOCAL)/frames ## Same as `api` (no containers), restarted on every source change
 	cd $(API_DIR) && env $(BASE_ENV) $(DEV_AUTH_ENV) $(LEVEL1_ENV) $(RUNS_ENV) \
-		uv run --group runs --with watchfiles watchfiles 'python -m collab_hub_api' src
+		uv run --with watchfiles watchfiles 'python -m collab_hub_api' src
 
 # ---------------------------------------------------------------------------
 ## Level 1 — running Cogs and Ops
@@ -269,12 +270,20 @@ op: ## Run a fake Op and print its Track (OP=echo|needs-review|fails|slow|spende
 	cd $(ROOT)/execution && LOCATION=$(LOCATION) uv run --quiet --extra postgres --with pyyaml python $(CURDIR)/op.py $(OP) \
 		--backend $(BACKEND) --track $(TRACK)
 
-# The way the run API launches a run: the Op is recorded on the Track and nothing else, and a
-# controller (`make controller`, in another terminal) picks it up. Follows the run until it ends or
-# waits at a Gate, and says which controller picked it up.
-submit: ## Record a fake Op for `make controller` to pick up, and follow it (OP=echo|needs-review|fails|slow)
-	cd $(ROOT)/execution && uv run --quiet --extra postgres --with pyyaml python $(CURDIR)/op.py $(OP) --submit \
-		--track $(TRACK)
+# A fake Op launched through the run API (POST /v1/runs on `make api`, or `make api-pg`), as any
+# client launches one: a controller (`make controller`, in another terminal) picks it up. Follows the
+# run until it ends or waits at a Gate, prints its events, and says which controller picked it up.
+submit: ## Launch a fake Op through /v1/runs for `make controller`, and follow it (OP=echo|needs-review|fails|slow)
+	cd $(ROOT)/execution && uv run --quiet --with pyyaml python $(CURDIR)/op.py $(OP) --submit --api $(API_URL)
+
+# A run's events as they land, from GET /v1/runs/{id}/events as a server-sent event stream, until
+# the run ends. Dev auth answers at levels 1 and 2; at level 3 pass a token (TOKEN=$$(make -s token)).
+RUN ?=
+TOKEN ?=
+run-events: ## Stream a run's events until it ends (RUN=run-...)
+	@[ -n "$(RUN)" ] || { echo "RUN=run-... names the run, as make submit or collab-hub run list print it"; exit 1; }
+	curl -sSN -H 'Accept: text/event-stream' $(if $(TOKEN),-H "Authorization: Bearer $(TOKEN)") \
+		$(API_URL)/v1/runs/$(RUN)/events
 
 # The process that advances the runs `make api` (or `make api-oidc`) accepts, and `make submit`
 # records: it watches the Track (TRACK), picks up each submitted run, starts its worker as a local
@@ -324,14 +333,14 @@ fake-model: ## An OpenAI-compatible model that answers without one, for the Herm
 # ---------------------------------------------------------------------------
 
 api-pg: postgres | $(LOCAL)/frames ## Starts Postgres, then the API: history, groups, orgs, tasks
-	cd $(API_DIR) && env $(BASE_ENV) $(DEV_AUTH_ENV) $(PG_ENV) uv run python -m collab_hub_api
+	cd $(API_DIR) && env $(BASE_ENV) $(DEV_AUTH_ENV) $(PG_ENV) $(RUNS_PACKAGES_ENV) uv run python -m collab_hub_api
 
 # ---------------------------------------------------------------------------
 ## Level 3 — API with Keycloak (real bearer tokens, web surface, connectors)
 # ---------------------------------------------------------------------------
 
 api-oidc: postgres keycloak | $(LOCAL)/frames ## API verifying real Keycloak bearer tokens (no dev-auth shortcut)
-	cd $(API_DIR) && env $(BASE_ENV) $(OIDC_ENV) $(PG_ENV) $(RUNS_ENV) uv run --group runs python -m collab_hub_api
+	cd $(API_DIR) && env $(BASE_ENV) $(OIDC_ENV) $(PG_ENV) $(RUNS_PACKAGES_ENV) uv run python -m collab_hub_api
 
 # Connector routes exchange the CALLER's bearer with the broker, so the
 # dev-auth shortcut cannot reach them -- it authenticates a subject without

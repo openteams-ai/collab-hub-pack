@@ -91,9 +91,14 @@ and network identity, so the isolation a cluster gives a worker does not hold.
 
 The process that accepts runs is not the one that advances them (ADR-0002 D4).
 
-- **The API** (`/v1/runs`, behind the `cog_runs` [feature flag](../feature-flags.md)) records intent on the
-  Track and reads a run's status from it. It constructs no executor and never
-  calls the controller. The code is `collab_hub_execution.intents`.
+- **The API** (`/v1/runs`) records intent on the Track and reads a run's
+  status from it. It constructs no executor and never calls the controller.
+  The code is `collab_hub_execution.intents`. Its Track is the hub's own
+  database (`frames.postgres.url`), whose tables come from the hub's
+  migrations, or `runs.track_path`, a SQLite file for a hub without Postgres;
+  with neither, every route answers 503 `runs_unavailable`. The Cogs it can
+  launch are the packages under `runs.packages`, the same directories its
+  controller is given.
 - **The run controller** (`collab-hub-run-controller`, or
   `python -m collab_hub_execution.controller`) watches the Track. It picks up
   each run that was submitted and not yet picked up and starts it on the
@@ -105,7 +110,8 @@ The process that accepts runs is not the one that advances them (ADR-0002 D4).
 |---|---|
 | `POST /v1/runs` | Submit an Op: `steps`, each with `name`, `cog`, `entry_point`, `input` and `gate`, and optionally the run's own `name`, a label for listings. Records `op_submitted` with who submitted it, and answers 201 with the run, `SUBMITTED`. A `cog` that is not a package the controller can launch is a 422 naming the packages it can |
 | `GET /v1/runs` | The caller's organization's runs, newest first; `status`, `limit` and `offset` |
-| `GET /v1/runs/{id}` | One run: its status, each step's state, and each completed step's `output` |
+| `GET /v1/runs/{id}` | One run: its status, each step's state, each completed step's `output`, and `picked_up_by`, the controller that advances it |
+| `GET /v1/runs/{id}/events` | The run's Track: the events after `after` (a sequence), `limit` at a time, with `next_after` when there are more. Asked for `text/event-stream`, a live stream instead: each event as it lands, named by its sequence, then an `end` event with the run's status once it has ended; a client that lost the connection reconnects with `Last-Event-ID` and misses nothing and repeats nothing. Each event's payload carries only the fields named for its type (an allowlist, so a field recorded later is not served until it is named); where a local worker is on the controller's host (`pid`, `pgid`, `logs`) is never among them |
 | `GET /v1/runs/launchable` | The Cog packages a step's `cog` may name |
 | `POST /v1/runs/{id}/turns` | Ask a Cog whose step holds a session something: records `turn_requested` with the caller and answers 202 with the turn, `pending`. A run that has ended is a 409 |
 | `GET /v1/runs/{id}/turns/{turn}` | The turn: `pending`, then `answered` with the Cog's text, or `failed` with why |

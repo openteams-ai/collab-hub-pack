@@ -128,7 +128,7 @@ Bare decision and invariant numbers are ADR-0001's.
 | #101 the `none` backend | ADR-0002 D1–D3, invariants 1–2 | In-flight runs end `interrupted` after a restart and are never resumed. |
 | #102 keyed claim | ADR-0002 D1 | One attempt acts once; a recorded failure retries under a new key. |
 | #103 run API | ADR-0002 D4, D7, invariant 3 | The API records intent and reads the Track; it never calls the executor. |
-| #177 a Cog launched from the CLI on a local dev hub | ADR-0002 D4, D9, invariant 3 | Merged (#178). `examples/cog-local`, on the first form of the run controller, the run API (behind `cog_runs`) and the CLI's launch and run commands; #121, #103 and #126 build each out. |
+| #177 a Cog launched from the CLI on a local dev hub | ADR-0002 D4, D9, invariant 3 | Merged (#178). `examples/cog-local`, on the first form of the run controller, the run API (then behind a feature flag) and the CLI's launch and run commands; #121, #103 and #126 build each out. |
 | #121 run controller and run pickup | ADR-0002 D4, invariant 3 | Runs advance in the controller, which alone constructs an executor. Pickup is atomic under every backend and names the controller, which owns the run under `none` and records it `interrupted` on its next start, reaping its workers; cancels, turns and Gate decisions reach it through the Track. The `models:` block, health endpoints, a SQLite or Postgres Track. |
 | #104 DBOS backend | ADR-0002 D1, D3 | Resumes after a restart; status still comes from the Track. |
 | #105 materialize from the artifact | D5, invariant 2 | The worker runs the Cog's own `serve`. |

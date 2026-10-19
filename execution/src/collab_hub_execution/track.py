@@ -66,8 +66,8 @@ class TrackStore(Protocol):
         its Track without racing the one that does.
         """
 
-    def replay(self, run_id: str, *, after_sequence: int = 0) -> tuple[TrackEvent, ...]:
-        """Replay events in sequence order."""
+    def replay(self, run_id: str, *, after_sequence: int = 0, limit: int | None = None) -> tuple[TrackEvent, ...]:
+        """Replay events in sequence order: those after ``after_sequence``, at most ``limit`` of them."""
 
     def stream(
         self,
@@ -219,9 +219,10 @@ class InMemoryTrackStore:
             # The store's own events, as SQLite and Postgres read theirs inside the transaction.
             return self.append(event) if condition(tuple(self._events.get(event.run_id, ()))) else None
 
-    def replay(self, run_id: str, *, after_sequence: int = 0) -> tuple[TrackEvent, ...]:
+    def replay(self, run_id: str, *, after_sequence: int = 0, limit: int | None = None) -> tuple[TrackEvent, ...]:
         with self._lock:
-            return tuple(event for event in self._events.get(run_id, ()) if (event.sequence or 0) > after_sequence)
+            events = tuple(event for event in self._events.get(run_id, ()) if (event.sequence or 0) > after_sequence)
+        return events if limit is None else events[:limit]
 
     def stream(
         self,
@@ -340,16 +341,17 @@ class SqliteTrackStore:
                 return None
             return self._insert(connection, event)
 
-    def replay(self, run_id: str, *, after_sequence: int = 0) -> tuple[TrackEvent, ...]:
+    def replay(self, run_id: str, *, after_sequence: int = 0, limit: int | None = None) -> tuple[TrackEvent, ...]:
         with self._connect() as connection:
-            return self._select(connection, run_id, after_sequence)
+            return self._select(connection, run_id, after_sequence, limit)
 
     @staticmethod
-    def _select(connection: sqlite3.Connection, run_id: str, after_sequence: int) -> tuple[TrackEvent, ...]:
+    def _select(connection: sqlite3.Connection, run_id: str, after_sequence: int,
+                limit: int | None = None) -> tuple[TrackEvent, ...]:
         rows = connection.execute(
             "SELECT sequence, event_id, run_id, event_type, payload, occurred_at, schema "
-            "FROM collab_track_events WHERE run_id = ? AND sequence > ? ORDER BY sequence",
-            (run_id, after_sequence),
+            "FROM collab_track_events WHERE run_id = ? AND sequence > ? ORDER BY sequence LIMIT ?",
+            (run_id, after_sequence, -1 if limit is None else limit),
         ).fetchall()
         return tuple(
             TrackEvent(
@@ -506,20 +508,21 @@ class PostgresTrackStore:
                 return None
             return self._insert(connection, event)
 
-    def replay(self, run_id: str, *, after_sequence: int = 0) -> tuple[TrackEvent, ...]:
+    def replay(self, run_id: str, *, after_sequence: int = 0, limit: int | None = None) -> tuple[TrackEvent, ...]:
         with self.pool.connection() as connection:
-            return self._select(connection, run_id, after_sequence)
+            return self._select(connection, run_id, after_sequence, limit)
 
     @staticmethod
-    def _select(connection: Any, run_id: str, after_sequence: int) -> tuple[TrackEvent, ...]:
+    def _select(connection: Any, run_id: str, after_sequence: int, limit: int | None = None) -> tuple[TrackEvent, ...]:
         rows = connection.execute(
             """
             SELECT sequence, event_id, run_id, event_type, payload, occurred_at, schema
             FROM collab_track_events
             WHERE run_id = %s AND sequence > %s
             ORDER BY sequence
+            LIMIT %s
             """,
-            (run_id, after_sequence),
+            (run_id, after_sequence, limit),
         ).fetchall()
         # By name or by position: the hub's shared pool returns mappings (dict_row).
         return tuple(

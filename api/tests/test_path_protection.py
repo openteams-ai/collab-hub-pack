@@ -234,3 +234,16 @@ async def test_a_public_default_still_honours_protected_entries(tmp_path, monkey
         # Routes keep their own dependencies even where the map is permissive.
         assert (await client.get("/v1/frames")).status_code == 401
         assert (await client.get("/")).status_code == 200
+
+
+async def test_the_run_api_refuses_a_request_without_credentials_under_the_hardened_map(tmp_path, monkeypatch):
+    # /v1/runs/** needs no entry of its own: the hardened default refuses it before any route runs,
+    # the event stream included, and a request that carries credentials reaches the routes.
+    app, client = await make_client(tmp_path, monkeypatch, security=hardened())
+    async with app.router.lifespan_context(app), client:
+        for method, path in (("GET", "/v1/runs"), ("POST", "/v1/runs"), ("GET", "/v1/runs/launchable"),
+                             ("GET", "/v1/runs/run-000000000000/events"),
+                             ("POST", "/v1/runs/run-000000000000/cancel")):
+            assert (await client.request(method, path)).status_code == 401, (method, path)
+        # Signed in, the request reaches the run API: this hub has no Track, which it says.
+        assert (await client.get("/v1/runs", cookies=auth_cookie())).status_code == 503

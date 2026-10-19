@@ -150,43 +150,81 @@ jobs:
           grep -q "^interrupted $run:" /tmp/op-after.log \
             || { echo "the stopped run was not recorded interrupted"; exit 1; }
 
-      # Run pickup (Phase 11): `make submit` records an Op on the Track and nothing else, the way the run
-      # API does, and the controller, another process, picks it up and runs it. A controller killed with
-      # SIGKILL leaves its run looking alive, until it starts again and records it interrupted.
-      - name: make controller picks up what make submit records, and a killed controller's run is interrupted
+      # The run API and the run controller (Phases 11 and 12): `make submit` launches a fake Op through
+      # POST /v1/runs on `make api`, and the controller, another process, picks it up and runs it. A
+      # run cancelled through the API mid-step ends cancelled with no worker left, its events stream
+      # until it ends, and a controller killed with SIGKILL records its run interrupted when it starts
+      # again.
+      - name: make submit launches through the run API, make controller runs it, cancel and kill
         run: |
           set -euo pipefail
           # Stopped, and gone, before the next step: a controller left running would pick up its runs.
-          stop_controllers() {
+          stop_all() {
             pkill -TERM -f "[c]ollab_hub_execution.controller" || true
+            pkill -TERM -f "[c]ollab_hub_api" || true
             for _ in $(seq 1 30); do pgrep -f "[c]ollab_hub_execution.controller" > /dev/null || return 0; sleep 1; done
             pkill -KILL -f "[c]ollab_hub_execution.controller" || true
           }
-          trap stop_controllers EXIT
+          trap stop_all EXIT
+          make -s -C dev api > /tmp/api.log 2>&1 &
           start() {
             make -s -C dev controller ENVIRONMENT=host HEALTH_PORT=18990 >> /tmp/controller.log 2>&1 &
             for _ in $(seq 1 90); do curl -sf -m 2 -o /dev/null http://127.0.0.1:18990/readyz && return 0; sleep 1; done
             echo "the controller never got ready"; cat /tmp/controller.log; exit 1
           }
           start
+          for _ in $(seq 1 60); do curl -sf -m 2 -o /dev/null http://127.0.0.1:8000/health && break; sleep 1; done
           status() { make -s -C dev submit OP="$1" | tee /tmp/submit-"$1".log | sed -n 's/^status: //p'; }
           [ "$(status echo)" = COMPLETED ]                || { cat /tmp/submit-echo.log; exit 1; }
           [ "$(status needs-review)" = WAITING_AT_GATE ]  || { cat /tmp/submit-needs-review.log; exit 1; }
           [ "$(status fails)" = FAILED ]                  || { cat /tmp/submit-fails.log; exit 1; }
           grep -q '^picked up by: dev$' /tmp/submit-echo.log || { echo "the controller did not pick it up"; exit 1; }
+          echo_run=$(sed -n 's/^run \(run-[0-9a-f]*\) .*/\1/p' /tmp/submit-echo.log)
+          curl -sf "http://127.0.0.1:8000/v1/runs" | python3 -c "
+          import json, sys
+          runs = {run['id']: run['status'] for run in json.load(sys.stdin)['items']}
+          assert runs.get('$echo_run') == 'COMPLETED', runs
+          print('GET /v1/runs lists', len(runs), 'runs')"
+          # The finished run's events, as a stream: every event, then `end`.
+          make -s -C dev run-events RUN="$echo_run" > /tmp/events-echo.log  # it closes once the run has ended
+          grep -q '^event: completed$' /tmp/events-echo.log && grep -q '^event: end$' /tmp/events-echo.log \
+            || { echo "the event stream did not end with the run"; cat /tmp/events-echo.log; exit 1; }
 
+          # Cancel through the API, mid-step: the run ends cancelled, and no worker is left.
+          workers() { pgrep -f '[p]ython serve.py' || true; }
           make -s -C dev submit OP=slow > /tmp/submit-slow.log 2>&1 &
           follower=$!
-          for _ in $(seq 1 60); do grep -q '^run slow-' /tmp/submit-slow.log && break; sleep 1; done
-          run=$(sed -n 's/^run \(slow-[0-9a-f]*\) .*/\1/p' /tmp/submit-slow.log)
-          [ -n "$run" ] || { echo "the slow Op was never submitted"; cat /tmp/submit-slow.log; exit 1; }
-          sleep 3
+          for _ in $(seq 1 60); do grep -q '^run run-' /tmp/submit-slow.log && break; sleep 1; done
+          run=$(sed -n 's/^run \(run-[0-9a-f]*\) .*/\1/p' /tmp/submit-slow.log)
+          [ -n "$run" ] || { echo "the slow Op was never launched"; cat /tmp/submit-slow.log; exit 1; }
+          # Mid-step, proven: the worker's interaction started, or the step fails here.
+          mid_step() {
+            for _ in $(seq 1 60); do
+              curl -sf "http://127.0.0.1:8000/v1/runs/$1/events" | grep -q '"interaction_started"' && return 0; sleep 1
+            done
+            echo "run $1 never reached its step's interaction"; exit 1
+          }
+          mid_step "$run"
+          curl -sf -X POST "http://127.0.0.1:8000/v1/runs/$run/cancel" > /dev/null
+          wait "$follower" || true
+          grep -q '^status: CANCELLED$' /tmp/submit-slow.log \
+            || { echo "the cancelled run did not end cancelled"; cat /tmp/submit-slow.log; exit 1; }
+          for _ in $(seq 1 20); do [ -z "$(workers)" ] && break; sleep 1; done
+          [ -z "$(workers)" ] || { echo "a worker outlived its cancelled run"; exit 1; }
+
+          # Kill the controller mid-step: the run stays RUNNING until it starts again, then is interrupted.
+          make -s -C dev submit OP=slow > /tmp/submit-killed.log 2>&1 &
+          follower=$!
+          for _ in $(seq 1 60); do grep -q '^run run-' /tmp/submit-killed.log && break; sleep 1; done
+          run=$(sed -n 's/^run \(run-[0-9a-f]*\) .*/\1/p' /tmp/submit-killed.log)
+          [ -n "$run" ] || { echo "the slow Op was never launched"; cat /tmp/submit-killed.log; exit 1; }
+          mid_step "$run"
           pkill -KILL -f "[c]ollab_hub_execution.controller"
           sleep 1
           start
           wait "$follower" || true
-          grep -q '^status: INTERRUPTED$' /tmp/submit-slow.log \
-            || { echo "the killed controller's run did not end interrupted"; cat /tmp/submit-slow.log; exit 1; }
+          grep -q '^status: INTERRUPTED$' /tmp/submit-killed.log \
+            || { echo "the killed controller's run did not end interrupted"; cat /tmp/submit-killed.log; exit 1; }
           grep -q "interrupted $run: this controller stopped" /tmp/controller.log \
             || { echo "the restarted controller did not record it"; cat /tmp/controller.log; exit 1; }
 
@@ -281,9 +319,8 @@ jobs:
 
           # The Track tables (migration 12) come from the migration registry the
           # API ran at startup and from nowhere else: the one module of the API
-          # that imports the execution package is the run router, which is
-          # behind the cog_runs feature flag, off here, and keeps its Track in a
-          # SQLite file, so nothing else could have created them.
+          # that imports the execution package is the run router, which reads
+          # and writes the Track on this database and never creates a table.
           psql='docker compose -f dev/compose.yaml exec -T postgres psql -U collab -d collab -tAc'
           tables=$($psql "SELECT count(*) FROM pg_tables WHERE tablename IN ('collab_track_events', 'collab_track_payloads')")
           [ "$tables" = "2" ] || { echo "expected the two Track tables from migrations, found $tables"; exit 1; }
@@ -296,20 +333,24 @@ jobs:
           pkill -f "collab_hub_api" || true
           sleep 2
 
-      # Two controllers on one Postgres Track (Phase 11): of two picking up one run, one starts it. The
-      # Track's tables come from the hub's migrations, which `make api-pg` ran in the step before.
-      - name: Level 2 -- two controllers on one Postgres Track never both start a run
+      # The run API on the hub's own Postgres (Phase 12), and two controllers on that Track (Phase 11):
+      # `make api-pg` records runs in its database, its tables from the hub's migrations, and of two
+      # controllers picking up one run, one starts it.
+      - name: Level 2 -- the run API on Postgres, and two controllers never both start a run
         run: |
           set -euo pipefail
-          make -C dev postgres
-          export TRACK=postgresql://collab:collab@127.0.0.1:5432/collab
-          # Stopped, and gone, before the next step: a controller left running would pick up its runs.
-          stop_controllers() {
+          stop_all() {
             pkill -TERM -f "[c]ollab_hub_execution.controller" || true
+            pkill -TERM -f "[c]ollab_hub_api" || true
             for _ in $(seq 1 30); do pgrep -f "[c]ollab_hub_execution.controller" > /dev/null || return 0; sleep 1; done
             pkill -KILL -f "[c]ollab_hub_execution.controller" || true
           }
-          trap stop_controllers EXIT
+          trap stop_all EXIT
+          make -C dev api-pg > /tmp/api-pg-runs.log 2>&1 &
+          for _ in $(seq 1 60); do curl -sf -m 2 -o /dev/null http://127.0.0.1:8000/health && break; sleep 2; done
+          curl -sf -m 5 -o /dev/null http://127.0.0.1:8000/health \
+            || { echo "API never came up"; tail -40 /tmp/api-pg-runs.log; exit 1; }
+          export TRACK=postgresql://collab:collab@127.0.0.1:5432/collab
           for id in one two; do
             port=$([ "$id" = one ] && echo 18991 || echo 18992)
             make -s -C dev controller ENVIRONMENT=host CONTROLLER_ID=$id HEALTH_PORT=$port > /tmp/controller-$id.log 2>&1 &
@@ -390,7 +431,7 @@ jobs:
         run: |
           tail -60 /tmp/api-pg.log 2>/dev/null || true
           tail -60 /tmp/api-oidc.log 2>/dev/null || true
-          tail -40 /tmp/controller-one.log /tmp/controller-two.log 2>/dev/null || true
+          tail -40 /tmp/controller-one.log /tmp/controller-two.log /tmp/api-pg-runs.log 2>/dev/null || true
           make -C dev ps || true
           timeout 15 make -C dev logs || true
 

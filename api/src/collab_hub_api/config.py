@@ -991,7 +991,7 @@ class CogsConfig(BaseModel):
 
 
 class RunsConfig(BaseModel):
-    """Where the run API (``/v1/runs``, behind the ``cog_runs`` feature flag) records and reads runs.
+    """Where the run API (``/v1/runs``) records and reads runs.
 
     The API writes intent to the Track and reads a run's status from it; a run
     controller, a separate process over the same Track, advances the runs
@@ -1004,7 +1004,9 @@ class RunsConfig(BaseModel):
     model_config = ConfigDict(hide_input_in_errors=True, extra="forbid")
 
     track_path: str | None = None
-    """The SQLite Track file shared with the run controller. Required when ``cog_runs`` is on."""
+    """A SQLite Track file shared with the run controller, for a hub without Postgres (dev level 1).
+    Unset, the Track is the hub's own database (``frames.postgres.url``), whose tables come from the
+    hub's migrations; with neither, the run routes answer 503."""
     packages: list[str] | str = Field(default_factory=list)
     """The directories the controller finds Cog packages under: a step's ``cog`` must name one of them.
     A list, or from the environment one string of directories joined by ``os.pathsep``."""
@@ -1022,9 +1024,7 @@ class RunsConfig(BaseModel):
         return value
 
 
-FEATURE_FLAGS: dict[str, str] = {
-    "cog_runs": "The run API (/v1/runs): launch a Cog, list runs, cancel one. Needs the runs section set.",
-}
+FEATURE_FLAGS: dict[str, str] = {}
 """Every feature flag this hub knows: name to one line on what it exposes.
 
 Adding a flag starts here. A name that is not listed is refused wherever it
@@ -1033,7 +1033,9 @@ appears: set in the environment or the chart, it stops startup; passed to
 instead of silently reading as off.
 """
 
-RETIRED_FEATURE_FLAGS: frozenset[str] = frozenset()
+RETIRED_FEATURE_FLAGS: frozenset[str] = frozenset({
+    "cog_runs",  # the run API (/v1/runs) is always served since the hub ships the execution package
+})
 """Flags that have been removed but that deployments may still set.
 
 When a flag's feature ships, move its name here from :data:`FEATURE_FLAGS`.

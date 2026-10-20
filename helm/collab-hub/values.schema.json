@@ -1094,6 +1094,10 @@
               "type": "integer",
               "minimum": 1,
               "description": "Seconds a worker may take to start, building a Cog's environment on its first launch included."
+            },
+            "tmpSizeLimit": {
+              "type": "string",
+              "description": "The size limit of the controller's /tmp, where Cogs write."
             }
           },
           "additionalProperties": false

@@ -58,8 +58,7 @@ COPY --from=projectroot examples/cog-local/cogs/hello/pixi.toml examples/cog-loc
 RUN mkdir -p /opt/pixi && \
     printf 'detached-environments = "/var/cache/collab-hub/pixi-envs"\n' > /opt/pixi/config.toml
 ENV PIXI_HOME=/opt/pixi \
-    PIXI_CACHE_DIR=/var/cache/collab-hub/pixi-cache \
-    COLLAB_HUB_COGS=/opt/collab-hub/cogs
+    PIXI_CACHE_DIR=/var/cache/collab-hub/pixi-cache
 
 USER nonroot
 

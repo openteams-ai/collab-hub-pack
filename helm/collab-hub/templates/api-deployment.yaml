@@ -27,10 +27,15 @@ spec:
     metadata:
       labels:
         {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 8 }}
-      {{- if and $controller.enabled $controller.models }}
+      {{- if $controller.enabled }}
       annotations:
+        # EKS projects the pod's AWS web identity (IRSA) into every container; a Cog's worker runs in this
+        # one, so it gets none.
+        eks.amazonaws.com/skip-containers: run-controller
+        {{- if $controller.models }}
         # The controller reads its models block once, at start: a new block rolls the pod.
         checksum/run-models: {{ $controller.models | sha256sum }}
+        {{- end }}
       {{- end }}
     spec:
       serviceAccountName: {{ include "collab-hub.api-service-account-name" . }}
@@ -560,7 +565,8 @@ spec:
           emptyDir:
             sizeLimit: {{ $controller.cacheSizeLimit | quote }}
         - name: run-tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ $controller.tmpSizeLimit | quote }}
         {{- if $controller.models }}
         - name: run-models
           configMap:

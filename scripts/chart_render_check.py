@@ -163,6 +163,9 @@ def case_run_controller(r: Rendered) -> None:
     assert env["COLLAB_CONTROLLER_WORKER_START_TIMEOUT"]["value"] == "900"
     # The pod rolls when its models block changes: the controller reads it once, at start.
     assert re.fullmatch(r"[0-9a-f]{64}", r.annotations.get("checksum/run-models", "")), r.annotations
+    # No AWS web identity in the container Cogs run in.
+    assert r.annotations.get("eks.amazonaws.com/skip-containers") == "run-controller", r.annotations
+    assert r.volumes["run-tmp"]["emptyDir"]["sizeLimit"] == "5Gi" and r.volumes["run-cache"]["emptyDir"]["sizeLimit"]
     assert env["ANTHROPIC_API_KEY"]["valueFrom"]["secretKeyRef"]["name"] == "claude"
     # Liveness only: a readiness probe would hold the pod out while the controller waits for its id.
     assert "livenessProbe" in controller and "readinessProbe" not in controller and "startupProbe" not in controller
@@ -176,6 +179,7 @@ def case_run_controller(r: Rendered) -> None:
 
 def case_no_run_controller(r: Rendered) -> None:
     assert sorted(r.containers) == ["api"], sorted(r.containers)
+    assert not r.annotations, r.annotations
     assert "COLLAB_HUB_API__RUNS__PACKAGES" not in r.env
     assert not r.configmaps.get("t-collab-hub-run-models")
 

@@ -294,6 +294,12 @@ class IdTaken(RuntimeError):
     """Another live controller holds this id on this Track."""
 
 
+class TrackNotReady(SystemExit):
+    """The Track is not ready yet, where it may be soon: its database does not answer, or the API's
+    migrations have not created its tables. What a controller started beside its API waits for; every
+    other refusal of a Track is a misconfiguration, and stops it at once."""
+
+
 def open_track(spec: str) -> tuple[TrackStore, Any]:
     """The Track ``spec`` names, a SQLite file or a ``postgresql://`` URL, and what keeps it open."""
     if spec.startswith(POSTGRES_SCHEMES):
@@ -301,15 +307,23 @@ def open_track(spec: str) -> tuple[TrackStore, Any]:
             from psycopg_pool import ConnectionPool
         except ImportError as exc:  # pragma: no cover - an install without the extra
             raise SystemExit("a Postgres Track needs psycopg: install collab-hub-execution[postgres]") from exc
+        import psycopg
+        from psycopg_pool import PoolTimeout
+
         pool = ConnectionPool(spec, min_size=1, max_size=8, open=True)
-        with pool.connection() as connection:
-            # On Postgres the Track's tables come from the hub's migration registry, never from here.
-            missing = [table for table in TRACK_TABLES if connection.execute(
-                "SELECT to_regclass(%s) IS NULL", (table,)).fetchone()[0]]
+        try:
+            with pool.connection(timeout=10) as connection:
+                # On Postgres the Track's tables come from the hub's migration registry, never from here.
+                missing = [table for table in TRACK_TABLES if connection.execute(
+                    "SELECT to_regclass(%s) IS NULL", (table,)).fetchone()[0]]
+        except (PoolTimeout, psycopg.OperationalError) as exc:
+            pool.close()
+            raise TrackNotReady(f"the Track's database does not answer: {type(exc).__name__}") from exc
         if missing:
             pool.close()
-            raise SystemExit(f"this Postgres has no Track, or part of one (missing {', '.join(missing)}): the hub's "
-                             "migrations create its tables (start the API on it once, e.g. `make -C dev api-pg`)")
+            raise TrackNotReady(f"this Postgres has no Track, or part of one (missing {', '.join(missing)}): the "
+                                "hub's migrations create its tables (start the API on it once, e.g. `make -C dev "
+                                "api-pg`)")
         return PostgresTrackStore(pool), pool
     if "://" in spec:
         raise SystemExit(f"the Track is a SQLite file or a postgresql:// URL, not {spec.split('://')[0]}://...")
@@ -433,11 +447,11 @@ def _patiently(attempt, refusal: type[BaseException], deadline: float, waiting_f
     while True:
         try:
             return attempt()
-        except refusal:
+        except refusal as exc:
             if time.monotonic() >= deadline:
                 raise
-            starting["waiting"] = waiting_for
-            _log.info("waiting: %s", waiting_for)
+            starting["waiting"] = f"{waiting_for}: {exc}"
+            _log.info("waiting (%s): %s", waiting_for, exc)
             time.sleep(min(5.0, max(0.1, deadline - time.monotonic())))
 
 
@@ -469,8 +483,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.health_port:
         serve_health(health, args.health_host, args.health_port)
     deadline = time.monotonic() + args.wait
-    track, keep_open = _patiently(lambda: open_track(args.track), SystemExit, deadline,
-                                  "the Track's tables are not there yet", starting)
+    # Only what may come soon is waited for: a Track misconfigured stops the controller at once.
+    track, keep_open = _patiently(lambda: open_track(args.track), TrackNotReady, deadline,
+                                  "the Track is not ready", starting)
     try:
         still_held = _patiently(lambda: hold_id(args.track, args.id), IdTaken, deadline,
                                 f"another controller holds the id {args.id!r}", starting)

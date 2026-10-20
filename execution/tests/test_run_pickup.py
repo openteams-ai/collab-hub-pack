@@ -528,3 +528,21 @@ def test_a_track_url_of_another_kind_is_refused_not_taken_for_a_file(tmp_path, m
     with pytest.raises(SystemExit, match="postgresql://"):
         open_track("mysql://hub/runs")
     assert list(tmp_path.iterdir()) == []  # no file named after the URL
+
+
+def test_a_misconfigured_track_stops_the_controller_at_once_even_told_to_wait(tmp_path):
+    # Only a Track that may be ready soon is waited for; a wrong scheme never will be.
+    started = time.monotonic()
+    refused = subprocess.run([sys.executable, "-m", "collab_hub_execution.controller", "--track", "mysql://hub/runs",
+                              "--packages", str(tmp_path), "--work-dir", str(tmp_path / "runs"), "--wait", "60"],
+                             capture_output=True, text=True, timeout=60)
+    assert refused.returncode != 0 and "postgresql://" in refused.stderr
+    assert time.monotonic() - started < 30
+
+
+@pytest.mark.skipif(not TEST_PG, reason="set TEST_POSTGRES_URL to run the Postgres controller tests")
+def test_a_database_that_does_not_answer_is_waited_for_like_missing_tables():
+    from collab_hub_execution.controller import TrackNotReady, open_track
+
+    with pytest.raises(TrackNotReady, match="does not answer"):
+        open_track("postgresql://nobody:x@127.0.0.1:1/none")

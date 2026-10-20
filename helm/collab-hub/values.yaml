@@ -761,8 +761,11 @@ runs:
     models: ""
     # -- Extra environment for the controller: the variables a models block's auth_ref names, from Secrets.
     extraEnv: []
-    # -- The size limit of the volume Cog environments and run output are kept on (an emptyDir).
+    # -- The size limit of the volume Cog environments and run output are kept on (an emptyDir). Past it, the
+    # kubelet evicts the whole pod, the API with it.
     cacheSizeLimit: 20Gi
+    # -- The size limit of the controller's /tmp, where Cogs write (HOME is /tmp). Past it, the pod is evicted.
+    tmpSizeLimit: 5Gi
     # -- The port of the controller's /healthz, which its liveness probe reads.
     healthPort: 8771
     # -- Resources for the controller container, which also runs the Cogs' workers.

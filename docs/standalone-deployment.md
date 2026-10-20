@@ -448,27 +448,42 @@ runs:
   egress to conda-forge and PyPI, and Hermes's first launch takes a few
   minutes, within `workerStartSeconds` (900 by default), how long a worker
   may take to start. Environments and each run's output are kept on an `emptyDir`
-  (`cacheSizeLimit`), so a new pod builds them again.
+  (`cacheSizeLimit`), and what Cogs write under `/tmp` on another
+  (`tmpSizeLimit`), so a new pod builds them again. Past either limit the
+  kubelet evicts the whole pod, the API with it, and with one API pod that
+  is an outage until the pod is rescheduled.
 - **Its Track** is the hub's database (`frames.postgres`), the one the API
   records runs in; the chart refuses the controller without it.
 - **One API pod.** Each pod would run a controller under the same id, so the
   chart refuses the controller with `replicaCount` above 1 or autoscaling on.
   In a rollout, the new pod's controller waits (`waitSeconds`) until the old
   pod's has stopped, then takes its id, and records the runs the old one left
-  unfinished `interrupted`. It has a liveness probe and no readiness probe, so
-  waiting never holds the API out of service.
+  unfinished `interrupted`. It waits the same way for a database that does
+  not answer yet and for the Track's tables, logging why; a misconfigured
+  Track, a URL of another scheme, stops it at once. It has a liveness probe
+  and no readiness probe, so waiting never holds the API out of service.
 - **Models and keys.** `models` is the hub's models block, in TOML
   ([runs.md](cog-execution/runs.md#configuration-health-and-models)), rendered
   into a ConfigMap; the controller reads it once, at start, so a changed block
   rolls the pod (a checksum of it is on the pod template). A key is named by
-  `auth_ref = "env:NAME"` and arrives in
-  `extraEnv` from a Secret; it is handed to the workers of the Cogs bound to
-  that model, and to no other.
+  `auth_ref = "env:NAME"` and arrives in `extraEnv` from a Secret. A worker
+  inherits only the key of the model its Cog is bound to, but every key is in
+  the controller's own environment, which any worker can read (below): keep
+  to the keys the shipped Cogs need.
 - **Not isolated.** A Cog's worker is a process of the API's pod, run as the
-  same user: it shares that pod's network and filesystem with the API and the
-  controller, and although it inherits none of their environment, it could
-  read it, the database URL among it, through `/proc`. Run only Cogs you
-  trust this way, on a development hub. The `remote` location, a pod per worker under a
+  same user, and shares that pod with the API and the controller:
+  - **Their environment.** A worker inherits none of it, but it can read it
+    through `/proc`: the database URL, and every model key in `extraEnv`.
+  - **The pod's credentials.** The controller's container has the API's
+    ServiceAccount token mounted; the chart grants it no RBAC. With IRSA on
+    EKS (`api.serviceAccount.annotations`), the pod's AWS web identity, which
+    the S3 frame store uses, would be projected into every container, so the
+    chart marks the controller's container `eks.amazonaws.com/skip-containers`
+    and it gets none. Other identity webhooks need the same exclusion.
+  - **Its network and filesystem**, as any process of the pod.
+
+  Run only Cogs you trust this way, the ones the image ships, on a
+  development hub. The `remote` location, a pod per worker under a
   least-privilege controller, is a later phase of
   [`COG_EXECUTION.md`](../COG_EXECUTION.md).
 

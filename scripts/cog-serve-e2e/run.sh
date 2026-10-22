@@ -295,7 +295,7 @@ fi
 pass "non-Cog artifact and unindexed repository refused"
 
 echo "== the registry credential opens nothing else, anywhere"
-for path in /v1/cogs /v1/frames /v1/whoami; do
+for path in /v1/cogs /v1/frames /v1/me; do
   code="$(curl -s -o /dev/null -w '%{http_code}' -u "$REG_USER:$REG_SECRET" "$HUB$path")"
   [ "$code" = "401" ] || die "the registry credential got $code from $path"
   code="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $REG_SECRET" "$HUB$path")"

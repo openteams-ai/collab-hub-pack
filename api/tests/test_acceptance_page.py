@@ -1555,6 +1555,96 @@ def _post_body_over_socket(
     return elapsed, received, closed
 
 
+def _read_one_response(sock: socket.socket, buffered: bytes) -> tuple[bytes, bytes] | None:
+    """One ``Content-Length``-framed response off ``sock``, or None at EOF.
+
+    Returns ``(response, leftover)``. None means the server ended the
+    connection before a complete response — end-of-file or a reset — which is
+    what the keep-alive controls must fail on. A socket timeout is raised
+    instead: a server that leaves the connection open and never answers has
+    not closed it, and the failure should say so.
+    """
+
+    data = buffered
+    while b"\r\n\r\n" not in data:
+        try:
+            chunk = sock.recv(65536)
+        except TimeoutError:
+            raise
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        data += chunk
+    head, _, rest = data.partition(b"\r\n\r\n")
+    lengths = [
+        line.split(b":", 1)[1].strip()
+        for line in head.split(b"\r\n")[1:]
+        if line.lower().startswith(b"content-length:")
+    ]
+    # These controls only issue requests whose responses are length-framed; a
+    # chunked answer would need a decoder this helper deliberately lacks.
+    assert len(lengths) == 1, head
+    size = int(lengths[0])
+    while len(rest) < size:
+        try:
+            chunk = sock.recv(65536)
+        except TimeoutError:
+            raise
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        rest += chunk
+    return head + b"\r\n\r\n" + rest[:size], rest[size:]
+
+
+def _requests_over_one_socket(base_url: str, requests: list[bytes]) -> list[bytes]:
+    """Send ``requests`` one after another on **one** raw socket.
+
+    Returns the responses that were served, in order; a list shorter than
+    ``requests`` means the server closed or reset the connection before
+    serving the next one. A server that never answers raises ``TimeoutError``.
+    A raw socket rather than an HTTP client because a client library quietly
+    opens a fresh connection when the server closes one, so "the second
+    request was served" proves nothing about reuse there. Here there is only
+    the one socket: a second response on it *is* the connection kept alive.
+    """
+
+    parts = urlsplit(base_url)
+    served: list[bytes] = []
+    leftover = b""
+    with socket.create_connection((parts.hostname, parts.port), timeout=15) as sock:
+        for raw in requests:
+            try:
+                sock.sendall(raw)
+            except OSError:
+                break
+            result = _read_one_response(sock, leftover)
+            if result is None:
+                break
+            response, leftover = result
+            served.append(response)
+    return served
+
+
+def _raw_post(base_url: str, path: str, *, headers: dict[str, str], body: bytes) -> bytes:
+    """A ``Content-Length``-framed HTTP/1.1 POST, as bytes, with no ``Connection`` header.
+
+    HTTP/1.1's default is persistent, so leaving the header out asks for
+    keep-alive the way an ordinary client does.
+    """
+
+    parts = urlsplit(base_url)
+    lines = [
+        f"POST {path} HTTP/1.1",
+        f"Host: {parts.hostname}:{parts.port}",
+        f"Content-Length: {len(body)}",
+        *(f"{name}: {value}" for name, value in headers.items()),
+    ]
+    return ("\r\n".join(lines) + "\r\n\r\n").encode() + body
+
+
 def _sign_in_over_http(client: _LoopbackBrowser, idp: _StubIdp) -> str:
     start = client.get("/web/signin", params={"next": ACCEPT_PAGE_PATH})
     assert start.status_code == 303
@@ -1678,23 +1768,29 @@ def test_the_server_keeps_serving_after_refusing_an_oversize_body(tmp_path, idp)
 def test_a_normal_redemption_over_a_real_connection_keeps_it_alive(tmp_path, idp):
     """The close must be the exception, not the rule.
 
-    Two redemptions on one client: if the successful path closed the
+    Two redemptions on **one socket**: if the successful path closed the
     connection, every acceptance would cost a fresh TCP (and TLS) handshake.
+    Asserted as reuse — the second request is served on the same connection —
+    rather than as the absence of a ``Connection: close`` header, which would
+    still pass if the server dropped the connection for any other reason.
     """
 
     app, service = build_app(tmp_path, idp)
     with running_server(app) as base_url, _LoopbackBrowser(base_url) as client:
         csrf = _sign_in_over_http(client, idp)
-        headers = {"Content-Type": "application/json", "X-CSRF-Token": csrf}
-        first = client.post(
-            ACCEPT_REDEEM_PATH, content=json.dumps({"token": SENTINEL_TOKEN}), headers=headers
+        request = _raw_post(
+            base_url,
+            ACCEPT_REDEEM_PATH,
+            headers={
+                "Content-Type": "application/json",
+                "X-CSRF-Token": csrf,
+                "Cookie": client.cookie_header(),
+            },
+            body=json.dumps({"token": SENTINEL_TOKEN}).encode(),
         )
-        second = client.post(
-            ACCEPT_REDEEM_PATH, content=json.dumps({"token": SENTINEL_TOKEN}), headers=headers
-        )
-    assert first.status_code == 200
-    assert second.status_code == 200
-    assert "connection" not in {name.lower() for name in first.headers}
+        served = _requests_over_one_socket(base_url, [request, request])
+    assert len(served) == 2, "the server closed the connection after a successful redemption"
+    assert all(response.startswith(b"HTTP/1.1 200") for response in served), served
     assert len(service.calls) == 2
 
 

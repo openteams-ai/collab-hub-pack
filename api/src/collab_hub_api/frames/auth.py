@@ -476,9 +476,9 @@ def _shared_jwk_client_class():
           outcome, so a burst costs one request whether it succeeds or fails.
 
         * **Last known good, but not forever.** ``fetch_data`` writes the
-          decoded response to the cache *before* ``get_jwk_set`` validates it as
-          a ``PyJWKSet``. A successful HTTP 200 carrying an empty or unusable
-          key set therefore replaces a working cache with one that raises for
+          response to the cache *before* anything checks it has a key we can
+          verify with. A successful HTTP 200 carrying an empty or unusable
+          key set therefore replaces a working cache with one that fails for
           the rest of the lifespan — rejecting tokens signed by keys that are
           still valid, with no path back. Validating before adopting, and
           reinstating the last validated set otherwise, keeps a bad response
@@ -499,7 +499,6 @@ def _shared_jwk_client_class():
             self._flight_lock = threading.Lock()
             self._flight: _Flight | None = None
             self._last_forced_refresh = float("-inf")
-            self._validated_data = None
             self._validated_set = None
             self._validated_at = 0.0
 
@@ -536,6 +535,20 @@ def _shared_jwk_client_class():
                 return self._fly(flight)
             return flight.result()
 
+        def get_signing_key(self, kid: str):
+            # PyJWT 2.15 wraps this lookup in a per-client lock held across
+            # the fetch, and skips the unknown-``kid`` refresh for 30s after
+            # *any* fetch. The first would stall every request behind one hung
+            # forced refresh; the second would hide a key rotated just after a
+            # cache-expiry fetch. ``get_jwk_set`` already single-flights
+            # fetches and bounds forced refreshes, so neither is needed here.
+            signing_key = self.match_kid(self.get_signing_keys(), kid)
+            if signing_key is None:
+                signing_key = self.match_kid(self.get_signing_keys(refresh=True), kid)
+                if signing_key is None:
+                    raise PyJWKClientError(f'Unable to find a signing key that matches: "{kid}"')
+            return signing_key
+
         def _fly(self, flight: _Flight) -> PyJWKSet:
             """Run *flight*'s fetch and hand the outcome to everyone waiting."""
 
@@ -559,22 +572,23 @@ def _shared_jwk_client_class():
 
             if self.jwk_set_cache is None:
                 return None
-            data = self.jwk_set_cache.get()
-            if data is None:
+            cached = self.jwk_set_cache.get()
+            if cached is None:
                 return None
-            if data is not self._validated_data:
+            if cached is not self._validated_set:
                 # Either ``fetch_data`` has just cached a response the in-flight
                 # fetch has not adopted yet, or a set we dropped is still in the
                 # cache. Neither is ours to serve: treating it as a miss sends
-                # this caller to the lock, where the flight decides.
+                # this caller to the lock, where the flight decides. The check
+                # is against the parsed set we put back, not the raw response:
+                # PyJWT 2.15 parses whatever ``fetch_data`` caches, so the raw
+                # dict never comes back out of the cache.
                 return None
             if time.monotonic() - self._validated_at > JWKS_MAX_STALE_SECONDS:
                 # Unconfirmed for too long. Stop serving it from cache so the
                 # next fetch either revalidates it or drops it.
                 return None
-            # Serve the set already parsed instead of rebuilding every key from
-            # its JWK on each request.
-            return self._validated_set
+            return cached
 
         def _claim_forced_refresh(self) -> bool:
             """Consume the forced-refresh allowance if it is available."""
@@ -605,9 +619,13 @@ def _shared_jwk_client_class():
                     raise PyJWKClientError("The JWKS endpoint did not return a usable JWK set")
                 return fallback
 
-            self._validated_data = data
             self._validated_set = jwk_set
             self._validated_at = time.monotonic()
+            if self.jwk_set_cache is not None:
+                # Replace what ``fetch_data`` cached with the set we validated,
+                # so cache hits serve keys already parsed and are recognisably
+                # ours.
+                self.jwk_set_cache.put(jwk_set)
             return jwk_set
 
         def _stale_fallback(self) -> PyJWKSet | None:
@@ -628,13 +646,12 @@ def _shared_jwk_client_class():
             if self._validated_set is None:
                 return None
             if time.monotonic() - self._validated_at > JWKS_MAX_STALE_SECONDS:
-                self._validated_data = None
                 self._validated_set = None
                 if self.jwk_set_cache is not None:
                     self.jwk_set_cache.put(None)
                 return None
             if self.jwk_set_cache is not None:
-                self.jwk_set_cache.put(self._validated_data)
+                self.jwk_set_cache.put(self._validated_set)
             return self._validated_set
 
         @staticmethod

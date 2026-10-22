@@ -1,6 +1,6 @@
 import base64
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta
 
 
 def _jwt(payload: dict) -> str:
@@ -83,15 +83,23 @@ async def test_client_assigned_task_id_is_preserved_for_offline_replication(clie
     assert duplicate.status_code == 409
 
 
+def _recent(seconds: int = 0) -> str:
+    """A run's creation time a few minutes ago, plus ``seconds``: runs expire 90 days after creation."""
+    moment = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5) + timedelta(seconds=seconds)
+    return moment.isoformat().replace("+00:00", "Z")
+
+
 async def test_run_occurrence_is_idempotent_and_history_survives_task_delete(client):
     task = (await client.post("/v1/tasks", cookies=auth_cookie("alice"), json=task_payload())).json()
+    # A recent run: a run expires 90 days after it was created, so a fixed date stops being listed.
+    recent = _recent()
     run_request = {
         "task_revision": task["revision"],
         "schedule_revision": task["schedule_revision"],
-        "created_at": "2026-07-15T13:00:00Z",
-        "occurrence_key": f"{task['id']}:1:2026-07-15T13:00:00Z",
+        "created_at": recent,
+        "occurrence_key": f"{task['id']}:1:{recent}",
         "trigger": "scheduled",
-        "scheduled_at": "2026-07-15T13:00:00Z",
+        "scheduled_at": recent,
         "execution_device_id": "device-a",
         "agent_id": "agent-a",
         "task_snapshot": task,
@@ -101,8 +109,8 @@ async def test_run_occurrence_is_idempotent_and_history_survives_task_delete(cli
     assert first.status_code == 201
     assert second.status_code == 201
     assert first.json()["id"] == second.json()["id"]
-    assert datetime.fromisoformat(first.json()["created_at"].replace("Z", "+00:00")) == datetime(
-        2026, 7, 15, 13, 0, tzinfo=timezone.utc
+    assert datetime.fromisoformat(first.json()["created_at"].replace("Z", "+00:00")) == datetime.fromisoformat(
+        recent.replace("Z", "+00:00")
     )
 
     run_id = first.json()["id"]
@@ -191,7 +199,7 @@ async def test_run_lists_support_offset(client):
             cookies=auth_cookie("alice"),
             json={
                 "id": f"run_{index}",
-                "created_at": f"2026-07-15T13:00:0{index}Z",
+                "created_at": _recent(index),
                 "task_revision": 1,
                 "schedule_revision": 1,
                 "occurrence_key": f"offset-{index}",

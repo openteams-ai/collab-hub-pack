@@ -18,8 +18,10 @@ In the dev environment, `make -C dev cli` installs it and prints the sign-in lin
 ## Signing in
 
 ```sh
-collab-hub login --hub https://hub.example.org
+collab-hub --hub https://hub.example.org login
 ```
+
+`--hub`, like `--profile` and `--insecure`, is an option of `collab-hub` itself, so it comes before the command.
 
 The CLI signs in the way the Collab desktop does, against the same Keycloak realm and the same public client (`apollo-desktop`): the authorization code flow with PKCE (S256) and a loopback redirect (RFC 8252). `login` opens the realm's sign-in page in a browser on this machine, which returns to a listener on `127.0.0.1` and a port the system picks. The hub's URL is all you type: the hub names its issuer and client at `GET /v1/auth/cli`.
 
@@ -28,7 +30,7 @@ The CLI signs in the way the Collab desktop does, against the same Keycloak real
 
   ```sh
   ssh -L 8765:127.0.0.1:8765 remote-host          # on your laptop
-  collab-hub login --no-browser --port 8765        # on the remote host
+  collab-hub --hub https://hub.example.org login --no-browser --port 8765   # on the remote host
   ```
 
   Or use `--with-token`.
@@ -78,6 +80,8 @@ collab-hub cog show acme/reviewer          # one Cog's card and every indexed ve
 
 ## Launching a Cog, and its runs
 
+[`docs/cog-execution.md`](../docs/cog-execution.md) walks through it on a hub, from installing the CLI to stopping the Cog.
+
 ```sh
 collab-hub cog launch hello --input '{"name": "Ada"}' --watch   # launch, and follow the run to its end
 collab-hub cog launch hello --entry run --gate never --input -  # the input from stdin
@@ -107,7 +111,7 @@ These commands need a hub with the run API on (the `cog_runs` feature flag). [`e
 
 ## Output and exit codes
 
-Tables for people by default; `--json`, which every command takes, prints one JSON document for scripts, shaped for `jq`. Results go to stdout, messages to stderr.
+Tables for people by default; `--json`, which every command but `run connect` takes, prints one JSON document for scripts, shaped for `jq` (`run connect`'s stdout carries the ACP protocol and nothing else). Results go to stdout, messages to stderr.
 
 - `login --json`: what `whoami --json` prints, plus `obtained_by` (`browser` or `token`) and `dev_auth`; against a hub running dev auth, `{hub, profile, signed_in: false, dev_auth: true}`.
 - `logout --json`: `{hub, profile, was_signed_in, revoked, warning}`.

@@ -1696,6 +1696,119 @@ async def test_github_search_rejects_repo_outside_org_allowlist(tmp_path, monkey
     assert "allowlist" in detail
 
 
+@pytest.mark.parametrize(
+    "repo",
+    ["acme/x repo:evil/private", "acme/x evil/y", "acme", "acme/x\trepo:evil/y", "acme/x/y"],
+)
+def test_build_query_rejects_malformed_repo(repo):
+    # The owner check reads only the segment before the first "/", so a repo
+    # carrying whitespace or a second qualifier would pass it and then widen
+    # the search via GitHub's OR of repeated repo: qualifiers.
+    client = _scoped_api_client(["acme"])
+    with pytest.raises(GitHubSearchError):
+        client._build_query("bug", repo)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "bug org:evil",
+        "bug repo:evil/private",
+        "bug user:someone",
+        "bug owner:evil",
+        "bug ORG:evil",
+        "bug -org:evil",
+        '"org:evil"',
+        "(bug OR feature) repo:evil/private",
+    ],
+)
+def test_build_query_rejects_scope_qualifiers_in_query_with_allowlist(query):
+    client = _scoped_api_client(["acme"])
+    with pytest.raises(GitHubSearchError):
+        client._build_query(query, "")
+    with pytest.raises(GitHubSearchError):
+        client._build_query(query, "acme/widgets")
+
+
+def test_build_query_admits_non_scope_qualifiers_with_allowlist():
+    client = _scoped_api_client(["acme"])
+    assert (
+        client._build_query("is:open author:octocat label:bug", "")
+        == "is:open author:octocat label:bug org:acme"
+    )
+
+
+def test_build_query_empty_allowlist_admits_scope_qualifiers_in_query():
+    # Empty allowlist == the token's full visibility; the caller may scope freely.
+    assert _scoped_api_client([])._build_query("bug org:anyone", "") == "bug org:anyone"
+
+
+async def test_github_search_route_rejects_malformed_repo(tmp_path, monkeypatch):
+    called = {"search": False}
+
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith("/search/issues"):
+            called["search"] = True
+        return Response(200, json={"total_count": 0, "incomplete_results": False, "items": []})
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path, allowed_orgs=["acme"]))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/search",
+            headers=_auth_header(),
+            json={"query": "bug", "repo": "acme/x repo:evil/private"},
+        )
+    assert response.status_code == 422
+    assert called["search"] is False
+
+
+async def test_github_search_route_rejects_scope_qualifier_in_query(tmp_path, monkeypatch):
+    called = {"search": False}
+
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith("/search/issues"):
+            called["search"] = True
+        return Response(200, json={"total_count": 0, "incomplete_results": False, "items": []})
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path, allowed_orgs=["acme"]))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/search",
+            headers=_auth_header(),
+            json={"query": "bug org:evil"},
+        )
+    assert response.status_code == 422
+    assert "org:" in response.json()["detail"]
+    assert called["search"] is False
+
+
+async def test_github_search_drops_hits_outside_allowlist(tmp_path, monkeypatch):
+    # Defense in depth: even if GitHub returned an out-of-allowlist hit, the
+    # client drops it rather than relying on query parsing alone.
+    outside = _issue_item(2)
+    outside["repository_url"] = "https://github.test/api/repos/evil/private"
+
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith("/search/issues"):
+            return Response(
+                200, json={"total_count": 2, "incomplete_results": False, "items": [_issue_item(1), outside]}
+            )
+        return Response(404, json={"message": "Not Found"})
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path, allowed_orgs=["ACME"]))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/search",
+            headers=_auth_header(),
+            json={"query": "bug", "limit": 10},
+        )
+    assert response.status_code == 200
+    assert [hit["repo"] for hit in response.json()["hits"]] == ["acme/widgets"]
+
+
 # --- repo discovery: list_github_repos -----------------------------------
 
 

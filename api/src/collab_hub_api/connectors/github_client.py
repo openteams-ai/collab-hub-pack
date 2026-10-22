@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
@@ -48,6 +49,15 @@ _PR_REVIEW_PAGE_SIZE = 100
 _LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec"
 
 logger = logging.getLogger("frames_server.connectors")
+
+# Shape of a curated-search ``repo``: exactly ``owner/name``, nothing else. The
+# repo is appended as a ``repo:`` qualifier, so anything looser (whitespace, a
+# second qualifier) would let a caller widen the search past the owner check.
+_SEARCH_REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+# Search qualifiers that set which owners/repos a search spans. GitHub ORs
+# repeated scope qualifiers, so one in caller text would widen an allowlisted
+# search; with an allowlist set, the hub owns the scope and refuses these.
+_SCOPE_QUALIFIER_RE = re.compile(r"\b(?:org|user|owner|repo):", re.IGNORECASE)
 
 # Projects V2 are GraphQL-only. Query the org and user owners in one request and
 # use whichever resolves, so one tool handles org and personal boards.
@@ -396,6 +406,14 @@ class GitHubClient:
         total = int(payload.get("total_count", 0) or 0)
         incomplete = bool(payload.get("incomplete_results", False))
         hits = [_search_hit(item) for item in items if isinstance(item, dict)]
+        if self._allowed_orgs_normalized:
+            # Belt and braces: the query is already scoped, but drop any hit
+            # outside the allowlist so the boundary does not rest on GitHub's
+            # query parsing alone. Pagination below still counts raw items.
+            kept = [hit for hit in hits if self._owner_allowed(hit.repo.split("/", 1)[0])]
+            if len(kept) != len(hits):
+                logger.warning("github_search_dropped_out_of_allowlist_hits", extra={"dropped": len(hits) - len(kept)})
+            hits = kept
 
         next_token = ""
         reachable = min(total, GITHUB_SEARCH_RESULT_CAP)
@@ -753,36 +771,39 @@ class GitHubClient:
         return data if isinstance(data, dict) else {}
 
     def _build_query(self, query: str, repo: str) -> str:
-        parts = [query.strip()]
+        query = query.strip()
         repo = repo.strip()
-        if repo:
-            # An explicit repo: is a narrower scope than the allowlist, but it is
-            # still caller-supplied, so it must itself live inside the allowlist
-            # -- otherwise a caller could bypass the allowlist entirely by naming
-            # a repo in an org the deployment never approved.
-            if self._allowed_orgs_normalized and not self._repo_owner_allowed(repo):
+        if repo and not _SEARCH_REPO_RE.fullmatch(repo):
+            raise GitHubSearchError("repo must be of the form 'owner/name'")
+        if self._allowed_orgs_normalized:
+            # With an allowlist the hub owns the search scope: caller text must
+            # not carry its own org:/user:/owner:/repo: qualifier, which GitHub
+            # would OR with ours. This also refuses a quoted phrase containing
+            # such a token -- an acceptable cost at a security boundary.
+            if _SCOPE_QUALIFIER_RE.search(query):
+                raise GitHubSearchError(
+                    "the search query may not contain org:, user:, owner: or repo: "
+                    "qualifiers on this hub; use the repo field to narrow the search"
+                )
+            # An explicit repo is narrower than the allowlist, but it is still
+            # caller-supplied, so its owner must itself be in the allowlist.
+            if repo and not self._owner_allowed(repo.split("/", 1)[0]):
                 raise GitHubSearchError(
                     f"repo {repo!r} is outside the configured GitHub org allowlist "
                     f"({', '.join(self.allowed_orgs)})"
                 )
+        parts = [query]
+        if repo:
             parts.append(f"repo:{repo}")
-        elif self.allowed_orgs:
+        else:
             # Repeating ``org:`` qualifiers ORs them in GitHub issue search, so
             # results stay confined to the configured org allowlist.
             parts.extend(f"org:{org}" for org in self.allowed_orgs)
         return " ".join(part for part in parts if part)
 
-    def _repo_owner_allowed(self, repo: str) -> bool:
-        """Whether ``repo``'s ``owner/name`` owner segment is in the allowlist.
-
-        GitHub logins are case-insensitive, so the owner is folded against the
-        already-normalized allowlist. A malformed ``repo`` with no ``/`` is
-        treated as its own (never-matching) owner rather than raising here --
-        GitHub's own 422 on an invalid qualifier is the existing, already-handled
-        error path for that.
-        """
-        owner = repo.split("/", 1)[0].strip().lower()
-        return owner in self._allowed_orgs_normalized
+    def _owner_allowed(self, owner: str) -> bool:
+        """Whether ``owner`` is in the allowlist (GitHub logins fold case)."""
+        return owner.strip().lower() in self._allowed_orgs_normalized
 
     async def _get_response(
         self, path: str, *, operation: str, params: dict[str, str] | None = None

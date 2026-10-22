@@ -23,6 +23,7 @@ from .models import (
     GOOGLE_CALENDAR_CONNECTOR_ID,
     GOOGLE_DRIVE_CONNECTOR_ID,
     NOTION_CONNECTOR_ID,
+    SHAREPOINT_CONNECTOR_ID,
     SLACK_CONNECTOR_ID,
     ConnectorLink,
 )
@@ -99,6 +100,16 @@ CATALOG: tuple[ConnectorDescriptor, ...] = (
         short_name="Notion",
         description="Search and read your Notion pages and databases (read-only).",
         provider="notion",
+    ),
+    ConnectorDescriptor(
+        id=SHAREPOINT_CONNECTOR_ID,
+        name="SharePoint",
+        short_name="SharePoint",
+        description="Search and read files from connected SharePoint document libraries (read-only).",
+        # The `connectors.sharepoint` section; the linked identity is the
+        # Microsoft account, and connector_link reads its alias from the
+        # configured broker URL (.../broker/microsoft/token).
+        provider="sharepoint",
     ),
 )
 """Every connector this build can serve, in the order a client should show them."""

@@ -68,6 +68,7 @@ _CONNECTORS = (
     ("google", "Google Workspace"),
     ("slack", "Slack"),
     ("github", "GitHub"),
+    ("sharepoint", "SharePoint"),
 )
 
 

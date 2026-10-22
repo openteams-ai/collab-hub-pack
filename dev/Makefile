@@ -196,7 +196,9 @@ FAKE_CONNECTOR_ENV := \
   COLLAB_HUB_API__CONNECTORS__SLACK__BROKER_TOKEN_URL=http://127.0.0.1:8082/broker/token \
   COLLAB_HUB_API__CONNECTORS__SLACK__API_BASE_URL=http://127.0.0.1:8082/api \
   COLLAB_HUB_API__CONNECTORS__GITHUB__BROKER_TOKEN_URL=http://127.0.0.1:8083/broker/token \
-  COLLAB_HUB_API__CONNECTORS__GITHUB__API_BASE_URL=http://127.0.0.1:8083/api
+  COLLAB_HUB_API__CONNECTORS__GITHUB__API_BASE_URL=http://127.0.0.1:8083/api \
+  COLLAB_HUB_API__CONNECTORS__SHAREPOINT__BROKER_TOKEN_URL=http://127.0.0.1:8084/broker/token \
+  COLLAB_HUB_API__CONNECTORS__SHAREPOINT__API_BASE_URL=http://127.0.0.1:8084/v1.0
 
 # Bearer verification for tokens minted through the desktop front door. The
 # issuer must be the origin the token was ACTUALLY minted on -- the desktop
@@ -215,13 +217,14 @@ DESKTOP_OIDC_ENV := \
 KC_CONNECTOR_ENV := \
   COLLAB_HUB_API__CONNECTORS__GOOGLE__BROKER_TOKEN_URL=$(KC_URL)/realms/$(REALM)/broker/google/token \
   COLLAB_HUB_API__CONNECTORS__SLACK__BROKER_TOKEN_URL=$(KC_URL)/realms/$(REALM)/broker/slack/token \
-  COLLAB_HUB_API__CONNECTORS__GITHUB__BROKER_TOKEN_URL=$(KC_URL)/realms/$(REALM)/broker/github/token
+  COLLAB_HUB_API__CONNECTORS__GITHUB__BROKER_TOKEN_URL=$(KC_URL)/realms/$(REALM)/broker/github/token \
+  COLLAB_HUB_API__CONNECTORS__SHAREPOINT__BROKER_TOKEN_URL=$(KC_URL)/realms/$(REALM)/broker/microsoft/token
 
 .DEFAULT_GOAL := help
 .PHONY: help api api-watch api-pg api-oidc api-fakes api-full api-membership \
         api-desktop api-desktop-fakes hosts-check hub-proxy hub-proxy-down desktop-check \
         postgres services keycloak fakes up down destroy logs ps \
-        keycloak-admin realm-import broker-role idp-google idp-github idp-list \
+        keycloak-admin realm-import broker-role idp-google idp-github idp-microsoft idp-list \
         token sub whoami seed-org psql \
         kind-up kind-cluster kind-image kind-redeploy kind-forward kind-logs \
         kind-smoke kind-down test lint clean op controller fake-model
@@ -313,7 +316,7 @@ api-oidc: postgres keycloak | $(LOCAL)/frames ## API verifying real Keycloak bea
 # dev-auth shortcut cannot reach them -- it authenticates a subject without
 # ever producing a token to forward. This target therefore runs real Keycloak
 # verification and points only the provider APIs at the fakes.
-api-fakes: postgres keycloak fakes | $(LOCAL)/frames ## API + Keycloak + fake Google/Slack connector providers
+api-fakes: postgres keycloak fakes | $(LOCAL)/frames ## API + Keycloak + fake Google/Slack/GitHub/Graph connector providers
 	cd $(API_DIR) && env $(BASE_ENV) $(OIDC_ENV) $(PG_ENV) $(FAKE_CONNECTOR_ENV) \
 		uv run python -m collab_hub_api
 
@@ -414,8 +417,8 @@ keycloak: ## Start Keycloak and import the `nebari` realm
 	$(COMPOSE) --profile auth up -d --wait keycloak
 	@echo "Keycloak admin console: $(KC_URL)  ($(KC_ADMIN)/$(KC_ADMIN_PW))"
 
-fakes: ## Start the fake Google, Slack and GitHub providers
-	$(COMPOSE) --profile fakes up -d fake-google fake-slack fake-github
+fakes: ## Start the fake Google, Slack, GitHub and Microsoft Graph providers
+	$(COMPOSE) --profile fakes up -d fake-google fake-slack fake-github fake-graph
 
 up: services keycloak fakes ## Start every supporting service
 
@@ -492,6 +495,21 @@ idp-github: ## Create the GitHub IdP (GITHUB_CLIENT_ID= GITHUB_CLIENT_SECRET= re
 		-s 'config.defaultScope=user:email repo read:org read:project'
 	@echo "GitHub IdP created. Callback URL to register with GitHub:"
 	@echo "  $(KC_URL)/realms/$(REALM)/broker/github/endpoint"
+
+idp-microsoft: ## Create the Microsoft IdP for SharePoint (MICROSOFT_CLIENT_ID= MICROSOFT_CLIENT_SECRET= MICROSOFT_TENANT_ID= required)
+	@test -n "$(MICROSOFT_CLIENT_ID)" -a -n "$(MICROSOFT_CLIENT_SECRET)" -a -n "$(MICROSOFT_TENANT_ID)" || \
+		{ echo "MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET and MICROSOFT_TENANT_ID are required"; exit 1; }
+	$(KCADM) config credentials --server http://localhost:8080 \
+		--realm master --user $(KC_ADMIN) --password $(KC_ADMIN_PW)
+	$(KCADM) create identity-provider/instances -r $(REALM) \
+		-s alias=microsoft -s displayName=Microsoft -s providerId=microsoft -s enabled=true \
+		-s storeToken=true -s addReadTokenRoleOnCreate=true -s hideOnLogin=true -s linkOnly=true \
+		-s 'config.clientId=$(MICROSOFT_CLIENT_ID)' \
+		-s 'config.clientSecret=$(MICROSOFT_CLIENT_SECRET)' \
+		-s 'config.tenantId=$(MICROSOFT_TENANT_ID)' \
+		-s 'config.defaultScope=openid profile email offline_access User.Read Sites.Read.All Files.Read.All'
+	@echo "Microsoft IdP created (alias microsoft, used by the SharePoint connector). Redirect URI to register in Entra:"
+	@echo "  $(KC_URL)/realms/$(REALM)/broker/microsoft/endpoint"
 
 idp-list: ## List the realm's identity providers
 	$(KCADM) config credentials --server http://localhost:8080 \

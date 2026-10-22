@@ -41,6 +41,7 @@ STATIC='--set cogs.registry.sources[0].id=public --set cogs.registry.sources[0].
 
 # --- positive -----------------------------------------------------------------
 check "default values: only the enabled flag, no CA mount" default
+check "sharepoint defaults: the byte caps render as integers" sharepoint
 check "ci fixture: harbor + static, Secrets attached, CA mounted read-only" fixture -f "$CI_VALUES"
 check "sources with the indexer off: JSON renders, tuning vars do not" static-only $STATIC
 check "three sources: each credential attached to its own source" three-sources -f "$TESTDATA/cogs-three-sources.yaml"

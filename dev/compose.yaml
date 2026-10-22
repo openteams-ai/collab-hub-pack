@@ -183,6 +183,29 @@ services:
     volumes:
       - ../scripts/testdata:/app:ro
 
+  # Fake Microsoft Graph for the SharePoint connector. Its /content redirects
+  # must point at the origin the API (on your machine) reaches it through, hence
+  # --public-url with the published port.
+  fake-graph:
+    image: python:3.14-slim
+    profiles: ["fakes"]
+    command:
+      [
+        "python",
+        "/app/fake_graph_app.py",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--public-url",
+        "http://127.0.0.1:8084",
+      ]
+    working_dir: /app
+    ports:
+      - "127.0.0.1:8084:8000"
+    volumes:
+      - ../scripts/testdata:/app:ro
+
 volumes:
   postgres-data:
   s3-data:

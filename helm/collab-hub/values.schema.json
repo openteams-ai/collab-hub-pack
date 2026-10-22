@@ -931,6 +931,45 @@
             }
           },
           "additionalProperties": false
+        },
+        "sharepoint": {
+          "type": "object",
+          "properties": {
+            "brokerTokenUrl": {
+              "type": "string"
+            },
+            "apiBaseUrl": {
+              "type": "string"
+            },
+            "requestTimeoutSeconds": {
+              "type": "number",
+              "minimum": 1
+            },
+            "downloadTimeoutSeconds": {
+              "type": "number",
+              "minimum": 1
+            },
+            "maxDownloadBytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "extractionTimeoutSeconds": {
+              "type": "number",
+              "minimum": 1
+            },
+            "extractionMemoryLimitBytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "extractionWaitSeconds": {
+              "type": "number",
+              "minimum": 0
+            },
+            "includePersonalOnedrive": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

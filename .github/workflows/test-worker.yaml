@@ -1,0 +1,43 @@
+name: Test worker SDK
+
+# Runs the collab-hub-cog-worker package's tests + ruff (in worker/) on the
+# lowest and highest Python it supports. The SDK is the worker side of the
+# seam and imports no hub package and nothing beyond the standard library; its
+# adapters are tested against the fake ACP agent and the fake model under dev/,
+# so nothing is installed and no container runs. Fork-safe: no secrets,
+# read-only checkout.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "worker/**"
+      - "dev/fake-agent/**"
+      - "dev/fake-model/**"
+      - ".github/workflows/test-worker.yaml"
+  pull_request: {}   # runs on every PR so it can be a required status check
+
+permissions:
+  contents: read
+
+jobs:
+  test-worker:
+    name: Test worker SDK (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+
+      - name: Lint
+        working-directory: worker
+        run: uv run -p ${{ matrix.python }} --with ruff ruff check src tests
+
+      - name: Test
+        working-directory: worker
+        run: uv run -p ${{ matrix.python }} --group test pytest

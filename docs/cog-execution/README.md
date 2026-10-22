@@ -29,6 +29,10 @@ Contents:
   talking to and stopping a Cog.
 - [Sensitivity](sensitivity.md) — how data-sensitivity labels are born,
   propagated, and enforced (the basis of ADR-0001 D10).
+- [The Worker SDK](../../worker/README.md) — writing a Cog worker on the SDK:
+  entry points, sessions, the harness adapter protocol, and what the SDK hands
+  a harness; [`cogs/hermes`](../../cogs/README.md) is the reference harness
+  Cog built on it.
 
 ## Vocabulary
 
@@ -133,8 +137,8 @@ Bare decision and invariant numbers are ADR-0001's.
 | #104 DBOS backend | ADR-0002 D1, D3 | Resumes after a restart; status still comes from the Track. |
 | #105 materialize from the artifact | D5, invariant 2 | The worker runs the Cog's own `serve`. |
 | #106 install by digest | D5 | Install runs `check` once; materialize happens per run. |
-| #107 worker SDK | ADR-0002 D5, invariant 4 | Optional for Cogs; the hub never imports it. |
-| #108 Hermes harness Cog | ADR-0002 D5 | The first harness Cog, built on the worker SDK. |
+| #107 worker SDK | ADR-0002 D5, invariant 4 | `worker/`, `collab-hub-cog-worker`: the seam server, the binding, Frames and limits, and the ACP and OpenAI-compatible adapters; optional for Cogs; the hub never imports it, and a test proves it. |
+| #108 Hermes harness Cog | ADR-0002 D5 | `cogs/hermes`, the first harness Cog, on the worker SDK: Hermes over ACP with no tools, configured from the binding. |
 | #109 agent location | ADR-0002 D12, invariant 6 | `location`, `local` or `remote`, beside `backend`: a process on the controller's host first, built; a pod (#6) behind the same switch. A worker's run token is minted here. |
 | #110 Temporal backend | ADR-0002 D1, D3 | The same conformance suites as the other backends. |
 | #125 the `collab-hub` CLI | ADR-0002 D4, D7 | A client over the REST API, authentication first; it imports no hub package. |

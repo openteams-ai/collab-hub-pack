@@ -24,7 +24,11 @@ def answer(messages):
     if isinstance(content, list):
         content = " ".join(part.get("text", "") for part in content if isinstance(part, dict))
     said = " ".join(str(content).split())
-    return f"The fake model heard: {said[-300:]}"
+    heard = f"The fake model heard: {said[-300:]}"
+    # Context messages a worker sent beside the prompt (the step's Frames) are named, so a test sees they arrived.
+    frames = [line[3:].strip() for message in messages if message.get("role") == "system"
+              for line in str(message.get("content") or "").splitlines() if line.startswith("## ")]
+    return heard + (f" [frames: {', '.join(frames)}]" if frames else "")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -47,6 +51,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self.path.rstrip("/").endswith("/chat/completions"):
             return self._json(404, {"error": {"message": "not found"}})
         request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        if "overflow" in json.dumps(request.get("messages") or []):
+            # As a real endpoint refuses a prompt its model cannot fit.
+            return self._json(400, {"error": {"code": "context_length_exceeded",
+                                              "message": "This model's maximum context length is exceeded"}})
         text, created = answer(request.get("messages") or []), int(time.time())
         usage = {"prompt_tokens": 10, "completion_tokens": len(text.split()), "total_tokens": 10 + len(text.split())}
         if not request.get("stream"):

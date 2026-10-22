@@ -12,7 +12,9 @@ on:
       - "docs/cog-execution/states.md"
       - "dev/cogs/**"
       - "cogs/**"
+      - "worker/**"
       - "dev/fake-model/**"
+      - "dev/fake-agent/**"
       - ".github/workflows/test-execution.yaml"
   pull_request: {}   # runs on every PR so it can be a required status check
 

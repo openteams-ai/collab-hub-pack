@@ -1,6 +1,6 @@
 [project]
 name = "collab-hub-api"
-version = "0.0.0.dev0"
+version = "0.8.3"
 description = "Collab Hub API"
 license = "Apache-2.0"
 license-files = ["LICENSE"]

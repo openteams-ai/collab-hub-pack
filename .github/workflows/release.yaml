@@ -1,27 +1,133 @@
 name: Release Chart
 
-# Releases the collab-hub chart via the shared reusable workflow in
-# nebari-dev/.github: pins the chart's image tag to the release commit's sha,
-# packages the chart, creates a GitHub Release, and opens a PR in
-# nebari-dev/helm-repository.
+# Releases the collab-hub chart: pins the chart's image tag to the release
+# commit's sha, packages the chart, pushes it to oci://ghcr.io/openteams-ai/charts
+# and attaches it to a GitHub Release. GITHUB_TOKEN is enough throughout; no
+# other organization's repo or secret is involved.
 #
 # Runs only when dispatched. semantic-release.yml dispatches it from a
 # collab-hub-<version> tag, whose Chart.yaml carries the release version, after
 # dispatching build-images.yaml from the same tag for the matching
 # sha-<short> image. Chart.yaml on main holds a placeholder version and never
-# releases. Publishing relies on the org-provided NEBARI_HELM_REPO_TOKEN
-# secret.
+# releases.
+#
+# Install a release with:
+#   helm install collab-hub oci://ghcr.io/openteams-ai/charts/collab-hub --version <version>
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release-chart-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
-    uses: nebari-dev/.github/.github/workflows/pack-release.yaml@v1
-    with:
-      chart-path: helm/collab-hub
-      chart-name: collab-hub
-      tag-paths: |
-        api.deployment.image.tag
-    secrets:
-      NEBARI_HELM_REPO_TOKEN: ${{ secrets.NEBARI_HELM_REPO_TOKEN }}
+    name: Release collab-hub
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release
+      packages: write # push the chart to GHCR
+    env:
+      CHART_PATH: helm/collab-hub
+      CHART_NAME: collab-hub
+      CHART_REGISTRY: oci://ghcr.io/${{ github.repository_owner }}/charts
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read chart metadata
+        id: chart
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(grep -E '^version:' "${CHART_PATH}/Chart.yaml" | head -1 | awk '{print $2}' | tr -d "\"'")"
+          # Releasable only from a collab-hub-<version> tag; main's 0.0.0-dev never publishes.
+          [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ && "${version}" != 0.0.0* ]] \
+            || { echo "::error::Refusing to release chart version '${version}'; dispatch from a ${CHART_NAME}-<version> tag." >&2; exit 1; }
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${CHART_NAME}-${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if already released
+        id: exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.chart.outputs.tag }}
+        run: |
+          # The GitHub Release is created last, so its existence means every
+          # step below already succeeded for this version.
+          if gh release view "${TAG}" -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "::notice::Release ${TAG} already exists, skipping."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pin the image tag to the release sha
+        if: steps.exists.outputs.exists == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # In the working copy only; the packaged chart pulls the image
+          # build-images.yaml builds from this same commit.
+          # A one-line edit rather than a YAML round-trip, so the rest of the
+          # file ships exactly as written; the parse afterwards proves it hit
+          # api.deployment.image.tag and nothing else.
+          python3 -m pip install --quiet pyyaml
+          python3 - "${CHART_PATH}/values.yaml" "sha-${GITHUB_SHA::7}" <<'EOF'
+          import re, sys, yaml
+          path, tag = sys.argv[1:]
+          text = open(path).read()
+          before = yaml.safe_load(text)
+          pattern = re.compile(r'(?m)^(\s+repository: \S+/api\n\s+# .*\n\s+tag: )"[^"]*"$')
+          text, n = pattern.subn(rf'\g<1>"{tag}"', text)
+          if n != 1:
+              sys.exit(f"expected one api image tag in {path}, found {n}")
+          after = yaml.safe_load(text)
+          before["api"]["deployment"]["image"]["tag"] = tag
+          if after != before:
+              sys.exit("pinning changed more than api.deployment.image.tag")
+          open(path, "w").write(text)
+          print(f"api.deployment.image.tag = {tag}")
+          EOF
+
+      - uses: azure/setup-helm@v5
+        if: steps.exists.outputs.exists == 'false'
+        with:
+          # Pinned to match lint.yaml: when the latest-release lookup fails the
+          # action falls back to Helm 3.
+          version: v4.3.0
+
+      - name: Package the chart
+        if: steps.exists.outputs.exists == 'false'
+        run: |
+          helm dependency update "${CHART_PATH}"
+          helm package "${CHART_PATH}" --destination dist
+
+      - name: Push the chart to GHCR
+        if: steps.exists.outputs.exists == 'false'
+        shell: bash
+        env:
+          VERSION: ${{ steps.chart.outputs.version }}
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${REGISTRY_TOKEN}" | helm registry login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          helm push "dist/${CHART_NAME}-${VERSION}.tgz" "${CHART_REGISTRY}"
+          echo "Install with: \`helm install ${CHART_NAME} ${CHART_REGISTRY}/${CHART_NAME} --version ${VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create the GitHub Release
+        if: steps.exists.outputs.exists == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.chart.outputs.tag }}
+          VERSION: ${{ steps.chart.outputs.version }}
+        run: |
+          set -euo pipefail
+          args=(--title "${TAG}" --generate-notes --verify-tag)
+          [[ "${VERSION}" == *-* ]] && args+=(--prerelease)
+          gh release create "${TAG}" -R "${GITHUB_REPOSITORY}" "${args[@]}" "dist/${CHART_NAME}-${VERSION}.tgz"

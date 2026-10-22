@@ -535,7 +535,7 @@ def cog_launch(
             "gate": {"escalate": gate}}
     with Hub(_target()) as hub:
         body = {"steps": [step], **({"name": run_name} if run_name else {})}
-        run = hub.request("POST", "/v1/runs", json=body).json()
+        run = hub.request_json("POST", "/v1/runs", json=body)
         called = f" ({run_name})" if run_name else ""
         _err(f"Launched {name} as {run['id']}{called} on the {run['backend']} backend, workers {run['location']}.")
         if not watch:
@@ -616,7 +616,7 @@ def run_say(
     """
 
     with Hub(_target()) as hub:
-        turn = hub.request("POST", f"/v1/runs/{run_id}/turns", json={"text": " ".join(text)}).json()
+        turn = hub.request_json("POST", f"/v1/runs/{run_id}/turns", json={"text": " ".join(text)})
         deadline = time.monotonic() + timeout
         while turn["state"] == "pending" and time.monotonic() < deadline:
             time.sleep(POLL_SECONDS)
@@ -666,7 +666,7 @@ def run_terminate(
     """
 
     with Hub(_target()) as hub:
-        run = hub.request("POST", f"/v1/runs/{run_id}/cancel").json()
+        run = hub.request_json("POST", f"/v1/runs/{run_id}/cancel")
         if not no_wait:
             run = _follow(hub, run, lambda current: current["ended"], quiet=True)
     if run["ended"]:

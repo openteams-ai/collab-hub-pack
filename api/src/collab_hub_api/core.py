@@ -241,7 +241,7 @@ def make_app(config: BaseConfig) -> FastAPI:
     # rather than dead-ending every operator's browser.
     enforce_web_surface_preconditions(config)
     # One pool registry for every Postgres-backed store: stores sharing a URL
-    # share a pool, opened at startup and closed at shutdown below (issue #58).
+    # share a pool, opened at startup and closed at shutdown below.
     postgres_pools = build_postgres_pools(config)
     frames_store = build_frames_store(config)
     active_frame_store = build_active_frame_store(config, postgres_pools)

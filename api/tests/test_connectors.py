@@ -783,7 +783,7 @@ async def test_slack_status_reports_broker_permission_error(tmp_path, monkeypatc
     )
 
 
-async def test_list_connectors_includes_all_read_only_connectors(tmp_path, monkeypatch):
+async def test_list_connectors_lists_only_what_the_deployment_configured(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
     monkeypatch.setenv("FRAMES_BEARER_ALLOW_UNSIGNED", "true")
     _install_mock_client(monkeypatch, _auth_test_only_handler())
@@ -795,15 +795,7 @@ async def test_list_connectors_includes_all_read_only_connectors(tmp_path, monke
             response = await client.get("/v1/connectors", headers=auth_header())
 
     assert response.status_code == 200
-    ids = [item["id"] for item in response.json()]
-    assert ids == [
-        "google-drive",
-        "gmail",
-        "google-calendar",
-        "slack",
-        "github",
-        "notion",
-    ]
+    assert [item["id"] for item in response.json()] == ["slack"]
 
 
 def _slack_api_handler(request: httpx.Request, seen_authorization: list[str]) -> Response:

@@ -67,6 +67,12 @@ refused "feature flags: an uppercase name is refused" "Cogs_ui" --set features.C
 # no value to set, so the schema refuses one.
 refused "indexer: a replica count is not a value" "replicas" $STATIC --set cogs.index.enabled=true --set cogs.indexer.replicas=2
 
+# server.rootPath is a prefix with a leading and no trailing slash; config.py
+# refuses the same values (api/tests/test_path_protection.py).
+refused "root path: a trailing slash is refused" "/server/rootPath" --set server.rootPath=/hub/
+refused "root path: a bare slash is refused" "/server/rootPath" --set server.rootPath=/
+refused "root path: a missing leading slash is refused" "/server/rootPath" --set server.rootPath=hub
+
 # --- negative: every refused configuration, from one fixture ------------------
 # scripts/testdata/chart/cogs-negative-cases.yaml holds each refusal once, in
 # two forms: the chart values and the settings the chart renders from them.

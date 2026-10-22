@@ -7,6 +7,7 @@ expires. A request the hub refuses as unauthenticated is an :class:`AuthError`
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from typing import Any
 
@@ -29,6 +30,24 @@ class HubError(Exception):
 
 def http_client() -> httpx.Client:
     return httpx.Client(transport=transport, timeout=TIMEOUT_SECONDS)
+
+
+def _is_html(response: httpx.Response) -> bool:
+    return response.headers.get("content-type", "").split(";")[0].strip().lower() in ("text/html",
+                                                                                       "application/xhtml+xml")
+
+
+def not_the_hub(url: str, path: str, response: httpx.Response) -> str:
+    """Why an answer that is not JSON means ``url`` is not a Collab Hub API, and what answered instead.
+
+    A web app in front of the hub — a portal serving the same page at every
+    path — answers 200 with HTML, which says nothing about the hub.
+    """
+    kind = response.headers.get("content-type", "").split(";")[0].strip() or "no content type"
+    title = re.search(r"<title[^>]*>\s*([^<]{1,120}?)\s*</title>", response.text, re.IGNORECASE)
+    what = f'a web page titled "{title.group(1)}"' if title else kind
+    return (f"{url} is not a Collab Hub API: it answered {path} with {what} (HTTP {response.status_code}), "
+            "not the hub's JSON. Check the hub's address: the API's own host, not a web app in front of it")
 
 
 def error_message(response: httpx.Response) -> str:
@@ -113,21 +132,34 @@ class Hub:
             response = self.http.request(method, f"{self.url}{path}", headers=headers, **kwargs)
         except httpx.HTTPError as exc:
             raise HubError(f"cannot reach the hub at {self.url}: {exc}") from exc
+        if 400 <= response.status_code < 500 and _is_html(response):
+            # The hub refuses in JSON, always: a refusal that is a web page comes from a web server or
+            # a portal at this URL, not the hub. A 5xx page is left as it is: a proxy's error page in
+            # front of a hub that is failing says nothing about the address.
+            raise HubError(not_the_hub(self.url, path, response))
         if not authenticate and response.status_code in (401, 404):
             # Asked without credentials, so a 401 is not about a session: the hub has no such public route.
             raise HubError(f"{self.url} does not offer {path} (HTTP {response.status_code}); "
                            "it may predate this version of collab-hub and need upgrading")
         if response.status_code == 401:
             if self.session is None:
-                raise AuthError(f"not signed in to {self.url}; run `collab-hub login --hub {self.url}`")
+                raise AuthError(f"not signed in to {self.url}; run `collab-hub --hub {self.url} login`")
             raise AuthError(f"{self.url} refused the session ({error_message(response)}); "
                             "run `collab-hub login` again")
         if response.status_code >= 400:
             raise HubError(error_message(response))
         return response
 
+    def request_json(self, method: str, path: str, **kwargs: Any) -> Any:
+        """A request whose answer is the hub's JSON; anything else means the URL is not the hub's API."""
+        response = self.request(method, path, **kwargs)
+        try:
+            return response.json()
+        except ValueError:
+            raise HubError(not_the_hub(self.url, path, response)) from None
+
     def get_json(self, path: str, **kwargs: Any) -> Any:
-        return self.request("GET", path, **kwargs).json()
+        return self.request_json("GET", path, **kwargs)
 
     def pages(self, path: str, params: dict[str, Any], limit: int = 200) -> Iterator[dict]:
         """Every item of a paged listing (``items`` + ``next_offset``), following pages to the end."""

@@ -123,7 +123,13 @@ class WebhookRequest:
 
 @runtime_checkable
 class RegistrySource(Protocol):
-    """What the indexer (#84) and the webhook receiver (#86) need from a registry."""
+    """What the indexer (#84) and the webhook receiver (#86) need from a registry.
+
+    An adapter whose listing cannot include untagged manifests says so with
+    ``lists_untagged = False``; the indexer then asks the registry about the
+    untagged rows it already has before declaring them gone. Absent means
+    the listing is complete.
+    """
 
     id: str
     """Stable source id stored with every indexed row."""

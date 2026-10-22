@@ -171,6 +171,13 @@ fetches the next batch beyond what earlier sweeps indexed. Artifacts past the
 budget are counted as ``deferred`` and picked up next sweep.
 """
 
+MAX_UNTAGGED_CHECKS_PER_SOURCE = 256
+"""Untagged rows asked about directly per sweep, for a source that lists by tag; past it they are kept unasked.
+
+One ``HEAD`` each. A source that lists by tag gets an untagged row only from
+a publish by digest or a tag that moved on, so this is generous.
+"""
+
 MAX_CARD_BYTES = 8 * 1024 * 1024
 """Cap on one card's JSON text. Bundle files are capped at 256 KiB each and a
 card embeds at most a few of them; a card past this is not a Cog description,
@@ -462,6 +469,8 @@ class CogIndexer:
         # reconciled. Deferred fetches do NOT skip removal: those artifacts
         # were enumerated and stand in the present set.
         present = {repo: [artifact.digest for artifact in artifacts] for repo, artifacts in enumeration.present.items()}
+        if not getattr(source, "lists_untagged", True):
+            await self._keep_untagged(source, known, present)
         removed = await self._on_sweep_thread(
             view.mark_removed,
             source.id,
@@ -474,6 +483,49 @@ class CogIndexer:
         summary.removed += removed
         if removed:
             COG_INDEX_ARTIFACTS.labels(outcome=OUTCOME_REMOVED).inc(removed)
+
+    async def _keep_untagged(
+        self, source: RegistrySource, known: dict[tuple[str, str], KnownArtifact], present: dict[str, list[str]]
+    ) -> None:
+        """Add to ``present`` the untagged manifests a source that lists by tag could not have listed.
+
+        Such a source (the static adapter) finds manifests only through
+        their tags, so one with none -- a manifest put by digest through the
+        Hub (issue #180), or one whose tag has moved on -- is never in its
+        listing, and the removal would declare it gone though the registry
+        still serves it. So each present catalog row with no tags, in a
+        repository that was listed, is asked about directly: one ``HEAD``,
+        kept if the registry has it. Any answer but a clear "not there"
+        keeps it too, as do rows past :data:`MAX_UNTAGGED_CHECKS_PER_SOURCE`:
+        what was not seen cannot be declared gone.
+        """
+
+        listed = {(repository, digest) for repository, digests in present.items() for digest in digests}
+        candidates = [
+            row
+            for row in known.values()
+            if not row.removed
+            and not row.tags
+            and row.repository in present
+            and (row.repository, row.digest) not in listed
+        ]
+        if len(candidates) > MAX_UNTAGGED_CHECKS_PER_SOURCE:
+            logger.warning(
+                "cog_index_untagged_checks_capped",
+                extra={"source": source.id, "untagged": len(candidates), "checked": MAX_UNTAGGED_CHECKS_PER_SOURCE},
+            )
+        for index, row in enumerate(candidates):
+            keep = True
+            if index < MAX_UNTAGGED_CHECKS_PER_SOURCE:
+                try:
+                    keep = await source.oci().has_manifest(row.repository, row.digest)
+                except Exception as exc:
+                    logger.warning(
+                        "cog_index_untagged_check_failed",
+                        extra={"source": source.id, "repository": row.repository, "reason": _describe(exc)},
+                    )
+            if keep:
+                present[row.repository].append(row.digest)
 
     def _schedule(self, source_id: str, unseen: list, retries: list) -> tuple[list, int]:
         """Split this sweep's fetches into (fetch now, number deferred) so neither class starves.

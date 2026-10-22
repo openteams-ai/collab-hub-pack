@@ -290,11 +290,25 @@ class OCITransportError(OCIError):
 
 
 class OCIRejected(OCIError):
-    """The registry refused a write for a reason that is the pusher's to fix (a 4xx other than 401/403).
+    """The registry refused a write for a reason that is the pusher's to fix (a 4xx other than 401/403/408/429).
 
     ``status`` is the registry's status code -- 400 for a digest that does
-    not match the bytes, 404 for an upload session it no longer knows, 416
-    for a chunk out of order. The registry's response body is never kept.
+    not match the bytes, 404 for an upload session it no longer knows, 413
+    for a body over its own limit, 416 for a chunk out of order. The
+    registry's response body is never kept.
+    """
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class OCIThrottled(OCIError):
+    """The registry asked for the write to be tried again later: a 429, or a 408. Not the pusher's to fix.
+
+    ``status`` says which. A 429 is a refusal of the request as a whole: the
+    registry took nothing. A 408 says it stopped waiting for the request, so
+    how much of a streamed body it took is not known.
     """
 
     def __init__(self, message: str, status: int) -> None:
@@ -564,6 +578,29 @@ class OCIClient:
             return int(declared) if declared.isascii() and declared.isdigit() else None
         finally:
             await response.aclose()
+
+    async def has_manifest(self, repo: str, digest: str) -> bool:
+        """Whether the repository holds the manifest ``digest``: one ``HEAD``, the body never fetched.
+
+        ``False`` only for a clear 404; any other answer raises, because the
+        caller is deciding whether something is gone.
+        """
+
+        _validate_repo(repo)
+        _validate_digest(digest)
+        response = await self._exchange(
+            "HEAD",
+            self._origin.join(f"/v2/{repo}/manifests/{digest}"),
+            scope_hint=_pull_scope(repo),
+            what="manifest check",
+            headers={"Accept": MANIFEST_ACCEPT},
+        )
+        await response.aclose()
+        if response.status_code == 200:
+            return True
+        if response.status_code == 404:
+            return False
+        raise OCIProtocolError(f"manifest check: the registry answered HTTP {response.status_code}")
 
     async def start_upload(self, repo: str) -> str:
         """Open a blob upload session and return its URL at the registry (never to be shown to a client)."""
@@ -1302,6 +1339,8 @@ def _expect(response: httpx.Response, statuses: tuple[int, ...], *, what: str) -
     status = response.status_code
     if status in statuses:
         return
+    if status in (408, 429):
+        raise OCIThrottled(f"{what}: the registry answered HTTP {status}", status)
     if 400 <= status < 500:
         raise OCIRejected(f"{what}: the registry answered HTTP {status}", status)
     raise OCIProtocolError(f"{what}: the registry answered HTTP {status}")

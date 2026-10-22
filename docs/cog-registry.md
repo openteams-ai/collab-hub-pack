@@ -850,11 +850,14 @@ forwards the first manifest: *pending*, and already owned by the publisher's
 organization. What the registry answers decides what becomes of it:
 
 - **accepted**: the row is committed. The repository is that organization's.
-- **definitely refused** (a 4xx, or the registry refusing the Hub's own
-  credential): nothing was stored. The pending row is deleted once every
-  manifest that organization had in flight for the name has been refused,
-  and the name is free again.
-- **unknown** (a timeout, a 5xx, a failure to record the outcome): the
+- **definitely refused** (a 4xx other than 408, including a 429, or the
+  registry refusing the Hub's own credential): nothing was stored. The
+  pending row is deleted once every manifest that organization had in flight
+  for the name has been refused, and the name is free again. The row holds
+  each attempt by its id, so a publish cut off by its deadline while the
+  name was being reserved waits for the reservation to finish and takes back
+  exactly its own hold.
+- **unknown** (a timeout, a 408 or a 5xx, a failure to record the outcome): the
   registry may hold the manifest, so the row stays, pending and owned, for
   as long as it takes. No other organization can publish to the name, or
   open an upload in it, including a platform operator; the same organization
@@ -907,10 +910,12 @@ are excepted from the ownership rule, not from the permission.
 
 **A repository that was not published through the Hub** accepts pushes from
 platform operators only. That is decided from the registry as well as the
-catalog: before a name is given to an organization for the first time, the
-Hub asks the publish source whether the repository already holds a tag (one
-request), so a repository pushed to the registry directly is protected even
-before any sweep has indexed it. Only an answer that says so counts as
+catalog: before anything of a publisher's reaches a name nobody owns yet --
+an upload being opened, a check for a blob already there, a manifest, which
+is checked before its bundle is read back for validation -- the Hub asks the
+publish source whether the repository already holds a tag (one request), so
+a repository pushed to the registry directly is protected even before any
+sweep has indexed it. A blob check there answers "not here". Only an answer that says so counts as
 "nothing there": a missing repository, or a tag list for that repository
 that is explicitly empty. If the registry cannot answer, or answers with
 anything else (no `tags` field, another repository's name, not JSON), the
@@ -962,10 +967,14 @@ a token that does not carry `push` for this repository),
 `BLOB_UPLOAD_UNKNOWN` (404: no such upload, or one that ended after a write
 whose outcome was unknown; start the blob again), `BLOB_UPLOAD_INVALID` (400: a `Content-Range`
 that does not fit, or **another request is writing to this upload: retry**;
-416 for a chunk out of order), `DIGEST_INVALID` (400), `SIZE_INVALID` (413:
-over `maxBlobBytes`), `MANIFEST_INVALID` (400, or 413 for a manifest over
-5 MiB), `TOOMANYREQUESTS` (429: too many uploads open or still being cleaned
-up, or the organization already has `maxPendingRepositories` names pending), `UNSUPPORTED` (405), `UNAVAILABLE` (503).
+416 for a chunk out of order), `DIGEST_INVALID` (400: the registry found the
+bytes do not hash to the digest), `SIZE_INVALID` (413: over `maxBlobBytes`, or
+over the publish registry's own limit), `MANIFEST_INVALID` (400, or 413 for a
+manifest over 5 MiB), `TOOMANYREQUESTS` (429: too many uploads open or still
+being cleaned up, or the organization already has `maxPendingRepositories`
+names pending), `UNSUPPORTED` (405), `UNAVAILABLE` (503, including when the
+publish registry answers 429 or 408: try again; after a 429 the upload is
+where it was).
 
 One answer is neither a success nor a refusal: **the registry accepted the
 manifest and the catalog does not list it**. It is 503 `UNAVAILABLE` when the
@@ -980,7 +989,9 @@ upload id and paths. The backing registry's session URL stays in the
 database (`collab_cog_upload_sessions`, migration 14), so any replica can
 continue an upload, and no `Location`, `Range` or `Docker-Upload-UUID` a
 client sees is the registry's. A session belongs to the user who opened it
-and to one repository, expires after an hour, and a user holds at most 64.
+and to one repository, expires after an hour with no chunk recorded (each
+one renews it, and a single write may run for as long as `maxBlobSeconds`
+allows), and a user holds at most 64.
 Bytes are streamed to the registry as they arrive, counted against
 `maxBlobBytes`, and never buffered; the registry verifies each blob against
 its digest when the upload is closed. Writes go to the registry's own origin
@@ -1042,7 +1053,10 @@ tag put through the Hub is on exactly one digest** of its source and
 repository: putting a manifest under a tag another digest holds moves the
 tag, and putting a manifest by digest adds no tag and brings none back. If
 that transaction fails, the answer says the manifest is stored and not
-listed (above).
+listed (above). A manifest with no tag stays listed on any kind of source: a
+`static` source finds manifests through their tags and so cannot list one
+with none, and a sweep asks the registry about each such row instead (one
+`HEAD`), removing it only when the registry no longer has it.
 
 **Who published a digest is only ever taken from an attempt the registry is
 known to have accepted.** Each manifest `PUT` is recorded as an attempt of

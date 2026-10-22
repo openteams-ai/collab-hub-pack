@@ -728,10 +728,10 @@ async def _pusher_blob_size(request: Request, grant: TokenGrant, name: str, dige
     if serving.publisher is None or not grant.allows_push(name):
         return None
     try:
-        await run_in_threadpool(_authorize_push, request, _bearer(request), name)
+        publisher = await run_in_threadpool(_authorize_push, request, _bearer(request), name)
     except (RegistryError, PublishError):
         return None
-    return await serving.publisher.blob_size(name, digest)
+    return await serving.publisher.blob_size(publisher, name, digest)
 
 
 def _declared_length(request: Request) -> int | None:

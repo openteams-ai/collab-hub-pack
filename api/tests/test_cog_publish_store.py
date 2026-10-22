@@ -8,6 +8,7 @@ and the session lease are actually proven under concurrency.
 
 from __future__ import annotations
 
+import itertools
 import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -56,9 +57,11 @@ def test_the_unavailable_store_refuses_every_call():
     store = UnavailablePublishStore()
     calls = (
         lambda: store.get_repository("cogs/a"),
-        lambda: store.reserve_repository("cogs/a", source_id="s", owner_org_id="o", created_by="u", max_pending=1),
+        lambda: store.reserve_repository(
+            "cogs/a", source_id="s", owner_org_id="o", created_by="u", max_pending=1, attempt_id="t"
+        ),
         lambda: store.commit_repository("cogs/a", source_id="s", owner_org_id="o", created_by="u"),
-        lambda: store.release_repository("cogs/a", owner_org_id="o"),
+        lambda: store.release_repository("cogs/a", owner_org_id="o", attempt_id="t"),
         lambda: store.published_repositories("s"),
         lambda: store.pending_repositories("s"),
         lambda: store.commit_found("s", "cogs/a", owner_org_id="o"),
@@ -170,10 +173,22 @@ def _open(store, user="alice", repository="cogs/a", upload_id=None, location=LOC
     return store.get_upload(slot.id, user_id=user, repository=repository)
 
 
-def _reserve(store, repository="cogs/a", org="org-a", user="alice", source="backing", max_pending=20):
+_ATTEMPTS = itertools.count()
+
+
+def _reserve(store, repository="cogs/a", org="org-a", user="alice", source="backing", max_pending=20, attempt=None):
     return store.reserve_repository(
-        repository, source_id=source, owner_org_id=org, created_by=user, max_pending=max_pending
+        repository,
+        source_id=source,
+        owner_org_id=org,
+        created_by=user,
+        max_pending=max_pending,
+        attempt_id=attempt if attempt is not None else f"attempt-{next(_ATTEMPTS)}",
     )
+
+
+def _release(store, repository="cogs/a", org="org-a", attempt="attempt"):
+    store.release_repository(repository, owner_org_id=org, attempt_id=attempt)
 
 
 def _commit(store, repository="cogs/a", org="org-a", user="alice", source="backing"):
@@ -197,8 +212,8 @@ def test_a_repository_is_its_publishers_before_the_manifest_is_forwarded_and_com
     # Committed, it never changes: not by a reservation, a commit or a release, of anyone's.
     assert _reserve(store, org="org-b", user="bob") == owned
     assert _commit(store, org="org-b", user="bob") == owned
-    store.release_repository("cogs/a", owner_org_id="org-a")
-    store.release_repository("cogs/a", owner_org_id="org-b")
+    _release(store, org="org-a")
+    _release(store, org="org-b")
     assert store.get_repository("cogs/a") == owned
 
     # An operator with no organization may own a repository; it then belongs to no organization.
@@ -212,7 +227,7 @@ def test_a_repository_is_its_publishers_before_the_manifest_is_forwarded_and_com
 
 def test_a_pending_repository_is_never_handed_to_another_organization(backend):
     store, clock = backend
-    _reserve(store)
+    _reserve(store, attempt="alice-1")
     # Another organization is shown whose it is, and nothing of the row changes: not now, and not ever.
     for wait in (0, 3600, 30 * 24 * 3600):
         clock.advance(wait)
@@ -221,7 +236,7 @@ def test_a_pending_repository_is_never_handed_to_another_organization(backend):
         assert _reserve(store, org=None, user="operator").owner_org_id == "org-a"
         # It cannot settle the name either, nor release what it does not hold.
         assert _commit(store, org="org-b", user="bob").owner_org_id == "org-a"
-        store.release_repository("cogs/a", owner_org_id="org-b")
+        _release(store, org="org-b", attempt="alice-1")
         assert store.get_repository("cogs/a") == RepositoryRecord("cogs/a", "backing", "org-a", "alice", False)
     # The organization that holds it settles it whenever its manifest is known to be there.
     assert _commit(store) == RepositoryRecord("cogs/a", "backing", "org-a", "alice", committed=True)
@@ -229,23 +244,38 @@ def test_a_pending_repository_is_never_handed_to_another_organization(backend):
 
 def test_a_pending_repository_is_freed_only_when_every_attempt_in_flight_was_refused(backend):
     store, _clock = backend
-    _reserve(store)  # alice's manifest is on its way
-    _reserve(store, user="carol")  # and a colleague's, at the same moment
-    # Alice's is refused: the name is still held for Carol's.
-    store.release_repository("cogs/a", owner_org_id="org-a")
+    _reserve(store, attempt="alice-1")  # alice's manifest is on its way
+    _reserve(store, user="carol", attempt="carol-1")  # and a colleague's, at the same moment
+    # Alice's is refused: the name is still held for Carol's -- however often Alice's is released.
+    _release(store, attempt="alice-1")
+    _release(store, attempt="alice-1")
     assert store.get_repository("cogs/a") is not None
     assert _reserve(store, org="org-b", user="bob").owner_org_id == "org-a"
     # Carol's too: nothing of that organization's can be in the registry, and the name is free.
-    store.release_repository("cogs/a", owner_org_id="org-a")
+    _release(store, attempt="carol-1")
     assert store.get_repository("cogs/a") is None
-    store.release_repository("cogs/a", owner_org_id="org-a")  # nothing left to release
+    _release(store, attempt="carol-1")  # nothing left to release
     assert _reserve(store, org="org-b", user="bob").owner_org_id == "org-b"
 
     # An attempt whose outcome is unknown is never released, so its refused retry does not free the name.
-    _reserve(store, "cogs/lost")  # the registry never answered
-    _reserve(store, "cogs/lost")  # the retry
-    store.release_repository("cogs/lost", owner_org_id="org-a")  # refused
+    _reserve(store, "cogs/lost", attempt="lost-1")  # the registry never answered
+    _reserve(store, "cogs/lost", attempt="lost-2")  # the retry
+    _release(store, "cogs/lost", attempt="lost-2")  # refused
     assert store.get_repository("cogs/lost") == RepositoryRecord("cogs/lost", "backing", "org-a", "alice", False)
+
+
+def test_a_hold_is_taken_back_by_its_own_attempt_whether_or_not_its_reservation_landed(backend):
+    """A request cut off during its reservation cannot tell whether it landed, and releases by its id anyway."""
+
+    store, _clock = backend
+    _reserve(store, attempt="landed")
+    # The cut-off request's reservation never landed: releasing by its id takes nothing from the one that did.
+    _release(store, attempt="never-landed")
+    assert store.get_repository("cogs/a") is not None
+    # Recorded twice for one attempt, it is one hold: a reservation that landed and is then released is gone.
+    _reserve(store, attempt="landed")
+    _release(store, attempt="landed")
+    assert store.get_repository("cogs/a") is None
 
 
 def test_sweeps_are_sent_to_a_pending_repository_after_a_grace_period_and_settle_it(backend):
@@ -275,14 +305,14 @@ def test_an_organization_holds_a_bounded_number_of_pending_names(backend):
     """Nothing pending ever expires, so this is what bounds the names held through a registry outage."""
 
     store, clock = backend
-    for name in ("cogs/one", "cogs/two"):
-        assert _reserve(store, name, max_pending=2).committed is False
+    assert _reserve(store, "cogs/one", max_pending=2, attempt="one-1").committed is False
+    assert _reserve(store, "cogs/two", max_pending=2).committed is False
     with pytest.raises(PendingLimitError):
         _reserve(store, "cogs/three", max_pending=2)
     assert store.get_repository("cogs/three") is None, "refused: no row, nothing held"
     # Trying again at a name that is already pending is never refused, however full the organization is.
-    assert _reserve(store, "cogs/one", user="carol", max_pending=2).owner_org_id == "org-a"
-    assert _reserve(store, "cogs/one", max_pending=1).owner_org_id == "org-a"
+    assert _reserve(store, "cogs/one", user="carol", max_pending=2, attempt="one-2").owner_org_id == "org-a"
+    assert _reserve(store, "cogs/one", max_pending=1, attempt="one-3").owner_org_id == "org-a"
     # The bound is each organization's own; an operator with no organization has one as well.
     assert _reserve(store, "cogs/theirs", org="org-b", user="bob", max_pending=2).owner_org_id == "org-b"
     assert _reserve(store, "cogs/op", org=None, user="operator", max_pending=1).owner_org_id is None
@@ -298,8 +328,8 @@ def test_an_organization_holds_a_bounded_number_of_pending_names(backend):
         _reserve(store, "cogs/three", max_pending=2)
     _commit(store, "cogs/two")
     assert _reserve(store, "cogs/three", max_pending=2).committed is False
-    for _ in range(3):
-        store.release_repository("cogs/one", owner_org_id="org-a")
+    for attempt in ("one-1", "one-2", "one-3"):
+        _release(store, "cogs/one", attempt=attempt)
     assert _reserve(store, "cogs/four", max_pending=2).committed is False
 
 
@@ -415,14 +445,20 @@ def test_an_expired_session_is_unusable_and_kept_until_its_registry_session_is_c
     assert store.claim_stale_uploads(limit=5, lease_seconds=60) == []
     held = store.lease_upload(session.id, user_id="alice", repository="cogs/a", lease_seconds=30)
     clock.advance(10, leases=False)
+    # Past its idle time it takes no new request ...
     assert store.get_upload(session.id, user_id="alice", repository="cogs/a") is None
     assert store.lease_upload(session.id, user_id="alice", repository="cogs/a", lease_seconds=30) is None
-    # A chunk that was in flight when the session expired cannot move it, on either backend.
+    # ... but a chunk that was in flight, its writer's lease still live, is recorded, and renews the session:
+    # a single write may legitimately run longer than the session's idle time.
     assert (
         store.advance_upload(session.id, lease=held.lease, expected_received=0, received=1, upstream_location=LOCATION)
-        is False
+        is True
     )
-    store.release_upload(session.id, lease=held.lease)
+    assert store.get_upload(session.id, user_id="alice", repository="cogs/a").received == 1
+    clock.advance(UPLOAD_SESSION_TTL_SECONDS - 5)
+    assert store.get_upload(session.id, user_id="alice", repository="cogs/a") is not None, "idle time renewed"
+    clock.advance(10)
+    assert store.get_upload(session.id, user_id="alice", repository="cogs/a") is None, "then idle too long"
 
     # Opening another session deletes nothing: the row is what remembers where to cancel.
     _open(store, user="bob")
@@ -502,6 +538,39 @@ def test_the_cap_never_retires_a_slot_that_is_still_opening(backend, monkeypatch
     assert store.get_upload(opening.id, user_id="alice", repository="cogs/a") is not None
 
 
+def test_a_write_is_recorded_by_its_live_lease_and_never_past_it(backend):
+    store, clock = backend
+    session = _open(store)
+    held = store.lease_upload(session.id, user_id="alice", repository="cogs/a", lease_seconds=30)
+    clock.advance(31)
+    # The lease lapsed: nobody can say what the registry took, so the write is not recorded.
+    assert (
+        store.advance_upload(session.id, lease=held.lease, expected_received=0, received=1, upstream_location=LOCATION)
+        is False
+    )
+
+
+def test_the_cap_never_retires_a_session_that_is_being_written_to(backend, monkeypatch):
+    """Its writer records the outcome by its lease; retired under it, the write would be lost mid-upload."""
+
+    from collab_hub_api.cogs import publish_store
+
+    monkeypatch.setattr(publish_store, "MAX_UPLOAD_SESSIONS_PER_USER", 2)
+    store, clock = backend
+    writing = _open(store)
+    held = store.lease_upload(writing.id, user_id="alice", repository="cogs/a", lease_seconds=600)
+    clock.advance(1, leases=False)
+    idle = _open(store)
+    clock.advance(1, leases=False)
+    _open(store)  # over the cap: the oldest session *not being written to* goes
+    assert store.get_upload(idle.id, user_id="alice", repository="cogs/a") is None
+    assert (
+        store.advance_upload(writing.id, lease=held.lease, expected_received=0, received=1, upstream_location=LOCATION)
+        is True
+    )
+    assert store.get_upload(writing.id, user_id="alice", repository="cogs/a").received == 1
+
+
 def test_live_concurrent_reservations_opens_and_leases():
     if not POSTGRES_URL:
         pytest.skip("set COLLAB_HUB_TEST_POSTGRES_URL to a disposable database to run the live-Postgres tests")
@@ -518,13 +587,13 @@ def test_live_concurrent_reservations_opens_and_leases():
             records = list(pool.map(reserve, range(48)))
         assert len({record.owner_org_id for record in records}) == 1, "exactly one organization holds a new name"
 
-        # One organization's attempts are counted, and the name is freed by the last refusal, not the first.
+        # One organization's attempts are each held, and the name is freed by the last refusal, not the first.
         with ThreadPoolExecutor(max_workers=12) as pool:
-            list(pool.map(lambda _i: _reserve(store, "cogs/shared"), range(24)))
+            list(pool.map(lambda i: _reserve(store, "cogs/shared", attempt=f"shared-{i}"), range(24)))
         with ThreadPoolExecutor(max_workers=12) as pool:
-            list(pool.map(lambda _i: store.release_repository("cogs/shared", owner_org_id="org-a"), range(23)))
+            list(pool.map(lambda i: _release(store, "cogs/shared", attempt=f"shared-{i}"), range(23)))
         assert _reserve(store, "cogs/shared", org="org-b", user="bob").owner_org_id == "org-a"
-        store.release_repository("cogs/shared", owner_org_id="org-a")
+        _release(store, "cogs/shared", attempt="shared-23")
         assert _reserve(store, "cogs/shared", org="org-b", user="bob").owner_org_id == "org-b"
 
         # The bound on pending names is atomic: many new names at once, exactly as many rows as allowed.
@@ -655,28 +724,29 @@ OWN_PENDING = (
 
 def test_postgres_reserve_never_changes_whose_a_row_is_and_counts_new_names_under_a_lock():
     store, conn = _fake({"SELECT repository, source_id": [REPOSITORY_ROW]})
-    record = _reserve(store, org="org-b", user="bob", max_pending=7)
+    record = _reserve(store, org="org-b", user="bob", max_pending=7, attempt="t")
     assert record == RepositoryRecord("cogs/a", "backing", "org-a", "alice"), "the record that stands"
     lock, join, insert, read = conn.calls
     assert lock == ("SELECT pg_advisory_xact_lock(%s, hashtext(%s))", (PENDING_LOCK_CLASS, "org-b"))
     # A retry of this organization's own pending name: only the count changes, and no bound applies.
     assert join == (
-        "UPDATE collab_cog_repositories SET holders = holders + 1"
+        "UPDATE collab_cog_repositories"
+        " SET holders = CASE WHEN %s = ANY(holders) THEN holders ELSE array_append(holders, %s) END"
         " WHERE repository = %s AND NOT committed AND owner_org_id IS NOT DISTINCT FROM %s RETURNING repository",
-        ("cogs/a", "org-b"),
+        ("t", "t", "cogs/a", "org-b"),
     )
     # A new name: written only while the organization has room, and never over a row that exists.
     assert insert[0].startswith("INSERT INTO collab_cog_repositories")
-    assert "SELECT %s, %s, %s, %s, false, 1 WHERE ( SELECT count(*) FROM collab_cog_repositories" in insert[0]
+    assert "SELECT %s, %s, %s, %s, false, ARRAY[%s] WHERE ( SELECT count(*) FROM collab_cog_repositories" in insert[0]
     assert "WHERE NOT committed AND owner_org_id IS NOT DISTINCT FROM %s ) < %s" in insert[0]
     assert insert[0].endswith("ON CONFLICT (repository) DO NOTHING")
-    assert insert[1] == ("cogs/a", "backing", "org-b", "bob", "org-b", 7)
+    assert insert[1] == ("cogs/a", "backing", "org-b", "bob", "t", "org-b", 7)
     assert read == (READ_REPOSITORY, ("cogs/a",))
     # Nothing about time anywhere, and nothing that says whose an existing row is.
     assert not any("now()" in sql or "owner_org_id =" in sql for sql, _ in conn.calls)
 
     joined, conn = _fake(
-        {"SET holders = holders + 1": [{"repository": "cogs/a"}], "SELECT repository": [REPOSITORY_ROW]}
+        {"SET holders = CASE": [{"repository": "cogs/a"}], "SELECT repository": [REPOSITORY_ROW]}
     )
     _reserve(joined)
     assert [sql.split()[0] for sql, _ in conn.calls] == ["SELECT", "UPDATE", "SELECT"], "no insert, no count"
@@ -690,22 +760,23 @@ def test_postgres_commit_release_and_reads_of_repositories():
     store, conn = _fake({"SELECT repository, source_id": [REPOSITORY_ROW]})
     assert _commit(store) == RepositoryRecord("cogs/a", "backing", "org-a", "alice")
     insert, read = conn.calls
-    assert "VALUES (%s, %s, %s, %s, true, 0)" in insert[0]
+    assert "VALUES (%s, %s, %s, %s, true, '{}')" in insert[0]
     # Bound to the organization: a commit settles its own pending row, never another's.
     assert insert[0].endswith(f"ON CONFLICT (repository) DO UPDATE SET committed = true {OWN_PENDING}")
     assert insert[1] == ("cogs/a", "backing", "org-a", "alice") and read == (READ_REPOSITORY, ("cogs/a",))
 
-    store.release_repository("cogs/a", owner_org_id=None)
-    # Counted down under the row's lock, and deleted only when no attempt of that organization's is left.
+    _release(store, org=None, attempt="t")
+    # This attempt's hold taken back under the row's lock, and the row deleted only when it holds for nobody.
     assert conn.calls[-2:] == [
         (
-            "UPDATE collab_cog_repositories SET holders = holders - 1"
+            "UPDATE collab_cog_repositories SET holders = array_remove(holders, %s)"
             " WHERE repository = %s AND NOT committed AND owner_org_id IS NOT DISTINCT FROM %s",
-            ("cogs/a", None),
+            ("t", "cogs/a", None),
         ),
         (
             "DELETE FROM collab_cog_repositories"
-            " WHERE repository = %s AND NOT committed AND owner_org_id IS NOT DISTINCT FROM %s AND holders <= 0",
+            " WHERE repository = %s AND NOT committed AND owner_org_id IS NOT DISTINCT FROM %s"
+            " AND cardinality(holders) = 0",
             ("cogs/a", None),
         ),
     ]
@@ -749,7 +820,10 @@ def test_postgres_open_upload_locks_counts_retires_and_inserts_a_leased_slot():
     assert count == ("SELECT count(*) AS n FROM collab_cog_upload_sessions WHERE user_id = %s", ("alice",))
     # Retired, never deleted: the row is what remembers where to cancel. And never a slot with no location yet.
     assert retire[0].startswith("UPDATE collab_cog_upload_sessions SET expires_at = now()")
-    assert "AND expires_at > now() AND upstream_location IS NOT NULL ORDER BY created_at, id LIMIT GREATEST((" in (
+    assert (
+        "AND expires_at > now() AND upstream_location IS NOT NULL AND leased_until IS NULL"
+        " ORDER BY created_at, id LIMIT GREATEST(("
+    ) in (
         retire[0]
     )
     assert retire[1] == ("alice", "alice", MAX_UPLOAD_SESSIONS_PER_USER - 1)
@@ -809,10 +883,12 @@ def test_postgres_advance_release_retire_and_close():
         store.advance_upload("up-1", lease=LEASE, expected_received=7, received=20, upstream_location=LOCATION) is True
     )
     ((sql, params),) = conn.calls
-    # The holder's lease, the position it read, and a session that has not expired -- or nothing moves.
+    # The holder's lease, still live, and the position it read -- or nothing moves. Not the session's expiry:
+    # a write may outlast its idle time, and each one recorded renews it.
     assert "SET received = %s, upstream_location = %s, leased_until = NULL" in sql
-    assert "WHERE id = %s AND leased_until = %s AND received = %s AND expires_at > now()" in sql
-    assert params == (20, LOCATION, "up-1", LEASE, 7)
+    assert "expires_at = GREATEST(expires_at, now() + make_interval(secs => %s))" in sql
+    assert "WHERE id = %s AND leased_until = %s AND leased_until > clock_timestamp() AND received = %s" in sql
+    assert params == (20, LOCATION, UPLOAD_SESSION_TTL_SECONDS, "up-1", LEASE, 7)
     lost, _ = _fake()
     assert (
         lost.advance_upload("up-1", lease=LEASE, expected_received=7, received=20, upstream_location=LOCATION) is False
@@ -861,7 +937,7 @@ def test_every_postgres_call_is_bounded_by_the_request_budget():
         lambda: store.get_repository("cogs/a"),
         lambda: _reserve(store),
         lambda: _commit(store),
-        lambda: store.release_repository("cogs/a", owner_org_id="org-a"),
+        lambda: store.release_repository("cogs/a", owner_org_id="org-a", attempt_id="t"),
         lambda: store.published_repositories("s"),
         lambda: store.pending_repositories("s"),
         lambda: store.commit_found("s", "cogs/a", owner_org_id="org-a"),

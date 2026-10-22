@@ -881,8 +881,10 @@ COLLAB_SCHEMA_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             # false) and already owned by the publisher's organization, then
             # committed once the registry has accepted a manifest. A pending
             # row is deleted only when the registry has definitely refused
-            # every attempt that organization had in flight (`holders` counts
-            # them); an unknown outcome leaves it pending and owned, so a
+            # every attempt that organization had in flight (`holders` names
+            # them, by attempt id, so a request that cannot tell whether its
+            # own reservation landed can still take back exactly its own);
+            # an unknown outcome leaves it pending and owned, so a
             # name is never handed to another organization automatically. A
             # platform operator releases a stuck one by hand (see
             # docs/cog-registry.md). Committed rows, and pending rows past a
@@ -896,7 +898,7 @@ COLLAB_SCHEMA_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
                 owner_org_id text,
                 created_by   text NOT NULL,
                 committed    boolean NOT NULL DEFAULT false,
-                holders      integer NOT NULL DEFAULT 0,
+                holders      text[] NOT NULL DEFAULT '{}',
                 created_at   timestamptz NOT NULL DEFAULT now()
             )
             """,

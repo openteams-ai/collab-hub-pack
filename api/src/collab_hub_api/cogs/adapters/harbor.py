@@ -82,6 +82,9 @@ _LINK_NEXT = re.compile(r'<[^>]*>\s*;\s*rel="?next"?', re.IGNORECASE)
 class HarborRegistrySource:
     """See the module docstring. Constructed by ``build_registry_sources``."""
 
+    lists_untagged = True
+    """Harbor's artifact API lists untagged artifacts too."""
+
     def __init__(
         self,
         config: CogRegistrySourceConfig,

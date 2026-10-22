@@ -77,7 +77,7 @@ import asyncio
 import hashlib
 import logging
 from collections.abc import AsyncIterable, AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -96,6 +96,7 @@ from .oci import (
     OCIError,
     OCIProtocolError,
     OCIRejected,
+    OCIThrottled,
     OCITransportError,
     _parse_manifest,
     is_index_manifest,
@@ -351,6 +352,24 @@ class CogPublisher:
         if holds_content:
             raise self._out_of_band(repository)
 
+    async def _require_unowned_new(self, publisher: Publisher, repository: str) -> None:
+        """For a name nobody owns yet: refuse it if the registry already holds content there.
+
+        :meth:`authorize` knows only what the catalog has indexed, so a
+        repository pushed to the registry directly passes it. This is the
+        registry's answer, asked before anything reaches the repository --
+        an upload opening, a blob check, a manifest's validation -- and not
+        only when the name is reserved: otherwise blobs could be written
+        into, and digests probed in, another team's repository. Later writes
+        to an upload go through the session it opened, so are covered by
+        this check at its opening.
+        """
+
+        if publisher.is_operator:
+            return
+        if await run_in_threadpool(self._store.get_repository, repository) is None:
+            await self._require_new(publisher, repository)
+
     def _require_owner(self, publisher: Publisher, owner_org_id: str | None, repository: str) -> None:
         if publisher.is_operator:
             return
@@ -359,14 +378,20 @@ class CogPublisher:
 
     # -- blobs -----------------------------------------------------------------
 
-    async def blob_size(self, repository: str, digest: str) -> int | None:
+    async def blob_size(self, publisher: Publisher, repository: str, digest: str) -> int | None:
         """The size of a blob the publish source already holds in this repository, or ``None``.
 
         For a caller already authorized to push here: lets a client skip an
-        upload it does not need. It makes nothing pullable.
+        upload it does not need. It makes nothing pullable. A name the
+        caller could not publish to answers ``None``, like a blob that is
+        not there: it says nothing about what another repository holds.
         """
 
         if not is_sha256_digest(digest):
+            return None
+        try:
+            await self._require_unowned_new(publisher, repository)
+        except PublishError:
             return None
         try:
             return await self._source.oci().blob_size(repository, digest)
@@ -377,6 +402,7 @@ class CogPublisher:
     async def start(self, publisher: Publisher, repository: str) -> UploadSession:
         """Open an upload: the Hub's slot first, then the registry's session, then the two are tied together."""
 
+        await self._require_unowned_new(publisher, repository)
         session = await self._open(publisher, repository)
         try:
             location = await self._source.oci().start_upload(repository)
@@ -568,10 +594,22 @@ class CogPublisher:
             except _LengthMismatch:
                 await self._abandon(held)
                 raise UploadInvalid(_RANGE_LENGTH) from None
+            except OCIThrottled as exc:
+                # Try again later, not the client's fault. After a 429 the
+                # registry took nothing and the session is given back as it
+                # was, for the same chunk to be sent again; after a 408 what
+                # it took is not known, and the session is retired.
+                if exc.status == 429:
+                    held.uncertain = False
+                raise self._unavailable("upload chunk", exc) from None
             except OCIRejected as exc:
                 # A definite no: the registry took nothing.
                 if exc.status == 404:
                     await self._abandon(held, cancel=False)
+                elif exc.status == 413:
+                    # Over the registry's own limit: no chunk will make it fit.
+                    await self._abandon(held)
+                    raise UploadTooLarge(_TOO_LARGE_UPSTREAM) from None
                 held.uncertain = False
                 raise self._write_failed("upload chunk", exc, session) from None
             except OCIAuthError as exc:
@@ -639,12 +677,23 @@ class CogPublisher:
             except _LengthMismatch:
                 await self._abandon(held)
                 raise UploadInvalid(_RANGE_LENGTH) from None
+            except OCIThrottled as exc:
+                # Try again later, not the client's fault. After a 429 the
+                # registry took nothing: the session is given back, usable,
+                # and the client closes it again. After a 408 it is retired.
+                if exc.status == 429:
+                    held.uncertain = False
+                raise self._unavailable("upload finish", exc) from None
             except OCIRejected as exc:
                 await self._abandon(held, cancel=exc.status != 404)
                 if exc.status == 404:
                     raise UploadUnknown("blob upload unknown to registry") from None
-                # The registry checked the bytes against the digest and they did not match.
-                raise DigestInvalid("the uploaded content does not match the digest") from None
+                if exc.status == 413:
+                    raise UploadTooLarge(_TOO_LARGE_UPSTREAM) from None
+                if exc.status == 400:
+                    # The registry checked the bytes against the digest and they did not match.
+                    raise DigestInvalid("the uploaded content does not match the digest") from None
+                raise UploadInvalid("the registry refused to complete the upload") from None
             except OCIAuthError as exc:
                 held.uncertain = False
                 raise self._unavailable("upload finish", exc) from None
@@ -730,37 +779,32 @@ class CogPublisher:
         if any(layer.size > self._max_blob_bytes for layer in manifest.layers):
             raise ManifestInvalid(f"a layer is over this registry's {self._max_blob_bytes}-byte limit")
 
+        # A name nobody owns yet is checked at the registry first: its
+        # content, if it has any, is somebody else's, and validation would
+        # read the bundle's blobs from it. It is also the cheaper check.
+        await self._require_unowned_new(publisher, repository)
         row = await self._validate(repository, manifest, (tag,) if tag is not None else ())
 
-        if await run_in_threadpool(self._store.get_repository, repository) is None:
-            await self._require_new(publisher, repository)
+        # This attempt's id, before anything is recorded: the hold on the
+        # name and the record of the attempt are both taken back by it.
+        attempt = new_attempt_id()
         # The name is this organization's from here, durably and before the
         # registry can have anything: pending until the registry answers.
         # Of two organizations publishing a new name at once, one holds it
         # and the other is refused here, before the write.
         try:
-            record = await run_in_threadpool(
-                lambda: self._store.reserve_repository(
-                    repository,
-                    source_id=self._source.id,
-                    owner_org_id=publisher.org_id,
-                    created_by=publisher.user_id,
-                    max_pending=self._max_pending,
-                )
-            )
+            record = await self._reserve(publisher, repository, attempt)
         except PendingLimitError:
             raise PublishLimited(
                 f"this organization already has {self._max_pending} repositories whose first publish is unresolved, "
                 "which is the limit; publish to one of them again, or ask a platform operator to release one"
             ) from None
-        holding = not record.committed and record.owner_org_id == publisher.org_id
         if record.committed:
             self._require_owner(publisher, record.owner_org_id, repository)
-        elif not holding:
+        elif record.owner_org_id != publisher.org_id:
             raise PublishDenied(f"{repository} is being published by another organization")
         # This attempt, on record before the registry can have the manifest.
         # It says who published the digest only once it is marked accepted.
-        attempt = new_attempt_id()
         try:
             await run_in_threadpool(
                 lambda: self._catalog.note_publication(
@@ -769,15 +813,24 @@ class CogPublisher:
             )
         except BaseException:
             # Nothing was forwarded: as definite as a refusal.
-            await self._withdraw(publisher, repository, None, holding)
+            await self._withdraw(publisher, repository, attempt)
             raise
 
         try:
             await self._source.oci().put_manifest(repository, reference, body, manifest.media_type or content_type)
+        except OCIThrottled as exc:
+            # Try again later. After a 429 the registry stored nothing, as
+            # definite as a refusal; after a 408 it may have, and nothing is
+            # withdrawn.
+            if exc.status == 429:
+                await self._withdraw(publisher, repository, attempt)
+            raise self._unavailable("manifest put", exc) from None
         except (OCIRejected, OCIAuthError) as exc:
             # A definite no: nothing was stored, so this attempt is withdrawn.
-            await self._withdraw(publisher, repository, attempt, holding)
+            await self._withdraw(publisher, repository, attempt)
             if isinstance(exc, OCIRejected):
+                if exc.status == 413:
+                    raise ManifestInvalid("the registry refused the manifest as too large") from None
                 raise ManifestInvalid("the registry refused the manifest") from None
             raise self._unavailable("manifest put", exc) from None
         except OCIError as exc:
@@ -827,12 +880,47 @@ class CogPublisher:
         )
         return digest
 
-    async def _withdraw(self, publisher: Publisher, repository: str, attempt: str | None, holding: bool) -> None:
+    async def _reserve(self, publisher: Publisher, repository: str, attempt: str):
+        """Reserve the name for this attempt; if the request ends meanwhile, let the reservation finish, then undo it.
+
+        A thread is not interrupted by the request's deadline: a reservation
+        cut off may still land, after the request has given up on it. So the
+        call runs as a task of its own, and a cancelled request waits for it
+        -- its statements are bounded by the request's budget -- before
+        taking it back by this attempt's id. Taken back any earlier, a
+        reservation landing late would hold the name with nothing forwarded
+        and nothing left to release it. Nothing was forwarded either way.
+        """
+
+        worker = asyncio.ensure_future(
+            run_in_threadpool(
+                lambda: self._store.reserve_repository(
+                    repository,
+                    source_id=self._source.id,
+                    owner_org_id=publisher.org_id,
+                    created_by=publisher.user_id,
+                    max_pending=self._max_pending,
+                    attempt_id=attempt,
+                )
+            )
+        )
+        try:
+            return await asyncio.shield(worker)
+        except PendingLimitError:
+            raise
+        except BaseException:
+            with anyio.CancelScope(shield=True):
+                with suppress(BaseException):
+                    await worker
+                await self._withdraw(publisher, repository, attempt)
+            raise
+
+    async def _withdraw(self, publisher: Publisher, repository: str, attempt: str) -> None:
+        """Take back what this attempt recorded: its note and its hold on the name. Safe for either if absent."""
+
         def withdraw() -> None:
-            if attempt is not None:
-                self._catalog.forget_publication(attempt)
-            if holding:
-                self._store.release_repository(repository, owner_org_id=publisher.org_id)
+            self._catalog.forget_publication(attempt)
+            self._store.release_repository(repository, owner_org_id=publisher.org_id, attempt_id=attempt)
 
         await self._settle(withdraw)
 
@@ -872,6 +960,7 @@ class CogPublisher:
 
 
 _RANGE_LENGTH = "the Content-Range does not match the number of bytes sent"
+_TOO_LARGE_UPSTREAM = "the blob is over the publish registry's own size limit"
 
 
 @dataclass

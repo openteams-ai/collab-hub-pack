@@ -1308,14 +1308,22 @@ async def test_a_repository_the_registry_already_holds_cannot_be_claimed_before_
     theirs = out_of_band(hub, REPO)
     assert not hub.catalog.repository_known(REPO)
     alice = await pusher(hub, ALICE)
-    await upload(alice, COG)
+    # Nothing of the publisher's reaches the repository: not an upload, not a blob check, not a manifest --
+    # and the manifest is refused before its bundle is read back from someone else's repository.
+    status, code, message = errors(await alice.start())
+    assert (status, code) == (403, "DENIED") and "not published through this Hub" in message
+    layer = next(iter(theirs.blobs.values()))
+    held = await hub.request("HEAD", f"/v2/{REPO}/blobs/{sha256(layer)}", headers=alice.headers)
+    assert held.status_code == 404, "a blob check says nothing about a repository the caller may not publish to"
     refused = await alice.manifest(COG, "1.0.0")
     status, code, message = errors(refused)
     assert (status, code) == (403, "DENIED") and "not published through this Hub" in message
+    assert hub.upstream.writes() == []
+    assert not [r for r in hub.upstream.requests if r.url.path.startswith(f"/v2/{REPO}/blobs/")]
     # Its tag still points at what was there, nothing was forwarded, and the name is nobody's.
     assert hub.upstream.manifests[(REPO, "1.0.0")][1] == theirs.manifest and manifest_puts(hub) == []
     assert store._repositories == {} and hub.catalog._attempts == {}
-    # One request to the registry decided it, and it asked for one tag.
+    # One request to the registry decided each, and it asked for one tag.
     asked = [request for request in hub.upstream.requests if request.url.path == f"/v2/{REPO}/tags/list"]
     assert [str(request.url.query, "ascii") for request in asked[-1:]] == ["n=1"]
 
@@ -1329,11 +1337,12 @@ async def test_a_repository_the_registry_already_holds_cannot_be_claimed_before_
     # When the registry cannot say, the answer is not "new": nothing is reserved and nothing forwarded.
     hub.upstream.fail[f"/v2/{OTHER}/tags/list"] = httpx.Response(500, text="boom")
     elsewhere = await pusher(hub, ALICE, OTHER)
-    await upload(elsewhere, COG, OTHER)
+    assert errors(await elsewhere.start(OTHER))[:2] == (503, "UNAVAILABLE")
     assert errors(await elsewhere.manifest(COG, "1.0.0", OTHER))[:2] == (503, "UNAVAILABLE")
-    assert store._repositories == {} and manifest_puts(hub) == []
+    assert store._repositories == {} and manifest_puts(hub) == [] and hub.upstream.writes() == []
     # A repository the registry does not have, or has with nothing in it, is new.
     del hub.upstream.fail[f"/v2/{OTHER}/tags/list"]
+    await upload(elsewhere, COG, OTHER)
     assert (await elsewhere.manifest(COG, "1.0.0", OTHER)).status_code == 201
     # Once it is the organization's, publishing to it asks the registry nothing of the kind.
     asked = len([r for r in hub.upstream.requests if r.url.path.endswith("/tags/list")])
@@ -1386,10 +1395,11 @@ async def test_a_platform_operator_may_publish_to_a_repository_the_registry_alre
     hub = membership_hub
     theirs = out_of_band(hub, REPO, "0.1.0")
     owner = await pusher(hub, member_token(OWNER))
-    await upload(owner, COG)
+    assert (await owner.start()).status_code == 403
     assert (await owner.manifest(COG, "1.0.0")).status_code == 403
     operator = await pusher(hub, member_token(OPERATOR))
     asked = len(hub.upstream.requests)
+    await upload(operator, COG)
     assert (await operator.manifest(COG, "1.0.0")).status_code == 201
     assert hub.upstream.manifests[(REPO, "0.1.0")][1] == theirs.manifest
     assert not any(request.url.path.endswith("/tags/list") for request in hub.upstream.requests[asked:])
@@ -1511,3 +1521,109 @@ async def test_the_matrix_on_a_hub_that_accepts_no_publishes(make_hub):
             response = await hub.request(method, path.format(repo=REPO, upload="up-1"), headers=headers, content=body)
             assert errors(response) == (405, "UNSUPPORTED", "this registry is read-only"), (method, path)
     assert hub.upstream.requests == []
+
+
+# -- review follow-ups (#182): untagged manifests, cut-off reservations, registry pushback ----------------
+
+
+async def test_a_manifest_put_by_digest_stays_listed_on_a_source_that_finds_manifests_by_tag(sweeping_hub: Hub):
+    """The static adapter cannot list a manifest with no tag; the sweep asks the registry about it instead."""
+
+    hub = sweeping_hub
+    client = await pusher(hub)
+    await upload(client, COG)
+    assert (await client.manifest(COG, COG.digest)).status_code == 201
+
+    def row():
+        return hub.catalog.get(COG.digest, source_id="backing", repository=REPO)
+
+    assert row().tags == () and row().removed_at is None
+    # Written before the sweep's clock reading, so only the registry's answer keeps it.
+    assert (await hub.app.state.cog_indexer.sweep()).removed == 0
+    assert row().removed_at is None
+    asked = [r for r in hub.upstream.requests if r.method == "HEAD" and r.url.path.endswith(f"/manifests/{COG.digest}")]
+    assert len(asked) == 1, "one HEAD for the one untagged row"
+    # Gone from the registry, it is gone from the catalog at the next sweep.
+    gone_from(hub.upstream, COG)
+    assert (await hub.app.state.cog_indexer.sweep()).removed == 1
+    assert row().removed_at is not None
+
+
+async def test_a_reservation_that_lands_after_the_deadline_is_taken_back_and_holds_nothing(hub: Hub):
+    """A thread is not interrupted by the deadline: the request waits for the reservation, then undoes it."""
+
+    client, store = await pusher(hub), store_of(hub)
+    await upload(client, COG)
+    reserve, serving = store.reserve_repository, hub.serving
+
+    def late(*args, **kwargs):
+        time.sleep(0.8)  # past the request's budget, and only then recorded
+        return reserve(*args, **kwargs)
+
+    store.reserve_repository = late
+    hub.app.state.cog_registry_serving = replace(serving, max_metadata_seconds=0.4)
+    assert errors(await client.manifest(COG, "1.0.0"))[:2] == (503, "UNAVAILABLE")
+    await asyncio.sleep(1.0)  # any reservation still running has landed by now
+    assert store.get_repository(REPO) is None, "nothing was forwarded, and the name is nobody's"
+    assert manifest_puts(hub) == [] and hub.catalog._attempts == {}
+    store.reserve_repository, hub.app.state.cog_registry_serving = reserve, serving
+    assert (await client.manifest(COG, "1.0.0")).status_code == 201
+
+
+async def test_a_registry_that_says_try_later_or_too_large_is_not_reported_as_the_clients_mistake(hub: Hub):
+    """429 and 408 mean "try again"; 413 is the registry's own size limit. None is a bad digest or a bad chunk."""
+
+    client, store = await pusher(hub), store_of(hub)
+    location = (await client.start()).headers["location"]
+    upload_id = location.rsplit("/", 1)[-1]
+    assert (await hub.request("PATCH", location, headers=client.headers, content=b"01234")).status_code == 202
+    whole = sha256(b"0123456789")
+
+    # Rate limited: the registry took nothing, so the session is given back as it was, for the same request again.
+    hub.upstream.refuse_writes = httpx.Response(429, text="slow down")
+    for method, request in (("PATCH", {}), ("PUT", {"params": {"digest": whole}})):
+        limited = await hub.request(method, location, headers=client.headers, content=b"56789", **request)
+        assert errors(limited)[:2] == (503, "UNAVAILABLE"), method
+        assert store._uploads[upload_id].leased_until is None, method
+    hub.upstream.refuse_writes = None
+    assert (await hub.get(location, headers=client.headers)).headers["range"] == "0-4", "where it was"
+    closed = await hub.request("PUT", location, headers=client.headers, params={"digest": whole}, content=b"56789")
+    assert closed.status_code == 201 and hub.upstream.blobs[whole] == b"0123456789"
+
+    async def refused_with(status: int, method: str) -> tuple[tuple[int, str], str]:
+        location = (await client.start()).headers["location"]
+        hub.upstream.refuse_writes = httpx.Response(status, text="no")
+        try:
+            response = await hub.request(
+                method, location, headers=client.headers, params={"digest": sha256(b"x")}, content=b"x"
+            )
+        finally:
+            hub.upstream.refuse_writes = None
+        return errors(response)[:2], location
+
+    for method in ("PATCH", "PUT"):
+        # Timed out at the registry: what it took is not known, so the upload ends -- still not the client's fault.
+        assert (await refused_with(408, method))[0] == (503, "UNAVAILABLE"), method
+        # Over the registry's own limit: no retry will fit, and it is said as a size, not as a bad chunk or digest.
+        status, location = await refused_with(413, method)
+        assert status == (413, "SIZE_INVALID"), method
+        assert (await hub.get(location, headers=client.headers)).status_code == 404, "ended"
+    # Closing: a 400 is the digest check failing; any other refusal is not reported as one.
+    assert (await refused_with(400, "PUT"))[0] == (400, "DIGEST_INVALID")
+    assert (await refused_with(409, "PUT"))[0] == (400, "BLOB_UPLOAD_INVALID")
+
+    # A manifest: rate limited is a definite no, so the attempt and the name are let go of.
+    await upload(client, COG)
+    hub.upstream.refuse_writes = httpx.Response(429, text="slow down")
+    assert errors(await client.manifest(COG, "1.0.0"))[:2] == (503, "UNAVAILABLE")
+    assert store.get_repository(REPO) is None and hub.catalog._attempts == {}
+    hub.upstream.refuse_writes = httpx.Response(413, text="too big")
+    status, _code, message = errors(await client.manifest(COG, "1.0.0"))
+    assert (status, _code) == (400, "MANIFEST_INVALID") and "too large" in message
+    assert store.get_repository(REPO) is None
+    # Timed out: the registry may have it, so the name stays this organization's, pending.
+    hub.upstream.refuse_writes = httpx.Response(408, text="slow")
+    assert errors(await client.manifest(COG, "1.0.0"))[:2] == (503, "UNAVAILABLE")
+    assert store.get_repository(REPO).committed is False
+    hub.upstream.refuse_writes = None
+    assert (await client.manifest(COG, "1.0.0")).status_code == 201

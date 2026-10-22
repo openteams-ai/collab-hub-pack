@@ -9,7 +9,7 @@ Two small relations, both created by migration 14 of
   belonging to the publisher's organization; it becomes ``committed`` once
   the registry has accepted a manifest. A pending row is deleted only when
   the registry has **definitely refused** every manifest that organization
-  had in flight for it (the row counts them). An unknown outcome leaves it
+  had in flight for it (the row names them, by attempt id). An unknown outcome leaves it
   pending and owned: the registry may hold the manifest, so the name is
   never handed to another organization automatically. Only the same
   organization can publish to a pending name; a platform operator can
@@ -49,7 +49,12 @@ from .deadline import bounded_connection
 
 UPLOAD_ID_PREFIX = "up-"
 UPLOAD_SESSION_TTL_SECONDS = 3600
-"""How long an upload may stay open between its first request and its last."""
+"""How long an upload may sit idle: renewed by every chunk recorded, so an active upload never runs out.
+
+A single write is bounded by its lease (``max_blob_seconds`` plus a margin),
+not by this: a write that outlasts the session's idle time is still recorded
+while its lease is live (:meth:`PublishStore.advance_upload`).
+"""
 
 UPLOAD_HARD_AGE_SECONDS = 24 * 3600
 """How long a session whose registry-side cancellation keeps failing is kept before it is dropped regardless."""
@@ -130,16 +135,29 @@ class PublishStore(ABC):
 
     @abstractmethod
     def reserve_repository(
-        self, repository: str, *, source_id: str, owner_org_id: str | None, created_by: str, max_pending: int
+        self,
+        repository: str,
+        *,
+        source_id: str,
+        owner_org_id: str | None,
+        created_by: str,
+        max_pending: int,
+        attempt_id: str,
     ) -> RepositoryRecord:
         """Record, before a manifest is forwarded, that this organization is publishing here.
 
         Atomic, and durable before anything reaches the registry. With no
         row, a pending one is written for this organization. A pending row
-        of this organization's counts one more attempt in flight. A
-        committed row, and a pending row of **another** organization's, are
-        returned untouched -- the caller checks whose the record is, and
-        counts as holding an attempt only when it is pending and its own.
+        of this organization's gets ``attempt_id`` among the attempts it
+        holds for. A committed row, and a pending row of **another**
+        organization's, are returned untouched -- the caller checks whose
+        the record is, and holds an attempt only when it is pending and its
+        own. Idempotent per attempt.
+
+        The hold is named, not counted, because a caller cut off during this
+        call cannot tell whether it landed: :meth:`release_repository` with
+        the same ``attempt_id`` takes back exactly this attempt's hold if it
+        is there, and nothing otherwise -- never another attempt's.
 
         A **new** pending row is written only while the organization has
         fewer than ``max_pending`` of them; otherwise
@@ -165,12 +183,13 @@ class PublishStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def release_repository(self, repository: str, *, owner_org_id: str | None) -> None:
-        """The registry **definitely refused** one of this organization's manifests: one attempt fewer.
+    def release_repository(self, repository: str, *, owner_org_id: str | None, attempt_id: str) -> None:
+        """This attempt forwarded nothing, or the registry **definitely refused** it: its hold is taken back.
 
-        The pending row is deleted when the last attempt in flight has been
-        refused. An attempt whose outcome is unknown is never released, so
-        the row stays, pending and owned. A committed row is not touched.
+        The pending row is deleted when it no longer holds for any attempt.
+        An attempt whose outcome is unknown is never released, so the row
+        stays, pending and owned. A committed row is not touched, and
+        neither is an attempt that was never recorded. Idempotent.
         """
 
         raise NotImplementedError
@@ -213,7 +232,9 @@ class PublishStore(ABC):
         Serialized per user. Live sessions past the cap are retired, oldest
         first: retired, not deleted -- they stay until
         :meth:`claim_stale_uploads` has had them cancelled at the registry --
-        and never a slot that is still opening. Raises
+        and never a slot that is still opening or a session being written
+        to (both hold a lease). The rows bound,
+        :data:`MAX_UPLOAD_ROWS_PER_USER`, still holds regardless. Raises
         :class:`UploadLimitError` when the user's rows (live and retired) are
         already at :data:`MAX_UPLOAD_ROWS_PER_USER`. The row has no registry
         location until :meth:`attach_upload`; until then it is unknown to
@@ -266,10 +287,15 @@ class PublishStore(ABC):
     def advance_upload(
         self, upload_id: str, *, lease: datetime, expected_received: int, received: int, upstream_location: str
     ) -> bool:
-        """Move a leased session forward after a chunk was forwarded, and give the lease back.
+        """Move a leased session forward after a chunk was forwarded, give the lease back, renew its idle time.
 
+        Decided by the lease, not by the session's expiry: a write may
+        legitimately run longer than :data:`UPLOAD_SESSION_TTL_SECONDS`, and
+        while its lease is live nothing else can have touched the session --
+        the cleanup claims only sessions whose lease is gone or lapsed, and
+        the per-user cap never retires one that is being written to.
         ``False`` -- and nothing changed -- if the lease is no longer this
-        holder's, the session had moved, or it expired meanwhile.
+        holder's or has lapsed, or the session had moved.
         """
 
         raise NotImplementedError
@@ -322,13 +348,13 @@ class UnavailablePublishStore(PublishStore):
     def get_repository(self, repository):
         raise self._refuse()
 
-    def reserve_repository(self, repository, *, source_id, owner_org_id, created_by, max_pending):
+    def reserve_repository(self, repository, *, source_id, owner_org_id, created_by, max_pending, attempt_id):
         raise self._refuse()
 
     def commit_repository(self, repository, *, source_id, owner_org_id, created_by):
         raise self._refuse()
 
-    def release_repository(self, repository, *, owner_org_id):
+    def release_repository(self, repository, *, owner_org_id, attempt_id):
         raise self._refuse()
 
     def published_repositories(self, source_id):
@@ -375,7 +401,7 @@ class UnavailablePublishStore(PublishStore):
 class _StoredRepository:
     record: RepositoryRecord
     since: datetime
-    holders: int = 0
+    holders: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -405,7 +431,7 @@ class InMemoryPublishStore(PublishStore):
             stored = self._repositories.get(repository)
             return stored.record if stored is not None else None
 
-    def reserve_repository(self, repository, *, source_id, owner_org_id, created_by, max_pending):
+    def reserve_repository(self, repository, *, source_id, owner_org_id, created_by, max_pending, attempt_id):
         with self._lock:
             stored = self._repositories.get(repository)
             if stored is None:
@@ -416,9 +442,9 @@ class InMemoryPublishStore(PublishStore):
                 if pending >= max_pending:
                     raise PendingLimitError(f"{pending} repositories of this organization are already pending")
                 record = RepositoryRecord(repository, source_id, owner_org_id, created_by, committed=False)
-                stored = self._repositories[repository] = _StoredRepository(record, self.clock(), holders=0)
+                stored = self._repositories[repository] = _StoredRepository(record, self.clock())
             if not stored.record.committed and stored.record.owner_org_id == owner_org_id:
-                stored.holders += 1
+                stored.holders.add(attempt_id)
             return stored.record
 
     def commit_repository(self, repository, *, source_id, owner_org_id, created_by):
@@ -431,13 +457,13 @@ class InMemoryPublishStore(PublishStore):
                 stored.record = replace(stored.record, committed=True)
             return stored.record
 
-    def release_repository(self, repository, *, owner_org_id):
+    def release_repository(self, repository, *, owner_org_id, attempt_id):
         with self._lock:
             stored = self._repositories.get(repository)
             if stored is None or stored.record.committed or stored.record.owner_org_id != owner_org_id:
                 return
-            stored.holders -= 1
-            if stored.holders <= 0:
+            stored.holders.discard(attempt_id)
+            if not stored.holders:
                 del self._repositories[repository]
 
     def published_repositories(self, source_id):
@@ -486,9 +512,14 @@ class InMemoryPublishStore(PublishStore):
             if len(mine) >= MAX_UPLOAD_ROWS_PER_USER:
                 raise UploadLimitError("too many upload sessions are still being cleaned up")
             live = [stored for stored in mine if stored.expires > now]
-            # Never a slot that is still opening: its registry session is on its way.
+            # Never a slot that is still opening (its registry session is on
+            # its way) or one being written to: both hold a lease.
             evictable = sorted(
-                (stored for stored in live if stored.session.upstream_location is not None),
+                (
+                    stored
+                    for stored in live
+                    if stored.session.upstream_location is not None and stored.leased_until is None
+                ),
                 key=lambda stored: (stored.created, stored.session.id),
             )
             for stored in evictable[: max(len(live) - (MAX_UPLOAD_SESSIONS_PER_USER - 1), 0)]:
@@ -551,15 +582,17 @@ class InMemoryPublishStore(PublishStore):
     def advance_upload(self, upload_id, *, lease, expected_received, received, upstream_location):
         with self._lock:
             stored = self._uploads.get(upload_id)
+            now = self.clock()
             if (
                 stored is None
                 or stored.leased_until != lease
+                or lease <= now
                 or stored.session.received != expected_received
-                or stored.expires <= self.clock()
             ):
                 return False
             stored.session = replace(stored.session, received=received, upstream_location=upstream_location)
             stored.leased_until = None
+            stored.expires = max(stored.expires, now + timedelta(seconds=UPLOAD_SESSION_TTL_SECONDS))
             return True
 
     def release_upload(self, upload_id, *, lease):
@@ -657,7 +690,7 @@ class PostgresPublishStore(PublishStore):
         with bounded_connection(self._db) as conn:
             return self._read_repository(conn, repository)
 
-    def reserve_repository(self, repository, *, source_id, owner_org_id, created_by, max_pending):
+    def reserve_repository(self, repository, *, source_id, owner_org_id, created_by, max_pending, attempt_id):
         with bounded_connection(self._db) as conn:
             # One organization's new names are counted and written one at a
             # time, so two requests cannot both see room for the last one.
@@ -666,15 +699,16 @@ class PostgresPublishStore(PublishStore):
                 (PENDING_LOCK_CLASS, owner_org_id or ""),
             )
             # Another attempt at a name this organization already holds
-            # pending: always allowed, and only counted. A committed row, and
+            # pending: always allowed, and only recorded. A committed row, and
             # a pending row of another organization's, match nothing here.
             joined = conn.execute(
                 """
-                UPDATE collab_cog_repositories SET holders = holders + 1
+                UPDATE collab_cog_repositories
+                SET holders = CASE WHEN %s = ANY(holders) THEN holders ELSE array_append(holders, %s) END
                 WHERE repository = %s AND NOT committed AND owner_org_id IS NOT DISTINCT FROM %s
                 RETURNING repository
                 """,
-                (repository, owner_org_id),
+                (attempt_id, attempt_id, repository, owner_org_id),
             ).fetchone()
             if joined is None:
                 # A new name, if the organization has room for one more
@@ -683,14 +717,14 @@ class PostgresPublishStore(PublishStore):
                     """
                     INSERT INTO collab_cog_repositories
                         (repository, source_id, owner_org_id, created_by, committed, holders)
-                    SELECT %s, %s, %s, %s, false, 1
+                    SELECT %s, %s, %s, %s, false, ARRAY[%s]
                     WHERE (
                         SELECT count(*) FROM collab_cog_repositories
                         WHERE NOT committed AND owner_org_id IS NOT DISTINCT FROM %s
                     ) < %s
                     ON CONFLICT (repository) DO NOTHING
                     """,
-                    (repository, source_id, owner_org_id, created_by, owner_org_id, max_pending),
+                    (repository, source_id, owner_org_id, created_by, attempt_id, owner_org_id, max_pending),
                 )
             # Read back in the same transaction: whoever holds the name,
             # this is the record that stands, and the caller checks it.
@@ -705,7 +739,7 @@ class PostgresPublishStore(PublishStore):
                 """
                 INSERT INTO collab_cog_repositories
                     (repository, source_id, owner_org_id, created_by, committed, holders)
-                VALUES (%s, %s, %s, %s, true, 0)
+                VALUES (%s, %s, %s, %s, true, '{}')
                 ON CONFLICT (repository) DO UPDATE SET committed = true
                 WHERE NOT collab_cog_repositories.committed
                   AND collab_cog_repositories.owner_org_id IS NOT DISTINCT FROM EXCLUDED.owner_org_id
@@ -714,21 +748,24 @@ class PostgresPublishStore(PublishStore):
             )
             return self._read_repository(conn, repository)
 
-    def release_repository(self, repository, *, owner_org_id):
+    def release_repository(self, repository, *, owner_org_id, attempt_id):
         with bounded_connection(self._db) as conn:
-            # Counted down first, under the row's lock, and deleted only at
-            # zero: two releases at once cannot both see "one attempt left".
+            # This attempt's hold first, under the row's lock, and the row
+            # deleted only once it holds for nobody: two releases at once
+            # cannot both see "one attempt left", and a release of an attempt
+            # that was never recorded takes nothing from anyone.
             conn.execute(
                 """
-                UPDATE collab_cog_repositories SET holders = holders - 1
+                UPDATE collab_cog_repositories SET holders = array_remove(holders, %s)
                 WHERE repository = %s AND NOT committed AND owner_org_id IS NOT DISTINCT FROM %s
                 """,
-                (repository, owner_org_id),
+                (attempt_id, repository, owner_org_id),
             )
             conn.execute(
                 """
                 DELETE FROM collab_cog_repositories
-                WHERE repository = %s AND NOT committed AND owner_org_id IS NOT DISTINCT FROM %s AND holders <= 0
+                WHERE repository = %s AND NOT committed AND owner_org_id IS NOT DISTINCT FROM %s
+                  AND cardinality(holders) = 0
                 """,
                 (repository, owner_org_id),
             )
@@ -786,12 +823,15 @@ class PostgresPublishStore(PublishStore):
             # each, and the row is what remembers where to cancel it. Never
             # a slot that is still opening (no location yet): its registry
             # session is on its way, and nobody else knows where it will be.
+            # Nor one being written to: its writer records the outcome by
+            # its lease, and an upload is never retired under it.
             conn.execute(
                 """
                 UPDATE collab_cog_upload_sessions SET expires_at = now()
                 WHERE id IN (
                     SELECT id FROM collab_cog_upload_sessions
                     WHERE user_id = %s AND expires_at > now() AND upstream_location IS NOT NULL
+                      AND leased_until IS NULL
                     ORDER BY created_at, id
                     LIMIT GREATEST((
                         SELECT count(*) FROM collab_cog_upload_sessions
@@ -870,11 +910,12 @@ class PostgresPublishStore(PublishStore):
             row = conn.execute(
                 """
                 UPDATE collab_cog_upload_sessions
-                SET received = %s, upstream_location = %s, leased_until = NULL
-                WHERE id = %s AND leased_until = %s AND received = %s AND expires_at > now()
+                SET received = %s, upstream_location = %s, leased_until = NULL,
+                    expires_at = GREATEST(expires_at, now() + make_interval(secs => %s))
+                WHERE id = %s AND leased_until = %s AND leased_until > clock_timestamp() AND received = %s
                 RETURNING id
                 """,
-                (received, upstream_location, upload_id, lease, expected_received),
+                (received, upstream_location, UPLOAD_SESSION_TTL_SECONDS, upload_id, lease, expected_received),
             ).fetchone()
         return row is not None
 

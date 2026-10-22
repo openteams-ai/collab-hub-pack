@@ -55,6 +55,9 @@ source's removal step skipped and says which repository is out of shape.
 class StaticRegistrySource:
     """See the module docstring. Constructed by ``build_registry_sources``."""
 
+    lists_untagged = False
+    """Manifests are found through their tags, so one with none is never listed (see the module docstring)."""
+
     def __init__(
         self,
         config: CogRegistrySourceConfig,

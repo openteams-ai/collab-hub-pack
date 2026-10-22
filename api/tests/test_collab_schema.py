@@ -428,7 +428,7 @@ def test_migration_creates_the_cog_publishing_schema():
     assert "created_by text NOT NULL" in repositories and "source_id text NOT NULL" in repositories
     # A row is pending until the registry accepts a manifest, and it never expires: no column says when.
     assert "committed boolean NOT NULL DEFAULT false" in repositories
-    assert "holders integer NOT NULL DEFAULT 0" in repositories and "until" not in repositories
+    assert "holders text[] NOT NULL DEFAULT '{}'" in repositories and "until" not in repositories
     (attempts,) = server.ddl_for("collab_cog_publication_attempts")
     # One row per attempt, and accepted only when it says so.
     assert "attempt_id text PRIMARY KEY" in attempts and "published_by text NOT NULL" in attempts
@@ -497,7 +497,7 @@ PINNED_CHECKSUMS = {
     11: "4269a363932920da48b77be6cb6b02fe7ab933b4ab0478f0a722bb08244adbb1",
     12: "b4d98654df15a5f52a16273f77cae95daa5d597aa1f7ff1e78b830ce9cc2cabd",
     13: "0fdba92b5b894fa4358da5ebada5a33ce23a527e181dce411268df650a71935d",
-    14: "3609122830be48e9ad31631ce5a7d03992f3f3d8732ab417c0a7cdeff6f530e1",
+    14: "c3ceed5775cd624aabf1b9b9ac90aa23f8909cf93777f90836c7a263f72a2494",
 }
 
 

@@ -156,6 +156,9 @@ class FakeRegistry:
     async def _write(self, request: httpx.Request, rest: str) -> httpx.Response:
         """The push half of the distribution API, as a registry answers it (absolute, stateful upload URLs)."""
 
+        if request.method == "HEAD" and "/manifests/" in rest:
+            repo, _, ref = rest.rpartition("/manifests/")
+            return httpx.Response(200 if (repo, ref) in self.manifests else 404)
         if request.method == "HEAD":
             digest = rest.rpartition("/blobs/")[2]
             if digest in self.blobs:

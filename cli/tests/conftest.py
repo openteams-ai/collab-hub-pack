@@ -275,7 +275,12 @@ def stub(monkeypatch, tmp_path) -> Stub:
 
 
 @pytest.fixture
-def cli():
+def cli(monkeypatch, tmp_path):
+    # A configuration directory of the test's own, with or without the stub: the machine's own
+    # profile may well name a hub and hold a session.
+    monkeypatch.setenv("COLLAB_HUB_CONFIG_DIR", str(tmp_path / "config"))
+    for name in ("COLLAB_HUB_URL", "COLLAB_HUB_PROFILE"):
+        monkeypatch.delenv(name, raising=False)
     runner = CliRunner()
 
     def invoke(*args: str, input: str | None = None):

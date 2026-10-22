@@ -849,9 +849,9 @@ post() { curl -s -X POST -H "Authorization: Bearer $TOKEN" \
            -H 'Content-Type: application/json' -d "$2" "$B/$1"; }
 
 post search            '{"query":"orbits"}'
-post items/42/read     '{"repo":"nebari-dev/collab-hub-pack"}'   # an issue
-post items/43/read     '{"repo":"nebari-dev/collab-hub-pack"}'   # a pull request
-post files/read        '{"repo":"nebari-dev/collab-hub-pack","path":"README.md"}'
+post items/42/read     '{"repo":"openteams-ai/collab-hub-pack"}'   # an issue
+post items/43/read     '{"repo":"openteams-ai/collab-hub-pack"}'   # a pull request
+post files/read        '{"repo":"openteams-ai/collab-hub-pack","path":"README.md"}'
 post projects/list     '{"owner":"nebari-dev"}'
 post projects/7/read   '{"owner":"nebari-dev"}'
 ```

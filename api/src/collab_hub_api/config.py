@@ -97,6 +97,14 @@ class ServerConfig(BaseModel):
     exactly that reason (``server.proxyHeaders``). ``forwarded_allow_ips``
     bounds which peers may set them; ``["*"]`` is only sound when the pod is
     unreachable except through the proxy.
+
+    ``root_path`` is a URL prefix (``/hub``): it starts with a slash and never
+    ends in one. The router strips it only on a segment boundary, so ``/hub/``
+    is never stripped from ``/hub/metrics`` and every protection rule goes
+    unmatched; ``/`` and ``/hub/`` both turn the pages' ``{root_path}/web``
+    links into ``//web``. A request path always starts with a slash, so
+    ``hub`` is never a prefix of one and every route 404s. None of these has
+    a working reading, so all are refused at load (#69).
     """
 
     hostname: str = "127.0.0.1"
@@ -104,6 +112,21 @@ class ServerConfig(BaseModel):
     proxy_headers: bool = False
     forwarded_allow_ips: list[str] = Field(default_factory=lambda: ["*"])
     root_path: str = ""
+
+    @field_validator("root_path")
+    @classmethod
+    def _root_path_is_a_prefix(cls, value: str) -> str:
+        if value and not value.startswith("/"):
+            raise ValueError(
+                'root_path must start with "/": use "" to serve at the root of the host, '
+                'or a prefix such as "/hub"'
+            )
+        if value.endswith("/"):
+            raise ValueError(
+                'root_path must not end with "/": use "" to serve at the root of the host, '
+                'or a prefix such as "/hub"'
+            )
+        return value
 
 
 class LoggingConfig(BaseModel):

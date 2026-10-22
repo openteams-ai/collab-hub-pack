@@ -955,6 +955,66 @@ async def test_a_token_refusal_is_still_the_403_page_not_a_body_refusal(tmp_path
         assert pulled == 0
 
 
+@pytest.mark.parametrize(
+    "content_type",
+    ["APPLICATION/X-WWW-FORM-URLENCODED", "application/x-www-form-urlencoded; charset=UTF-8"],
+    ids=["uppercase", "charset_param"],
+)
+async def test_the_fallback_reads_the_form_type_however_it_is_spelled(tmp_path, idp, content_type):
+    """The fallback compares the media type, not a prefix of the header (#71):
+    case and parameters do not change the type, so both of these are forms
+    and their token is read. The uppercase spelling used to miss the prefix
+    match and fall through to a 403 for a token that was right."""
+
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        page = (await client.get("/web")).text
+        token = re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
+        response = await client.post(
+            "/web/signout",
+            content=f"csrf_token={token}".encode(),
+            headers={"Content-Type": content_type},
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == "/web/signed-out"
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["application/x-www-form-urlencoded-not-really", "multipart/form-data-ish; boundary=x"],
+    ids=["form_suffix_extended", "multipart_suffix_extended"],
+)
+async def test_a_type_that_only_begins_like_a_form_is_not_read_as_one(tmp_path, idp, content_type):
+    """A type that merely *begins* with a form type does not claim a form
+    (#71). Both used to pass the fallback's prefix match: the urlencoded one
+    then had its body read and parsed (and its token honoured), the multipart
+    one was refused 415 by ``form_fields``. Each is now what any other
+    non-form type is — a missing token, the plain 403, none of its body
+    pulled."""
+
+    pulled = 0
+
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        page = (await client.get("/web")).text
+        token = re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
+
+        async def form_shaped_body():
+            nonlocal pulled
+            pulled += 1
+            yield f"csrf_token={token}".encode()
+
+        response = await client.post(
+            "/web/signout", content=form_shaped_body(), headers={"Content-Type": content_type}
+        )
+        assert response.status_code == 403
+        assert pulled == 0
+        # A refused sign-out signs nothing out.
+        assert (await client.get("/web")).status_code == 200
+
+
 async def test_an_undecodable_form_fails_the_token_check_not_the_server(tmp_path, idp):
     # Bytes that are not UTF-8 parse to no fields; the CSRF check fails closed
     # on the empty mapping rather than anything raising into a 500.

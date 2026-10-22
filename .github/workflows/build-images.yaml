@@ -7,6 +7,11 @@ name: Build Docker Images
 # semantic-release.yml dispatches this from each collab-hub-<version> tag, so
 # the image a release pins (sha-<short> of the release commit) is built from
 # that same commit.
+#
+# A dev server deploys a commit of main by its image, sha-<short>: every push to
+# main that touches api/ or this file builds one, and the summary of that run
+# names the tag. For a commit that touched neither, run this workflow by hand
+# on main (workflow_dispatch).
 
 on:
   push:

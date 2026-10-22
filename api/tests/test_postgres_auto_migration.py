@@ -7,8 +7,8 @@ deployments use. A refactor once swallowed
 with auto-migration enabled would have crashed at startup with
 ``AttributeError``. These tests construct every Postgres store against a
 stubbed pooled database and assert the migration DDL actually runs — and that
-no store ever opens a direct ``psycopg.connect`` (issue #58: everything goes
-through the shared connection pool).
+no store ever opens a direct ``psycopg.connect`` — everything goes through the
+shared connection pool.
 
 The stub keeps this a fast startup-path test that needs no database. Verifying
 the DDL against a real server (that the statements are valid Postgres and are

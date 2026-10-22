@@ -137,7 +137,7 @@ Two consequences to plan for:
   service-account subjects are all valid, and the server does not infer identity
   from syntax. (Whether a subject is a real member is a membership question, not
   a syntax one; the scoped member check arrives with
-  [#99](https://github.com/nebari-dev/collab-hub-pack/issues/99).) Clients
+  [#99](https://github.com/openteams-ai/collab-hub-pack/issues/99).) Clients
   need a member picker that submits subject ids before this is turned on.
   Removal routes (`DELETE .../owners/{id}`) and reads of stored records are
   *not* validated, so principals written before the pin still load and can be
@@ -641,7 +641,7 @@ Migration version 8 adds `collab_audit_events_actor_idx` on `(actor, id DESC)`
 and `collab_audit_events_action_idx` on `(action, id DESC)`, which serve the
 actor and action filters; the unfiltered listing uses the primary key.
 Retention and erasure-request handling are tracked for resolution before GA
-in [#113](https://github.com/nebari-dev/collab-hub-pack/issues/113).
+in [#113](https://github.com/openteams-ai/collab-hub-pack/issues/113).
 
 #### Actions the admin panel and sign-in sync record
 
@@ -733,9 +733,9 @@ that one is the note that you did it, and the `UPDATE` is the state change.
 it, because a failed retry removes no membership somebody already holds.
 
 There is no automated sweep yet
-([#180](https://github.com/nebari-dev/collab-hub-pack/issues/180) records
+([#180](https://github.com/openteams-ai/collab-hub-pack/issues/180) records
 what is owed; the operator surface that finishes one is
-[#176](https://github.com/nebari-dev/collab-hub-pack/issues/176)).
+[#176](https://github.com/openteams-ai/collab-hub-pack/issues/176)).
 
 #### The audit trail for a grant (`service_access.grant`)
 
@@ -811,11 +811,30 @@ connector that has no credentials leaves it unusable.
 writes the row and a `connector.enable` or `connector.disable` audit row in
 the same transaction. The connector routes read the table on every request,
 with no cache, and blank the credential fields of a switched-off connector, so
-it answers exactly as an unconfigured one does from the next request. Without
-a database the endpoint answers 503 `connector_switch_unavailable`, and a
-database that has not yet applied version 10 reads as nothing switched off.
-If the table cannot be read on a request, that request treats every connector
-as switched on and logs `connector_state_unavailable`.
+its search and read routes answer exactly as an unconfigured one's do from the
+next request. Without a database the endpoint answers 503
+`connector_switch_unavailable`, and a database that has not yet applied
+version 10 reads as nothing switched off. If the table cannot be read on a
+request, that request treats every connector as switched on and logs
+`connector_state_unavailable`.
+
+The status routes are the exception, because `not_connected` tells a client
+to offer the user a connection that cannot succeed. While a connector is
+switched off, its status routes answer 404 with
+`{"detail": "The <connector> connector is switched off on this hub"}` and
+`GET /v1/connectors` leaves its entries out (see
+[connector discovery](connector-discovery.md)), so a client shows it as not
+offered here rather than as broken. `google` covers
+`/v1/connectors/google-drive/status`, `/v1/connectors/gmail/status` and
+`/v1/connectors/google-calendar/status`. A connector that was never switched
+and merely has no credentials still answers 200 `not_connected`. Each such 404
+logs `connector_status_switched_off` with the connector's key at debug level
+(not info, because clients poll these routes). The 404's `detail` ("The
+`<key>` connector is switched off on this hub") tells it apart from a 404 for
+a path nothing serves; with debug logging on, so does that log line. This is the
+switch to use while a provider's OAuth app is not yet usable by this
+deployment's users — still in the provider's verification process, say —
+and to flip back when it is.
 
 To see what is switched off:
 

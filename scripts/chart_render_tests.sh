@@ -62,6 +62,12 @@ refused "feature flags: a dashed name is refused" "cogs-ui" --set features.cogs-
 refused "feature flags: a name with a double underscore is refused" "cogs__ui" --set features.cogs__ui=true
 refused "feature flags: an uppercase name is refused" "Cogs_ui" --set features.Cogs_ui=true
 
+# server.rootPath is a prefix with a leading and no trailing slash; config.py
+# refuses the same values (api/tests/test_path_protection.py).
+refused "root path: a trailing slash is refused" "/server/rootPath" --set server.rootPath=/hub/
+refused "root path: a bare slash is refused" "/server/rootPath" --set server.rootPath=/
+refused "root path: a missing leading slash is refused" "/server/rootPath" --set server.rootPath=hub
+
 # --- negative: every refused configuration, from one fixture ------------------
 # scripts/testdata/chart/cogs-negative-cases.yaml holds each refusal once, in
 # two forms: the chart values and the settings the chart renders from them.

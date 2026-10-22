@@ -19,6 +19,10 @@ connector route already takes. A disabled connector is then indistinguishable,
 downstream, from one that was never configured -- which is a state those routes
 already refuse correctly. No route had to change, and no route can forget.
 
+The status routes add one thing on top, in ``routers/connectors.py``: they
+answer 404 for a switched-off connector, because "not connected" would invite
+a user to connect something this hub is not offering.
+
 The alternative was a check in each of the twenty-odd connector handlers, which
 is twenty-odd chances to miss one.
 """

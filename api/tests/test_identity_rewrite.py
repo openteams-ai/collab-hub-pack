@@ -252,7 +252,7 @@ def test_unknown_fields_and_legacy_shapes_survive(tmp_path):
 
 
 def test_local_sidecars_are_found_below_an_org_directory(tmp_path):
-    """#162 adds a directory level; a one-level walk would report a clean pass."""
+    """#46 adds a directory level; a one-level walk would report a clean pass."""
 
     path = sidecar_at(tmp_path / "frames" / "nebari" / "f1", created_by="alice@example.com")
     rewrite_local_sidecars(tmp_path, MAP, Manifest(), apply=True)

@@ -117,7 +117,7 @@ Bare decision and invariant numbers are ADR-0001's.
 | #3 model binding | D3, invariant 4 | The hub offers the inventory; the Cog's `resolve` selects; the binding record is the output. |
 | #4 budgets and idle workers | invariant 3 | Duration is a hard pre-check; token/cost is post-interaction accounting. |
 | #5 durable Track | D8; ADR-0002 D3 | Event schema v1 ([track](track.md)): binding identity per step, actor per gate decision, a bounded failure record with the key and worker; payloads by reference; in-memory, SQLite and Postgres stores under one conformance suite; the hub's tables from migration 12. Catalog persistence belongs to #7. |
-| #6 the remote location and least-privilege RBAC | invariant 2; ADR-0002 D4, invariant 3 | `location: remote` puts the Kubernetes executor behind the switch #109 adds; a namespace-scoped grant to the controller only; workers carry no ServiceAccount token. |
+| #6 the remote location and least-privilege RBAC | invariant 2; ADR-0002 D4, invariant 3 | `location: remote` puts the Kubernetes executor behind the switch #109 adds; a namespace-scoped grant to the controller only; workers carry no ServiceAccount token. #223: a run whose owner's id never starts again is ended by a live controller. |
 | #7 registry and catalog | D6, D9 | The catalog card derives from the manifest; index the full profile as declared. |
 | #8 delegated connector access | "deferred" list | The hub's brokered connectors act as the user; no credential enters the worker. |
 | #9 Guards | seam item 2 | Guards consume the envelope; a Cog's contract checks are inputs to Guards, not Guards. Gates decide. |

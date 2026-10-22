@@ -44,7 +44,7 @@ requires = ["uv_build>=0.9.27,<0.10.0"]
 build-backend = "uv_build"
 
 [project.urls]
-Repository = "https://github.com/nebari-dev/collab-hub-pack"
+Repository = "https://github.com/openteams-ai/collab-hub-pack"
 
 [tool.ruff]
 # The floor of requires-python, not the newest version: with a newer target,

@@ -1,4 +1,4 @@
-"""Behavior of the shared psycopg connection pools (issue #58).
+"""Behavior of the shared psycopg connection pools.
 
 Covers the acceptance criteria beyond what test_postgres_auto_migration
 asserts (stores never open direct per-request connections):

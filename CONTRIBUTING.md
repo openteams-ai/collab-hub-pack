@@ -126,5 +126,5 @@ its `collab-hub-<version>` tag.
 ## Reporting security issues
 
 Do not open a public issue for vulnerabilities. Use GitHub's
-[Report a vulnerability](https://github.com/nebari-dev/collab-hub-pack/security/advisories/new)
+[Report a vulnerability](https://github.com/openteams-ai/collab-hub-pack/security/advisories/new)
 to open a private advisory with the maintainers.

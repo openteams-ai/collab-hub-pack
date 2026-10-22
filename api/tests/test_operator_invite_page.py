@@ -29,7 +29,7 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
 import pytest_asyncio
@@ -712,6 +712,85 @@ async def test_an_oversized_form_is_refused_before_it_is_parsed(tmp_path, idp, p
             data={"csrf_token": csrf_from(page.text), EMAIL_FIELD: "a" * admin_router.MAX_FORM_BYTES},
         )
     assert response.status_code == admin_router.REQUEST_TOO_LARGE
+    assert service.issue_calls == [] and service.revoke_calls == []
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "application/x-www-form-urlencoded",
+        "application/x-www-form-urlencoded; charset=UTF-8",
+        "APPLICATION/X-WWW-FORM-URLENCODED",
+        " application/x-www-form-urlencoded ;charset=utf-8",
+    ],
+    ids=["exact", "charset_param", "uppercase", "padded"],
+)
+async def test_the_form_type_is_matched_as_a_media_type(tmp_path, idp, content_type):
+    """Parameters and case do not change what the type is (#71).
+
+    Media types are case-insensitive and ``charset`` is a parameter, so each
+    of these is the urlencoded form and is read as one. The uppercase spelling
+    is the case a prefix match got wrong in the other direction: it refused a
+    form it should have read.
+    """
+
+    app, service, _ = build_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await signed_in(client, idp)
+        page = await client.get(ADMIN_INVITATIONS_PATH)
+        response = await client.post(
+            ADMIN_INVITATIONS_PATH,
+            content=urlencode({"csrf_token": csrf_from(page.text), EMAIL_FIELD: INVITEE}),
+            headers={"Content-Type": content_type},
+        )
+    assert response.status_code == 201, response.text
+    assert len(service.issue_calls) == 1
+
+
+@pytest.mark.parametrize("path", ADMIN_PATHS)
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "application/x-www-form-urlencoded-not-really",
+        "application/x-www-form-urlencodedx; charset=utf-8",
+        "multipart/form-data; boundary=x",
+        "text/plain",
+        "",
+        None,
+    ],
+    ids=["suffix_extended", "suffix_extended_with_param", "multipart", "text", "empty", "absent"],
+)
+async def test_anything_but_the_form_type_is_refused_unread(tmp_path, idp, path, content_type):
+    """A type that merely *begins* with the form type is not the form type (#71).
+
+    The gate used to be ``startswith``, so the first two were parsed as forms.
+    They are refused with the same 415 multipart gets, before the body is read,
+    and the connection is let go because that body was never consumed. The
+    body is a valid form carrying the right token, so the only thing that can
+    refuse it is the type gate.
+    """
+
+    pulled = 0
+
+    app, service, _ = build_app(tmp_path, idp, rows=[an_invitation(invitation_id="inv-9")])
+    async with web_client(app) as client:
+        await signed_in(client, idp)
+        page = await client.get(ADMIN_INVITATIONS_PATH)
+        body = {"csrf_token": csrf_from(page.text), EMAIL_FIELD: INVITEE, INVITATION_ID_FIELD: "inv-9"}
+
+        async def form_body():
+            nonlocal pulled
+            pulled += 1
+            yield urlencode(body).encode()
+
+        # None sends no Content-Type at all; httpx adds none for raw content.
+        headers = {} if content_type is None else {"Content-Type": content_type}
+        response = await client.post(path, content=form_body(), headers=headers)
+        assert (content_type is None) == ("content-type" not in response.request.headers)
+    assert response.status_code == admin_router.UNSUPPORTED_MEDIA_TYPE, response.text
+    # Refused before the read, not after it: the server pulled nothing.
+    assert pulled == 0
+    assert response.headers.get("connection") == "close"
     assert service.issue_calls == [] and service.revoke_calls == []
 
 
@@ -1543,6 +1622,8 @@ def test_the_lock_key_is_a_signed_32_bit_integer():
 from test_acceptance_page import (  # noqa: E402
     _LoopbackBrowser,
     _post_body_over_socket,
+    _raw_post,
+    _requests_over_one_socket,
     running_server,
 )
 
@@ -1633,17 +1714,31 @@ def test_a_normal_submission_over_a_real_connection_keeps_it_alive(tmp_path, idp
     """The other half: a request whose body *was* read must not be closed.
 
     Without this, "always send Connection: close" would pass every test above
-    while throwing away keep-alive for every ordinary submission.
+    while throwing away keep-alive for every ordinary submission. So it is
+    asserted as reuse: two submissions on **one raw socket**, and the second
+    is served on it (#71). The absence of a ``Connection: close`` header is
+    not enough — the server could drop the connection for any other reason
+    and that control would still pass, which is the regression it is for.
     """
 
     app, service, _ = _operator_app(tmp_path, idp)
     with running_server(app) as base_url, _LoopbackBrowser(base_url) as browser:
         csrf = _sign_in_operator(browser, idp)
-        response = browser.post(
-            ADMIN_INVITATIONS_PATH,
-            data={"csrf_token": csrf, EMAIL_FIELD: INVITEE},
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-    assert response.status_code == 201
-    assert response.headers.get("connection", "").lower() != "close"
-    assert len(service.issue_calls) == 1
+        submissions = [
+            _raw_post(
+                base_url,
+                ADMIN_INVITATIONS_PATH,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Cookie": browser.cookie_header(),
+                },
+                body=urlencode({"csrf_token": csrf, EMAIL_FIELD: address}).encode(),
+            )
+            for address in (INVITEE, "carol@example.com")
+        ]
+        served = _requests_over_one_socket(base_url, submissions)
+    assert len(served) == 2, "the server closed the connection after a normal submission"
+    assert all(response.startswith(b"HTTP/1.1 201") for response in served), [
+        response[:200] for response in served
+    ]
+    assert len(service.issue_calls) == 2

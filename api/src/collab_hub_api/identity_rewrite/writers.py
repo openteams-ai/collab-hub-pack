@@ -826,7 +826,7 @@ def rewrite_local_sidecars(
     """Rewrite every ``metadata.json`` beneath *root*, at any depth.
 
     Walked recursively rather than one level deep: partitioning storage by
-    organization (#162) adds a directory level, and a one-level walk would report
+    organization (#46) adds a directory level, and a one-level walk would report
     a clean pass over a store it never entered.
 
     **Symlinks and anything that is not a regular file are refused, and a

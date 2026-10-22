@@ -188,7 +188,7 @@ def test_build_task_store_uses_shared_postgres_url():
 
 def test_stores_on_the_shared_url_share_one_pool():
     # All relational stores riding frames.postgres must draw from a single
-    # connection pool — that sharing is the point of issue #58.
+    # connection pool — that sharing is the whole point.
     config = Config.parse(
         {
             "frames": {

@@ -327,7 +327,7 @@ cases:
         registry:
           sources:
             - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
-        serve: {enabled: true, publicUrl: 'https://cogs.example.com'}
+        serve: {enabled: true, publicUrl: 'https://cogs.example.com', routeTimeout: false}
     chart_error: 'cogs.serve.publicUrl names host cogs.example.com, but the Hub API is served on hub.example.com'
     settings:
       registry_sources:

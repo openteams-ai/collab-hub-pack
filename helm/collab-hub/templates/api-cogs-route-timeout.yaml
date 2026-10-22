@@ -16,8 +16,18 @@ timeouts on those paths are unchanged.
 
 A policy on a route replaces, for that route, a BackendTrafficPolicy attached
 to the Gateway rather than merging with it; cogs.serve.routeTimeout=false
-leaves this out for a cluster that manages the route's policy itself. */ -}}
+leaves this out for a cluster that manages the route's policy itself.
+
+On a cluster without Envoy Gateway's CRDs the render fails rather than
+skipping the policy: skipping it would leave /v2 on the 15 s default, and
+large pulls would be cut off mid-body with nothing in the manifest to say
+why. Nebari always has the CRDs; Argo CD and `helm install` see them, and an
+offline `helm template` needs
+`--api-versions gateway.envoyproxy.io/v1alpha1/BackendTrafficPolicy`. */ -}}
 {{- if and .Values.api.enabled .Values.api.nebariapp.enabled .Values.cogs.serve.enabled .Values.cogs.serve.routeTimeout }}
+{{- if not (.Capabilities.APIVersions.Has "gateway.envoyproxy.io/v1alpha1/BackendTrafficPolicy") }}
+{{- fail "cogs.serve.routeTimeout: this cluster has no gateway.envoyproxy.io/v1alpha1 BackendTrafficPolicy, so the /v2 request timeout cannot be attached to the NebariApp's public route. Install Envoy Gateway's CRDs, or set cogs.serve.routeTimeout=false and give the route a timeout of at least cogs.serve.maxBlobSeconds yourself." }}
+{{- end }}
 {{- $component := "api" }}
 {{- $name := include "collab-hub.component-name" (dict "top" . "component" $component) }}
 apiVersion: gateway.envoyproxy.io/v1alpha1

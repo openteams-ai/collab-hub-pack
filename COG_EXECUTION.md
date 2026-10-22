@@ -305,8 +305,8 @@ Each phase is one pull request from the branch it names, numbered in build order
 | 10 | #177 | Hermes as a Cog, launched from the `collab-hub` CLI on a local hub and talked to from Toad: an example | `feat/cog-local-example` | 6, 9 | M | merged, #178 |
 | 11 | #121 | Run controller and run pickup | `feat/cog-run-controller` | 8, 9, 10 | M | in review, #186 |
 | 12 | #103, first half | The hub run API: launch, list and terminate runs | `feat/cog-run-launch` | 10, 11 | M | in review, #202 |
-| 13 | #107 | Add a Worker SDK with Harness adapters, ACP first | `feat/cog-worker-sdk` | 2, 9 | M | in review, with Phase 14 |
-| 14 | #108 | Publish a Hermes harness Cog, launched by the hub as a local process | `feat/cog-worker-sdk` | 9, 12, 13 | M | in review, with Phase 13 |
+| 13 | #107 | Add a Worker SDK with Harness adapters, ACP first | `feat/cog-worker-sdk` | 2, 9 | M | in review, #224, with Phase 14 |
+| 14 | #108 | Publish a Hermes harness Cog, launched by the hub as a local process | `feat/cog-worker-sdk` | 9, 12, 13 | M | in review, #224, with Phase 13 |
 | 15 | #126, first half | Launch, list and terminate Cogs from the `collab-hub` CLI | `feat/cli-launch` | 6, 10, 12 | S | not started |
 | 16 | #102 | Never repeat a completed side effect when a step is invoked again | `feat/cog-keyed-claim` | 8, 11, 13 | M | not started |
 | 17 | #103, closes it | The hub run API: Frames, payloads, decisions and retry | `feat/cog-run-api` | 12, 14, 16 | M | not started |
@@ -643,7 +643,7 @@ State a Cog for execution, see what is running, stop it — as endpoints Collab 
 - [x] A member of another organization can neither see nor cancel a run, and unauthenticated requests are refused under the hardened path map.
 
 #### Phase 13 — Worker SDK and harness-neutral adapters
-**Issue** #107 · **Branch** `feat/cog-worker-sdk` · **Depends on** Phases 2, 9 · **Size** M · **Status** in review, one pull request with Phase 14
+**Issue** #107 · **Branch** `feat/cog-worker-sdk` · **Depends on** Phases 2, 9 · **Size** M · **Status** in review, #224, one pull request with Phase 14
 
 Implement the seam once, so wrapping a harness is an adapter rather than a server — Hermes first, pi and OpenCode after it.
 
@@ -666,7 +666,7 @@ Implement the seam once, so wrapping a harness is an adapter rather than a serve
 - [x] A worker built on the SDK runs as a `local` worker under Phase 9's executor (the Hermes Cog, in the execution suite); Phase 22's materialization later runs it unchanged.
 
 #### Phase 14 — The Hermes harness Cog, launched by the hub as a local process
-**Issue** #108 · **Branch** `feat/cog-worker-sdk` · **Depends on** Phases 9, 12, 13 · **Size** M · **Status** in review, one pull request with Phase 13
+**Issue** #108 · **Branch** `feat/cog-worker-sdk` · **Depends on** Phases 9, 12, 13 · **Size** M · **Status** in review, #224, one pull request with Phase 13
 
 The primary goal: `POST /v1/runs` on a laptop starts Hermes as a separate process, and the Op step completes with a valid envelope. No cluster, no registry, no durability engine, no keyed claim and no CLI — those come after or alongside, and none of them changes this Cog.
 

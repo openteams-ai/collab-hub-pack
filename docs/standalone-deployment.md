@@ -249,13 +249,15 @@ audience is people with no account on this deployment yet.
 
 Both entries are **inert on an install that does not enable the web surface**.
 No routes are registered under either prefix, so a request there matches
-nothing in the app and answers a plain 404. A prefix declared public that
-serves nothing is not a hole. Unhardened installs never see these entries at all: the chart passes
+nothing in the app and falls through to the MCP catch-all mounted at `/`, which
+runs its own `McpAuthMiddleware` and authenticates on the API axis before the
+sub-application sees it. A prefix declared public that serves nothing is not a
+hole. Unhardened installs never see these entries at all: the chart passes
 `PATHS="[]"` and `DEFAULT_ACCESS="public"` when `security.enforce` resolves
 false.
 
 `/admin` was listed ahead of its routes for merge ordering: the operator page
-(nebari-dev/collab-hub-pack#91) added `/admin` routes without a values change,
+(openteams-ai/collab-hub-pack#91) added `/admin` routes without a values change,
 so with the entry on neither side a hardened install would have refused to
 start between the two merges. `/admin` now serves the admin panel (`/admin/`,
 `/admin/assets/*` and the JSON API under `/admin/api/*`) on an install that
@@ -284,7 +286,7 @@ On a gateway install nothing changes: `/metrics` stays unauthenticated and
 in-cluster scrapes keep working. Under enforcement it answers 401 unless the
 scraper carries a credential `get_auth_context` accepts. There is no
 scrape-token mode yet — that is
-[nebari-dev/collab-hub-pack#97](https://github.com/nebari-dev/collab-hub-pack/issues/97).
+[openteams-ai/collab-hub-pack#97](https://github.com/openteams-ai/collab-hub-pack/issues/97).
 
 To let an in-cluster Prometheus scrape a hardened deployment, open the one
 path and keep it off the internet:
@@ -356,9 +358,10 @@ server:
   records in its logs and audit trail.
 - **`rootPath`** is for serving the app under a URL prefix. The protection map
   is matched against paths with the prefix stripped, so rules stay written
-  against the app's own paths. Write it without a trailing slash (`/hub`, not
-  `/hub/`, and never `/`): the chart and the app both refuse one, because the
-  router would not strip it and every rule would go unmatched.
+  against the app's own paths. Write it with a leading slash and without a
+  trailing one (`/hub`, not `hub` or `/hub/`, and never `/`): the chart and the
+  app both refuse the others, because the router would not strip them and
+  every rule would go unmatched or every route 404.
 
 These were previously reachable only by smuggling `extraEnv` entries.
 `api.deployment.extraEnv` still renders last and therefore still wins, so an

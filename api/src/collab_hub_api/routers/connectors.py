@@ -14,6 +14,7 @@ from collab_hub_api.connectors.calendar_client import (
     CalendarUpstreamError,
     GoogleCalendarClient,
 )
+from collab_hub_api.connectors.catalog import CATALOG, ConnectorDescriptor, connector_link, is_offered
 from collab_hub_api.connectors.drive_client import DriveUpstreamError, GoogleDriveClient, UnsupportedDriveFileType
 from collab_hub_api.connectors.github_client import (
     GitHubApiRequestError,
@@ -31,14 +32,21 @@ from collab_hub_api.connectors.google_tokens import (
 )
 from collab_hub_api.connectors.models import (
     DRIVE_READONLY_SCOPE,
+    GITHUB_CONNECTOR_ID,
+    GMAIL_CONNECTOR_ID,
     GMAIL_READONLY_SCOPE,
+    GOOGLE_CALENDAR_CONNECTOR_ID,
     GOOGLE_CALENDAR_READONLY_SCOPE,
+    GOOGLE_DRIVE_CONNECTOR_ID,
+    NOTION_CONNECTOR_ID,
     NOTION_READONLY_CAPABILITIES,
+    SLACK_CONNECTOR_ID,
     SLACK_READONLY_SCOPES,
     CalendarReadRequest,
     CalendarReadResponse,
     CalendarSearchRequest,
     CalendarSearchResponse,
+    ConnectorListing,
     ConnectorSummary,
     DriveReadRequest,
     DriveReadResponse,
@@ -105,7 +113,28 @@ router = APIRouter(prefix="/connectors", tags=["connectors"])
 logger = logging.getLogger("frames_server.connectors")
 
 
-def get_connectors_config(request: Request) -> ConnectorsConfig:
+def switched_off_connectors(request: Request) -> frozenset[str]:
+    """The connectors an operator has switched off, read once per request.
+
+    A store that cannot answer disables nothing. Failing closed here would take
+    every connector down over a database blip, which is a far worse outcome
+    than briefly honouring a switch late.
+    """
+
+    store = getattr(request.app.state, "connector_store", None)
+    if store is None:
+        return frozenset()
+    try:
+        return frozenset(store.disabled())
+    except Exception:
+        logger.warning("connector_state_unavailable")
+        return frozenset()
+
+
+def get_connectors_config(
+    request: Request,
+    disabled: frozenset[str] = Depends(switched_off_connectors),
+) -> ConnectorsConfig:
     """This deployment's connector configuration, minus anything switched off.
 
     The switch is applied here rather than in each handler because every
@@ -113,41 +142,104 @@ def get_connectors_config(request: Request) -> ConnectorsConfig:
     route that can forget. A disabled connector arrives with its credentials
     blanked, so it reads as unconfigured to code that already handles that --
     see :mod:`..frames.connector_state`.
-
-    A store that cannot answer disables nothing. Failing closed here would take
-    every connector down over a database blip, which is a far worse outcome
-    than briefly honouring a switch late.
     """
 
-    config = request.app.state.connectors_config
-    store = getattr(request.app.state, "connector_store", None)
-    if store is None:
-        return config
-    try:
-        disabled = store.disabled()
-    except Exception:
-        logger.warning("connector_state_unavailable")
-        return config
-    return apply_disabled(config, disabled)
+    return apply_disabled(request.app.state.connectors_config, disabled)
 
 
-@router.get("", response_model=list[ConnectorSummary])
+def _offered(connector: str):
+    """Answer 404 on a status route whose connector is switched off.
+
+    Blanked credentials alone make status read ``not_connected``, which a
+    client renders as something the user can connect -- and here they cannot.
+    A 404 says what is true: this hub does not offer the connector. It is
+    limited to a connector that was explicitly switched off; one that was
+    simply never configured keeps answering ``not_connected`` as before.
+    """
+
+    def dependency(
+        _auth=Depends(get_auth_context),
+        disabled: frozenset[str] = Depends(switched_off_connectors),
+    ) -> None:
+        if connector in disabled:
+            # The access log shows a 404 on a route that plainly exists; the
+            # response body tells it apart from a path nothing serves, and so
+            # does this line when debug logging is on. At debug, because
+            # clients poll status: a switched-off provider would otherwise add
+            # a line per connector, per user, per refresh.
+            logger.debug("connector_status_switched_off", extra={"connector": connector})
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                f"The {connector} connector is switched off on this hub",
+            )
+
+    return Depends(dependency)
+
+
+@router.get("", response_model=list[ConnectorListing])
 async def list_connectors(
     request: Request,
     _auth=Depends(get_auth_context),
     config: ConnectorsConfig = Depends(get_connectors_config),
-) -> list[ConnectorSummary]:
+) -> list[ConnectorListing]:
+    """The connectors this hub offers, and the caller's state in each.
+
+    This is how a client discovers connectors, so it lists only what the
+    deployment can serve: one with no credentials is left out, and so is one an
+    operator switched off (it arrives here with its credentials blanked). An
+    empty list is an answer, not an error.
+    """
+
+    offered = [
+        (descriptor, getattr(config, descriptor.provider))
+        for descriptor in CATALOG
+        if is_offered(getattr(config, descriptor.provider))
+    ]
+    statuses = await asyncio.gather(*(_listed_status(request, config, descriptor) for descriptor, _ in offered))
     return [
-        await _google_drive_status(request, config),
-        await _gmail_status(request, config),
-        await _google_calendar_status(request, config),
-        await _slack_status(request, config),
-        await _github_status(request, config),
-        await _notion_status(request, config),
+        ConnectorListing(
+            id=descriptor.id,
+            name=descriptor.name,
+            short_name=descriptor.short_name,
+            description=descriptor.description,
+            provider=descriptor.provider,
+            link=connector_link(descriptor, section),
+            connect_hint=descriptor.connect_hint,
+            connected=found.connected,
+            state=found.state,
+            scopes=found.scopes,
+            detail=found.detail,
+            account=getattr(found, "account", ""),
+        )
+        for (descriptor, section), found in zip(offered, statuses, strict=True)
     ]
 
 
-@router.get("/google-drive/status", response_model=GoogleDriveStatus)
+async def _listed_status(
+    request: Request, config: ConnectorsConfig, descriptor: ConnectorDescriptor
+) -> ConnectorSummary:
+    """One connector's status for the list, which a single failure must not sink.
+
+    The status helpers answer provider trouble as a state, but an unexpected
+    error in one would otherwise turn the whole list into a 500 and hide every
+    connector that is working. Cancellation is not a failure of one connector
+    and is left to propagate: a request that is going away takes its list along.
+    """
+
+    try:
+        return await _STATUS_READERS[descriptor.id](request, config)
+    except Exception:
+        logger.exception("connector_list_status_failed", extra={"connector": descriptor.id})
+        return ConnectorSummary(
+            id=descriptor.id,
+            name=descriptor.name,
+            connected=False,
+            state="unavailable",
+            detail=f"{descriptor.name} status check failed.",
+        )
+
+
+@router.get("/google-drive/status", response_model=GoogleDriveStatus, dependencies=[_offered("google")])
 async def google_drive_status(
     request: Request,
     _auth=Depends(get_auth_context),
@@ -213,7 +305,7 @@ async def read_google_drive_file(
     return DriveReadResponse(file=file, text=text, truncated=truncated)
 
 
-@router.get("/gmail/status", response_model=GmailStatus)
+@router.get("/gmail/status", response_model=GmailStatus, dependencies=[_offered("google")])
 async def gmail_status(
     request: Request,
     _auth=Depends(get_auth_context),
@@ -282,7 +374,7 @@ async def read_gmail_message(
     )
 
 
-@router.get("/google-calendar/status", response_model=GoogleCalendarStatus)
+@router.get("/google-calendar/status", response_model=GoogleCalendarStatus, dependencies=[_offered("google")])
 async def google_calendar_status(
     request: Request,
     _auth=Depends(get_auth_context),
@@ -352,7 +444,7 @@ async def read_google_calendar_event(
     return CalendarReadResponse(event=event, truncated=truncated)
 
 
-@router.get("/slack/status", response_model=SlackStatus)
+@router.get("/slack/status", response_model=SlackStatus, dependencies=[_offered("slack")])
 async def slack_status(
     request: Request,
     _auth=Depends(get_auth_context),
@@ -495,7 +587,7 @@ async def read_slack_thread(
     )
 
 
-@router.get("/github/status", response_model=GitHubStatus)
+@router.get("/github/status", response_model=GitHubStatus, dependencies=[_offered("github")])
 async def github_status(
     request: Request,
     _auth=Depends(get_auth_context),
@@ -511,6 +603,8 @@ async def search_github(
     _auth=Depends(get_auth_context),
     config: ConnectorsConfig = Depends(get_connectors_config),
 ) -> GitHubSearchResponse:
+    if body.repo.strip():
+        _validate_github_repo(body.repo)
     client = await _github_client(request, config)
     try:
         hits, next_page_token, incomplete = await client.search(
@@ -1287,3 +1381,14 @@ def _validate_slack_channel_id(channel_id: str) -> None:
 def _validate_slack_message_ts(message_ts: str) -> None:
     if not re.fullmatch(_SLACK_MESSAGE_TS_PATTERN, message_ts):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "A Slack message timestamp is required")
+
+
+_STATUS_READERS = {
+    GOOGLE_DRIVE_CONNECTOR_ID: _google_drive_status,
+    GMAIL_CONNECTOR_ID: _gmail_status,
+    GOOGLE_CALENDAR_CONNECTOR_ID: _google_calendar_status,
+    SLACK_CONNECTOR_ID: _slack_status,
+    GITHUB_CONNECTOR_ID: _github_status,
+    NOTION_CONNECTOR_ID: _notion_status,
+}
+"""The status read behind each catalog entry, keyed by connector id."""

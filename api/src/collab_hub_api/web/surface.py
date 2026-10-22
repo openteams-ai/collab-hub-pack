@@ -148,7 +148,7 @@ ORG_INVITATIONS_PATH = "/web/org/invitations"
 """The owner invitation page (#142): ``GET`` renders it, ``POST`` issues.
 
 Under ``/web``, **not** at the reserved top-level ``/org`` prefix, by the
-routing decision recorded on nebari-dev/collab-hub-pack#142. The public
+routing decision recorded on openteams-ai/collab-hub-pack#142. The public
 Collab Hub fronts browser paths with a gateway auth wall that exempts only the
 prefixes named in ``nebariapp.routing.publicRoutes`` (``/web``, ``/invite``
 and ``/admin`` were added by an internal issue after the

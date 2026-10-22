@@ -98,11 +98,13 @@ class ServerConfig(BaseModel):
     bounds which peers may set them; ``["*"]`` is only sound when the pod is
     unreachable except through the proxy.
 
-    ``root_path`` is a URL prefix (``/hub``) and never ends in a slash. The
-    router strips it only on a segment boundary, so ``/hub/`` is never stripped
-    from ``/hub/metrics`` and every protection rule goes unmatched; ``/`` and
-    ``/hub/`` both turn the pages' ``{root_path}/web`` links into ``//web``.
-    Neither has a working reading, so both are refused at load (#69).
+    ``root_path`` is a URL prefix (``/hub``): it starts with a slash and never
+    ends in one. The router strips it only on a segment boundary, so ``/hub/``
+    is never stripped from ``/hub/metrics`` and every protection rule goes
+    unmatched; ``/`` and ``/hub/`` both turn the pages' ``{root_path}/web``
+    links into ``//web``. A request path always starts with a slash, so
+    ``hub`` is never a prefix of one and every route 404s. None of these has
+    a working reading, so all are refused at load (#69).
     """
 
     hostname: str = "127.0.0.1"
@@ -113,7 +115,12 @@ class ServerConfig(BaseModel):
 
     @field_validator("root_path")
     @classmethod
-    def _root_path_has_no_trailing_slash(cls, value: str) -> str:
+    def _root_path_is_a_prefix(cls, value: str) -> str:
+        if value and not value.startswith("/"):
+            raise ValueError(
+                'root_path must start with "/": use "" to serve at the root of the host, '
+                'or a prefix such as "/hub"'
+            )
         if value.endswith("/"):
             raise ValueError(
                 'root_path must not end with "/": use "" to serve at the root of the host, '
@@ -733,11 +740,10 @@ class GitHubConnectorConfig(BaseModel):
     api_base_url: str = "https://api.github.com"
     static_access_token: str = ""
     request_timeout_seconds: float = 10.0
-    # Restrict the generic api_get read to these GitHub org logins. Empty = the
-    # token's full visibility (personal repos + every approved org). Set this in
-    # real deploys so the generic read cannot reach outside the allowlist. (The
-    # curated search reads the SAME key once PR #76 lands its _build_query
-    # enforcement; on this branch only api_get consults it.)
+    # Restrict BOTH GitHub read surfaces to these org logins: the curated search
+    # (via _build_query) and the generic api_get read. Empty = the token's full
+    # visibility (personal repos + every approved org). Set this in real deploys
+    # so neither read can reach outside the allowlist.
     allowed_orgs: list[str] = Field(default_factory=list)
 
     @field_validator("allowed_orgs")

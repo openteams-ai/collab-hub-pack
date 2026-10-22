@@ -11,13 +11,13 @@ invitation page ([#91], `/admin/invitations`), the owner invitation page
 `/web/data-statement`), and the canonical Terms of Service and Privacy
 Statement ([#95], `/web/terms` and `/web/privacy`).
 
-[#88]: https://github.com/nebari-dev/collab-hub-pack/issues/88
-[#90]: https://github.com/nebari-dev/collab-hub-pack/issues/90
-[#91]: https://github.com/nebari-dev/collab-hub-pack/issues/91
-[#142]: https://github.com/nebari-dev/collab-hub-pack/issues/142
-[#44]: https://github.com/nebari-dev/collab-hub-pack/issues/188
-[#146]: https://github.com/nebari-dev/collab-hub-pack/issues/146
-[#95]: https://github.com/nebari-dev/collab-hub-pack/issues/95
+[#88]: https://github.com/openteams-ai/collab-hub-pack/issues/88
+[#90]: https://github.com/openteams-ai/collab-hub-pack/issues/90
+[#91]: https://github.com/openteams-ai/collab-hub-pack/issues/91
+[#142]: https://github.com/openteams-ai/collab-hub-pack/issues/142
+[#44]: https://github.com/openteams-ai/collab-hub-pack/issues/188
+[#146]: https://github.com/openteams-ai/collab-hub-pack/issues/146
+[#95]: https://github.com/openteams-ai/collab-hub-pack/issues/95
 
 ## Two auth axes, deliberately
 
@@ -209,8 +209,8 @@ elsewhere" shape as `web_platform_role_source_missing`.
   exception escaping a page (which `ServerErrorMiddleware` would otherwise
   answer above this middleware, bare) — carry them too.
 
-[#67]: https://github.com/nebari-dev/collab-hub-pack/issues/67
-[#83]: https://github.com/nebari-dev/collab-hub-pack/issues/83
+[#67]: https://github.com/openteams-ai/collab-hub-pack/issues/67
+[#83]: https://github.com/openteams-ai/collab-hub-pack/issues/83
 
 ## The per-path protection map
 
@@ -605,9 +605,9 @@ checks enforce at rollout that those are present**. A passing startup is not a
 claim about routes that did not exist when it ran. Both halves of that boundary
 are asserted in `test_web_surface.py` so the claim and the code cannot drift.
 
-[#91]: https://github.com/nebari-dev/collab-hub-pack/issues/91
+[#91]: https://github.com/openteams-ai/collab-hub-pack/issues/91
 
-[#87]: https://github.com/nebari-dev/collab-hub-pack/issues/87
+[#87]: https://github.com/openteams-ai/collab-hub-pack/issues/87
 
 ## Invitation acceptance (`/invite/accept`)
 
@@ -798,7 +798,7 @@ exception takes the route out of the shared exception handler's reach, so it
 re-emits `web_forbidden` with the same `reason` field an operator's existing
 query groups by, alongside its own `web_invitation_accept_csrf_refused`.
 
-[#119]: https://github.com/nebari-dev/collab-hub-pack/issues/119
+[#119]: https://github.com/openteams-ai/collab-hub-pack/issues/119
 
 ## Operator invitations (`/admin/invitations`)
 
@@ -912,7 +912,7 @@ shortened to 48 hours as the display's compensating control
 not a consequence of this one, and it has not been taken.
 
 [an internal issue]: an internal issue
-[#89]: https://github.com/nebari-dev/collab-hub-pack/issues/89
+[#89]: https://github.com/openteams-ai/collab-hub-pack/issues/89
 
 ### Where the surface's URLs point — configuration only, never the request
 

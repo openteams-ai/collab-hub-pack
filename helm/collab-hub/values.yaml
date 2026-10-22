@@ -33,7 +33,7 @@ api:
     extraEnv: []
     image:
       # -- The repository of the main application image
-      repository: ghcr.io/nebari-dev/collab-hub-pack/api
+      repository: ghcr.io/openteams-ai/collab-hub-pack/api
       # -- The tag of the main application image. If not set, the chart's appVersion is used.
       tag: "latest"
       # -- The pull policy for the main application image
@@ -213,8 +213,8 @@ server:
   # logs. Prefer naming the proxy's CIDR above.
   trustAnyProxy: false
   # -- ASGI root path, when the app is served under a URL prefix rather than
-  # at the root of its host. A prefix such as "/hub": it must not end with a
-  # slash, and "/" is not a root path (leave it empty).
+  # at the root of its host. A prefix such as "/hub": it must start with a
+  # slash and not end with one, and "/" is not a root path (leave it empty).
   rootPath: ""
 
 security:
@@ -277,13 +277,15 @@ security:
   #
   # They are inert on an install that does not enable the web surface: no
   # routes are registered under them, so a request there matches nothing in
-  # the app and answers a plain 404. A prefix declared public that serves
-  # nothing is not a hole. Where the web surface is enabled and organizations
-  # come from membership, /admin now serves the admin panel (/admin/, /admin/assets/*
+  # the app and falls through to the MCP catch-all mounted at "/", which runs
+  # its own McpAuthMiddleware and authenticates on the API axis before the
+  # sub-application sees it. A prefix declared public that serves nothing is
+  # not a hole. Where the web surface is enabled and organizations come from
+  # membership, /admin now serves the admin panel (/admin/, /admin/assets/*
   # and its JSON API under /admin/api/*). The panel authenticates itself with
   # the web session, the CSRF token on every write, and the operator check.
   #
-  # /admin is listed ahead of its routes (nebari-dev/collab-hub-pack#91) on
+  # /admin is listed ahead of its routes (openteams-ai/collab-hub-pack#91) on
   # purpose. The alternative — each page shipping its own entry — leaves
   # release/public transiently broken between two merges: the operator page
   # lands, the startup check finds /admin resolving to authenticated, and
@@ -322,7 +324,7 @@ security:
   # means restating the map. "public" lets an in-cluster Prometheus scrape
   # without credentials; pair it with an api.ingress.paths list that does not
   # route /metrics, which the chart enforces. There is no scrape-token mode
-  # yet (nebari-dev/collab-hub-pack#97).
+  # yet (openteams-ai/collab-hub-pack#97).
   metricsAccess: authenticated
   # -- Access applied to any path no rule matches. Keep it "authenticated" so
   # a route that ships without its own auth dependency fails closed.

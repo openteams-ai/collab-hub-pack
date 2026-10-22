@@ -4,7 +4,7 @@ Route-level dependencies protect the API routers, but they cannot protect what
 they do not decorate: ``/`` and ``/metrics`` were reachable without credentials
 and relied on the Nebari gateway (``enforceAtGateway``) to keep browsers out.
 Behind an ordinary Ingress there is no gateway, so that reliance turns into a
-public metrics endpoint (issue #60).
+public metrics endpoint.
 
 The fix is a middleware that consults a protection map — a list of path rules
 supplied as configuration — before the request is routed, and a default that

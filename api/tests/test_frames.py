@@ -690,7 +690,7 @@ async def test_request_id_and_metrics(client):
     assert frame["id"]
 
     # Unconfigured, /metrics stays reachable exactly as it was: the protection
-    # map (issue #60) is opted into, not on by default. test_path_protection
+    # map is opted into, not on by default. test_path_protection
     # covers the hardened deployment.
     metrics = await client.get("/metrics")
     assert metrics.status_code == 200

@@ -379,7 +379,7 @@
         },
         "rootPath": {
           "type": "string",
-          "pattern": "^$|[^/]$"
+          "pattern": "^$|^/.*[^/]$"
         }
       },
       "additionalProperties": false

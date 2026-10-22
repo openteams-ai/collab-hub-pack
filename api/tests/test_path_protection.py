@@ -1,4 +1,4 @@
-"""Tests for the per-path protection map (issue #60)."""
+"""Tests for the per-path protection map."""
 
 from __future__ import annotations
 
@@ -128,6 +128,14 @@ def test_a_root_path_ending_in_a_slash_is_refused_at_load(root_path):
     # also turn the pages' "{root_path}/web" links into "//web". A value with no
     # working reading is a misconfiguration to stop on, not one to resolve.
     with pytest.raises(ValidationError, match="root_path must not end with"):
+        Config.model_validate({"server": {"root_path": root_path}})
+
+
+@pytest.mark.parametrize("root_path", ["w", "a/b"])
+def test_a_root_path_without_a_leading_slash_is_refused_at_load(root_path):
+    # A request path always starts with a slash, so "w" is never a prefix of
+    # one: nothing is stripped and every route 404s.
+    with pytest.raises(ValidationError, match="root_path must start with"):
         Config.model_validate({"server": {"root_path": root_path}})
 
 
@@ -330,7 +338,7 @@ def hardened() -> dict:
 
 async def test_an_unconfigured_server_keeps_its_previous_behavior(tmp_path, monkeypatch):
     # The upgrade case: protection is opted into, so a deployment that does not
-    # ask for it serves / and /metrics exactly as it did before issue #60.
+    # ask for it serves / and /metrics exactly as it did before the map existed.
     app, client = await make_client(tmp_path, monkeypatch)
     async with app.router.lifespan_context(app), client:
         assert Config.parse(base_values(tmp_path)).security.default_access == "public"

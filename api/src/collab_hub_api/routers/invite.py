@@ -129,6 +129,7 @@ from ..web.acceptance import (
     acceptance_page,
 )
 from ..web.authz import WebForbidden, get_web_session, require_csrf, require_web_session
+from ..web.forms import media_type
 from ..web.pages import page_response
 from ..web.request_limits import bounded_body, connection_close_headers, declares_oversize
 from ..web.session import WebSession, verified_claims_are_current
@@ -309,9 +310,7 @@ def _sends_json(request: Request) -> bool:
     the content type, which is this route's own business.)
     """
 
-    return request.headers.get("content-type", "").split(";", 1)[0].strip().lower() == (
-        JSON_CONTENT_TYPE
-    )
+    return media_type(request) == JSON_CONTENT_TYPE
 
 
 def make_routers(

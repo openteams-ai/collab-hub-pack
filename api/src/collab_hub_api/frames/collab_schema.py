@@ -29,8 +29,8 @@ issue's scope. They keep their (masked) startup race.
 
 Wiring follows the house pattern: the tables ride the shared
 ``frames.postgres.url`` and are migrated at app startup when
-``frames.postgres.auto_migrate`` is set, over the shared psycopg pool
-(issue #58) — never a fresh ``psycopg.connect``.
+``frames.postgres.auto_migrate`` is set, over the shared psycopg pool —
+never a fresh ``psycopg.connect``.
 """
 
 from __future__ import annotations

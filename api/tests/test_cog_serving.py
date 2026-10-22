@@ -999,8 +999,8 @@ HUB_API_PATHS = (
     ("GET", "/v1/active-frames"),
     ("GET", "/v1/frame-groups"),
     ("GET", "/v1/tasks"),
-    ("GET", "/v1/usage"),
-    ("GET", "/v1/whoami"),
+    ("GET", "/v1/usage/me"),
+    ("GET", "/v1/me"),
     ("GET", "/docs"),
     ("GET", "/openapi.json"),
     ("POST", "/mcp"),
@@ -1390,8 +1390,11 @@ async def test_serving_closes_its_own_sources_at_shutdown(tmp_path, monkeypatch)
     app = make_app(Config.parse(settings(tmp_path)))
     async with app.router.lifespan_context(app):
         (source,) = app.state.cog_registry_serving.front.sources
-        # Built for serving on its own: this process does not index.
-        assert app.state.cog_indexer is None and app.state.cog_registry_sources == []
+        # Built for serving on its own: the indexer an API replica holds for
+        # its targeted entry points (issue #148) has sources of its own, and
+        # this process does not sweep.
+        assert app.state.cog_indexer is not None
+        assert all(other is not source for other in app.state.cog_registry_sources)
         assert source.host == BACKING_HOST
     assert source.oci()._http.is_closed
 

@@ -113,6 +113,14 @@ class ServerConfig(BaseModel):
     exactly that reason (``server.proxyHeaders``). ``forwarded_allow_ips``
     bounds which peers may set them; ``["*"]`` is only sound when the pod is
     unreachable except through the proxy.
+
+    ``root_path`` is a URL prefix (``/hub``): it starts with a slash and never
+    ends in one. The router strips it only on a segment boundary, so ``/hub/``
+    is never stripped from ``/hub/metrics`` and every protection rule goes
+    unmatched; ``/`` and ``/hub/`` both turn the pages' ``{root_path}/web``
+    links into ``//web``. A request path always starts with a slash, so
+    ``hub`` is never a prefix of one and every route 404s. None of these has
+    a working reading, so all are refused at load (#69).
     """
 
     hostname: str = "127.0.0.1"
@@ -120,6 +128,21 @@ class ServerConfig(BaseModel):
     proxy_headers: bool = False
     forwarded_allow_ips: list[str] = Field(default_factory=lambda: ["*"])
     root_path: str = ""
+
+    @field_validator("root_path")
+    @classmethod
+    def _root_path_is_a_prefix(cls, value: str) -> str:
+        if value and not value.startswith("/"):
+            raise ValueError(
+                'root_path must start with "/": use "" to serve at the root of the host, '
+                'or a prefix such as "/hub"'
+            )
+        if value.endswith("/"):
+            raise ValueError(
+                'root_path must not end with "/": use "" to serve at the root of the host, '
+                'or a prefix such as "/hub"'
+            )
+        return value
 
 
 class LoggingConfig(BaseModel):
@@ -733,11 +756,10 @@ class GitHubConnectorConfig(BaseModel):
     api_base_url: str = "https://api.github.com"
     static_access_token: str = ""
     request_timeout_seconds: float = 10.0
-    # Restrict the generic api_get read to these GitHub org logins. Empty = the
-    # token's full visibility (personal repos + every approved org). Set this in
-    # real deploys so the generic read cannot reach outside the allowlist. (The
-    # curated search reads the SAME key once PR #76 lands its _build_query
-    # enforcement; on this branch only api_get consults it.)
+    # Restrict BOTH GitHub read surfaces to these org logins: the curated search
+    # (via _build_query) and the generic api_get read. Empty = the token's full
+    # visibility (personal repos + every approved org). Set this in real deploys
+    # so neither read can reach outside the allowlist.
     allowed_orgs: list[str] = Field(default_factory=list)
 
     @field_validator("allowed_orgs")
@@ -1488,10 +1510,11 @@ def build_cog_catalog_store(config: BaseConfig, pools: PostgresPools) -> CogCata
 
 
 class CogIndexing:
-    """A built indexer plus the loop parameters the app lifespan runs it with."""
+    """A built indexer, whether this process sweeps with it, and the loop parameters if it does."""
 
-    def __init__(self, indexer: CogIndexer, *, interval_seconds: float, run_on_startup: bool) -> None:
+    def __init__(self, indexer: CogIndexer, *, sweeps: bool, interval_seconds: float, run_on_startup: bool) -> None:
         self.indexer = indexer
+        self.sweeps = sweeps
         self.interval_seconds = interval_seconds
         self.run_on_startup = run_on_startup
 
@@ -1516,38 +1539,52 @@ def publish_source_id(config: BaseConfig) -> str | None:
 def build_cog_indexing(
     config: BaseConfig, store: CogCatalogStore, publish_store: PublishStore | None = None
 ) -> CogIndexing | None:
-    """The reconciliation indexer (issue #84) when ``cogs.index.enabled``, else ``None``.
+    """The indexer (issue #84) wherever registry sources and a catalog store are configured, else ``None``.
 
     Reads the ``cogs`` block (issue #87): ``cogs.registry_sources`` and
     ``cogs.index`` (``enabled``, ``interval_seconds``, ``run_on_startup``).
     ``CogsConfig`` has already refused an enabled index with no sources and
     resolved every credential indirection, so what arrives here is complete.
 
+    ``cogs.index.enabled`` decides one thing: whether this process runs the
+    sweep loop (``sweeps``). The indexer object itself is built without it,
+    because its targeted entry points (``reindex``, ``mark_removed``) take no
+    sweep lock and are what a request-serving process calls -- and the chart
+    renders ``enabled=false`` on every API replica (issue #148), which are
+    the only pods a Service reaches.
+
     Sources are constructed here, once, so a duplicate id or an unsupported
-    kind fails the rollout rather than the first sweep, and are not
-    constructed at all when indexing is disabled. Indexing into the
-    unavailable store is refused: the store is what a sweep writes, and a
-    deployment that enables sweeping without a database would otherwise fail
-    every interval for as long as the pod lived.
+    kind fails the rollout rather than the first sweep or the first targeted
+    call. Sweeping into the unavailable store is refused: the store is what a
+    sweep writes, and a deployment that enables sweeping without a database
+    would otherwise fail every interval for as long as the pod lived. With
+    sweeping off and no database there is nothing an indexer could write, so
+    none is built.
     """
 
     cogs = config.cogs
     index = cogs.index
-    if not index.enabled:
-        return None
     if isinstance(store, UnavailableCogCatalogStore):
+        if not index.enabled:
+            return None
         raise RuntimeError(
             "cogs.index.enabled requires the Cog catalog store: set the shared "
             "COLLAB_HUB_API__FRAMES__POSTGRES__URL (frames.postgres.url), or disable indexing."
         )
+    if not cogs.registry_sources:
+        return None
     pool = config.frames.postgres.pool
-    if pool.max_size < 2:
+    if index.enabled and pool.max_size < 2:
         # A sweep occupies one pooled connection for its whole duration: the
         # session-level advisory lock is held on it, and the sweep's reads and
         # writes ride it too (issue #128). With max_size=1 that is the pool's
-        # only connection gone for minutes at a time -- every API read and
-        # every webhook write would wait on the sweep and time out, silently,
-        # at runtime. Refuse the rollout instead.
+        # only connection gone for minutes at a time -- every catalog read
+        # and every webhook write this process serves would wait on the sweep
+        # and time out, silently, at runtime. Refuse the rollout instead. A
+        # check on the sweeping process only: a targeted call borrows a
+        # connection for one statement, and the chart enables sweeping on its
+        # dedicated indexer workload and never on the API replicas (issue
+        # #148), so this never constrains an API pod.
         raise RuntimeError(
             "cogs.index.enabled requires frames.postgres.pool.max_size >= 2 "
             f"(configured: {pool.max_size}): the indexer's sweep occupies one pooled "
@@ -1570,6 +1607,7 @@ def build_cog_indexing(
             published_repositories=publish_store.published_repositories if publishing else None,
             repositories_found=settle_found(publish_store, store) if publishing else None,
         ),
+        sweeps=index.enabled,
         interval_seconds=float(index.interval_seconds),
         run_on_startup=index.run_on_startup,
     )

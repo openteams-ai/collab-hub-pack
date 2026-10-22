@@ -33,7 +33,7 @@ api:
     extraEnv: []
     image:
       # -- The repository of the main application image
-      repository: ghcr.io/nebari-dev/collab-hub-pack/api
+      repository: ghcr.io/openteams-ai/collab-hub-pack/api
       # -- The tag of the main application image. If not set, the chart's appVersion is used.
       tag: "latest"
       # -- The pull policy for the main application image
@@ -213,7 +213,8 @@ server:
   # logs. Prefer naming the proxy's CIDR above.
   trustAnyProxy: false
   # -- ASGI root path, when the app is served under a URL prefix rather than
-  # at the root of its host.
+  # at the root of its host. A prefix such as "/hub": it must start with a
+  # slash and not end with one, and "/" is not a root path (leave it empty).
   rootPath: ""
 
 security:
@@ -284,7 +285,7 @@ security:
   # and its JSON API under /admin/api/*). The panel authenticates itself with
   # the web session, the CSRF token on every write, and the operator check.
   #
-  # /admin is listed ahead of its routes (nebari-dev/collab-hub-pack#91) on
+  # /admin is listed ahead of its routes (openteams-ai/collab-hub-pack#91) on
   # purpose. The alternative — each page shipping its own entry — leaves
   # release/public transiently broken between two merges: the operator page
   # lands, the startup check finds /admin resolving to authenticated, and
@@ -323,7 +324,7 @@ security:
   # means restating the map. "public" lets an in-cluster Prometheus scrape
   # without credentials; pair it with an api.ingress.paths list that does not
   # route /metrics, which the chart enforces. There is no scrape-token mode
-  # yet (nebari-dev/collab-hub-pack#97).
+  # yet (openteams-ai/collab-hub-pack#97).
   metricsAccess: authenticated
   # -- Access applied to any path no rule matches. Keep it "authenticated" so
   # a route that ships without its own auth dependency fails closed.
@@ -729,13 +730,16 @@ cogs:
     # -- Key in that ConfigMap holding the PEM bundle.
     key: ca.crt
   index:
-    # -- Whether the indexer sweeps the configured sources. Off leaves the
-    # Cog read API up and static (it serves what the index already holds);
-    # on with zero sources fails the render and the API's startup.
+    # -- Whether the configured sources are swept. On, the chart renders the
+    # dedicated indexer workload below (the one process that sweeps) and the
+    # API replicas keep serving the read API without sweeping; off renders
+    # no indexer and leaves the Cog read API up and static (it serves what
+    # the index already holds). On with zero sources fails the render and
+    # the indexer's startup.
     enabled: false
     # -- Seconds between sweeps (10..86400).
     intervalSeconds: 300
-    # -- Whether a sweep runs when the API starts, before the first interval.
+    # -- Whether a sweep runs when the indexer starts, before the first interval.
     runOnStartup: true
   serve:
     # -- Whether the Hub serves Cog pulls itself: the OCI read API (`/v2/`)
@@ -775,6 +779,18 @@ cogs:
     # BackendTrafficPolicy for that route. Set false on older CRDs, or where
     # the cluster manages that policy, and configure the gateway instead.
     routeTimeout: true
+  indexer:
+    # The Cog indexer workload, rendered when `index.enabled`: the API image
+    # and settings as one extra Deployment with cogs.index.enabled=true, a
+    # Recreate strategy (a rollout never runs two sweepers), no Service and
+    # no ingress. Single flight is a property of this shape; the sweep's
+    # advisory lock in the database is only a belt under it. The replica
+    # count is fixed at 1 in the template; pause sweeping with
+    # `index.enabled: false`.
+    # -- Resources for the indexer container. Empty means the API's
+    # `api.deployment.resources`; a sweep of a large registry may want more
+    # memory than a request-serving replica.
+    resources: {}
 
   publish:
     # Who may publish Cogs through the Hub, once one source is marked

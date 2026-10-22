@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import secrets
 import threading
 import time
@@ -113,12 +114,50 @@ def session_id(token: str | None) -> str | None:
     return sid if isinstance(sid, str) and sid else None
 
 
+def _token_body(response: httpx.Response, endpoint: str) -> dict:
+    """The token endpoint's JSON answer; a realm error otherwise, never a traceback."""
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    token = body.get("access_token") if isinstance(body, dict) else None
+    if not isinstance(token, str) or not token:
+        raise RealmError(f"the realm's token endpoint {endpoint} answered without tokens "
+                         f"({response.headers.get('content-type', 'no content type')})")
+    refresh = body.get("refresh_token")
+    if refresh is not None and (not isinstance(refresh, str) or not refresh):
+        raise RealmError(f"the realm's token endpoint {endpoint} answered with a refresh_token that is not one")
+    if body.get("expires_in") is not None and _seconds(body["expires_in"]) is None:
+        raise RealmError(f"the realm's token endpoint {endpoint} answered with an expires_in that is not a "
+                         "number of seconds")
+    return body
+
+
+def _seconds(value: object) -> float | None:
+    """A token's lifetime in seconds, or ``None`` when it is not one.
+
+    RFC 6749 sends ``expires_in`` as a number; some realms send a string of
+    ASCII digits, which is accepted too, and nothing else is (no sign, no
+    decimal point, no other script's digits). A value too large to be a float
+    is refused rather than raised.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    if isinstance(value, str) and not (value.isascii() and value.isdigit()):
+        return None
+    try:
+        seconds = float(int(value) if isinstance(value, str) else value)
+    except (ValueError, OverflowError):
+        return None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
+
+
 def _tokens(body: dict) -> Tokens:
     expires_in = body.get("expires_in")
     return Tokens(
         access_token=body["access_token"],
         refresh_token=body.get("refresh_token"),
-        expires_at=clock() + float(expires_in) if expires_in else None,
+        expires_at=clock() + _seconds(expires_in) if expires_in is not None else None,
     )
 
 
@@ -235,7 +274,7 @@ def browser_login(
         if response.status_code >= 500:
             raise RealmError(f"the realm failed to exchange the sign-in code: HTTP {response.status_code}")
         raise AuthError(f"the realm refused the sign-in code: {code} {detail}".rstrip())
-    return _tokens(response.json())
+    return _tokens(_token_body(response, metadata["token_endpoint"]))
 
 
 def refresh(http: httpx.Client, metadata: dict, client_id: str, refresh_token: str) -> Tokens:
@@ -249,7 +288,7 @@ def refresh(http: httpx.Client, metadata: dict, client_id: str, refresh_token: s
         # A realm restarting or a proxy error page: the session may be fine, so keep it.
         raise RealmError(f"the realm could not renew the session right now (HTTP {response.status_code}, {code}); "
                          "try again")
-    tokens = _tokens(response.json())
+    tokens = _tokens(_token_body(response, metadata["token_endpoint"]))
     # A realm that does not rotate refresh tokens omits the new one: keep the old.
     return Tokens(tokens.access_token, tokens.refresh_token or refresh_token, tokens.expires_at)
 

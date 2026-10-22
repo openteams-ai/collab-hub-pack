@@ -12,13 +12,13 @@ name: Semantic Release
 # 2. A release commit is made on top of that commit, pinning the version into
 #    helm/collab-hub/Chart.yaml, api/pyproject.toml, cli/pyproject.toml and
 #    the CLI's __version__ (scripts/release/bump-version.py). It is pushed
-#    only as the tag collab-hub-<version>, the name pack-release gives the
+#    only as the tag collab-hub-<version>, the name release.yaml gives the
 #    release, and never to a branch.
-# 3. build-images.yaml and release.yaml are dispatched from that tag. The
-#    shared pack-release reads the version from the tag's Chart.yaml and pins
-#    the chart to the sha-<short> image that build-images builds from the same
-#    ref, then packages, releases, and syncs to nebari-dev/helm-repository as
-#    it does for every pack.
+# 3. build-images.yaml and release.yaml are dispatched from that tag.
+#    release.yaml reads the version from the tag's Chart.yaml and pins the
+#    chart to the sha-<short> image that build-images builds from the same
+#    ref, then packages it, pushes it to oci://ghcr.io/openteams-ai/charts and
+#    attaches it to a GitHub Release.
 #
 # Those files on main keep a 0.0.0 development placeholder; the released
 # version lives in the tags and the GitHub Release. CONTRIBUTING.md describes
@@ -125,7 +125,7 @@ jobs:
           fi
           if git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
             # Tagged by an earlier run whose dispatches may not have run. Both
-            # are safe to repeat: pack-release skips a release that exists.
+            # are safe to repeat: release.yaml skips a release that exists.
             echo "${tag} already exists; dispatching its build and release again."
             exit 0
           fi
@@ -147,6 +147,6 @@ jobs:
         run: |
           set -euo pipefail
           # Both from the tag, so the image is built from the release commit
-          # and pack-release pins the chart to that same commit's sha.
+          # and release.yaml pins the chart to that same commit's sha.
           gh workflow run build-images.yaml --ref "${TAG}"
           gh workflow run release.yaml --ref "${TAG}"

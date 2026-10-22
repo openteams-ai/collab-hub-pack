@@ -28,7 +28,7 @@ from starlette.routing import Mount, WebSocketRoute
 
 from ..frames.orgs import ROLE_OWNER, OrgStore, OrgsUnavailableError
 from ..path_protection import request_path
-from .forms import FORM_CONTENT_TYPE, MULTIPART_CONTENT_TYPE, form_fields
+from .forms import FORM_CONTENT_TYPE, MULTIPART_CONTENT_TYPE, form_fields, media_type
 from .session import SESSION_COOKIE, WebSession, csrf_token_matches
 from .surface import SIGNIN_PATH, WebSurface
 
@@ -677,12 +677,12 @@ async def require_csrf(
 
     presented = request.headers.get("x-csrf-token", "")
     if not presented:
-        content_type = request.headers.get("content-type", "")
-        if content_type.startswith((FORM_CONTENT_TYPE, MULTIPART_CONTENT_TYPE)):
+        if media_type(request) in (FORM_CONTENT_TYPE, MULTIPART_CONTENT_TYPE):
             # form_fields re-checks the content type and refuses multipart
             # (415) before reading anything; the tuple here only decides that
-            # the request *claims a form*, so a JSON or absent body still
-            # falls through to the plain 403 below, unread.
+            # the request *claims a form*, so a JSON or absent body -- or a
+            # type that merely begins with a form type (#71) -- still falls
+            # through to the plain 403 below, unread.
             fields = await form_fields(request)
             presented = fields.get("csrf_token", "")
     if not csrf_token_matches(session, presented):

@@ -148,14 +148,14 @@ own review).
   deploy-time, not instant.
 - **(b) Org allowlist enforced; residual scope is the token's within it.** The
   generic read honors the same `connectors.github.allowed_orgs` allowlist as the
-  curated search (issue #64 / PR #76): with it set, `api/get` admits ONLY
+  curated search (issue #64): with it set, `api/get` admits ONLY
   owner-qualified paths (`/repos`, `/orgs`, `/users`) under an allowed owner and
   refuses everything that can read across orgs — `/search/*`, the `/user/*`
   self-endpoints, `/issues`, `/gists`, `/notifications`, etc. (positive allowlist,
   so a future cross-org endpoint is refused without a code change). This closes
   the earlier gap where the generic read walked around the curated allowlist.
   Residual, ratified: (1) an EMPTY allowlist == the token's full visibility (the
-  project-wide default, matching #76 — real deploys set `allowed_orgs`); (2)
+  project-wide default — real deploys set `allowed_orgs`); (2)
   within an allowed org, nothing further binds the reachable `path` to the agent's
   frame/repo, and the actor is the possibly-injected agent, not the user, so an
   injected agent still reaches every in-allowlist endpoint the token scopes cover.

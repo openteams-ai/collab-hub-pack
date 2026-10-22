@@ -16,6 +16,7 @@ from collab_hub_api.connectors.connector_text import sanitize_github_api_text
 from collab_hub_api.connectors.github_client import (
     GitHubApiRequestError,
     GitHubClient,
+    GitHubSearchError,
     GitHubUpstreamError,
     _project_filter_value,
     _raise_for_github_status,
@@ -124,6 +125,31 @@ def test_github_search_request_bounds() -> None:
         GitHubSearchRequest(query="", limit=1)
     with pytest.raises(ValidationError):
         GitHubSearchRequest(query="bug", limit=26)
+
+
+# --- config validation: allowed_orgs ---------------------------------------
+
+
+def test_github_allowed_orgs_accepts_valid_logins(tmp_path) -> None:
+    config = _config(tmp_path, allowed_orgs=["acme", "other-co", "a", "x" * 39])
+    assert config.connectors.github.allowed_orgs == ["acme", "other-co", "a", "x" * 39]
+
+
+@pytest.mark.parametrize(
+    "bad_org",
+    [
+        "-acme",  # leading hyphen
+        "acme-",  # trailing hyphen
+        "ac--me",  # doubled hyphen
+        "acme org",  # whitespace
+        "acme OR repo:other/private",  # search-syntax injection
+        "x" * 40,  # over GitHub's 39-char login limit
+        "",  # blank entry
+    ],
+)
+def test_github_allowed_orgs_rejects_invalid_logins(tmp_path, bad_org) -> None:
+    with pytest.raises(ValidationError):
+        _config(tmp_path, allowed_orgs=[bad_org])
 
 
 # --- status ---------------------------------------------------------------
@@ -1566,6 +1592,223 @@ async def test_github_search_bad_repo_qualifier_maps_to_422(tmp_path, monkeypatc
     assert "repo" in response.json()["detail"].lower()
 
 
+# --- query building: allowed_orgs -----------------------------------------
+
+
+def test_build_query_empty_allowlist_adds_no_org_qualifiers():
+    assert _scoped_api_client([])._build_query("is:open bug", "") == "is:open bug"
+
+
+def test_build_query_empty_allowlist_imposes_no_repo_restriction():
+    # Empty allowed_orgs is the documented "token's full visibility" default:
+    # an explicit repo is passed through untouched, whatever org it names.
+    client = _scoped_api_client([])
+    assert client._build_query("is:open bug", "anyone/anything") == "is:open bug repo:anyone/anything"
+
+
+def test_build_query_applies_allowed_orgs_when_no_repo_qualifier():
+    client = _scoped_api_client(["acme", "other-co"])
+    assert client._build_query("is:open bug", "") == "is:open bug org:acme org:other-co"
+
+
+def test_build_query_explicit_repo_inside_allowlist_passes_without_org_qualifiers():
+    # A caller-supplied repo: is a narrower scope than the allowlist and is
+    # meant to override it, not stack with it -- as long as the repo's own
+    # owner is itself inside the allowlist.
+    client = _scoped_api_client(["acme"])
+    assert client._build_query("is:open bug", "acme/widgets") == "is:open bug repo:acme/widgets"
+
+
+def test_build_query_explicit_repo_owner_match_is_case_insensitive():
+    # GitHub logins are case-insensitive; the allowlist check must be too.
+    client = _scoped_api_client(["Acme"])
+    assert client._build_query("is:open bug", "ACME/widgets") == "is:open bug repo:ACME/widgets"
+
+
+def test_build_query_rejects_explicit_repo_outside_allowlist():
+    # The allowlist boundary must hold for a caller-supplied repo too, not
+    # just the no-repo case -- otherwise a caller bypasses the allowlist
+    # entirely by naming a repo in an org the deployment never approved.
+    client = _scoped_api_client(["acme"])
+    with pytest.raises(GitHubSearchError):
+        client._build_query("is:open bug", "other-org/private-repo")
+
+
+async def test_github_search_applies_org_allowlist_when_no_repo_given(tmp_path, monkeypatch):
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith("/search/issues"):
+            seen["q"] = request.url.params.get("q", "")
+            return Response(200, json={"total_count": 0, "incomplete_results": False, "items": []})
+        return Response(404, json={"message": "Not Found"})
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path, allowed_orgs=["acme", "other-co"]))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/search",
+            headers=_auth_header(),
+            json={"query": "login", "limit": 10},
+        )
+    assert response.status_code == 200
+    assert "org:acme" in seen["q"]
+    assert "org:other-co" in seen["q"]
+
+
+async def test_github_search_repo_inside_org_allowlist_succeeds(tmp_path, monkeypatch):
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith("/search/issues"):
+            seen["q"] = request.url.params.get("q", "")
+            return Response(200, json={"total_count": 0, "incomplete_results": False, "items": []})
+        return Response(404, json={"message": "Not Found"})
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path, allowed_orgs=["acme"]))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/search",
+            headers=_auth_header(),
+            json={"query": "login", "limit": 10, "repo": "acme/widgets"},
+        )
+    assert response.status_code == 200
+    assert "repo:acme/widgets" in seen["q"]
+    assert "org:" not in seen["q"]
+
+
+async def test_github_search_rejects_repo_outside_org_allowlist(tmp_path, monkeypatch):
+    # The allowlist is a data-scope boundary, not a UX default: a caller
+    # naming a repo the deployment never approved must be rejected, not
+    # silently searched at the token's full visibility.
+    _install_mock_client(monkeypatch, _ok_status_handler)
+    app = make_app(_config(tmp_path, allowed_orgs=["acme"]))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/search",
+            headers=_auth_header(),
+            json={"query": "login", "limit": 10, "repo": "other-org/private-repo"},
+        )
+    assert response.status_code == 422
+    detail = response.json()["detail"].lower()
+    assert "other-org/private-repo" in detail
+    assert "allowlist" in detail
+
+
+@pytest.mark.parametrize(
+    "repo",
+    ["acme/x repo:evil/private", "acme/x evil/y", "acme", "acme/x\trepo:evil/y", "acme/x/y"],
+)
+def test_build_query_rejects_malformed_repo(repo):
+    # The owner check reads only the segment before the first "/", so a repo
+    # carrying whitespace or a second qualifier would pass it and then widen
+    # the search via GitHub's OR of repeated repo: qualifiers.
+    client = _scoped_api_client(["acme"])
+    with pytest.raises(GitHubSearchError):
+        client._build_query("bug", repo)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "bug org:evil",
+        "bug repo:evil/private",
+        "bug user:someone",
+        "bug owner:evil",
+        "bug ORG:evil",
+        "bug -org:evil",
+        '"org:evil"',
+        "(bug OR feature) repo:evil/private",
+    ],
+)
+def test_build_query_rejects_scope_qualifiers_in_query_with_allowlist(query):
+    client = _scoped_api_client(["acme"])
+    with pytest.raises(GitHubSearchError):
+        client._build_query(query, "")
+    with pytest.raises(GitHubSearchError):
+        client._build_query(query, "acme/widgets")
+
+
+def test_build_query_admits_non_scope_qualifiers_with_allowlist():
+    client = _scoped_api_client(["acme"])
+    assert (
+        client._build_query("is:open author:octocat label:bug", "")
+        == "is:open author:octocat label:bug org:acme"
+    )
+
+
+def test_build_query_empty_allowlist_admits_scope_qualifiers_in_query():
+    # Empty allowlist == the token's full visibility; the caller may scope freely.
+    assert _scoped_api_client([])._build_query("bug org:anyone", "") == "bug org:anyone"
+
+
+async def test_github_search_route_rejects_malformed_repo(tmp_path, monkeypatch):
+    called = {"search": False}
+
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith("/search/issues"):
+            called["search"] = True
+        return Response(200, json={"total_count": 0, "incomplete_results": False, "items": []})
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path, allowed_orgs=["acme"]))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/search",
+            headers=_auth_header(),
+            json={"query": "bug", "repo": "acme/x repo:evil/private"},
+        )
+    assert response.status_code == 422
+    assert called["search"] is False
+
+
+async def test_github_search_route_rejects_scope_qualifier_in_query(tmp_path, monkeypatch):
+    called = {"search": False}
+
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith("/search/issues"):
+            called["search"] = True
+        return Response(200, json={"total_count": 0, "incomplete_results": False, "items": []})
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path, allowed_orgs=["acme"]))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/search",
+            headers=_auth_header(),
+            json={"query": "bug org:evil"},
+        )
+    assert response.status_code == 422
+    assert "org:" in response.json()["detail"]
+    assert called["search"] is False
+
+
+async def test_github_search_drops_hits_outside_allowlist(tmp_path, monkeypatch):
+    # Defense in depth: even if GitHub returned an out-of-allowlist hit, the
+    # client drops it rather than relying on query parsing alone.
+    outside = _issue_item(2)
+    outside["repository_url"] = "https://github.test/api/repos/evil/private"
+
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith("/search/issues"):
+            return Response(
+                200, json={"total_count": 2, "incomplete_results": False, "items": [_issue_item(1), outside]}
+            )
+        return Response(404, json={"message": "Not Found"})
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path, allowed_orgs=["ACME"]))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/search",
+            headers=_auth_header(),
+            json={"query": "bug", "limit": 10},
+        )
+    assert response.status_code == 200
+    assert [hit["repo"] for hit in response.json()["hits"]] == ["acme/widgets"]
+
+
 # --- repo discovery: list_github_repos -----------------------------------
 
 
@@ -2552,11 +2795,6 @@ async def test_api_get_route_enforces_allowed_orgs(tmp_path, monkeypatch):
             _API_GET_ROUTE, headers=_auth_header(), json={"path": "/search/issues"}
         )
         assert search.status_code == 422
-
-
-def test_github_config_rejects_invalid_allowed_org(tmp_path) -> None:
-    with pytest.raises(ValidationError):
-        _config(tmp_path, allowed_orgs=["acme OR repo:other/private"])
 
 
 async def test_api_get_route_coerces_params(tmp_path, monkeypatch):

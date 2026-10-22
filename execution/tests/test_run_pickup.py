@@ -242,6 +242,45 @@ def test_a_decision_the_runner_does_not_take_is_recorded_refused_and_another_can
     _settle(one, until=lambda: intents.describe(track, "r").state is RunState.COMPLETED)
 
 
+def test_a_decision_left_undelivered_by_a_restart_is_not_pending_against_the_retrys_escalation():
+    # The owner restarts between `decision_requested` and delivery, and the run is retried: the old
+    # decision names an escalation the run no longer waits on, so it is not pending, nothing refuses
+    # it, and a decision on the new escalation is accepted at once.
+    track = InMemoryTrackStore()
+    one = _named(track, "one", {"echo": lambda e, v: v})
+    first = _waiting_at_gate(track, one)
+    intents.request_decision(track, "r", escalation=first, outcome="approve", actor="alice")
+    again = _named(track, "one", {"echo": lambda e, v: v})  # the same id, started again: no delivery
+    assert again.start() == ("r",) and intents.describe(track, "r").state is RunState.INTERRUPTED
+    assert intents.describe(track, "r").decision is None
+    again.runner.retry("r")
+    _settle(again, until=lambda: intents.describe(track, "r").state is RunState.WAITING_AT_GATE)
+    second = again.runner.open_escalation("r")["escalation"]
+    assert second != first and intents.describe(track, "r").decision is None
+    view = intents.request_decision(track, "r", escalation=second, outcome="approve", actor="bob")
+    assert view.decision["escalation"] == second
+    _settle(again, until=lambda: intents.describe(track, "r").state is RunState.COMPLETED)
+    assert "decision_refused" not in _types(track, "r")
+    decided = [e.payload["escalation"] for e in track.replay("r") if e.event_type == "gate_decided"]
+    assert decided == [second]
+
+
+def test_a_numeric_variable_that_is_not_a_number_is_a_usage_error(monkeypatch, tmp_path, capsys):
+    from collab_hub_execution.controller import parse_args
+
+    monkeypatch.setenv("COLLAB_CONTROLLER_TRACK", str(tmp_path / "t.sqlite"))
+    monkeypatch.setenv("COLLAB_CONTROLLER_WORK_DIR", str(tmp_path / "runs"))
+    monkeypatch.setenv("COLLAB_CONTROLLER_PACKAGES", "/a")
+    for name in ("POLL_INTERVAL", "INTERACTION_TIMEOUT", "HEALTH_PORT", "WORKER_START_TIMEOUT", "WAIT"):
+        monkeypatch.setenv(f"COLLAB_CONTROLLER_{name}", "soon")
+        with pytest.raises(SystemExit) as stopped:
+            parse_args([])
+        assert stopped.value.code == 2
+        assert f"COLLAB_CONTROLLER_{name} is not a number: 'soon'" in capsys.readouterr().err
+        monkeypatch.delenv(f"COLLAB_CONTROLLER_{name}")
+    assert parse_args([]).health_port == 0
+
+
 # --- the reaper ----------------------------------------------------------------------------------
 
 

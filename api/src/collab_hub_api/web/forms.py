@@ -44,6 +44,7 @@ __all__ = [
     "csrf_ok",
     "form_field",
     "form_fields",
+    "media_type",
     "refused_form_page",
 ]
 
@@ -82,6 +83,21 @@ there is a second spelling that can drift.
 """
 
 
+def media_type(request: Request) -> str:
+    """The request's declared media type: ``Content-Type`` minus its parameters.
+
+    Split on the first ``;``, stripped, and lowercased, so
+    ``application/x-www-form-urlencoded; charset=UTF-8`` and the same type in
+    capitals both compare equal to :data:`FORM_CONTENT_TYPE` (media types are
+    case-insensitive), while a type that merely *begins* with it —
+    ``application/x-www-form-urlencoded-not-really`` — does not (#71). Spelled
+    once here for every management page, for :func:`~.authz.require_csrf`'s
+    form fallback, and for the invitation redemption endpoint's JSON gate.
+    """
+
+    return request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+
+
 class FormRefused(Exception):
     """The body was refused before it was read. Carries the status to answer.
 
@@ -112,10 +128,10 @@ async def form_fields(request: Request, *, max_bytes: int = MAX_FORM_BYTES) -> d
     declared size before that read starts, and the counted size during it.
     """
 
-    content_type = request.headers.get("content-type", "")
-    if not content_type.startswith(FORM_CONTENT_TYPE):
-        # Multipart in particular: its parsing cost is not bounded by the byte
-        # count alone, and nothing on these pages uploads anything.
+    if media_type(request) != FORM_CONTENT_TYPE:
+        # An exact compare, never a prefix match (#71). Multipart in
+        # particular: its parsing cost is not bounded by the byte count
+        # alone, and nothing on these pages uploads anything.
         raise FormRefused(UNSUPPORTED_MEDIA_TYPE)
     if declares_oversize(request, max_bytes=max_bytes):
         raise FormRefused(REQUEST_TOO_LARGE)

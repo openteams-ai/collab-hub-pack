@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import secrets
 import threading
 import time
@@ -123,7 +124,32 @@ def _token_body(response: httpx.Response, endpoint: str) -> dict:
     if not isinstance(token, str) or not token:
         raise RealmError(f"the realm's token endpoint {endpoint} answered without tokens "
                          f"({response.headers.get('content-type', 'no content type')})")
+    refresh = body.get("refresh_token")
+    if refresh is not None and (not isinstance(refresh, str) or not refresh):
+        raise RealmError(f"the realm's token endpoint {endpoint} answered with a refresh_token that is not one")
+    if body.get("expires_in") is not None and _seconds(body["expires_in"]) is None:
+        raise RealmError(f"the realm's token endpoint {endpoint} answered with an expires_in that is not a "
+                         "number of seconds")
     return body
+
+
+def _seconds(value: object) -> float | None:
+    """A token's lifetime in seconds, or ``None`` when it is not one.
+
+    RFC 6749 sends ``expires_in`` as a number; some realms send a string of
+    ASCII digits, which is accepted too, and nothing else is (no sign, no
+    decimal point, no other script's digits). A value too large to be a float
+    is refused rather than raised.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    if isinstance(value, str) and not (value.isascii() and value.isdigit()):
+        return None
+    try:
+        seconds = float(int(value) if isinstance(value, str) else value)
+    except (ValueError, OverflowError):
+        return None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
 def _tokens(body: dict) -> Tokens:
@@ -131,7 +157,7 @@ def _tokens(body: dict) -> Tokens:
     return Tokens(
         access_token=body["access_token"],
         refresh_token=body.get("refresh_token"),
-        expires_at=clock() + float(expires_in) if expires_in else None,
+        expires_at=clock() + _seconds(expires_in) if expires_in is not None else None,
     )
 
 

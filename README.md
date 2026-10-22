@@ -1,9 +1,9 @@
 # Collab Hub
 
 ![Status: Beta](https://img.shields.io/badge/status-beta-orange)
-[![Lint](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/lint.yaml/badge.svg)](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/lint.yaml)
-[![Test](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/test.yaml/badge.svg)](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/test.yaml)
-[![Dev Environment](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/dev-env.yaml/badge.svg)](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/dev-env.yaml)
+[![Lint](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/lint.yaml/badge.svg)](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/lint.yaml)
+[![Test](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/test.yaml/badge.svg)](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/test.yaml)
+[![Dev Environment](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/dev-env.yaml/badge.svg)](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/dev-env.yaml)
 
 > **Beta** — stable enough to deploy in your own environment with engineering
 > support. APIs and chart values may still change between releases. See the
@@ -42,12 +42,12 @@ The API is a FastAPI service exposing:
 
 ## Quickstart
 
-Install the versioned chart from the latest [release](../../releases/latest)
-(pinned to an immutable image):
+Install a versioned chart (pinned to an immutable image) from GHCR; the
+[releases](../../releases) list the versions and attach the same chart:
 
 ```sh
 helm install collab-hub-pack \
-  https://github.com/nebari-dev/collab-hub-pack/releases/download/v0.1.0/collab-hub-0.1.0.tgz \
+  oci://ghcr.io/openteams-ai/charts/collab-hub --version <version> \
   --namespace nebari-nexus --create-namespace \
   --values values-example.yaml
 ```
@@ -132,7 +132,7 @@ production build.
 
 ## Documentation
 
-Setup and reference docs — connector setup, Frames, operations, the
+Setup and reference docs — connector setup, [connector discovery](docs/connector-discovery.md), Frames, operations, the
 [Cog registry](docs/cog-registry.md), [feature flags](docs/feature-flags.md) — live in [`docs/`](docs/).
 
 The basis for Cog and Op execution — vocabulary, the Op–Cog seam, the
@@ -149,4 +149,4 @@ offers.
 See [CONTRIBUTING.md](CONTRIBUTING.md). Contributions are accepted under the
 [Apache-2.0 license](LICENSE). Report
 security issues privately via GitHub's
-[Report a vulnerability](https://github.com/nebari-dev/collab-hub-pack/security/advisories/new).
+[Report a vulnerability](https://github.com/openteams-ai/collab-hub-pack/security/advisories/new).

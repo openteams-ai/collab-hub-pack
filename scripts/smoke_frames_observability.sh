@@ -24,7 +24,7 @@ FRAME_ID="$("${PYTHON_BIN}" "${ROOT_DIR}/scripts/smoke_frames_http.py" \
     --check-active-state \
     --keep-frame | tail -n 1)"
 
-# /metrics is protected by the path-protection map (issue #60), so the scrape
+# /metrics is protected by the path-protection map, so the scrape
 # carries the same smoke credentials the REST calls above use.
 METRICS_COOKIE="$(PYTHONPATH="${SCRIPT_DIR}" "${PYTHON_BIN}" -c \
     'from smoke_frames_mcp import auth_headers; print(auth_headers()["Cookie"])')"

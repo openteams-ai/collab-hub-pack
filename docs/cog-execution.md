@@ -41,7 +41,7 @@ redirections.
 ## 1. Install the CLI from `main`
 
 ```sh
-pip install "git+https://github.com/nebari-dev/collab-hub-pack.git@main#subdirectory=cli"
+pip install "git+https://github.com/openteams-ai/collab-hub-pack.git@main#subdirectory=cli"
 collab-hub --help
 ```
 
@@ -50,8 +50,8 @@ command is `collab-hub`. Install it in a virtual environment, or as a tool of
 its own:
 
 ```sh
-uv tool install "git+https://github.com/nebari-dev/collab-hub-pack.git@main#subdirectory=cli"
-pipx install "git+https://github.com/nebari-dev/collab-hub-pack.git@main#subdirectory=cli"
+uv tool install "git+https://github.com/openteams-ai/collab-hub-pack.git@main#subdirectory=cli"
+pipx install "git+https://github.com/openteams-ai/collab-hub-pack.git@main#subdirectory=cli"
 ```
 
 To pick up later changes on `main`, install again with `--force-reinstall`
@@ -63,7 +63,7 @@ To install from a checkout instead, for a branch other than `main` or to
 change the CLI:
 
 ```sh
-git clone https://github.com/nebari-dev/collab-hub-pack.git
+git clone https://github.com/openteams-ai/collab-hub-pack.git
 cd collab-hub-pack
 pip install -e cli
 collab-hub --help

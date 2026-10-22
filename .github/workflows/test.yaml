@@ -4,6 +4,12 @@ name: Test
 # read-only checkout. uv provisions the Python and the `test` group: `test` on
 # the version api/.python-version pins (the one the image runs), and
 # `test-python-floor` on the oldest version requires-python allows.
+#
+# A PostgreSQL service backs the live suites, and a step asserts they ran:
+# without the database, `skipif` silently removes every test that touches real
+# SQL -- one organization under concurrent acceptance, a token that cannot be
+# redeemed twice, an audited mutation committing with its event row or not at
+# all -- while the job stays green.
 
 on:
   push:
@@ -12,6 +18,7 @@ on:
       - "api/**"
       - ".github/workflows/test.yaml"
   pull_request: {}   # runs on every PR so it can be a required status check
+  merge_group: {}    # and on each merge-queue group; a required check that never reports there blocks the queue
 
 jobs:
   test:
@@ -50,6 +57,27 @@ jobs:
         # --cov-fail-under enforces the global floor here (not in addopts) so a
         # scoped local run isn't failed for not exercising the whole package.
         run: uv run --group test pytest --cov-fail-under=85
+
+      - name: Confirm the live suites actually ran
+        working-directory: api
+        # The failure this catches is silent and total: rename the variable, or
+        # let the service drop out, and `skipif` quietly removes the live tests
+        # while the job stays green. A count assertion is the only thing that
+        # notices, because a skipped test looks exactly like a test that had
+        # nothing to say.
+        run: |
+          set -euo pipefail
+          live=$(uv run --group test pytest --no-cov -q --collect-only \
+            -k "live or differential" 2>/dev/null | tail -1)
+          echo "collected: ${live}"
+          count=$(uv run --group test pytest --no-cov -q -k "live or differential" 2>&1 \
+            | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')
+          echo "live tests passed: ${count}"
+          if [ "${count:-0}" -lt 100 ]; then
+            echo "expected the live suites to run (>=100 tests); the service or the" >&2
+            echo "environment variable is not reaching pytest." >&2
+            exit 1
+          fi
 
       - name: Patch coverage (changed lines)
         if: github.event_name == 'pull_request'

@@ -381,6 +381,16 @@ def _listed(name: str, separator: str) -> list[str] | None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """The controller's configuration: its options, each defaulting to its ``COLLAB_CONTROLLER_*`` variable."""
     env = os.environ.get
+    parser: argparse.ArgumentParser
+
+    def number(name: str, default: str, cast):
+        """A numeric option's default from its variable; one that is not a number is a usage error."""
+        value = env(name) or default
+        try:
+            return cast(value)
+        except ValueError:
+            parser.error(f"{name} is not a number: {value!r}")
+
     parser = argparse.ArgumentParser(
         description="The run controller: advances the runs submitted to a Track. Each option also reads the "
                     "COLLAB_CONTROLLER_ variable named after it (COLLAB_CONTROLLER_HEALTH_PORT for --health-port); "
@@ -402,21 +412,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--models", default=env("COLLAB_CONTROLLER_MODELS"), metavar="FILE",
                         help="the hub's models: block, in TOML: the models it offers, and which Cog talks to "
                              "which; each worker gets its Cog's model, and no other")
-    parser.add_argument("--poll-interval", type=float, default=float(env("COLLAB_CONTROLLER_POLL_INTERVAL", "0.25")))
+    parser.add_argument("--poll-interval", type=float, default=number("COLLAB_CONTROLLER_POLL_INTERVAL", "0.25", float))
     parser.add_argument("--interaction-timeout", type=float, metavar="SECONDS",
-                        default=float(env("COLLAB_CONTROLLER_INTERACTION_TIMEOUT", "60")),
+                        default=number("COLLAB_CONTROLLER_INTERACTION_TIMEOUT", "60", float),
                         help="how long one interaction with a worker may take; 0 for no limit, which a Cog "
                              "holding a session for as long as someone talks to it needs")
     parser.add_argument("--environment", default=env("COLLAB_CONTROLLER_ENVIRONMENT", "pixi"), choices=("pixi", "host"),
                         help="how a package's serve task is run: in its own pixi environment, or directly")
-    parser.add_argument("--health-port", type=int, default=int(env("COLLAB_CONTROLLER_HEALTH_PORT", "0")),
+    parser.add_argument("--health-port", type=int, default=number("COLLAB_CONTROLLER_HEALTH_PORT", "0", int),
                         help="serve /healthz and /readyz on this port; none when 0")
     parser.add_argument("--health-host", default=env("COLLAB_CONTROLLER_HEALTH_HOST", "127.0.0.1"))
     parser.add_argument("--worker-start-timeout", type=float, metavar="SECONDS",
-                        default=float(env("COLLAB_CONTROLLER_WORKER_START_TIMEOUT", "120")),
+                        default=number("COLLAB_CONTROLLER_WORKER_START_TIMEOUT", "120", float),
                         help="how long a worker may take to start and answer /healthz, which includes pixi building "
                              "a Cog's environment the first time it is launched")
-    parser.add_argument("--wait", type=float, default=float(env("COLLAB_CONTROLLER_WAIT", "0")), metavar="SECONDS",
+    parser.add_argument("--wait", type=float, default=number("COLLAB_CONTROLLER_WAIT", "0", float), metavar="SECONDS",
                         help="how long to wait at start for the Track's tables (the API's migrations create them) "
                              "and for this controller's id (held by the one a rollout replaces); 0 refuses at "
                              "once")

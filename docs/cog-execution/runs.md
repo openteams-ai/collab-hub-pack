@@ -158,7 +158,10 @@ under the same id refuses to start, and one that loses its hold stops.
 
 An id is what lets a restarted controller take its runs back, so it is the
 same across restarts and different between replicas: a StatefulSet's pod
-names, or `CONTROLLER_ID=` in `dev/`.
+names, or `CONTROLLER_ID=` in `dev/`. On Postgres the id is held as a
+session-level advisory lock, so `--track` must reach Postgres on a direct
+connection: through a transaction-pooling PgBouncer the lock would not outlive
+the transaction that took it, and two controllers could hold one id.
 
 ### Signals travel through the Track
 

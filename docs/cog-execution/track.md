@@ -63,7 +63,10 @@ client's decision on the Gate a run waits at, written with `append_if` only
 while the run waits on that escalation and holds no other decision. The
 controller that owns the run delivers it, and the runner records
 `gate_decided`; when the runner does not take it, the controller records
-`decision_refused` (`escalation`, `error`). Neither moves the run.
+`decision_refused` (`escalation`, `error`). Neither moves the run. A decision
+is pending only while the run waits on the escalation it names: one left
+undelivered when the run ends, or when a retry opens a new escalation, lapses
+with it, and is neither delivered nor refused.
 
 A Track written before controllers named themselves has `run_picked_up` with
 no `controller`: such a run belongs to the first controller to start

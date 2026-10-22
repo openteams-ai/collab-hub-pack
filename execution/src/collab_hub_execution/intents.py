@@ -431,17 +431,29 @@ class StaleDecision(ValueError):
 def pending_decision(events: Iterable[TrackEvent]) -> dict[str, Any] | None:
     """The decision asked for on the run's open escalation and not yet delivered; ``None`` when there is none.
 
-    A decision is delivered when its escalation is decided, refused, or ends the
-    run (a send back past the revision limit fails it).
+    A decision is pending only while the run still waits on the escalation it
+    names: it is delivered when that escalation is decided or refused, or ends
+    the run (a send back past the revision limit fails it), and it lapses when
+    the run ends or moves on without it, as when its controller restarts and
+    the run is retried under a new escalation.
     """
     pending = None
     for event in events:
         if event.event_type == DECISION_REQUESTED:
             pending = dict(event.payload)
-        elif event.event_type in ("gate_decided", DECISION_REFUSED, "failed") and pending is not None \
-                and event.payload.get("escalation") == pending.get("escalation"):
+        elif event.event_type in _CLOSES_DECISION:
+            # The escalation the decision answers is no longer the one the run waits on: it was
+            # decided or refused, the run ended with it (interrupted, say, while its controller was
+            # down), or a retry opened a new attempt. A decision left over from before is not
+            # pending against the new escalation.
             pending = None
     return pending
+
+
+_CLOSES_DECISION = frozenset({
+    "gate_decided", DECISION_REFUSED, "failed", "completed", "cancelled", "interrupted",
+    "retry_requested", "gate_escalated", "step_started",
+})
 
 
 def request_decision(track: TrackStore, run_id: str, *, escalation: str, outcome: str, actor: str,

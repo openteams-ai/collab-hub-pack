@@ -2,8 +2,8 @@ apiVersion: v2
 name: collab-hub
 type: application
 description: Helm chart for collab-hub-pack
-version: "0.0.0-dev"
-appVersion: "0.0.0-dev"
+version: "0.8.2"
+appVersion: "0.8.2"
 home: https://github.com/openteams-ai/collab-hub-pack
 sources:
   - https://github.com/openteams-ai/collab-hub-pack

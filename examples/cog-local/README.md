@@ -16,7 +16,7 @@ make env      # the CLI, the hub, Toad, pixi, and Hermes's environment
 make tools    # checks each one is there
 ```
 
-`make env` installs [pixi](https://pixi.sh) if it is missing (it gives each Cog its own environment), [Toad](https://github.com/batrachianai/toad) with `uv tool install`, and Hermes Agent into the Hermes Cog's environment, about 400 MB the first time. Open a new shell afterwards if pixi or Toad was new.
+`make env` installs [pixi](https://pixi.sh) if it is missing, or replaces one older than 0.82.1 (it gives each Cog its own environment), [Toad](https://github.com/batrachianai/toad) with `uv tool install`, and Hermes Agent into the Hermes Cog's environment, about 400 MB the first time. Open a new shell afterwards if pixi or Toad was new, or pixi was replaced.
 
 ## The quickest way: `make toad`
 

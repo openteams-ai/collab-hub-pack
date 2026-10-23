@@ -23,15 +23,24 @@ never reach cards, ``read_errors``, or logs. The store additionally refuses
 content ``jsonb`` cannot represent (:class:`CogCatalogDataError`), so one
 pathological card can be recorded as failed instead of poisoning writes.
 
-The write surface is exactly what the reconciliation indexer needs
-(:meth:`~CogCatalogStore.known`, :meth:`~CogCatalogStore.upsert`,
-:meth:`~CogCatalogStore.update_tags`, :meth:`~CogCatalogStore.mark_removed`);
-the read surface is what the catalog API (#85) builds on. Rows are never
-deleted: installs and runs may reference a digest long after its publisher
-removed it, so removal is ``removed_at = now()`` and the row stays readable.
+The write surface is exactly what the reconciliation indexer needs -- the
+four calls of :class:`SweepView` (``known``, ``upsert``, ``update_tags``,
+``mark_removed``) plus ``mark_removed_one`` for a webhook delete; the read
+surface is what the catalog API (#85) builds on. Rows are never deleted:
+installs and runs may reference a digest long after its publisher removed
+it, so removal is ``removed_at = now()`` and the row stays readable.
+
+**Sessions.** A sweep runs under :meth:`CogCatalogStore.sweep_lock`, which
+yields a :class:`SweepView` when the lock was taken. On Postgres that view is
+bound to the lock's own connection, so every sweep read and write rides the
+lock session and a sweeper that dies mid-write loses the write and the lock
+together (issue #128). The store's *own* methods never consult the lock:
+they check out a pooled connection of their own every time, so a webhook's
+targeted write or a direct call in a test lands concurrently with a sweep and
+cannot be pulled onto -- or die with -- its session (issue #148).
 
 Every method is synchronous psycopg over the shared pool, like every other
-store here. The indexer is async and bridges with ``asyncio.to_thread``.
+store here. The indexer is async and bridges with a worker thread.
 """
 
 from __future__ import annotations
@@ -74,14 +83,13 @@ COG_INDEX_LOCK_KEY = int.from_bytes(b"cogidx_1", "big")
 SWEEP_STATEMENT_TIMEOUT_SECONDS = 20.0
 """Server-side bound on every statement the sweep runs (lock included).
 
-The pool timeout bounds *checkout*; nothing else bounds execution, and a
-sweep's cancelled worker threads are drained before the lock is released --
-so a statement the server never finishes would otherwise stall shutdown for
-the whole drain deadline. Set transaction-locally on the sweep-path methods
-(the connection goes back to the pool unaltered) and session-set/reset on the
-lock connection (which runs in autocommit). Deliberately below the indexer's
-``DRAIN_DEADLINE_SECONDS`` so the server's abort fires first whenever the
-transport still works; a dead transport is what the drain deadline is for.
+The pool timeout bounds *checkout*; nothing else bounds execution. A
+cancelled sweep's release is queued behind the statement it abandoned, so
+this is what bounds how long a cancelled sweep can keep its lock while the
+transport still works (a dead transport is the process's to end: the session
+dies with it). Session-set on the lock connection (which runs in autocommit)
+and reset before it returns to the pool; transaction-local on the store's
+own sweep-path methods, so their connections go back unaltered.
 """
 
 
@@ -196,10 +204,16 @@ class CatalogFilter:
         return document or None
 
 
-class CogCatalogStore(ABC):
-    """The catalog relation, as the indexer writes it and the API reads it."""
+class SweepView(ABC):
+    """The catalog as one sweep sees it: the four sweep-path calls and nothing else.
 
-    # -- what the indexer needs ---------------------------------------------
+    What :meth:`CogCatalogStore.sweep_lock` hands the sweep that took the
+    lock. On Postgres the view is bound to the lock's own connection, so a
+    call on it rides the lock session (issue #128) -- a sweeper that dies
+    mid-write loses the write and the lock together, and nothing but the
+    holder of the view can ride that session (issue #148). The in-memory
+    store has no sessions and is its own view.
+    """
 
     @abstractmethod
     def known(self, source_id: str) -> list[KnownArtifact]:
@@ -208,15 +222,8 @@ class CogCatalogStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def upsert(self, artifact: CogArtifact, *, targeted: bool = False) -> None:
-        """Insert the row or replace it whole; a replaced row is present again (``removed_at`` cleared).
-
-        ``targeted`` marks the webhook receiver's lock-less ``reindex`` path:
-        a targeted upsert always checks out its own pooled connection instead
-        of riding a running sweep's lock session (issue #128), so it works
-        concurrently with a sweep. Sweep-path upserts leave it ``False``.
-        Backends without sessions ignore the flag.
-        """
+    def upsert(self, artifact: CogArtifact) -> None:
+        """Insert the row or replace it whole; a replaced row is present again (``removed_at`` cleared)."""
 
         raise NotImplementedError
 
@@ -252,6 +259,18 @@ class CogCatalogStore(ABC):
 
         raise NotImplementedError
 
+
+class CogCatalogStore(SweepView):
+    """The catalog relation, as the indexer writes it and the API reads it.
+
+    The :class:`SweepView` calls exist on the store itself too, each on a
+    pooled connection of its own, for the lock-less targeted entry points (a
+    webhook's ``reindex``) and for direct use; a sweep does not call them --
+    it calls the view its lock returned.
+    """
+
+    # -- what the indexer needs, beyond the sweep view ----------------------
+
     @abstractmethod
     def mark_removed_one(self, source_id: str, repository: str, digest: str) -> bool:
         """Mark one row removed (a webhook delete). Returns whether a present row was marked."""
@@ -259,17 +278,21 @@ class CogCatalogStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def sweep_lock(self) -> AbstractContextManager[bool]:
-        """Try to become the one sweeper; yields whether the lock was taken.
+    def sweep_lock(self) -> AbstractContextManager[SweepView | None]:
+        """Try to become the one sweeper; yields the sweep's view of the store, or ``None`` when locked out.
 
         Non-blocking. Held for the whole sweep and released on exit whether or
-        not the sweep succeeded. The Postgres store takes a **session-level**
-        advisory lock on one pooled connection held outside any transaction
-        (the sweep does network I/O for minutes; an open transaction that long
-        would pin vacuum); a dead sweeper's lock is released by the server
-        when its connection drops -- and its in-flight writes drop with it,
-        because the sweep-path reads and writes run on that same connection
-        while the lock is held (issue #128).
+        not the sweep succeeded. Single flight is first a property of the
+        deployment shape -- the chart runs one indexer replica, recreated,
+        never rolled (issue #148) -- and this lock is the belt under it: it
+        catches two indexer releases against one database. The Postgres
+        store takes a **session-level** advisory lock on one pooled
+        connection held outside any transaction (the sweep does network I/O
+        for minutes; an open transaction that long would pin vacuum) and
+        yields a view bound to that connection, so the sweep's reads and
+        writes ride the lock session and a dead sweeper's lock and in-flight
+        writes drop together when the server drops its connection (issue
+        #128).
         """
 
         raise NotImplementedError
@@ -479,7 +502,7 @@ class UnavailableCogCatalogStore(CogCatalogStore):
     def known(self, source_id: str) -> list[KnownArtifact]:
         raise self._refuse()
 
-    def upsert(self, artifact: CogArtifact, *, targeted: bool = False) -> None:
+    def upsert(self, artifact: CogArtifact) -> None:
         raise self._refuse()
 
     def update_tags(self, source_id, repository, digest, tags, *, pushed_at=None) -> bool:
@@ -491,7 +514,7 @@ class UnavailableCogCatalogStore(CogCatalogStore):
     def mark_removed_one(self, source_id, repository, digest) -> bool:
         raise self._refuse()
 
-    def sweep_lock(self) -> AbstractContextManager[bool]:
+    def sweep_lock(self) -> AbstractContextManager[SweepView | None]:
         raise self._refuse()
 
     def get(self, digest, *, source_id=None, repository=None) -> CogArtifact | None:
@@ -515,7 +538,8 @@ class InMemoryCogCatalogStore(CogCatalogStore):
     """Process-local catalog for tests and single-process development.
 
     Same semantics as the Postgres store, including containment filtering
-    (:func:`json_contains`) and a process-local, non-blocking sweep lock.
+    (:func:`json_contains`) and a process-local, non-blocking sweep lock
+    whose view is the store itself (no sessions to bind to).
     """
 
     _rows: dict[tuple[str, str, str], CogArtifact] = field(default_factory=dict)
@@ -539,9 +563,7 @@ class InMemoryCogCatalogStore(CogCatalogStore):
                 if row.source_id == source_id
             ]
 
-    def upsert(self, artifact: CogArtifact, *, targeted: bool = False) -> None:
-        # ``targeted`` is about connection routing and this store has no
-        # connections; accepted for signature parity with the Postgres store.
+    def upsert(self, artifact: CogArtifact) -> None:
         if artifact.status not in STATUSES:
             raise ValueError(f"unknown catalog status {artifact.status!r}")
         require_aware(artifact.pushed_at, "pushed_at")
@@ -603,7 +625,7 @@ class InMemoryCogCatalogStore(CogCatalogStore):
     def sweep_lock(self):
         acquired = self._sweep.acquire(blocking=False)
         try:
-            yield acquired
+            yield self if acquired else None
         finally:
             if acquired:
                 self._sweep.release()
@@ -716,27 +738,20 @@ class PostgresCogCatalogStore(CogCatalogStore):
 
     def __init__(self, db):
         self._db = db
-        # The connection the sweep lock is currently held on, published by
-        # _postgres_sweep_lock for exactly as long as the lock is acquired.
-        # Sweep-path reads and writes run on it (see _sweep_connection), so a
-        # crashed sweeper's writes die with its lock session (issue #128).
-        # Written by the lock context and read by the sweep's store calls; no
-        # guard, because the indexer sequences them: the acquire completes
-        # before any sweep call is submitted, and every sweep call -- handed-
-        # off workers included -- completes before the release runs.
-        self._lock_conn = None
 
     @contextmanager
     def _own_connection(self):
         """A pooled connection of this call's own, whose statements the server bounds.
 
         The pool timeout bounds checkout, and this transaction-local
-        ``statement_timeout`` bounds execution, so a cancelled sweep's drained
-        worker cannot sit on one statement past
+        ``statement_timeout`` bounds execution to
         :data:`SWEEP_STATEMENT_TIMEOUT_SECONDS` while the transport is alive.
         Transaction-local, so the connection returns to the pool unaltered.
-        The API reads (get/list) keep the ordinary checkout: they run on the
-        request path, which has its own semantics.
+        Every write method of the store itself takes one: the store never
+        consults whether a sweep holds the lock, so a targeted write or a
+        direct call lands on its own session however many sweeps are running
+        (issue #148). The API reads (get/list) keep the ordinary checkout:
+        they run on the request path, which has its own semantics.
         """
 
         with self._db.connection() as conn:
@@ -746,176 +761,28 @@ class PostgresCogCatalogStore(CogCatalogStore):
             )
             yield conn
 
-    @contextmanager
-    def _sweep_connection(self):
-        """The lock's own session while a sweep holds it, else an own pooled connection.
-
-        Sweep-path reads and writes ride the very connection the sweep lock is
-        held on (issue #128): the lock is session-level, so if the process dies
-        mid-sweep the server drops the writes' session *and* the lock together
-        -- no write of a dead sweep can land after another replica has acquired
-        the lock. Safe to share because the indexer runs its store calls one at
-        a time and every sweep-path statement is a single statement, fine under
-        the autocommit that session already uses; its ``statement_timeout`` is
-        session-set by the lock helper, so no transaction-local set is needed
-        (under autocommit it would be a no-op anyway). The lock-less targeted
-        entry points (the webhook's ``reindex``/``mark_removed_one``) never
-        take this path while a sweep runs: they use :meth:`_own_connection`,
-        so they work concurrently with a sweep and stay out of the lock
-        connection's lifecycle. Without a lock held (the store used directly,
-        as in tests) this is exactly :meth:`_own_connection`.
-        """
-
-        conn = self._lock_conn
-        if conn is not None:
-            yield conn
-            return
-        with self._own_connection() as conn:
-            yield conn
-
     def known(self, source_id: str) -> list[KnownArtifact]:
-        with self._sweep_connection() as conn:
-            rows = conn.execute(
-                "SELECT repository, digest, tags, status, removed_at IS NOT NULL AS removed"
-                " FROM collab_cog_artifacts WHERE source_id = %s",
-                (source_id,),
-            ).fetchall()
-        return [
-            KnownArtifact(
-                repository=row["repository"],
-                digest=row["digest"],
-                tags=tuple(row["tags"] or ()),
-                status=row["status"],
-                removed=row["removed"],
-            )
-            for row in rows
-        ]
+        with self._own_connection() as conn:
+            return _select_known(conn, source_id)
 
-    def upsert(self, artifact: CogArtifact, *, targeted: bool = False) -> None:
-        import psycopg
-        from psycopg.types.json import Jsonb
-
-        if artifact.status not in STATUSES:
-            raise ValueError(f"unknown catalog status {artifact.status!r}")
-        require_aware(artifact.pushed_at, "pushed_at")
-        require_aware(artifact.indexed_at, "indexed_at")
-        # `indexed_at` is the server's clock: rows compare across replicas.
-        # The card goes in as jsonb verbatim -- the reader's dict, structure
-        # preserved -- and `removed_at` is cleared because a row being
-        # (re)written was just seen in the registry. A targeted upsert (the
-        # webhook's lock-less reindex) takes its own connection rather than a
-        # running sweep's lock session -- see _sweep_connection (issue #128).
-        connection = self._own_connection if targeted else self._sweep_connection
-        try:
-            with connection() as conn:
-                conn.execute(
-                    """
-                INSERT INTO collab_cog_artifacts (
-                    source_id, host, repository, digest, tags, pushed_at, indexed_at, manifest_media_type,
-                    status, card, cog_id, name, version, kind, publisher, manifest_schema, read_errors, removed_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, now(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
-                ON CONFLICT (source_id, repository, digest) DO UPDATE SET
-                    host = EXCLUDED.host,
-                    tags = EXCLUDED.tags,
-                    pushed_at = EXCLUDED.pushed_at,
-                    indexed_at = now(),
-                    manifest_media_type = EXCLUDED.manifest_media_type,
-                    status = EXCLUDED.status,
-                    card = EXCLUDED.card,
-                    cog_id = EXCLUDED.cog_id,
-                    name = EXCLUDED.name,
-                    version = EXCLUDED.version,
-                    kind = EXCLUDED.kind,
-                    publisher = EXCLUDED.publisher,
-                    manifest_schema = EXCLUDED.manifest_schema,
-                    read_errors = EXCLUDED.read_errors,
-                    removed_at = NULL
-                    """,
-                    (
-                        artifact.source_id,
-                        artifact.host,
-                        artifact.repository,
-                        artifact.digest,
-                        sorted(set(artifact.tags)),
-                        artifact.pushed_at,
-                        artifact.manifest_media_type,
-                        artifact.status,
-                        Jsonb(artifact.card) if artifact.card is not None else None,
-                        artifact.cog_id,
-                        artifact.name,
-                        artifact.version,
-                        artifact.kind,
-                        artifact.publisher,
-                        artifact.manifest_schema,
-                        Jsonb(list(artifact.read_errors)),
-                    ),
-                )
-        except psycopg.DataError as exc:
-            # This row's *content* is what the server refused (NUL in a jsonb
-            # string is the known case) -- an availability problem it is not,
-            # and the two must fail differently: the indexer records a data
-            # error against the artifact and continues, while an outage
-            # aborts its sweep. Class name only; the server's message quotes
-            # the offending value.
-            raise CogCatalogDataError(type(exc).__name__) from exc
+    def upsert(self, artifact: CogArtifact) -> None:
+        _check_upsertable(artifact)  # before a connection is checked out
+        with self._own_connection() as conn:
+            _upsert_row(conn, artifact)
 
     def update_tags(self, source_id, repository, digest, tags, *, pushed_at=None) -> bool:
-        require_aware(pushed_at, "pushed_at")
-        with self._sweep_connection() as conn:
-            row = conn.execute(
-                """
-                UPDATE collab_cog_artifacts
-                SET tags = %s,
-                    pushed_at = COALESCE(%s, pushed_at),
-                    removed_at = NULL
-                WHERE source_id = %s AND repository = %s AND digest = %s
-                RETURNING digest
-                """,
-                (sorted(set(tags)), pushed_at, source_id, repository, digest),
-            ).fetchone()
-        return row is not None
+        require_aware(pushed_at, "pushed_at")  # before a connection is checked out
+        with self._own_connection() as conn:
+            return _update_tags_row(conn, source_id, repository, digest, tags, pushed_at=pushed_at)
 
     def mark_removed(self, source_id, present, *, excluding=()) -> int:
-        from psycopg.types.json import Jsonb
-
-        # The present set travels as one jsonb document ({repo: [digest, ...]})
-        # and is unnested server-side, so a source with thousands of artifacts
-        # is one statement rather than one per repository, and the whole
-        # decision is one snapshot. Repositories whose listing failed travel
-        # as an array and are excluded from the UPDATE outright.
-        document = {repo: sorted(set(digests)) for repo, digests in present.items()}
-        shielded = sorted(set(excluding))
-        with self._sweep_connection() as conn:
-            row = conn.execute(
-                """
-                WITH present AS (
-                    SELECT repo.key AS repository, digest.value #>> '{}' AS digest
-                    FROM jsonb_each(%s) AS repo,
-                         jsonb_array_elements(repo.value) AS digest
-                ),
-                marked AS (
-                    UPDATE collab_cog_artifacts a
-                    SET removed_at = now()
-                    WHERE a.source_id = %s
-                      AND a.removed_at IS NULL
-                      AND NOT (a.repository = ANY(%s))
-                      AND NOT EXISTS (
-                          SELECT 1 FROM present p
-                          WHERE p.repository = a.repository AND p.digest = a.digest
-                      )
-                    RETURNING 1
-                )
-                SELECT count(*) AS n FROM marked
-                """,
-                (Jsonb(document), source_id, shielded),
-            ).fetchone()
-        return int(row["n"]) if row else 0
+        with self._own_connection() as conn:
+            return _mark_removed_rows(conn, source_id, present, excluding=excluding)
 
     def mark_removed_one(self, source_id, repository, digest) -> bool:
-        # A targeted entry point (webhook delete), never the sweep's: it takes
-        # its own bounded connection so it works concurrently with a sweep
-        # instead of riding -- and dying with -- the lock session (issue #128).
+        # A targeted entry point (webhook delete), never the sweep's: its own
+        # bounded connection, so it works concurrently with a sweep instead
+        # of riding -- and dying with -- the lock session (issue #128).
         with self._own_connection() as conn:
             row = conn.execute(
                 """
@@ -927,8 +794,8 @@ class PostgresCogCatalogStore(CogCatalogStore):
             ).fetchone()
         return row is not None
 
-    def sweep_lock(self) -> AbstractContextManager[bool]:
-        return _postgres_sweep_lock(self._db, store=self)
+    def sweep_lock(self) -> AbstractContextManager[SweepView | None]:
+        return _postgres_sweep_lock(self._db)
 
     def get(self, digest, *, source_id=None, repository=None) -> CogArtifact | None:
         with self._db.connection() as conn:
@@ -1048,23 +915,196 @@ class PostgresCogCatalogStore(CogCatalogStore):
         return [_row_to_artifact(row) for row in rows]
 
 
+class _PostgresSweepView(SweepView):
+    """The sweep-path calls bound to the connection the sweep lock is held on.
+
+    Yielded by :func:`_postgres_sweep_lock` for exactly as long as the lock is
+    acquired; the only way onto that session (issue #148). Safe to share
+    with the lock because the indexer runs its store calls one at a time and
+    every sweep-path statement is a single statement, fine under the
+    autocommit the session uses; ``statement_timeout`` is session-set by the
+    lock helper, so no transaction-local set is needed (under autocommit it
+    would be a no-op anyway). Calls on a view whose lock has been released
+    are a bug: the connection has gone back to the pool.
+    """
+
+    def __init__(self, conn) -> None:
+        self._conn = conn
+
+    def known(self, source_id: str) -> list[KnownArtifact]:
+        return _select_known(self._conn, source_id)
+
+    def upsert(self, artifact: CogArtifact) -> None:
+        _upsert_row(self._conn, artifact)
+
+    def update_tags(self, source_id, repository, digest, tags, *, pushed_at=None) -> bool:
+        return _update_tags_row(self._conn, source_id, repository, digest, tags, pushed_at=pushed_at)
+
+    def mark_removed(self, source_id, present, *, excluding=()) -> int:
+        return _mark_removed_rows(self._conn, source_id, present, excluding=excluding)
+
+
+def _select_known(conn, source_id: str) -> list[KnownArtifact]:
+    rows = conn.execute(
+        "SELECT repository, digest, tags, status, removed_at IS NOT NULL AS removed"
+        " FROM collab_cog_artifacts WHERE source_id = %s",
+        (source_id,),
+    ).fetchall()
+    return [
+        KnownArtifact(
+            repository=row["repository"],
+            digest=row["digest"],
+            tags=tuple(row["tags"] or ()),
+            status=row["status"],
+            removed=row["removed"],
+        )
+        for row in rows
+    ]
+
+
+def _check_upsertable(artifact: CogArtifact) -> None:
+    if artifact.status not in STATUSES:
+        raise ValueError(f"unknown catalog status {artifact.status!r}")
+    require_aware(artifact.pushed_at, "pushed_at")
+    require_aware(artifact.indexed_at, "indexed_at")
+
+
+def _upsert_row(conn, artifact: CogArtifact) -> None:
+    import psycopg
+    from psycopg.types.json import Jsonb
+
+    _check_upsertable(artifact)
+    # `indexed_at` is the server's clock: rows compare across replicas. The
+    # card goes in as jsonb verbatim -- the reader's dict, structure
+    # preserved -- and `removed_at` is cleared because a row being
+    # (re)written was just seen in the registry.
+    try:
+        conn.execute(
+            """
+            INSERT INTO collab_cog_artifacts (
+                source_id, host, repository, digest, tags, pushed_at, indexed_at, manifest_media_type,
+                status, card, cog_id, name, version, kind, publisher, manifest_schema, read_errors, removed_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, now(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+            ON CONFLICT (source_id, repository, digest) DO UPDATE SET
+                host = EXCLUDED.host,
+                tags = EXCLUDED.tags,
+                pushed_at = EXCLUDED.pushed_at,
+                indexed_at = now(),
+                manifest_media_type = EXCLUDED.manifest_media_type,
+                status = EXCLUDED.status,
+                card = EXCLUDED.card,
+                cog_id = EXCLUDED.cog_id,
+                name = EXCLUDED.name,
+                version = EXCLUDED.version,
+                kind = EXCLUDED.kind,
+                publisher = EXCLUDED.publisher,
+                manifest_schema = EXCLUDED.manifest_schema,
+                read_errors = EXCLUDED.read_errors,
+                removed_at = NULL
+            """,
+            (
+                artifact.source_id,
+                artifact.host,
+                artifact.repository,
+                artifact.digest,
+                sorted(set(artifact.tags)),
+                artifact.pushed_at,
+                artifact.manifest_media_type,
+                artifact.status,
+                Jsonb(artifact.card) if artifact.card is not None else None,
+                artifact.cog_id,
+                artifact.name,
+                artifact.version,
+                artifact.kind,
+                artifact.publisher,
+                artifact.manifest_schema,
+                Jsonb(list(artifact.read_errors)),
+            ),
+        )
+    except psycopg.DataError as exc:
+        # This row's *content* is what the server refused (NUL in a jsonb
+        # string is the known case) -- an availability problem it is not, and
+        # the two must fail differently: the indexer records a data error
+        # against the artifact and continues, while an outage aborts its
+        # sweep. Class name only; the server's message quotes the offending
+        # value.
+        raise CogCatalogDataError(type(exc).__name__) from exc
+
+
+def _update_tags_row(conn, source_id, repository, digest, tags, *, pushed_at=None) -> bool:
+    require_aware(pushed_at, "pushed_at")
+    row = conn.execute(
+        """
+        UPDATE collab_cog_artifacts
+        SET tags = %s,
+            pushed_at = COALESCE(%s, pushed_at),
+            removed_at = NULL
+        WHERE source_id = %s AND repository = %s AND digest = %s
+        RETURNING digest
+        """,
+        (sorted(set(tags)), pushed_at, source_id, repository, digest),
+    ).fetchone()
+    return row is not None
+
+
+def _mark_removed_rows(conn, source_id, present, *, excluding=()) -> int:
+    from psycopg.types.json import Jsonb
+
+    # The present set travels as one jsonb document ({repo: [digest, ...]})
+    # and is unnested server-side, so a source with thousands of artifacts is
+    # one statement rather than one per repository, and the whole decision is
+    # one snapshot. Repositories whose listing failed travel as an array and
+    # are excluded from the UPDATE outright.
+    document = {repo: sorted(set(digests)) for repo, digests in present.items()}
+    shielded = sorted(set(excluding))
+    row = conn.execute(
+        """
+        WITH present AS (
+            SELECT repo.key AS repository, digest.value #>> '{}' AS digest
+            FROM jsonb_each(%s) AS repo,
+                 jsonb_array_elements(repo.value) AS digest
+        ),
+        marked AS (
+            UPDATE collab_cog_artifacts a
+            SET removed_at = now()
+            WHERE a.source_id = %s
+              AND a.removed_at IS NULL
+              AND NOT (a.repository = ANY(%s))
+              AND NOT EXISTS (
+                  SELECT 1 FROM present p
+                  WHERE p.repository = a.repository AND p.digest = a.digest
+              )
+            RETURNING 1
+        )
+        SELECT count(*) AS n FROM marked
+        """,
+        (Jsonb(document), source_id, shielded),
+    ).fetchone()
+    return int(row["n"]) if row else 0
+
+
 @contextmanager
-def _postgres_sweep_lock(db, store: PostgresCogCatalogStore | None = None):
+def _postgres_sweep_lock(db):
     """``pg_try_advisory_lock(COG_INDEX_LOCK_KEY)`` on one pooled connection, held for the block.
 
-    The lock is **session**-level, not transaction-level, and the connection
-    is switched to autocommit for the duration so that no transaction (and no
-    snapshot) stays open while the sweep talks to registries for minutes. The
-    connection is one pool slot the sweep occupies; autocommit is restored
-    before it goes back to the pool so the next borrower sees the transaction
-    semantics every other store relies on. If the process dies mid-sweep the
-    server releases the lock with the connection -- and with it every sweep
-    write still in flight, because while the lock is held the connection is
-    published to ``store`` for the sweep-path reads and writes to ride
-    (issue #128; see :meth:`PostgresCogCatalogStore._sweep_connection`).
-    Publication is withdrawn before the unlock, so nothing can pick the
-    connection up once the lock is gone; a losing acquisition never publishes
-    and never withdraws another session's publication.
+    Yields a :class:`_PostgresSweepView` bound to that connection when the
+    lock was taken, else ``None``. The lock is **session**-level, not
+    transaction-level, and the connection is switched to autocommit for the
+    duration so that no transaction (and no snapshot) stays open while the
+    sweep talks to registries for minutes. The connection is one pool slot
+    the sweep occupies; autocommit is restored before it goes back to the
+    pool so the next borrower sees the transaction semantics every other
+    store relies on. If the process dies mid-sweep the server releases the
+    lock with the connection -- and with it every sweep write still in
+    flight, because the view is the sweep's only way to the database and it
+    is bound to this connection (issue #128). The view is the block's alone:
+    a losing acquisition gets ``None`` and touches no session but its own.
+
+    A cancelled sweep's release is queued on the indexer's sweep thread
+    behind the view call it abandoned (issue #148), so the unlock runs after
+    that call has returned -- never while its statement is in flight, and
+    never before a call that had started but not yet reached the server.
     """
 
     with db.connection() as conn:
@@ -1083,21 +1123,17 @@ def _postgres_sweep_lock(db, store: PostgresCogCatalogStore | None = None):
         try:
             conn.autocommit = True
             # Session-set (autocommit makes a transaction-local set a no-op)
-            # and RESET below before the connection returns: the acquire and
-            # release statements are trivial, so this only matters when the
-            # server itself has stopped answering them promptly -- exactly
-            # when an unbounded statement would stall a cancelled sweep's
-            # drain for its whole deadline.
+            # and RESET below before the connection returns. It bounds every
+            # statement the view runs on this session, and a cancelled
+            # sweep's release is queued behind whichever of them is in
+            # flight -- so this is what bounds how long a cancelled sweep can
+            # keep its lock while the server still answers.
             conn.execute(f"SET statement_timeout = '{int(SWEEP_STATEMENT_TIMEOUT_SECONDS * 1000)}ms'")
             row = conn.execute("SELECT pg_try_advisory_lock(%s) AS locked", (COG_INDEX_LOCK_KEY,)).fetchone()
             acquired = bool(row and row["locked"])
-            if acquired and store is not None:
-                store._lock_conn = conn
             try:
-                yield acquired
+                yield _PostgresSweepView(conn) if acquired else None
             finally:
-                if store is not None and store._lock_conn is conn:
-                    store._lock_conn = None
                 if not conn.closed:
                     if acquired:
                         conn.execute("SELECT pg_advisory_unlock(%s)", (COG_INDEX_LOCK_KEY,))

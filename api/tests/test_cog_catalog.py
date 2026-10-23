@@ -380,12 +380,12 @@ def test_upsert_refuses_an_unknown_status(store):
 
 
 def test_sweep_lock_is_non_blocking_and_single_holder(store):
-    with store.sweep_lock() as held:
-        assert held is True
+    with store.sweep_lock() as view:
+        assert view is store, "the in-memory store has no sessions: it is its own sweep view"
         with store.sweep_lock() as second:
-            assert second is False
+            assert second is None
     with store.sweep_lock() as again:
-        assert again is True
+        assert again is store
 
 
 def test_unavailable_store_refuses_every_call():
@@ -779,9 +779,9 @@ def test_live_sweep_lock_is_single_flight_across_connections_and_restores_autoco
     other = PostgresCogCatalogStore(_database(max_size=2))
     try:
         with store.sweep_lock() as held:
-            assert held is True
+            assert held is not None
             with other.sweep_lock() as second:
-                assert second is False, "a second connection must not get the session lock"
+                assert second is None, "a second connection must not get the session lock"
             # The lock is session-level: a fresh transaction on another
             # connection of the *same* pool must also be refused, and the
             # holder's connection must not be inside a transaction.
@@ -795,7 +795,7 @@ def test_live_sweep_lock_is_single_flight_across_connections_and_restores_autoco
                 ).fetchone()
                 assert idle["n"] == 0, "the lock holder must not sit idle in a transaction"
         with other.sweep_lock() as after:
-            assert after is True
+            assert after is not None
     finally:
         other._db.close()
     # Autocommit restoration is asserted with connection identity in
@@ -854,8 +854,9 @@ def test_lock_connection_goes_back_clean_on_the_happy_path():
     from collab_hub_api.cogs.catalog import _postgres_sweep_lock
 
     conn = _FakeLockConnection()
-    with _postgres_sweep_lock(_FakeLockDb(conn)) as held:
-        assert held is True and conn.autocommit is True
+    with _postgres_sweep_lock(_FakeLockDb(conn)) as view:
+        assert view is not None and conn.autocommit is True
+        assert view._conn is conn, "the view is bound to the lock's connection"
     assert not conn.closed
     assert conn.autocommit is False, "autocommit restored"
     assert [s.split("(")[0].split(" =")[0] for s in conn.statements] == [
@@ -1052,6 +1053,15 @@ def test_upsert_translates_a_psycopg_data_error():
     assert "unsupported" not in str(info.value)
 
 
+def test_update_tags_refuses_a_naive_pushed_at_before_touching_the_database():
+    from datetime import datetime
+
+    store, conn = _fake_store()
+    with pytest.raises(ValueError, match="pushed_at"):
+        store.update_tags(SOURCE, "cogs/a", DIGEST_A, ["v1"], pushed_at=datetime(2026, 9, 1))
+    assert conn.calls == []
+
+
 def test_update_tags_reports_whether_a_row_existed():
     store, conn = _fake_store([[{"digest": DIGEST_A}]])
     assert store.update_tags(SOURCE, "cogs/a", DIGEST_A, ["b", "a", "b"], pushed_at=T0) is True
@@ -1088,7 +1098,8 @@ def test_mark_removed_one_only_marks_a_present_row():
 
 
 # ---------------------------------------------------------------------------
-# Sweep writes ride the lock's session (issue #128)
+# Sweep writes ride the lock's session (issue #128), through the view the
+# lock hands out and nothing else (issue #148)
 # ---------------------------------------------------------------------------
 
 
@@ -1129,63 +1140,69 @@ class _FakeMultiDb:
 
 
 def test_sweep_writes_ride_the_lock_holding_session():
-    # Issue #128: while a sweep holds the lock, every sweep-path read and
-    # write runs on the lock's own connection, so a dead sweeper's writes are
-    # dropped by the server together with its lock -- there is no second
-    # session for a write to outlive the lock on.
+    # Issue #128: every sweep-path read and write goes through the view the
+    # lock yields, and that view is bound to the lock's own connection -- so
+    # a dead sweeper's writes are dropped by the server together with its
+    # lock; there is no second session for a write to outlive the lock on.
     db = _FakeMultiDb()
     store = PostgresCogCatalogStore(db)
-    with store.sweep_lock() as held:
-        assert held is True
+    with store.sweep_lock() as view:
+        assert view is not None and view is not store, "the Postgres view is a connection-bound object, not the store"
         lock_conn = db.connections[0]
-        assert store._lock_conn is lock_conn
+        view.known(SOURCE)
+        view.upsert(artifact("a"))
+        view.update_tags(SOURCE, "cogs/a", DIGEST_A, ["v1"])
+        view.mark_removed(SOURCE, {"cogs/a": [DIGEST_A]})
+        assert len(db.connections) == 1, "no call on the view checked out a second connection"
+        assert not any(s.startswith("SELECT set_config") for s in lock_conn.statements), (
+            "the lock session's timeout is session-set; a transaction-local set would be an autocommit no-op"
+        )
+        assert any(s.startswith("SELECT repository") for s in lock_conn.statements)
+        assert any(s.startswith("INSERT INTO collab_cog_artifacts") for s in lock_conn.statements)
+        assert any(s.startswith("UPDATE collab_cog_artifacts") for s in lock_conn.statements)
+        assert any(s.startswith("WITH present AS") for s in lock_conn.statements)
+    assert lock_conn.statements[-2].startswith("SELECT pg_advisory_unlock"), "released on the same connection"
+
+
+def test_a_plain_store_call_during_a_sweep_uses_its_own_connection():
+    # Issue #148: the store has no lock-connection attribute to consult, so a
+    # call on the store itself while a sweep holds the lock -- the webhook's
+    # targeted writes, a read, anything a future caller forgets to route
+    # through the view -- checks out a pooled, statement-bounded connection of
+    # its own. Nothing but the view can ride (or die with) the lock session.
+    db = _FakeMultiDb()
+    store = PostgresCogCatalogStore(db)
+    assert not hasattr(store, "_lock_conn"), "the store publishes no lock state"
+    with store.sweep_lock() as view:
+        assert view is not None
+        lock_conn = db.connections[0]
         store.known(SOURCE)
         store.upsert(artifact("a"))
         store.update_tags(SOURCE, "cogs/a", DIGEST_A, ["v1"])
         store.mark_removed(SOURCE, {"cogs/a": [DIGEST_A]})
-        assert len(db.connections) == 1, "no sweep-path call checked out a second connection"
-        assert not any(s.startswith("SELECT set_config") for s in lock_conn.statements), (
-            "the lock session's timeout is session-set; a transaction-local set would be an autocommit no-op"
-        )
-        assert any(s.startswith("INSERT INTO collab_cog_artifacts") for s in lock_conn.statements)
-        assert any(s.startswith("UPDATE collab_cog_artifacts") for s in lock_conn.statements)
-    assert store._lock_conn is None, "publication is withdrawn with the lock"
-    store.known(SOURCE)
-    assert len(db.connections) == 2, "after release, sweep-path calls take their own connections again"
-    assert db.connections[1].statements[0].startswith("SELECT set_config('statement_timeout'")
-
-
-def test_targeted_writes_use_their_own_connections_while_a_sweep_holds_the_lock():
-    # The webhook's lock-less entry points must work concurrently with a sweep
-    # and stay out of the lock connection's lifecycle: each takes its own
-    # pooled, statement-bounded connection instead of the lock's session.
-    db = _FakeMultiDb()
-    store = PostgresCogCatalogStore(db)
-    with store.sweep_lock() as held:
-        assert held is True
-        store.upsert(artifact("a"), targeted=True)
         store.mark_removed_one(SOURCE, "cogs/cog-a", DIGEST_A)
-        assert len(db.connections) == 3, "each targeted write checked out its own connection"
+        assert len(db.connections) == 6, "each plain store call checked out its own connection"
         for conn in db.connections[1:]:
-            assert conn.statements[0].startswith("SELECT set_config('statement_timeout'")
-        assert not any(s.startswith(("INSERT", "UPDATE")) for s in db.connections[0].statements), (
-            "nothing targeted ran on the lock's session"
+            assert conn.statements[0].startswith("SELECT set_config('statement_timeout'"), "own, bounded"
+            assert not any("advisory" in s for s in conn.statements), "and never touches the lock"
+        assert not any(s.startswith(("SELECT repository", "INSERT", "UPDATE", "WITH")) for s in lock_conn.statements), (
+            "nothing a plain store call did ran on the lock's session"
         )
 
 
-def test_a_losing_sweep_lock_neither_publishes_nor_clears_the_winners_session():
+def test_a_losing_sweep_lock_gets_no_view_and_leaves_the_winner_alone():
     db = _FakeMultiDb(lock_answers=[True, False])
     store = PostgresCogCatalogStore(db)
-    with store.sweep_lock() as held:
-        assert held is True
+    with store.sweep_lock() as view:
+        assert view is not None
         winner = db.connections[0]
         with store.sweep_lock() as second:
-            assert second is False
-            assert store._lock_conn is winner, "a loser must not publish its own connection"
-        assert store._lock_conn is winner, "a loser's exit must not withdraw the winner's publication"
-        store.known(SOURCE)
+            assert second is None, "a loser gets no view: there is no session it may write on"
+        assert not winner.closed and not any("unlock" in s for s in winner.statements), (
+            "a loser's exit must not release the winner's lock"
+        )
+        view.known(SOURCE)
         assert len(db.connections) == 2 and winner.statements[-1].startswith("SELECT repository")
-    assert store._lock_conn is None
 
 
 def test_get_prefers_present_rows_and_scopes_by_source_and_repository():
@@ -1286,7 +1303,7 @@ def test_live_lock_connection_is_discarded_when_the_backend_dies_mid_sweep(live_
     try:
         with pytest.raises(psycopg.OperationalError):
             with store.sweep_lock() as held:
-                assert held is True
+                assert held is not None
                 with database.connection() as conn:
                     row = conn.execute(
                         "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND classid = %s AND objid = %s",
@@ -1299,7 +1316,7 @@ def test_live_lock_connection_is_discarded_when_the_backend_dies_mid_sweep(live_
             assert conn.autocommit is False
             assert conn.execute("SHOW statement_timeout").fetchone()["statement_timeout"] == "0"
         with store.sweep_lock() as held:
-            assert held is True, "the lock died with the terminated session"
+            assert held is not None, "the lock died with the terminated session"
     finally:
         single.close()
 
@@ -1320,7 +1337,7 @@ def test_live_lock_connection_returns_with_autocommit_restored(live_store):
     store = PostgresCogCatalogStore(single)
     try:
         with store.sweep_lock() as held:
-            assert held is True
+            assert held is not None
             with database.connection() as conn:
                 row = conn.execute(
                     "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND classid = %s AND objid = %s",
@@ -1407,9 +1424,9 @@ def test_live_concurrent_sweepers_exactly_one_wins(live_store):
     def attempt(store: PostgresCogCatalogStore) -> bool:
         start.wait()
         with store.sweep_lock() as held:
-            if held:
+            if held is not None:
                 release.wait(timeout=10)
-            return held
+            return held is not None
 
     try:
         with ThreadPoolExecutor(max_workers=replicas) as pool:
@@ -1436,23 +1453,21 @@ def test_live_sweep_writes_share_the_lock_sessions_backend(live_store):
     """
 
     store, database = live_store
-    with store.sweep_lock() as held:
-        assert held is True
+    with store.sweep_lock() as view:
+        assert view is not None
         with database.connection() as conn:
             row = conn.execute(
                 "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND classid = %s AND objid = %s",
                 (COG_INDEX_LOCK_KEY >> 32, COG_INDEX_LOCK_KEY & 0xFFFFFFFF),
             ).fetchone()
         holder_pid = row["pid"]
-        with store._sweep_connection() as conn:
-            assert conn.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"] == holder_pid
+        assert view._conn.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"] == holder_pid
         with store._own_connection() as conn:
             assert conn.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"] != holder_pid
         # A write on the lock session commits statement by statement
         # (autocommit) and is visible to other sessions mid-sweep.
-        store.upsert(artifact("a"))
+        view.upsert(artifact("a"))
         assert store.get(digest("a")) is not None, "get() reads on an ordinary pooled connection"
-    assert store._lock_conn is None
 
 
 @live_postgres
@@ -1470,8 +1485,8 @@ def test_live_sweep_write_cannot_apply_once_the_lock_session_is_dead(live_store)
     other = PostgresCogCatalogStore(_database(max_size=2))
     try:
         with pytest.raises(psycopg.Error):
-            with other.sweep_lock() as held:
-                assert held is True
+            with other.sweep_lock() as view:
+                assert view is not None
                 with database.connection() as conn:
                     row = conn.execute(
                         "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND classid = %s AND objid = %s",
@@ -1483,12 +1498,12 @@ def test_live_sweep_write_cannot_apply_once_the_lock_session_is_dead(live_store)
                 deadline = time.monotonic() + 10
                 acquired = False
                 while not acquired:
-                    with store.sweep_lock() as acquired:
-                        pass
+                    with store.sweep_lock() as taken:
+                        acquired = taken is not None
                     assert acquired or time.monotonic() < deadline, "the freed lock was never acquirable"
                 # ...while the old sweeper's write rides the dead session and
                 # dies with it instead of landing under the new holder's lock.
-                other.upsert(artifact("a"))
+                view.upsert(artifact("a"))
         assert store.get(digest("a")) is None, "the fenced write did not land"
     finally:
         other._db.close()

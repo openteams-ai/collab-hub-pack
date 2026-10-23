@@ -719,14 +719,29 @@ cogs:
     # -- Key in that ConfigMap holding the PEM bundle.
     key: ca.crt
   index:
-    # -- Whether the indexer sweeps the configured sources. Off leaves the
-    # Cog read API up and static (it serves what the index already holds);
-    # on with zero sources fails the render and the API's startup.
+    # -- Whether the configured sources are swept. On, the chart renders the
+    # dedicated indexer workload below (the one process that sweeps) and the
+    # API replicas keep serving the read API without sweeping; off renders
+    # no indexer and leaves the Cog read API up and static (it serves what
+    # the index already holds). On with zero sources fails the render and
+    # the indexer's startup.
     enabled: false
     # -- Seconds between sweeps (10..86400).
     intervalSeconds: 300
-    # -- Whether a sweep runs when the API starts, before the first interval.
+    # -- Whether a sweep runs when the indexer starts, before the first interval.
     runOnStartup: true
+  indexer:
+    # The Cog indexer workload, rendered when `index.enabled`: the API image
+    # and settings as one extra Deployment with cogs.index.enabled=true, a
+    # Recreate strategy (a rollout never runs two sweepers), no Service and
+    # no ingress. Single flight is a property of this shape; the sweep's
+    # advisory lock in the database is only a belt under it. The replica
+    # count is fixed at 1 in the template; pause sweeping with
+    # `index.enabled: false`.
+    # -- Resources for the indexer container. Empty means the API's
+    # `api.deployment.resources`; a sweep of a large registry may want more
+    # memory than a request-serving replica.
+    resources: {}
 
 # Feature flags for work in progress that is on main but not yet exposed. Every
 # flag is off until it is listed here and set to true; each entry becomes

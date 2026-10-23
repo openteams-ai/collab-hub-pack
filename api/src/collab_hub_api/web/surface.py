@@ -82,11 +82,10 @@ down rather than leaving for the next reader to re-derive. The protection map
 must leave these prefixes public (see
 :func:`enforce_web_surface_preconditions`), so while ``/admin`` and ``/org``
 carry no routes, a request to one of them matches nothing in this app and
-falls through to the MCP catch-all mounted at ``/`` (issue #86). That is fine,
-and specifically it is not an authentication hole: that mount runs its own
-``McpAuthMiddleware``, which authenticates the request on the API axis before
-the sub-application sees it. Map-public means "the *web* surface's own session
-flow decides this path", never "unauthenticated".
+answers the router's own 404 once the session guard, which authenticates by
+path before routing, has let it through. That is fine, and specifically it is
+not an authentication hole: a 404 serves nothing. Map-public means "the *web*
+surface's own session flow decides this path", never "unauthenticated".
 """
 
 ALLOWED_WEB_MOUNTS: frozenset[str] = frozenset()

@@ -96,10 +96,18 @@ def first_lines(text: str, n: int = 3) -> str:
 
 
 def rendered_cogs(manifests: str) -> dict[str, Any]:
-    """The ``cogs`` settings the rendered Deployment hands the API, in the API's shape."""
+    """The ``cogs`` settings the rendered release hands the sweeping process, in the API's shape.
+
+    With ``cogs.index.enabled`` the chart renders a dedicated indexer
+    Deployment and that is the process the index settings reach (issue
+    #148); the API Deployment then carries ``enabled=false`` and no tuning.
+    So the indexer's environment is read when it is rendered, the API's
+    otherwise -- the source list is the same on both.
+    """
 
     docs = [d for d in yaml.safe_load_all(manifests) if d]
-    deployment = next(d for d in docs if d.get("kind") == "Deployment")
+    deployments = {d["metadata"]["labels"]["app.kubernetes.io/component"]: d for d in docs if d.get("kind") == "Deployment"}
+    deployment = deployments.get("indexer") or deployments["api"]
     env: dict[str, str | None] = {}
     for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]:
         env[entry["name"]] = entry.get("value")

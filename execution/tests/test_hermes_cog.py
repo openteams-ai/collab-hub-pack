@@ -109,6 +109,58 @@ def test_with_claude_hermes_uses_its_anthropic_provider_and_gets_only_that_key(t
     _until(controller, lambda: intents.describe(track, "r").state is RunState.CANCELLED, "not cancelled")
 
 
+def test_a_delivered_ca_bundle_reaches_hermes(tmp_path):
+    track = InMemoryTrackStore()
+    controller = _controller(tmp_path, track, {**MODEL, "SSL_CERT_FILE": "/delivered/ca.pem",
+                                               "REQUESTS_CA_BUNDLE": "/delivered/ca.pem"})
+    intents.submit(track, OpDefinition("r", (OpStep("chat", "hermes", "session"),)), by=BY)
+    seen = json.loads(_answer(controller, track, "r", "env"))
+    assert seen["ssl_cert_file"] == "/delivered/ca.pem" and seen["requests_ca_bundle"] == "/delivered/ca.pem"
+    intents.request_cancel(track, "r", actor="alice")
+    _until(controller, lambda: intents.describe(track, "r").state is RunState.CANCELLED, "not cancelled")
+
+
+def _serve_module():
+    """The Hermes Cog's worker module, imported from the package: its environment assembly is tested in-process."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("hermes_serve", HERMES / "serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_hermes_gets_its_environments_ca_bundle_only_inside_pixi_and_never_over_a_delivered_one(tmp_path, monkeypatch):
+    serve = _serve_module()
+    bundle = tmp_path / "cacert.pem"
+    bundle.write_text("")
+    monkeypatch.setattr(serve, "CA_BUNDLE", bundle)
+    for name in ("PIXI_ENVIRONMENT_NAME", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE"):
+        monkeypatch.delenv(name, raising=False)
+    # The `host` environment: whatever interpreter runs the worker, whose bundle is not the package's.
+    assert not {"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"} & serve.hermes_environment().keys()
+    # The package's pixi environment: its conda bundle, current by the lock, for httpx and requests alike.
+    monkeypatch.setenv("PIXI_ENVIRONMENT_NAME", "default")
+    env = serve.hermes_environment()
+    assert env["SSL_CERT_FILE"] == str(bundle) and env["REQUESTS_CA_BUNDLE"] == str(bundle)
+    # Delivered bundles win, and a delivered directory alone disables the defaults too: Hermes resolves
+    # SSL_CERT_FILE or REQUESTS_CA_BUNDLE itself and otherwise lets httpx read SSL_CERT_FILE, then SSL_CERT_DIR,
+    # so a default file beside the delivered directory would take precedence over it.
+    monkeypatch.setenv("SSL_CERT_DIR", "/delivered/ca")
+    env = serve.hermes_environment()
+    assert env["SSL_CERT_DIR"] == "/delivered/ca"
+    assert not {"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"} & env.keys()
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/delivered/ca.pem")
+    env = serve.hermes_environment()
+    assert "SSL_CERT_FILE" not in env
+    assert env["SSL_CERT_DIR"] == "/delivered/ca" and env["REQUESTS_CA_BUNDLE"] == "/delivered/ca.pem"
+    # An environment without the bundle sets nothing either.
+    monkeypatch.delenv("SSL_CERT_DIR")
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE")
+    bundle.unlink()
+    assert not {"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"} & serve.hermes_environment().keys()
+
+
 @pytest.mark.parametrize(("environment", "why"), [
     ({"COLLAB_MODEL_PROVIDER": "anthropic"}, "needs COLLAB_MODEL_API_KEY"),
     ({"COLLAB_MODEL_PROVIDER": "gemini", "COLLAB_MODEL_BASE_URL": "http://x/v1"}, "unknown COLLAB_MODEL_PROVIDER"),

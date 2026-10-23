@@ -1,7 +1,9 @@
-FROM python:3.14-slim-trixie AS python
-FROM ghcr.io/astral-sh/uv:0.12.7 AS uv
-FROM node:24-bookworm-slim AS node
-FROM ghcr.io/prefix-dev/pixi:0.79.0-bookworm-slim AS pixi
+FROM python:3.14.9-slim-trixie AS python
+FROM ghcr.io/astral-sh/uv:0.13.4 AS uv
+FROM node:24.22.1-bookworm-slim AS node
+# At least 0.82.1: the first pixi whose bundled roots exclude the compromised eMudhra chain, which
+# cogs/hermes/pixi.toml requires (requires-pixi).
+FROM ghcr.io/prefix-dev/pixi:0.83.0-bookworm-slim AS pixi
 
 # The admin panel is a built bundle, so it is built here rather than committed.
 # `npm ci --ignore-scripts` installs exactly what package-lock.json pins and

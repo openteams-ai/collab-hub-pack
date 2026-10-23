@@ -19,6 +19,7 @@ why the registry stays swappable — are documented in
 [#84]: https://github.com/openteams-ai/collab-hub-pack/issues/84
 [#85]: https://github.com/openteams-ai/collab-hub-pack/issues/85
 [#86]: https://github.com/openteams-ai/collab-hub-pack/issues/86
+[#148]: https://github.com/openteams-ai/collab-hub-pack/issues/148
 
 Two rules shape everything below:
 
@@ -140,22 +141,40 @@ cogs:
     enabled: false      # sweep the sources on a schedule
     intervalSeconds: 300
     runOnStartup: true
+  indexer:
+    resources: {}       # empty = api.deployment.resources
 ```
 
-`enabled` is the switch the indexer (#84) will honor: off, no sweep is
-scheduled, so the read API (#85) serves whatever the index already holds.
+`enabled` decides whether the chart renders the **indexer workload**
+([#148]): a Deployment of its own, `<release>-indexer`, running the API
+image with the API's settings and `cogs.index.enabled=true` — one replica, a
+`Recreate` strategy (a rollout never runs two sweepers side by side), no
+Service, no ingress, and an `emptyDir` in place of the API's frames-storage
+claim. That is the one process that sweeps (#84). The API replicas always
+receive `cogs.index.enabled=false`, whatever the values say, and go on
+serving the read API (#85); a rolling update of the API therefore never
+starts a sweep. `enabled` gates the sweep loop and nothing else: every
+process with sources and the catalog database builds the indexer, so the
+API replicas hold its lock-less targeted entry points, which the webhook
+receiver (#86) will call. Single flight is a property of this shape; the
+sweep's advisory lock in the database is only a belt under it (see
+[frames-operations.md](frames-operations.md#the-cog-catalog-collab_cog_artifacts)).
+The replica count is fixed at `1` in the template and is not a value. Pause
+sweeping with `enabled: false`.
+
 Sources may be configured while the indexer is off — and they are still
 rendered and validated: the source JSON, the Secret-backed env vars and the
 CA mount are emitted whenever `registry.sources` is non-empty, regardless of
 `enabled`, and the API still resolves every named Secret at startup. Only
-`intervalSeconds` and `runOnStartup` are suppressed when `enabled` is false.
-`enabled: true` with zero sources is refused at render and at startup — an
-indexer with nothing to index is a misconfiguration, not an idle worker. The
-interval is bounded to 10 s..24 h because a sweep lists every repository of
-every source.
+the indexer Deployment, with `intervalSeconds` and `runOnStartup`, is
+suppressed when `enabled` is false. `enabled: true` with zero sources is
+refused at render and at startup — an indexer with nothing to index is a
+misconfiguration, not an idle worker. The interval is bounded to 10 s..24 h
+because a sweep lists every repository of every source.
 
 With no sources and the indexer off, the chart renders only the `enabled`
-flag, so a deployment without Cogs carries no other `cogs` environment.
+flag (`false`) on the API, so a deployment without Cogs carries no other
+`cogs` environment.
 
 ## Read API
 

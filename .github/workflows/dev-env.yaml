@@ -57,6 +57,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
+          uv-file: .github/uv.toml
           enable-cache: true
           cache-dependency-glob: api/uv.lock
 
@@ -232,9 +233,14 @@ jobs:
       # package's own pixi environment by the local executor. A host killed with SIGKILL runs no
       # teardown, and still leaves no worker behind: the launcher that holds the worker sees its
       # pipe to the host close, and kills the worker's process group (ADR-0002 D12).
+      - name: Pixi version
+        id: pixi
+        run: echo "version=$(cat .github/pixi-version)" >> "$GITHUB_OUTPUT"
+
       - name: Install pixi
         uses: prefix-dev/setup-pixi@v0.10.2
         with:
+          pixi-version: ${{ steps.pixi.outputs.version }}
           run-install: false
 
       - name: make op LOCATION=local runs a fake Cog as a process, and a killed host leaves no worker
@@ -283,6 +289,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
+          uv-file: .github/uv.toml
           enable-cache: true
           cache-dependency-glob: api/uv.lock
 

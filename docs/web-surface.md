@@ -205,11 +205,11 @@ elsewhere" shape as `web_platform_role_source_missing`.
   `web.surface.on_admin_panel()` decides which paths get it.
   They are applied by middleware keyed on the path rather than by each handler,
   so responses no handler of this surface produced — redirects, a 405, an
-  unmatched `/web/*` path answered by the mounted MCP catch-all ([#86]), and an
+  unmatched `/web/*` path answered by the router's own 404, and an
   exception escaping a page (which `ServerErrorMiddleware` would otherwise
   answer above this middleware, bare) — carry them too.
 
-[#86]: https://github.com/openteams-ai/collab-hub-pack/issues/86
+[#67]: https://github.com/openteams-ai/collab-hub-pack/issues/67
 [#83]: https://github.com/openteams-ai/collab-hub-pack/issues/83
 
 ## The per-path protection map
@@ -297,10 +297,11 @@ deliberate: requiring a deployment to open `/org` before anything serves
 `/org` would be asking operators to widen a map for paths that do not exist.
 (The chart choosing to ship `/admin` early is a separate decision, made on
 merge-ordering grounds above — the check does not demand it.)
-While a prefix is empty, a request to it matches nothing here and falls
-through to the MCP catch-all mounted at `/` ([#86]). That is not a hole — that
-mount runs its own `McpAuthMiddleware` and authenticates on the API axis
-before the sub-application sees the request. Map-public means "the web
+While a prefix is empty, a request to it matches nothing here and, once the
+session guard (which authenticates by path, before routing) has let it
+through, answers the router's own 404. That is not a hole — a 404 serves
+nothing. (Until [#67] the MCP app was mounted at `/` and answered such paths
+instead; it is now registered at `/mcp` only.) Map-public means "the web
 surface's own session flow decides this path", never "unauthenticated".
 
 Pages built on the surface register their own paths the same way: `/admin/*`

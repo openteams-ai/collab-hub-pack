@@ -120,7 +120,7 @@ def rendered_cogs(manifests: str) -> dict[str, Any]:
     Deployment and that is the process the index settings reach (issue
     #148); the API Deployment then carries ``enabled=false`` and no tuning.
     So the indexer's environment is read when it is rendered, the API's
-    otherwise -- the source list is the same on both.
+    otherwise -- the source list and the serve settings are the same on both.
     """
 
     docs = [d for d in yaml.safe_load_all(manifests) if d]

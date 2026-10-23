@@ -1167,3 +1167,37 @@ accepted:
         - {id: mirror, kind: static, url: https://mirror.example.com, repositories: [cogs/alpha]}
       serve: {enabled: true, public_url: 'https://hub.example.com'}
       publish: {allowed_roles: [owner, operator], allowed_users: [8f2c1d7e-user-id], max_pending_repositories: 1000}
+
+  # The indexer Deployment's environment is the one compared (it is the
+  # sweeping process): with serving on it must say so, or its sweeps follow
+  # redirects outside the serving policy (docs/cog-registry.md).
+  - name: serving with the indexer on reaches the indexer too
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+        serve: {enabled: true, publicUrl: 'https://hub.example.com'}
+        index: {enabled: true}
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+      serve: {enabled: true, public_url: 'https://hub.example.com'}
+      index: {enabled: true}
+
+  # And a publish source reaches the indexer (it enumerates and settles what
+  # was published through the Hub), which Config refuses without serving on.
+  # Who may publish stays on the API replicas, so it is left out here.
+  - name: a publish source with the indexer on starts the indexer
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, publish: true}
+        serve: {enabled: true, publicUrl: 'https://hub.example.com'}
+        index: {enabled: true}
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, publish: true}
+      serve: {enabled: true, public_url: 'https://hub.example.com'}
+      index: {enabled: true}

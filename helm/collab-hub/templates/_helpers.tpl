@@ -679,10 +679,11 @@ include with nindent.
   value: {{ .Values.cogs.index.runOnStartup | quote }}
 {{- end }}
 {{- /* Pulls through the Hub (issue #179). Nothing renders unless it is on,
-so a deployment that does not serve pulls carries no trace of it; and only on
-the API replicas, which are the ones /v2 routes to -- the indexer serves no
-requests. */}}
-{{- if and .Values.cogs.serve.enabled (not $indexer) }}
+so a deployment that does not serve pulls carries no trace of it. On the
+indexer too, though /v2 never routes there: serving is a property of the
+deployment, and a sweep reads it -- with serving on, the indexer's registry
+clients are held to the same redirect policy as the ones that serve pulls. */}}
+{{- if .Values.cogs.serve.enabled }}
 - name: COLLAB_HUB_API__COGS__SERVE__ENABLED
   value: "true"
 - name: COLLAB_HUB_API__COGS__SERVE__PUBLIC_URL
@@ -697,8 +698,9 @@ requests. */}}
   value: {{ .Values.cogs.serve.maxBlobSeconds | int64 | quote }}
 {{- end }}
 {{- /* Who may publish through the Hub (issue #180). Rendered only when
-someone is named: the default, nobody, needs no variable. API replicas only,
-like serving: pushes are requests, and the indexer takes none. */}}
+someone is named: the default, nobody, needs no variable. API replicas only:
+pushes are requests, and the indexer takes none. (Unlike serving, which the
+indexer carries too: a publish source needs it, and a sweep reads it.) */}}
 {{- if not $indexer }}
 {{- with .Values.cogs.publish.allowedRoles }}
 - name: COLLAB_HUB_API__COGS__PUBLISH__ALLOWED_ROLES

@@ -262,12 +262,14 @@ def case_publish_with_indexer(r: Rendered) -> None:
 
 
 def case_serve_with_indexer(r: Rendered) -> None:
-    # Serving and sweeping both on: /v2 routes to the API replicas only, so
-    # they carry the serve settings and the indexer, which takes no requests,
-    # carries none of them.
+    # Serving and sweeping both on: /v2 routes to the API replicas only, but
+    # the indexer carries the same serve settings. A sweep is held to the
+    # serving redirect policy when the deployment serves pulls
+    # (docs/cog-registry.md), and a process without cogs.serve.enabled
+    # follows redirects unchecked.
     assert serve_env(r)["ENABLED"] == "true", serve_env(r)
-    assert r.indexer is not None
-    assert not [n for n in r.indexer.env if n.startswith(SERVE_PREFIX)], sorted(r.indexer.env)
+    r.indexer_is_the_one_sweeper(interval="300", run_on_startup="true")  # env equal to the API's, serve included
+    assert r.indexer.value(SERVE_PREFIX + "ENABLED") == "true"
 
 
 def case_serve_off(r: Rendered) -> None:

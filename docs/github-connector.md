@@ -108,6 +108,26 @@ caller can triage by person or label and chain `items/{number}/read` to read
 that issue/PR. The item read excludes archived items (`archived_policy:
 "excluded"` on `counts`).
 
+By default the read returns one small page (`max_items: 50`) rather than the
+whole board. Check `truncated` to tell a partial listing from a complete one,
+and page with the response's `next_cursor`: send it back as `after` (with the
+same owner, number and `query`) to get the next items without re-downloading
+the first page. `next_cursor` is `null` once the listing is exhausted. Raise
+`max_items` (up to 500) only when the full listing is needed in one call.
+An optional `query` narrows the items with GitHub board filter DSL
+(e.g., `status:"In Progress"`, `assignee:octocat`). The response echoes the
+applied filter as `query` and reports `matched_count` (how many items it
+selected) next to `total_count`, which is always the board's full size (the same
+scalar as `project.items_count` and `counts.total`). `truncated` compares the
+returned items against `matched_count`. A filter that matches nothing -- GitHub
+silently returns zero for an unrecognised filter rather than an error -- shows
+as `matched_count: 0` against a non-zero `total_count`, so it can't be mistaken
+for an empty board, and the response carries a `note` saying so and listing
+the board's real Status column names (GitHub matches `status:` values ignoring
+case but not emoji, so `status:"In Progress"` finds nothing on a board whose
+column is `In progress 🏗`). `counts` below stays board-wide regardless of
+either and is never what the filter matched.
+
 The read also returns a `counts` object with the board's aggregate breakdowns: an
 exact non-archived `total` (scope recorded in `archived_policy`), per-status-column
 counts (`by_status` plus `no_status` for the blank column, which reconcile to the
@@ -116,9 +136,14 @@ total), `by_type` (issue / pull_request / draft / redacted), and `by_state`
 so each bucket is a `totalCount`-only count query under one `archivedStates`
 policy — which makes the counts accurate **even when the returned item list is
 truncated**. If those count queries are unavailable the breakdowns fall back to
-sampling the returned items and set `authoritative: false` with
-`counted_items`/`total_items`, so a partial sample is never mistaken for a full
-count. `by_status` + `no_status` and `by_type` are each independent partitions of
+sampling: an unfiltered read from the top of the board is continued with a
+counting-only query (up to the 500 ceiling); a filtered or `after` read, whose
+items can't stand in for the board, is re-sampled from the top. When the count
+queries failed because GitHub is rate limiting or failing (429, 5xx, timeout) no
+further requests are made and only the items in hand are bucketed. Sampled
+counts set `authoritative: false` with `counted_items` (zero when nothing could
+be sampled, with `total` still the board size), so a partial sample is never
+mistaken for a full count. `by_status` + `no_status` and `by_type` are each independent partitions of
 `total` and should not be cross-added; `by_state` covers only linked issues/PRs
 so it need not sum to `total`.
 

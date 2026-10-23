@@ -745,6 +745,106 @@ COLLAB_SCHEMA_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             "CREATE INDEX IF NOT EXISTS collab_track_payloads_run ON collab_track_payloads (run_id)",
         ),
     ),
+    (
+        13,
+        (
+            # Pulls through the Hub (issue #179): the Hub serves the OCI read
+            # API itself, and a client authenticates to that surface with a
+            # *registry credential* exchanged from its Hub session, never with
+            # the Hub token. Two tables, both holding only SHA-256 digests of
+            # the secrets they stand for: the credential a client stores, and
+            # the short-lived repository-scoped tokens minted from it.
+            #
+            # `user_id` is the ACL principal the credential was exchanged by.
+            # `scope` is what the credential may ask for ('pull' today; the
+            # publish half adds its own value, which is why there is no CHECK
+            # to migrate later). `session_id` is the `sid` of the Hub session
+            # it was exchanged from, when the token carried one. A credential
+            # is revoked by deleting its row, and its tokens go with it
+            # (ON DELETE CASCADE), which is what makes revocation immediate.
+            """
+            CREATE TABLE IF NOT EXISTS collab_cog_registry_credentials (
+                id          text PRIMARY KEY,
+                user_id     text NOT NULL,
+                secret_hash text NOT NULL,
+                scope       text NOT NULL,
+                session_id  text,
+                created_at  timestamptz NOT NULL DEFAULT now(),
+                expires_at  timestamptz NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS collab_cog_registry_credentials_user_idx
+            ON collab_cog_registry_credentials (user_id, created_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS collab_cog_registry_credentials_expiry_idx
+            ON collab_cog_registry_credentials (expires_at)
+            """,
+            # `credential_id` is NULL for a token minted straight from a Hub
+            # access token, which has no credential to be revoked with; such a
+            # token is bounded by its own `expires_at` and by the per-user
+            # revoke, which is why `user_id` is here as well.
+            """
+            CREATE TABLE IF NOT EXISTS collab_cog_registry_tokens (
+                token_hash    text PRIMARY KEY,
+                user_id       text NOT NULL,
+                credential_id text REFERENCES collab_cog_registry_credentials (id) ON DELETE CASCADE,
+                repositories  text[] NOT NULL DEFAULT '{}',
+                actions       text NOT NULL DEFAULT 'pull',
+                created_at    timestamptz NOT NULL DEFAULT now(),
+                expires_at    timestamptz NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS collab_cog_registry_tokens_user_idx
+            ON collab_cog_registry_tokens (user_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS collab_cog_registry_tokens_credential_idx
+            ON collab_cog_registry_tokens (credential_id)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS collab_cog_registry_tokens_expiry_idx
+            ON collab_cog_registry_tokens (expires_at)
+            """,
+            # Every request on the Hub's /v2/ surface is an exact lookup that
+            # starts from the repository path, across sources: a digest, a
+            # stored tag, or a blob. The primary key leads with source_id, so
+            # those reads need their own index; partial, like the other
+            # present-row index, so the removed tail costs it nothing.
+            """
+            CREATE INDEX IF NOT EXISTS collab_cog_artifacts_repository_idx
+            ON collab_cog_artifacts (repository, digest) WHERE removed_at IS NULL
+            """,
+            # Which blobs a manifest references: its config and layer
+            # descriptors, written once its bytes have been verified against
+            # its digest (what a digest references never changes, so rows are
+            # inserted and never updated; the catalog store deletes them when
+            # their artifact is marked removed). A blob request names a repository and a
+            # blob digest and nothing else; this is what ties it to a manifest
+            # without reading registries at request time. The rows grant
+            # nothing alone: a blob is pullable only while a row here joins
+            # to a present, indexed artifact, so removing a version takes its
+            # blobs with it. No foreign key to the artifacts table, because
+            # that table's rows are replaced whole on reindex.
+            """
+            CREATE TABLE IF NOT EXISTS collab_cog_manifest_blobs (
+                source_id       text NOT NULL,
+                repository      text NOT NULL,
+                manifest_digest text NOT NULL,
+                blob_digest     text NOT NULL,
+                size            bigint NOT NULL CHECK (size >= 0),
+                media_type      text NOT NULL DEFAULT '',
+                PRIMARY KEY (source_id, repository, manifest_digest, blob_digest)
+            )
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS collab_cog_manifest_blobs_blob_idx
+            ON collab_cog_manifest_blobs (repository, blob_digest)
+            """,
+        ),
+    ),
 )
 
 

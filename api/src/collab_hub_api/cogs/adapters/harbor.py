@@ -87,6 +87,7 @@ class HarborRegistrySource:
         *,
         oci_client_factory: OCIClientFactory,
         http_transport: httpx.AsyncBaseTransport | None = None,
+        restrict_redirects: bool = False,
     ) -> None:
         self.id = config.id
         self.host = registry_host(config.url)
@@ -117,6 +118,8 @@ class HarborRegistrySource:
             ca_bundle_path=config.ca_bundle_path or None,
             timeout_seconds=config.request_timeout_seconds,
             transport=http_transport,
+            redirect_hosts=tuple(config.blob_redirect_hosts),
+            restrict_redirects=restrict_redirects,
         )
         self._closed = False
 

@@ -47,6 +47,9 @@ from collab_hub_api.frames.collab_schema import (  # noqa: E402
 
 COLLAB_TABLES = (
     "collab_connector_state",
+    "collab_cog_registry_tokens",
+    "collab_cog_registry_credentials",
+    "collab_cog_manifest_blobs",
     "collab_cog_artifacts",
     "collab_service_access_grants",
     "collab_provisioned_accounts",
@@ -341,7 +344,60 @@ def test_migration_creates_the_track_schema():
         statement for version, statements in COLLAB_SCHEMA_MIGRATIONS if version < 12 for statement in statements
     )
     assert "collab_track" not in earlier
-    assert LATEST_COLLAB_SCHEMA_VERSION == 12
+
+
+def test_migration_creates_the_cog_registry_credential_schema():
+    server = FakeServer()
+
+    run_collab_schema_migrations(FakeDatabase(server))
+
+    (credentials,) = server.ddl_for("collab_cog_registry_credentials")
+    # Only a digest of the secret is stored, and the row is the credential:
+    # deleting it is revocation.
+    assert "id text PRIMARY KEY" in credentials
+    assert "secret_hash text NOT NULL" in credentials and "secret text" not in credentials
+    assert "user_id text NOT NULL" in credentials and "session_id text," in credentials
+    assert "expires_at timestamptz NOT NULL" in credentials
+    # No CHECK on scope: the publish half adds a value without a migration.
+    assert "scope text NOT NULL," in credentials and "CHECK" not in credentials
+    (tokens,) = server.ddl_for("collab_cog_registry_tokens")
+    assert "token_hash text PRIMARY KEY" in tokens
+    # Revoking a credential takes its tokens with it, at once.
+    assert "credential_id text REFERENCES collab_cog_registry_credentials (id) ON DELETE CASCADE" in tokens
+    assert "repositories text[] NOT NULL DEFAULT '{}'" in tokens
+    assert "expires_at timestamptz NOT NULL" in tokens
+
+    (blobs,) = server.ddl_for("collab_cog_manifest_blobs")
+    # One row per (manifest location, blob): inserted once, never updated, and
+    # deliberately not tied to the artifact row by a foreign key.
+    assert "PRIMARY KEY (source_id, repository, manifest_digest, blob_digest)" in blobs
+    assert "size bigint NOT NULL CHECK (size >= 0)" in blobs and "REFERENCES" not in blobs
+
+    created = " ".join(server.statements)
+    for index in (
+        "CREATE INDEX IF NOT EXISTS collab_cog_registry_credentials_user_idx"
+        " ON collab_cog_registry_credentials (user_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS collab_cog_registry_credentials_expiry_idx"
+        " ON collab_cog_registry_credentials (expires_at)",
+        "CREATE INDEX IF NOT EXISTS collab_cog_registry_tokens_user_idx ON collab_cog_registry_tokens (user_id)",
+        "CREATE INDEX IF NOT EXISTS collab_cog_registry_tokens_credential_idx"
+        " ON collab_cog_registry_tokens (credential_id)",
+        "CREATE INDEX IF NOT EXISTS collab_cog_registry_tokens_expiry_idx ON collab_cog_registry_tokens (expires_at)",
+        # What a pull through the Hub starts from: an exact (repository, digest) among the present rows.
+        "CREATE INDEX IF NOT EXISTS collab_cog_artifacts_repository_idx"
+        " ON collab_cog_artifacts (repository, digest) WHERE removed_at IS NULL",
+        # ... and, for a blob, the manifests of that repository that reference it.
+        "CREATE INDEX IF NOT EXISTS collab_cog_manifest_blobs_blob_idx"
+        " ON collab_cog_manifest_blobs (repository, blob_digest)",
+    ):
+        assert index in created, index
+    # Appended as version 13; nothing earlier mentions the tables.
+    earlier = " ".join(
+        statement for version, statements in COLLAB_SCHEMA_MIGRATIONS if version < 13 for statement in statements
+    )
+    assert "collab_cog_registry" not in earlier and "collab_cog_artifacts_repository_idx" not in earlier
+    assert "collab_cog_manifest_blobs" not in earlier
+    assert LATEST_COLLAB_SCHEMA_VERSION == 13
 
 
 def test_rerunning_the_migration_applies_nothing():
@@ -386,6 +442,7 @@ PINNED_CHECKSUMS = {
     10: "cad0ef7844a3458f9aa0528f4edf5d418300cdd40b22a65fd4ecd1e6e0a29e6b",
     11: "4269a363932920da48b77be6cb6b02fe7ab933b4ab0478f0a722bb08244adbb1",
     12: "b4d98654df15a5f52a16273f77cae95daa5d597aa1f7ff1e78b830ce9cc2cabd",
+    13: "0fdba92b5b894fa4358da5ebada5a33ce23a527e181dce411268df650a71935d",
 }
 
 
@@ -704,9 +761,11 @@ def test_live_migration_creates_tables_constraints_and_index(clean_database):
             "collab_cog_artifacts_kind_idx",
             "collab_cog_artifacts_present_idx",
             "collab_cog_artifacts_card_idx",
+            "collab_cog_artifacts_repository_idx",
         } <= set(catalog_indexes)
         assert "USING gin (card jsonb_path_ops)" in catalog_indexes["collab_cog_artifacts_card_idx"]
         assert catalog_indexes["collab_cog_artifacts_present_idx"].endswith("WHERE (removed_at IS NULL)")
+        assert catalog_indexes["collab_cog_artifacts_repository_idx"].endswith("WHERE (removed_at IS NULL)")
 
         assert applied_collab_schema_version(clean_database) == LATEST_COLLAB_SCHEMA_VERSION
 

@@ -68,6 +68,18 @@ PLACEHOLDER = re.compile(r"%[sdvq%]")
 
 INDEX_DEFAULTS = {"enabled": False, "interval_seconds": 300, "run_on_startup": True}
 
+# cogs.serve (issue #179). The chart renders the block only when serving is
+# on, so everything but `enabled` falls back to the API's own defaults here.
+SERVE_PREFIX = "COLLAB_HUB_API__COGS__SERVE__"
+SERVE_DEFAULTS = {
+    "enabled": False,
+    "public_url": "",
+    "credential_ttl_seconds": 900,
+    "token_ttl_seconds": 300,
+    "max_blob_bytes": 1024 * 1024 * 1024,
+    "max_blob_seconds": 900,
+}
+
 
 class Reporter:
     def __init__(self) -> None:
@@ -102,7 +114,7 @@ def rendered_cogs(manifests: str) -> dict[str, Any]:
     Deployment and that is the process the index settings reach (issue
     #148); the API Deployment then carries ``enabled=false`` and no tuning.
     So the indexer's environment is read when it is rendered, the API's
-    otherwise -- the source list is the same on both.
+    otherwise -- the source list and the serve settings are the same on both.
     """
 
     docs = [d for d in yaml.safe_load_all(manifests) if d]
@@ -118,14 +130,27 @@ def rendered_cogs(manifests: str) -> dict[str, Any]:
     if RUN_ON_STARTUP_VAR in env:
         index["run_on_startup"] = env[RUN_ON_STARTUP_VAR] == "true"
     sources = json.loads(env[SOURCES_VAR] or "[]") if SOURCES_VAR in env else []
-    return {"registry_sources": sources, "index": index}
+    serve = dict(SERVE_DEFAULTS)
+    for key, default in SERVE_DEFAULTS.items():
+        name = SERVE_PREFIX + key.upper()
+        if name not in env:
+            continue
+        value = env[name] or ""
+        if isinstance(default, bool):
+            serve[key] = value == "true"
+        elif isinstance(default, int):
+            serve[key] = int(value or 0)
+        else:
+            serve[key] = value
+    return {"registry_sources": sources, "index": index, "serve": serve}
 
 
 def normalized_settings(settings: dict[str, Any]) -> dict[str, Any]:
     """The fixture's ``settings`` with the API's defaults filled, for comparison with a render."""
 
     index = {**INDEX_DEFAULTS, **settings.get("index", {})}
-    return {"registry_sources": settings.get("registry_sources", []), "index": index}
+    serve = {**SERVE_DEFAULTS, **settings.get("serve", {})}
+    return {"registry_sources": settings.get("registry_sources", []), "index": index, "serve": serve}
 
 
 def check_case(

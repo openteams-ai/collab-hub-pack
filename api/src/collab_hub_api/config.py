@@ -3,6 +3,7 @@ import re
 import sys
 from collections.abc import Mapping
 from typing import Any, Literal, Self
+from urllib.parse import urlsplit
 
 import l2sl
 from pydantic import (
@@ -25,7 +26,15 @@ from .cogs.catalog import (
     UnavailableCogCatalogStore,
 )
 from .cogs.indexer import CogIndexer
-from .cogs.registry import CogRegistrySourceConfig, build_registry_sources
+from .cogs.oci import install_log_redaction
+from .cogs.registry import CogRegistrySourceConfig, build_registry_sources, registry_host
+from .cogs.registry_credentials import (
+    InMemoryRegistryCredentialStore,
+    PostgresRegistryCredentialStore,
+    RegistryCredentialStore,
+    UnavailableRegistryCredentialStore,
+)
+from .cogs.serving import CogRegistryFront, CogRegistryServing
 from .frames.account_provisioning import DisabledServiceAccessGranter, ServiceAccessGranter
 from .frames.active_state import (
     ActiveFrameStore,
@@ -852,6 +861,107 @@ class CogCatalogConfig(BaseModel):
     backend: Literal["", "memory"] = ""
 
 
+COGS_SERVE_CREDENTIAL_TTL_MIN_SECONDS = 60
+COGS_SERVE_CREDENTIAL_TTL_MAX_SECONDS = 24 * 3600
+COGS_SERVE_TOKEN_TTL_MIN_SECONDS = 30
+COGS_SERVE_TOKEN_TTL_MAX_SECONDS = 3600
+COGS_SERVE_MAX_BLOB_SECONDS_MIN = 10
+COGS_SERVE_MAX_BLOB_SECONDS_MAX = 6 * 3600
+
+
+def origin_authority(url: str) -> str:
+    """``host[:port]`` of an http(s) origin, lowercase, without the scheme's default port."""
+
+    parts = urlsplit(url)
+    authority = registry_host(url).lower()
+    default = {"https": 443, "http": 80}.get(parts.scheme)
+    if parts.port is not None and parts.port == default:
+        authority = authority.rsplit(":", 1)[0]
+    return authority
+
+
+class CogServeConfig(BaseModel):
+    """Whether, and how, the Hub serves Cog pulls itself (issue #179).
+
+    Off by default, and off changes nothing: no ``/v2/`` route is mounted,
+    no registry credential can be exchanged, and catalog references keep
+    naming the backing registry, which is what clients released before this
+    existed pull from. On, the Hub answers the OCI read API on its own host,
+    in front of ``registry_sources``, and every catalog ``reference`` names
+    the Hub instead.
+
+    ``public_url`` is the origin clients reach the Hub at -- **the same origin
+    that serves the Hub API**, not a registry hostname of its own: a client
+    accepts a registry credential only when its ``registry`` is exactly the
+    authority it sent the exchange to, and treats anything else as a Hub that
+    does not serve installs. The chart derives it from the API's host and
+    refuses a value naming another one; the API refuses one that disagrees
+    with ``web.public_base_url`` when that is set. It is
+    configuration rather than read from the request's ``Host`` header because
+    it is handed to clients three ways -- the ``registry`` of an exchanged
+    credential, the bearer ``realm`` of the challenge, and the host of every
+    reference -- and a value a caller could influence has no business in any
+    of them. It must be a bare origin: registry clients address ``/v2/`` at
+    the root of a host, never under a path.
+
+    The two lifetimes bound what a leaked secret is worth; the two blob
+    limits bound what one pull can make the Hub carry.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    public_url: str = ""
+    credential_ttl_seconds: int = Field(
+        default=900, ge=COGS_SERVE_CREDENTIAL_TTL_MIN_SECONDS, le=COGS_SERVE_CREDENTIAL_TTL_MAX_SECONDS
+    )
+    token_ttl_seconds: int = Field(
+        default=300, ge=COGS_SERVE_TOKEN_TTL_MIN_SECONDS, le=COGS_SERVE_TOKEN_TTL_MAX_SECONDS
+    )
+    max_blob_bytes: int = Field(default=1024 * 1024 * 1024, ge=1)
+    max_blob_seconds: int = Field(
+        default=900, ge=COGS_SERVE_MAX_BLOB_SECONDS_MIN, le=COGS_SERVE_MAX_BLOB_SECONDS_MAX
+    )
+
+    @field_validator("public_url", mode="before")
+    @classmethod
+    def _strip(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("public_url")
+    @classmethod
+    def _check_public_url(cls, value: str) -> str:
+        if not value:
+            return value
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError("cogs.serve.public_url must be an http(s) origin with a host")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("cogs.serve.public_url must not embed a username or password")
+        try:
+            parts.port  # noqa: B018 - raises for a non-numeric or out-of-range port
+        except ValueError:
+            raise ValueError("cogs.serve.public_url has an invalid port") from None
+        if parts.path or parts.query or parts.fragment or "?" in value or "#" in value:
+            raise ValueError(
+                "cogs.serve.public_url must be a bare origin (scheme://host[:port]) with no path, query or "
+                "fragment, and no trailing slash: registry clients address /v2/ at the root of a host"
+            )
+        return value
+
+    @property
+    def host(self) -> str:
+        """The authority of ``public_url``: what clients call the Hub registry.
+
+        ``host[:port]`` with the scheme's default port left out, so it is
+        byte-for-byte the authority of the Hub API origin a client already
+        talks to -- clients accept an exchanged credential only when its
+        ``registry`` is exactly that.
+        """
+
+        return origin_authority(self.public_url)
+
+
 COGS_SOURCE_SECRET_ENV_FIELDS: tuple[tuple[str, str, bool], ...] = (
     ("username_env", "username", False),
     ("password_env", "password", True),
@@ -984,6 +1094,7 @@ class CogsConfig(BaseModel):
     registry_sources: list[CogRegistrySourceConfig] = Field(default_factory=list)
     index: CogIndexConfig = Field(default_factory=CogIndexConfig)
     catalog: CogCatalogConfig = Field(default_factory=CogCatalogConfig)
+    serve: CogServeConfig = Field(default_factory=CogServeConfig)
 
     @field_validator("registry_sources", mode="before")
     @classmethod
@@ -1008,6 +1119,16 @@ class CogsConfig(BaseModel):
                 "cogs.index.enabled is true but cogs.registry_sources is empty: an indexer with nothing "
                 "to index is a misconfiguration, not an idle worker. Add a source or set enabled=false "
                 "(the read API stays up either way)."
+            )
+        if self.serve.enabled and not self.registry_sources:
+            raise ValueError(
+                "cogs.serve.enabled is true but cogs.registry_sources is empty: a registry endpoint with "
+                "no source behind it can serve nothing. Add a source or set enabled=false."
+            )
+        if self.serve.enabled and not self.serve.public_url:
+            raise ValueError(
+                "cogs.serve.enabled is true but cogs.serve.public_url is empty: the Hub hands clients its "
+                "own registry address, and does not guess it from a request's Host header."
             )
         return self
 
@@ -1381,12 +1502,83 @@ def build_cog_indexing(config: BaseConfig, store: CogCatalogStore) -> CogIndexin
             f"(configured: {pool.max_size}): the indexer's sweep occupies one pooled "
             "connection for the whole sweep while everything else needs another."
         )
-    sources = build_registry_sources(list(cogs.registry_sources))
+    # With serving off the indexer follows registry redirects exactly as it
+    # always has. With serving on it is held to the redirect policy the
+    # serving clients are: a source the Hub could not serve a pull from
+    # should not index as healthy.
+    sources = build_registry_sources(list(cogs.registry_sources), restrict_redirects=cogs.serve.enabled)
     return CogIndexing(
         CogIndexer(store, sources),
         sweeps=index.enabled,
         interval_seconds=float(index.interval_seconds),
         run_on_startup=index.run_on_startup,
+    )
+
+
+def build_cog_registry_credential_store(config: BaseConfig, pools: PostgresPools) -> RegistryCredentialStore:
+    """Where registry credentials and pull tokens live (issue #179).
+
+    Follows the catalog it authorizes pulls of: in memory when the catalog is
+    (``cogs.catalog.backend=memory``, development only), else the shared
+    ``frames.postgres`` (tables from ``collab_`` migration 13), else a store
+    that refuses.
+    """
+
+    if config.cogs.catalog.backend == "memory":
+        return InMemoryRegistryCredentialStore()
+    url = config.frames.postgres.url
+    if url:
+        return PostgresRegistryCredentialStore(pools.database(url))
+    return UnavailableRegistryCredentialStore()
+
+
+def build_cog_registry_serving(
+    config: BaseConfig, store: CogCatalogStore, pools: PostgresPools
+) -> CogRegistryServing | None:
+    """The Hub's own registry surface when ``cogs.serve.enabled``, else ``None`` (issue #179).
+
+    Builds its **own** registry sources rather than borrowing the indexer's:
+    serving needs a source's OCI client on every API replica, whether or not
+    that process sweeps (the indexer may be a separate workload, or off), so
+    the two are constructed and closed independently. ``CogsConfig`` has
+    already refused serving with no sources or no public URL.
+    """
+
+    cogs = config.cogs
+    if not cogs.serve.enabled:
+        return None
+    if isinstance(store, UnavailableCogCatalogStore):
+        raise RuntimeError(
+            "cogs.serve.enabled requires the Cog catalog store: set the shared "
+            "COLLAB_HUB_API__FRAMES__POSTGRES__URL (frames.postgres.url), or disable serving."
+        )
+    serve = cogs.serve
+    public_url = serve.public_url
+    web_url = config.web.public_base_url
+    if web_url and origin_authority(web_url) != serve.host:
+        # The one other place this deployment states its own external origin.
+        # Two answers means one is wrong, and a registry host that is not the
+        # API's host is one every client refuses.
+        raise RuntimeError(
+            "cogs.serve.public_url and web.public_base_url name different hosts: the Hub serves /v2/ on the "
+            "same origin as its API, and clients accept a registry credential only for that origin."
+        )
+    # Serving follows registry redirects on clients' behalf: keep signed
+    # storage URLs out of the HTTP libraries' own logs. Process-wide, and
+    # only here -- with serving off (indexing on or not) logging is untouched.
+    install_log_redaction()
+    return CogRegistryServing(
+        front=CogRegistryFront(
+            store,
+            build_registry_sources(list(cogs.registry_sources), restrict_redirects=True),
+            max_blob_bytes=serve.max_blob_bytes,
+        ),
+        credentials=build_cog_registry_credential_store(config, pools),
+        host=serve.host,
+        token_url=f"{public_url}/v2/token",
+        credential_ttl_seconds=serve.credential_ttl_seconds,
+        token_ttl_seconds=serve.token_ttl_seconds,
+        max_blob_seconds=serve.max_blob_seconds,
     )
 
 

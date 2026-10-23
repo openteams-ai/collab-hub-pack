@@ -15,6 +15,11 @@ here so the layer-selection helper can name what it selects.
 Public interface (stable for the adapters and the indexer):
 
 - :class:`OCIClient` — one registry, optionally pre-authenticated.
+- :meth:`OCIClient.fetch_manifest` / :meth:`OCIClient.open_blob` — the two
+  reads the Hub's own ``/v2/`` surface serves pulls with: a verified manifest
+  exactly as stored (an index is *not* followed), and a blob as a
+  :class:`BlobStream` whose bytes are hashed as they pass instead of being
+  buffered.
 - :class:`Descriptor` / :class:`Manifest` — the parsed content descriptors.
 - :func:`select_bundle_layers` / :func:`fetch_bundle_files` — pick and fetch
   exactly the small layers the bundle reader needs.
@@ -50,11 +55,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import ipaddress
 import json
+import logging
 import re
 import ssl
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -146,6 +153,85 @@ _LINK_NEXT_RE = re.compile(r'<([^>]*)>\s*;(?:[^,]*?;)?\s*rel\s*=\s*"?next"?', re
 
 _TokenKey = tuple[str, str, str]
 """(token endpoint, service, scope): what makes one bearer token interchangeable with another."""
+
+
+class _RequestLogFilter(logging.Filter):
+    """Drop the query string and userinfo from httpx's own per-request log line.
+
+    httpx logs ``HTTP Request: GET <url> ...`` at INFO for every request, and
+    a blob redirect to object storage is a pre-signed URL: its query string
+    *is* the credential. The path stays (it says which blob), the rest goes.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(_scrubbed_url(arg) if isinstance(arg, httpx.URL) else arg for arg in record.args)
+        return True
+
+
+def _scrubbed_url(url: httpx.URL) -> httpx.URL:
+    if not url.query and not url.userinfo:
+        return url
+    return url.copy_with(query=None, userinfo=b"")
+
+
+_TRACE_HEADERS = re.compile(r"^(?P<event>\S*headers\S*)(?:\s|$)")
+_TRACE_STATUS = re.compile(r"return_value=\((?:b'[^']*',\s*)?(?P<status>[1-5][0-9]{2}),")
+_URL_USERINFO = re.compile(r"(?P<scheme>https?://)[^/\s'\"@]*@")
+_URL_QUERY = re.compile(r"(?P<url>https?://[^\s'\"?]*)\?[^\s'\"]*")
+
+
+class _TransportTraceFilter(logging.Filter):
+    """Keep header values out of httpcore's DEBUG trace.
+
+    Below httpx, the transport traces every step of a request at DEBUG, and
+    one of those lines is the response's whole header list: a redirect's
+    ``Location`` with its signature, ``Set-Cookie``, ``WWW-Authenticate``.
+    Any line about headers is cut down to its event name and the status
+    code; every other line has URL userinfo and query strings removed. The
+    trace message arrives preformatted, so this works on the text.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        headers = _TRACE_HEADERS.match(message)
+        if headers is not None:
+            found = _TRACE_STATUS.search(message)
+            status = f" status={found.group('status')}" if found else ""
+            message = f"{headers.group('event')}{status} [header values redacted]"
+        else:
+            message = _URL_USERINFO.sub(r"\g<scheme>", message)
+            message = _URL_QUERY.sub(r"\g<url>", message)
+        record.msg, record.args = message, None
+        return True
+
+
+_REQUEST_LOGGER = "httpx"
+_TRANSPORT_LOGGERS = (
+    "httpcore.connection",
+    "httpcore.http11",
+    "httpcore.http2",
+    "httpcore.proxy",
+    "httpcore.socks",
+)
+
+
+def install_log_redaction() -> None:
+    """Install the two filters above. **Process-wide**, idempotent, and never undone.
+
+    Called when a deployment turns Cog *serving* on, and not otherwise, so a
+    Hub that does not serve pulls logs exactly as it did -- including one
+    that only indexes, whose DEBUG transport trace is unfiltered as it has
+    always been. Once installed the filters apply to every httpx client in
+    the process, not only the registry's: logging filters attach to loggers,
+    and the HTTP libraries share theirs.
+    """
+
+    targets = [(_REQUEST_LOGGER, _RequestLogFilter)] + [(name, _TransportTraceFilter) for name in _TRANSPORT_LOGGERS]
+    for name, kind in targets:
+        target = logging.getLogger(name)
+        if not any(isinstance(existing, kind) for existing in target.filters):
+            target.addFilter(kind())
 
 
 def _monotonic() -> float:
@@ -295,6 +381,8 @@ class OCIClient:
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         max_manifest_bytes: int = DEFAULT_MAX_MANIFEST_BYTES,
         transport: httpx.AsyncBaseTransport | None = None,
+        redirect_hosts: Sequence[str] = (),
+        restrict_redirects: bool = False,
     ) -> None:
         try:
             origin = httpx.URL(base_url.rstrip("/"))
@@ -309,6 +397,12 @@ class OCIClient:
         self._base_url = str(origin)
         self._origin = origin
         self._credentials = credentials
+        self._redirect_hosts = tuple(host.lower() for host in redirect_hosts)
+        # The redirect policy is an opt-in of whoever builds the client: on
+        # when asked for (the Hub serving pulls), or when the source names
+        # the hosts its redirects may reach. Otherwise redirects are followed
+        # as they always were, with the credential dropped off-origin.
+        self._restrict_redirects = bool(restrict_redirects or self._redirect_hosts)
         self._token_url = token_url
         self._max_manifest_bytes = max_manifest_bytes
         self._tokens: dict[_TokenKey, _CachedToken] = {}
@@ -384,6 +478,36 @@ class OCIClient:
         body = await _read_bounded(response, max_bytes, what=f"blob {digest}")
         _verify_digest(body, digest, what=f"blob {digest}")
         return body
+
+    async def fetch_manifest(self, repo: str, ref: str) -> Manifest:
+        """Fetch a manifest exactly as the registry stores it, verified, without following an index.
+
+        What a pull through the Hub needs: a client that asked for an index
+        must get the index. ``Manifest.raw`` is the body, ``Manifest.digest``
+        its verified sha256 (see the module docstring for what a tag is
+        verified against).
+        """
+        _validate_repo(repo)
+        _validate_ref(ref)
+        return await self._fetch_manifest(repo, ref)
+
+    async def open_blob(self, repo: str, digest: str) -> BlobStream:
+        """Open a blob for streaming: redirects followed here, nothing read yet.
+
+        The caller drains :meth:`BlobStream.iter_verified` (or closes the
+        stream). Redirects to object storage are followed by this client, one
+        hop at a time and without the registry credential once a hop leaves
+        the registry origin, so the caller never sees a ``Location``.
+        """
+        _validate_repo(repo)
+        _validate_digest(digest)
+        response = await self._send(
+            f"/v2/{repo}/blobs/{digest}",
+            headers={},
+            scope_hint=_pull_scope(repo),
+            allow_redirects=True,
+        )
+        return BlobStream(response, digest)
 
     async def list_tags(self, repo: str) -> list[str]:
         """List a repository's tags, following ``Link: rel="next"`` pagination.
@@ -544,6 +668,8 @@ class OCIClient:
             if not location:
                 raise OCIProtocolError(f"{what}: redirect without a Location header")
             target = _join_url(url, location, what=f"{what} redirect")
+            if self._restrict_redirects:
+                self._check_redirect(url, target, what=what)
             hop_headers = dict(headers)
             if not _same_origin(target, self._origin):
                 # Object storage must never see the registry credential. Every
@@ -559,6 +685,61 @@ class OCIClient:
             await response.aclose()
             raise OCIProtocolError(f"{what}: more than {MAX_BLOB_REDIRECTS} redirects")
         return response
+
+    def _check_redirect(self, previous: httpx.URL, target: httpx.URL, *, what: str) -> None:
+        """Refuse a redirect a client built with the redirect policy must not follow. Messages never quote the target.
+
+        Applied only when the client was constructed with
+        ``restrict_redirects`` or a ``redirect_hosts`` allowlist.
+
+        The registry is configured by the operator and trusted with a
+        credential, so this is defence in depth against a registry that is
+        compromised or misconfigured into pointing the Hub at something else:
+
+        - ``https`` never downgrades to ``http``, on any hop, including one
+          that returns to the registry;
+        - otherwise a hop that stays on the registry's own origin is allowed;
+        - a loopback, link-local, multicast or unspecified address is never
+          a destination, and neither is an instance-metadata endpoint,
+          including the ones outside those ranges (AWS's IPv6 address is
+          unique-local, Alibaba's is carrier-grade NAT space) and any of
+          them written inside an IPv6 literal. Nor is a host written as a
+          bare number or a short or hex/octal dotted form, which a resolver
+          would read as an address (see :func:`_redirect_host_kind`). No
+          allowlist entry lifts any of these;
+        - any other address literal that is not globally routable (RFC 1918,
+          IPv6 unique-local, carrier-grade NAT) is followed only when the
+          operator has listed that address in ``redirect_hosts``: in-cluster
+          object storage is normal, but it is the operator who says where it
+          is, not the registry's ``Location`` header;
+        - with ``redirect_hosts`` configured, the host must be on it: an
+          exact name or address, or a ``.suffix`` any subdomain of which
+          matches.
+
+        A hostname that *resolves* to a refused address is not caught here;
+        the allowlist is what closes that.
+        """
+
+        if previous.scheme == "https" and target.scheme != "https":
+            # Before the same-origin exemption: a chain that leaves an http
+            # registry for https storage may not be led back down to http,
+            # where the registry credential would be attached again.
+            raise OCIProtocolError(f"{what}: refusing a redirect from https to http")
+        if _same_origin(target, self._origin):
+            return
+        host = target.host.lower().rstrip(".")
+        kind = _redirect_host_kind(host)
+        if kind == "forbidden":
+            raise OCIProtocolError(f"{what}: refusing a redirect to a loopback, link-local or metadata address")
+        if kind == "ambiguous":
+            raise OCIProtocolError(f"{what}: refusing a redirect to a host that is neither an IP address nor a name")
+        if kind == "private" and host not in self._redirect_hosts:
+            # The address itself must be listed; a ``.suffix`` entry is for names.
+            raise OCIProtocolError(
+                f"{what}: refusing a redirect to a private address that is not in blob_redirect_hosts"
+            )
+        if self._redirect_hosts and not any(_host_allowed(host, allowed) for allowed in self._redirect_hosts):
+            raise OCIProtocolError(f"{what}: refusing a redirect to a host that is not in blob_redirect_hosts")
 
     def _proactive_auth(self, scope_hint: str) -> str | None:
         if self._use_basic and self._credentials is not None:
@@ -674,6 +855,101 @@ class OCIClient:
         _bound(self._tokens)
 
 
+class BlobStream:
+    """One open blob response, read as a verified stream.
+
+    Nothing is buffered beyond one chunk. :meth:`iter_verified` hashes the
+    bytes as they pass and **holds the last chunk back until the digest and
+    the size have been checked**: a body that does not hash to the digest it
+    was requested by ends in :class:`OCIDigestMismatch` *before* its final
+    bytes are released, so a consumer relaying the chunks to its own client
+    leaves that client with a short body rather than a complete wrong one.
+    """
+
+    def __init__(self, response: httpx.Response, digest: str) -> None:
+        self._response = response
+        self.digest = digest
+        self._closed = False
+
+    @property
+    def content_length(self) -> int | None:
+        """The size the registry (or its object storage) declared, when it declared a usable one."""
+
+        declared = self._response.headers.get("content-length")
+        if declared is None or not declared.isdigit():
+            return None
+        return int(declared)
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    async def aclose(self) -> None:
+        if not self._closed:
+            self._closed = True
+            await self._response.aclose()
+
+    async def iter_verified(self, *, max_bytes: int, expected_size: int | None = None):
+        """Yield the body's chunks; raise instead of releasing the last one if the blob is wrong.
+
+        ``max_bytes`` is the cap (:class:`OCITooLarge` once exceeded);
+        ``expected_size`` is the size a manifest descriptor promised, and a
+        body of any other length is :class:`OCIDigestMismatch`. Encoded
+        bodies are refused, as everywhere in this module. The response is
+        closed when the iteration ends, however it ends.
+        """
+
+        what = f"blob {self.digest}"
+        hasher = hashlib.sha256()
+        total = 0
+        held: bytes | None = None
+        try:
+            encoding = self._response.headers.get("content-encoding", "identity").strip().lower()
+            if encoding not in ("", "identity"):
+                raise OCIProtocolError(f"{what}: registry sent a Content-Encoding this client does not accept")
+            try:
+                async for chunk in self._response.aiter_bytes(_STREAM_CHUNK_BYTES):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise OCITooLarge(f"{what} exceeds the {max_bytes}-byte cap")
+                    if expected_size is not None and total > expected_size:
+                        raise OCIDigestMismatch(f"{what}: body is longer than the {expected_size} bytes declared")
+                    hasher.update(chunk)
+                    if held is not None:
+                        yield held
+                    held = chunk
+            except httpx.HTTPError as exc:
+                raise OCITransportError(f"{what}: {type(exc).__name__} while reading") from exc
+        finally:
+            await self.aclose()
+        if expected_size is not None and total != expected_size:
+            raise OCIDigestMismatch(f"{what}: body is {total} bytes, {expected_size} declared")
+        actual = "sha256:" + hasher.hexdigest()
+        if actual != self.digest:
+            raise OCIDigestMismatch(f"{what}: body hashes to {actual}")
+        if held is not None:
+            yield held
+
+
+def is_index_manifest(manifest: Manifest) -> bool:
+    """Whether ``manifest`` is a multi-platform index rather than an image manifest."""
+
+    return _is_index(manifest.media_type, manifest.raw)
+
+
+def index_children(manifest: Manifest) -> list[Descriptor]:
+    """The child descriptors of an index manifest (``[]`` for an image manifest)."""
+
+    if not is_index_manifest(manifest):
+        return []
+    children = _parse_json_object(manifest.raw, what="index").get("manifests")
+    if not isinstance(children, list):
+        raise OCIProtocolError("index has no 'manifests' list")
+    return [_parse_descriptor(entry, what="index entry") for entry in children]
+
+
 def select_bundle_layers(
     manifest: Manifest,
     *,
@@ -739,6 +1015,18 @@ def _pull_scope(repo: str) -> str:
     return f"repository:{repo}:pull"
 
 
+def is_tag(value: object) -> bool:
+    """Whether ``value`` is a tag by the distribution grammar."""
+
+    return isinstance(value, str) and _TAG_RE.fullmatch(value) is not None
+
+
+def is_sha256_digest(value: object) -> bool:
+    """Whether ``value`` is ``sha256:`` + 64 lowercase hex digits, the one digest form this module verifies."""
+
+    return isinstance(value, str) and _DIGEST_RE.fullmatch(value) is not None
+
+
 def _validate_repo(repo: object) -> None:
     if not isinstance(repo, str) or len(repo) > _MAX_REPO_LENGTH or not _REPO_RE.fullmatch(repo):
         raise OCIInvalidReference(f"invalid repository name {repo!r}")
@@ -774,6 +1062,95 @@ def _join_url(base: httpx.URL, target: str, *, what: str) -> httpx.URL:
 def _same_origin(a: httpx.URL, b: httpx.URL) -> bool:
     # httpx drops default ports, so https://h and https://h:443 compare equal.
     return (a.scheme, a.host, a.port) == (b.scheme, b.host, b.port)
+
+
+_NUMERIC_LABEL = re.compile(r"(?:0x[0-9a-f]*|[0-9]+)")
+
+_METADATA_ADDRESSES = frozenset(
+    ipaddress.ip_address(address)
+    for address in (
+        "169.254.169.254",  # AWS, GCP, Azure, OpenStack and most others (link-local, listed for the embedded forms)
+        "fd00:ec2::254",  # AWS IMDS over IPv6: a unique-local address, so no range check names it
+        "100.100.100.200",  # Alibaba Cloud: carrier-grade NAT space
+        "168.63.129.16",  # Azure's platform endpoint (WireServer): a public address
+        "192.0.0.192",  # Oracle Cloud's secondary endpoint
+    )
+)
+"""Instance-metadata endpoints that are refused by address, wherever their range would otherwise put them."""
+
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _addresses_named(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> list:
+    """``address`` and every IPv4 address it carries inside it.
+
+    An IPv6 literal can be another way of writing an IPv4 destination
+    (IPv4-mapped, NAT64, 6to4, Teredo); each one is judged as that
+    destination as well as as itself.
+    """
+
+    named = [address]
+    if isinstance(address, ipaddress.IPv6Address):
+        embedded = [address.ipv4_mapped, address.sixtofour]
+        if address.teredo is not None:
+            embedded.extend(address.teredo)
+        if address in _NAT64:
+            embedded.append(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
+        named.extend(inner for inner in embedded if inner is not None)
+    return named
+
+
+def _redirect_host_kind(host: str) -> str:
+    """Classify a redirect host (lowercase, no trailing dot).
+
+    One of ``"ok"``, ``"private"``, ``"forbidden"`` or ``"ambiguous"``:
+
+    - A **canonical IP literal** (what :mod:`ipaddress` parses strictly:
+      dotted-quad IPv4 without leading zeros, or IPv6) is range-checked, as
+      itself and as any IPv4 address it embeds (:func:`_addresses_named`).
+      Loopback, link-local, multicast and unspecified addresses, and the
+      instance-metadata endpoints in :data:`_METADATA_ADDRESSES`, are
+      forbidden. Any other address that is not globally routable (RFC 1918,
+      IPv6 unique-local, carrier-grade NAT, reserved) is private: the caller
+      follows it only to a host the operator has listed.
+    - Anything else must be a **name with at least one label that is not a
+      number**. ``2130706433``, ``127.1``, ``0x7f000001`` and ``0177.0.0.1``
+      are not names: the resolver reads them as addresses (here, loopback),
+      and they parse as no canonical literal, so they are ambiguous and
+      refused rather than interpreted.
+    - ``localhost`` and names under it are forbidden: by convention they are
+      loopback, whatever a resolver says.
+    """
+
+    if not host:
+        return "ambiguous"
+    try:
+        address = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        if host == "localhost" or host.endswith(".localhost"):
+            return "forbidden"
+        if ":" in host or all(_NUMERIC_LABEL.fullmatch(label) for label in host.split(".")):
+            return "ambiguous"
+        return "ok"
+    named = _addresses_named(address)
+    if any(
+        each in _METADATA_ADDRESSES
+        or each.is_loopback
+        or each.is_link_local
+        or each.is_multicast
+        or each.is_unspecified
+        for each in named
+    ):
+        return "forbidden"
+    if any(not each.is_global for each in named):
+        return "private"
+    return "ok"
+
+
+def _host_allowed(host: str, allowed: str) -> bool:
+    if allowed.startswith("."):
+        return host.endswith(allowed)
+    return host == allowed
 
 
 def _bound(mapping: dict) -> None:

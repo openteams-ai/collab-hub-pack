@@ -61,6 +61,9 @@ DIGEST_PATTERN = re.compile(r"^[a-z0-9]+(?:[.+_-][a-z0-9]+)*:[a-f0-9]{32,}$")
 SOURCE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 SOURCE_ID_MAX_LENGTH = 64
 
+REDIRECT_HOST_PATTERN = re.compile(r"^\.?[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$")
+"""A lowercase DNS name (or IPv4 literal), optionally with a leading dot meaning "any subdomain of"."""
+
 CREATED_ANNOTATION = "org.opencontainers.image.created"
 
 
@@ -290,6 +293,13 @@ class CogRegistrySourceConfig(BaseModel):
     credentials: CogRegistryCredentials = Field(default_factory=CogRegistryCredentials)
     webhook_secret: SecretStr = SecretStr("")
     request_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    blob_redirect_hosts: list[str] = Field(default_factory=list)
+    """Hosts a blob redirect from this registry may point at; empty means no allowlist.
+
+    Exact hostnames (``storage.example.com``) or leading-dot suffixes
+    (``.s3.amazonaws.com``). The registry's own origin is always allowed, and
+    loopback and link-local literals never are, whatever this says.
+    """
 
     @field_validator(
         "id", "url", "api_url", "token_url", "index_url", "ca_bundle_path", "webhook_secret", mode="before"
@@ -335,6 +345,22 @@ class CogRegistrySourceConfig(BaseModel):
             if project in cleaned:
                 raise ValueError(f"projects lists {project!r} twice")
             cleaned.append(project)
+        return cleaned
+
+    @field_validator("blob_redirect_hosts")
+    @classmethod
+    def _check_redirect_hosts(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for host in value:
+            host = host.strip()
+            if not REDIRECT_HOST_PATTERN.match(host):
+                raise ValueError(
+                    f"blob_redirect_hosts entry {host!r} is not a hostname or a leading-dot suffix "
+                    "(lowercase, no scheme, port or path)"
+                )
+            if host in cleaned:
+                raise ValueError(f"blob_redirect_hosts lists {host!r} twice")
+            cleaned.append(host)
         return cleaned
 
     @field_validator("repositories")
@@ -385,13 +411,17 @@ def build_registry_sources(
     *,
     oci_client_factory: OCIClientFactory = OCIClient,
     http_transport: httpx.AsyncBaseTransport | None = None,
+    restrict_redirects: bool = False,
 ) -> list[RegistrySource]:
     """Instantiate one adapter per configured source, or refuse to start.
 
     ``make_app`` calls this once so that a duplicate id or an unsupported kind
     fails the rollout rather than the first sweep. ``http_transport`` exists
     for tests (``httpx.MockTransport``) and is handed to every adapter's own
-    HTTP client and to the OCI client factory.
+    HTTP client and to the OCI client factory. ``restrict_redirects`` turns
+    the OCI client's redirect policy on for every source (see
+    ``OCIClient._check_redirect``); a source that sets
+    ``blob_redirect_hosts`` has it on regardless.
     """
 
     # Adapters import this module for the protocol and config types, so the
@@ -422,10 +452,18 @@ def build_registry_sources(
     for config in configs:
         if config.kind == "harbor":
             source: RegistrySource = HarborRegistrySource(
-                config, oci_client_factory=oci_client_factory, http_transport=http_transport
+                config,
+                oci_client_factory=oci_client_factory,
+                http_transport=http_transport,
+                restrict_redirects=restrict_redirects,
             )
         else:
-            source = StaticRegistrySource(config, oci_client_factory=oci_client_factory, http_transport=http_transport)
+            source = StaticRegistrySource(
+                config,
+                oci_client_factory=oci_client_factory,
+                http_transport=http_transport,
+                restrict_redirects=restrict_redirects,
+            )
         sources.append(source)
     return sources
 

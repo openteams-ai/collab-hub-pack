@@ -1,0 +1,59 @@
+name: Test Cog pulls through the Hub (E2E)
+
+# Real-registry end-to-end for the Hub's OCI read endpoint (issue #179): a
+# private backing registry, a Cog bundle published to it with a standard
+# client, the Hub in front of it as a `static` source, and `oras` pulling the
+# Cog from the Hub host, over TLS, with nothing but a Hub sign-in.
+#
+# The matrix is the test: the same script, unchanged, against two different
+# registries. Swapping the registry behind the Hub must change nothing a
+# client sees. Fork-safe: no secrets, read-only checkout.
+#
+# Path-gated because it starts containers; the unit suite (`Test`) covers the
+# same surface against a fake registry on every PR.
+
+on:
+  pull_request:
+    paths:
+      - "api/src/collab_hub_api/cogs/**"
+      - "api/src/collab_hub_api/routers/cogs.py"
+      - "api/src/collab_hub_api/routers/registry.py"
+      - "api/src/collab_hub_api/config.py"
+      - "api/src/collab_hub_api/core.py"
+      - "api/src/collab_hub_api/path_protection.py"
+      - "api/pyproject.toml"
+      - "api/uv.lock"
+      - "scripts/cog-serve-e2e/**"
+      - ".github/workflows/test-cog-serve-e2e.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "api/src/collab_hub_api/cogs/**"
+      - "api/src/collab_hub_api/routers/cogs.py"
+      - "api/src/collab_hub_api/routers/registry.py"
+      - "scripts/cog-serve-e2e/**"
+      - ".github/workflows/test-cog-serve-e2e.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  cog-serve-e2e:
+    name: Pull through the Hub (${{ matrix.backing }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backing: [distribution, zot]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync the API environment
+        working-directory: api
+        run: uv sync
+
+      - name: Publish to ${{ matrix.backing }}, pull from the Hub
+        run: bash scripts/cog-serve-e2e/run.sh ${{ matrix.backing }}

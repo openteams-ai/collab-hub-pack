@@ -412,6 +412,94 @@ def test_index_style_env_override_is_not_a_supported_route(monkeypatch):
     assert source.credentials.password.get_secret_value() == "inline-secret"
 
 
+# --- cogs.serve: pulls through the Hub (issue #179) ---------------------------
+
+
+def test_serving_is_off_by_default_with_documented_limits():
+    serve = Config.parse().cogs.serve
+
+    assert serve.enabled is False and serve.public_url == ""
+    assert serve.credential_ttl_seconds == 900, "fifteen minutes"
+    assert serve.token_ttl_seconds == 300
+    assert serve.max_blob_bytes == 1024**3
+    assert serve.max_blob_seconds == 900
+
+
+@pytest.mark.parametrize(
+    ("public_url", "host"),
+    [
+        ("https://hub.example.com", "hub.example.com"),
+        ("  https://hub.example.com  ", "hub.example.com"),
+        ("https://hub.example.com:8443", "hub.example.com:8443"),
+        ("http://localhost:8000", "localhost:8000"),
+        ("https://[::1]:5000", "[::1]:5000"),
+        # The scheme's default port is left out and the host is lowercase, so
+        # the value is exactly the authority of the Hub API origin.
+        ("https://hub.example.com:443", "hub.example.com"),
+        ("http://hub.example.com:80", "hub.example.com"),
+        ("https://hub.example.com:80", "hub.example.com:80"),
+        ("https://Hub.Example.com", "hub.example.com"),
+    ],
+)
+def test_the_registry_host_is_the_public_urls_host_and_port(public_url, host):
+    serve = parse_cogs(registry_sources=[static_source()], serve={"enabled": True, "public_url": public_url}).cogs.serve
+
+    assert serve.host == host
+    assert serve.public_url == public_url.strip()
+
+
+@pytest.mark.parametrize(
+    ("public_url", "message"),
+    [
+        ("hub.example.com", "must be an http\\(s\\) origin with a host"),
+        ("https://", "must be an http\\(s\\) origin with a host"),
+        ("https://hub.example.com:99999", "has an invalid port"),
+        ("https://hub.example.com/v2", "must be a bare origin"),
+        ("https://hub.example.com/", "must be a bare origin"),
+        ("https://hub.example.com?x=1", "must be a bare origin"),
+        ("https://hub.example.com/#", "must be a bare origin"),
+        ("https://user:secret-pw@hub.example.com", "must not embed a username or password"),
+    ],
+)
+def test_a_public_url_that_is_not_a_bare_origin_is_refused(public_url, message):
+    with pytest.raises(ValidationError, match=message) as caught:
+        parse_cogs(registry_sources=[static_source()], serve={"enabled": True, "public_url": public_url})
+    assert "secret-pw" not in str(caught.value)
+
+
+def test_blob_redirect_hosts_are_hostnames_or_dot_suffixes():
+    source = static_source(blob_redirect_hosts=[" storage.example.com ", ".s3.amazonaws.com", "10.0.0.7"])
+    parsed = parse_cogs(registry_sources=[source]).cogs.registry_sources[0]
+    assert parsed.blob_redirect_hosts == ["storage.example.com", ".s3.amazonaws.com", "10.0.0.7"]
+    assert parse_cogs(registry_sources=[static_source()]).cogs.registry_sources[0].blob_redirect_hosts == []
+    bad_entries = ("https://storage.example.com", "storage.example.com:9000", "Storage.Example.com", "a/b", "", ".")
+    for bad in (*bad_entries, "*.x"):
+        with pytest.raises(ValidationError, match="blob_redirect_hosts entry"):
+            parse_cogs(registry_sources=[static_source(blob_redirect_hosts=[bad])])
+
+
+def test_serving_needs_a_source_and_a_public_url_only_when_enabled():
+    # Off: the rest of the block is inert, so a values file can carry it ahead of the switch.
+    assert parse_cogs(serve={"public_url": "https://hub.example.com"}).cogs.serve.enabled is False
+    with pytest.raises(ValidationError, match="cogs.serve.enabled is true but cogs.registry_sources is empty"):
+        parse_cogs(serve={"enabled": True, "public_url": "https://hub.example.com"})
+    with pytest.raises(ValidationError, match="cogs.serve.enabled is true but cogs.serve.public_url is empty"):
+        parse_cogs(registry_sources=[static_source()], serve={"enabled": True})
+
+
+def test_serving_round_trips_through_the_environment_as_the_chart_renders_it(monkeypatch):
+    monkeypatch.setenv("COLLAB_HUB_API__COGS__REGISTRY_SOURCES", json.dumps([static_source()]))
+    monkeypatch.setenv("COLLAB_HUB_API__COGS__SERVE__ENABLED", "true")
+    monkeypatch.setenv("COLLAB_HUB_API__COGS__SERVE__PUBLIC_URL", "https://hub.example.com")
+    monkeypatch.setenv("COLLAB_HUB_API__COGS__SERVE__MAX_BLOB_BYTES", "5368709120")
+    monkeypatch.setenv("COLLAB_HUB_API__COGS__SERVE__CREDENTIAL_TTL_SECONDS", "600")
+
+    serve = Config().cogs.serve
+
+    assert serve.enabled is True and serve.host == "hub.example.com"
+    assert serve.max_blob_bytes == 5 * 1024**3 and serve.credential_ttl_seconds == 600
+
+
 # --- Parity with the chart: the same refusals, from one fixture ---------------
 
 

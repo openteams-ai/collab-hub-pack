@@ -22,6 +22,7 @@ from .config import (
     build_audit_log,
     build_cog_catalog_store,
     build_cog_indexing,
+    build_cog_registry_serving,
     build_connector_store,
     build_frames_store,
     build_group_store,
@@ -78,6 +79,7 @@ from .routers import (
     invitations,
     invite,
     org_invitations,
+    registry,
     tasks,
     usage,
     user_directory,
@@ -284,6 +286,10 @@ def make_app(config: BaseConfig) -> FastAPI:
     # (issue #148).
     cog_catalog_store = build_cog_catalog_store(config, postgres_pools)
     cog_indexing = build_cog_indexing(config, cog_catalog_store)
+    # Pulls through the Hub (issue #179), when cogs.serve.enabled: the /v2/
+    # surface and the registry sources it reads from, built on every replica
+    # that serves it and independent of whether this process indexes.
+    cog_registry_serving = build_cog_registry_serving(config, cog_catalog_store, postgres_pools)
     # The run API (/v1/runs) is behind a feature flag, and so is its import: it is the one
     # place the API uses the execution package, which an image need not ship until it is on.
     run_service = None
@@ -387,6 +393,7 @@ def make_app(config: BaseConfig) -> FastAPI:
             app.state.cog_catalog_store = cog_catalog_store
             app.state.cog_indexer = cog_indexing.indexer if cog_indexing is not None else None
             app.state.cog_registry_sources = cog_indexing.indexer.sources if cog_indexing is not None else []
+            app.state.cog_registry_serving = cog_registry_serving
             cog_index_task: asyncio.Task | None = None
             if cog_indexing is not None and cog_indexing.sweeps:
                 indexer = cog_indexing.indexer
@@ -480,6 +487,10 @@ def make_app(config: BaseConfig) -> FastAPI:
                     for source in cog_indexing.indexer.sources:
                         with suppress(Exception):
                             await source.aclose()
+                if cog_registry_serving is not None:
+                    for source in cog_registry_serving.front.sources:
+                        with suppress(Exception):
+                            await source.aclose()
                 user_directory_client.close()
                 # Same reason as the line above: this granter owns an
                 # `httpx.Client`, so its connection pool outlives the app
@@ -551,6 +562,11 @@ def make_app(config: BaseConfig) -> FastAPI:
         rules=config.security.paths,
         default_access=config.security.default_access,
         authenticate=_authenticate,
+        # The registry surface (issue #179) authenticates every request
+        # itself, with the challenge registry clients need to find its token
+        # endpoint; this middleware's refusal would pre-empt it with the Hub
+        # API's envelope. Not a map entry, so no operator rule can undo it.
+        self_authenticating=registry.registry_path if cog_registry_serving is not None else None,
         unauthorized_response=_unauthorized_response,
         authenticate_error_response=_authenticate_error_response,
     )
@@ -775,6 +791,10 @@ def make_app(config: BaseConfig) -> FastAPI:
     # The Cog catalog read API (#85). /v1 only: it post-dates the unprefixed
     # legacy mounts, so there is no old client to keep answering.
     app.include_router(cogs.router, prefix="/v1")
+    if cog_registry_serving is not None:
+        # The OCI read API (#179), at the host root: registry clients address
+        # /v2/ there and nowhere else. Absent unless cogs.serve.enabled.
+        app.include_router(registry.router)
     if run_service is not None:
         app.include_router(runs_router.router, prefix="/v1")
     # Who is calling, and how the collab-hub CLI signs in. /auth/cli is public:

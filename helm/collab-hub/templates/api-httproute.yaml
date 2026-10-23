@@ -34,6 +34,21 @@ spec:
   hostnames:
     - {{ .Values.api.ingress.host | quote }}
   rules:
+    {{- /* Pulls through the Hub (issue #179): /v2 streams blobs, which can
+    take far longer than an API call. The rule exists to carry that timeout;
+    the app authenticates /v2 itself, like every other path. Listed first so
+    it wins over a "/" prefix whatever the implementation's tie-breaking. */}}
+    {{- if and .Values.cogs.serve.enabled .Values.cogs.serve.routeTimeout }}
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v2
+      timeouts:
+        request: {{ printf "%ds" (add (int64 .Values.cogs.serve.maxBlobSeconds) 30) | quote }}
+      backendRefs:
+        - name: {{ $name }}
+          port: {{ $.Values.api.service.port }}
+    {{- end }}
     {{- range .Values.api.ingress.paths }}
     - matches:
         - path:

@@ -1050,3 +1050,20 @@ accepted:
         serve: {enabled: false, publicUrl: 'https://hub.example.com', tokenTtlSeconds: 60}
     settings:
       registry_sources: []
+
+  # The indexer Deployment's environment is the one compared (it is the
+  # sweeping process): with serving on it must say so, or its sweeps follow
+  # redirects outside the serving policy (docs/cog-registry.md).
+  - name: serving with the indexer on reaches the indexer too
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+        serve: {enabled: true, publicUrl: 'https://hub.example.com'}
+        index: {enabled: true}
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+      serve: {enabled: true, public_url: 'https://hub.example.com'}
+      index: {enabled: true}

@@ -51,7 +51,7 @@ check "serving off: no serve variables, the gateway's public routes untouched" s
 ENVOY_CRDS='--api-versions gateway.envoyproxy.io/v1alpha1/BackendTrafficPolicy'
 check "serving on behind the Nebari gateway: URL derived, /v2 made a public route with a timeout policy" serve-nebariapp $STATIC $NEBARIAPP $ENVOY_CRDS --set cogs.serve.enabled=true
 check "serving on behind the Nebari gateway with routeTimeout off: no policy" serve-nebariapp-no-timeout $STATIC $NEBARIAPP --set cogs.serve.enabled=true --set cogs.serve.routeTimeout=false
-check "serving and sweeping on: the serve settings reach the API replicas, not the indexer" serve-with-indexer $STATIC $HTTPROUTE --set cogs.serve.enabled=true --set cogs.index.enabled=true
+check "serving and sweeping on: the indexer carries the same serve settings as the API replicas" serve-with-indexer $STATIC $HTTPROUTE --set cogs.serve.enabled=true --set cogs.index.enabled=true
 check "serving on behind an HTTPRoute: explicit URL, integer limits, /v2 rule with a timeout" serve-httproute $STATIC $HTTPROUTE --set cogs.serve.enabled=true --set cogs.serve.publicUrl=https://hub.example.com:8443 --set cogs.serve.maxBlobBytes=5368709120 --set cogs.serve.maxBlobSeconds=1800 --set cogs.serve.credentialTtlSeconds=600
 check "serving on with routeTimeout off: no /v2 rule, no timeout" serve-httproute-no-timeout $STATIC $HTTPROUTE --set cogs.serve.enabled=true --set cogs.serve.routeTimeout=false
 check "indexer on with its own resources: one Recreate replica, the API's env, the API does not sweep" indexer-resources $STATIC --set cogs.index.enabled=true --set cogs.indexer.resources.requests.memory=1Gi --set cogs.indexer.resources.limits.memory=2Gi

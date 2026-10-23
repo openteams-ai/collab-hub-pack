@@ -305,8 +305,8 @@ Each phase is one pull request from the branch it names, numbered in build order
 | 10 | #177 | Hermes as a Cog, launched from the `collab-hub` CLI on a local hub and talked to from Toad: an example | `feat/cog-local-example` | 6, 9 | M | merged, #178 |
 | 11 | #121 | Run controller and run pickup | `feat/cog-run-controller` | 8, 9, 10 | M | in review, #186 |
 | 12 | #103, first half | The hub run API: launch, list and terminate runs | `feat/cog-run-launch` | 10, 11 | M | in review, #202 |
-| 13 | #107 | Add a Worker SDK with Harness adapters, ACP first | `feat/cog-worker-sdk` | 2, 9 | M | not started |
-| 14 | #108 | Publish a Hermes harness Cog, launched by the hub as a local process | `feat/hermes-acp-harness` | 9, 12, 13 | M | not started |
+| 13 | #107 | Add a Worker SDK with Harness adapters, ACP first | `feat/cog-worker-sdk` | 2, 9 | M | in review, #224, with Phase 14 |
+| 14 | #108 | Publish a Hermes harness Cog, launched by the hub as a local process | `feat/cog-worker-sdk` | 9, 12, 13 | M | in review, #224, with Phase 13 |
 | 15 | #126, first half | Launch, list and terminate Cogs from the `collab-hub` CLI | `feat/cli-launch` | 6, 10, 12 | S | not started |
 | 16 | #102 | Never repeat a completed side effect when a step is invoked again | `feat/cog-keyed-claim` | 8, 11, 13 | M | not started |
 | 17 | #103, closes it | The hub run API: Frames, payloads, decisions and retry | `feat/cog-run-api` | 12, 14, 16 | M | not started |
@@ -643,7 +643,7 @@ State a Cog for execution, see what is running, stop it — as endpoints Collab 
 - [x] A member of another organization can neither see nor cancel a run, and unauthenticated requests are refused under the hardened path map.
 
 #### Phase 13 — Worker SDK and harness-neutral adapters
-**Issue** #107 · **Branch** `feat/cog-worker-sdk` · **Depends on** Phases 2, 9 · **Size** M
+**Issue** #107 · **Branch** `feat/cog-worker-sdk` · **Depends on** Phases 2, 9 · **Size** M · **Status** in review, #224, one pull request with Phase 14
 
 Implement the seam once, so wrapping a harness is an adapter rather than a server — Hermes first, pi and OpenCode after it.
 
@@ -656,17 +656,17 @@ Implement the seam once, so wrapping a harness is an adapter rather than a serve
 - **The model's limits, in the binding.** The binding file carries the model's context window and maximum output tokens, and the SDK hands them to the adapter, so a harness reserves output headroom from a number rather than a guess. The SDK does not run a harness's turns: an agent harness runs its own loop and owns its context within it (decision 19).
 - **One error for a context that did not fit.** `context-exhausted` joins the envelope's closed error-code set — `result-envelope.md` and the hub's parser change in this PR, before any worker emits it — mapped to 422: the input and Frames could not fit the bound model even after the harness's own recovery. Retrying on the same binding would not help, so a Gate or a person chooses a larger model or fewer Frames.
 - A stdlib fake ACP agent and a stdlib fake OpenAI-compatible model server, so both adapters test at level 1 without installing a harness or starting a container.
-- An import-boundary test: the API and the execution package never import the SDK. A Cog's pixi environment gets the SDK as a git dependency on this repository at a commit (decision 12).
+- An import-boundary test: the API and the execution package never import the SDK. A Cog's pixi environment gets the SDK by path when the Cog lives in this repository, and as a git dependency on this repository at a commit otherwise (decision 12).
 
-*Dev and CI* — both stdlib fakes sit in `scripts/testdata/`; `make fake-model` runs the model one at level 1; the adapter conformance suite runs in its own path-gated workflow on Python 3.11 and 3.14. *Docs* — a new `worker/README.md`: writing a Cog on the SDK, the adapter protocol, the authentication hook, the `end_turn` hazard, and what a harness owns per turn against what the SDK hands it (decision 19); `result-envelope.md` gains `context-exhausted`.
+*Dev and CI* — both stdlib fakes sit under `dev/`, beside what runs them: `dev/fake-model/` (`make fake-model`) and `dev/fake-agent/`; the adapter conformance suite and the seam's tests run in their own path-gated workflow, `test-worker.yaml`, on Python 3.11 and 3.14. *Docs* — a new `worker/README.md`: writing a Cog on the SDK, the adapter protocol, the authentication hook, the `end_turn` hazard, and what a harness owns per turn against what the SDK hands it (decision 19); `result-envelope.md` gains `context-exhausted`.
 
 *Acceptance*
-- [ ] Both adapters pass one shared adapter conformance suite through the same seam server, on Python 3.11 and 3.14.
-- [ ] A step's Frames reach both fakes' prompts — as embedded resources or as text, as the fake ACP agent advertises — and an input larger than the binding's context window ends the step `ok: false` with `context-exhausted`.
-- [ ] A worker built on the SDK runs as a `local` worker under Phase 9's executor; Phase 22's materialization later runs it unchanged.
+- [x] Both adapters pass one shared adapter conformance suite through the same seam server, on Python 3.11 and 3.14.
+- [x] A step's Frames reach both fakes' prompts — as embedded resources or as text, as the fake ACP agent advertises — and an input larger than the binding's context window ends the step `ok: false` with `context-exhausted`.
+- [x] A worker built on the SDK runs as a `local` worker under Phase 9's executor (the Hermes Cog, in the execution suite); Phase 22's materialization later runs it unchanged.
 
 #### Phase 14 — The Hermes harness Cog, launched by the hub as a local process
-**Issue** #108 · **Branch** `feat/hermes-acp-harness` · **Depends on** Phases 9, 12, 13 · **Size** M
+**Issue** #108 · **Branch** `feat/cog-worker-sdk` · **Depends on** Phases 9, 12, 13 · **Size** M · **Status** in review, #224, one pull request with Phase 13
 
 The primary goal: `POST /v1/runs` on a laptop starts Hermes as a separate process, and the Op step completes with a valid envelope. No cluster, no registry, no durability engine, no keyed claim and no CLI — those come after or alongside, and none of them changes this Cog.
 
@@ -680,12 +680,12 @@ Phase 10 built this Cog's first form: `cogs/hermes` with a worker of its own tha
 - Level 1 runs it straight from `cogs/hermes` through Phase 9's directory package source — no registry — until Phase 23 installs it by digest.
 - A CI test against the stdlib fake model; one opt-in test against a real model.
 
-*Dev and CI* — `make controller LOCATION=local` and `make op OP=hermes` at level 1, against `make fake-model` or a real endpoint given by environment — the demonstration of M4. `dev/ops/hermes.yaml` declares `gate: never`, since deciding a Gate arrives with Phase 17. CI: a path-gated `test-hermes.yaml` runs the Cog through the local executor on Linux against the fake model; it downloads Hermes' environment, so it stays out of `dev-env.yaml`. *Docs* — `cogs/hermes/README.md`; the catalog card describes the harness; `docs/cog-execution/README.md` links it as the reference harness Cog; `dev/README.md` gains *Running Hermes*.
+*Dev and CI* — `make controller LOCATION=local` and `make op OP=hermes LOCATION=local` at level 1, against `make fake-model` or a real endpoint given by environment — the demonstration of M4. `dev/ops/hermes.yaml` declares `gate: {escalate: never}`, since deciding a Gate arrives with Phase 17. CI: the Cog's worker runs against the fake agent in `test-execution.yaml`, and Hermes itself, in its environment, against the fake model in `examples.yaml`, which already installs it for `examples/cog-local`; a third workflow for the same download is not added, and `examples.yaml` runs when `worker/` changes. *Docs* — `cogs/hermes/README.md`; the catalog card describes the harness; `docs/cog-execution/README.md` links it as the reference harness Cog; `dev/README.md` gains *Running Hermes*.
 
 *Acceptance*
-- [ ] An Op step naming this Cog's bundled `ask`, submitted through `POST /v1/runs`, completes in a child process of the controller with a valid envelope, at level 1. (A context Cog *requiring* a harness resolving to it is Phase 24's, where resolution lives.)
-- [ ] A Hermes failure surfaces as `ok: false` with an error code, not as a silent `end_turn`; a turn that overflows the bound model and cannot recover surfaces as `context-exhausted`.
-- [ ] The Cog contains nothing that knows whether it is a process or a pod.
+- [x] An Op step naming this Cog's bundled `ask`, submitted through `POST /v1/runs`, completes in a child process of the controller with a valid envelope, at level 1. (A context Cog *requiring* a harness resolving to it is Phase 24's, where resolution lives.)
+- [x] A Hermes failure surfaces as `ok: false` with an error code, not as a silent `end_turn`; a turn that overflows the bound model and cannot recover surfaces as `context-exhausted`.
+- [x] The Cog contains nothing that knows whether it is a process or a pod.
 
 *Risk* — 0.19's ACP surface is not the 0.17 one Collab drives today; the configuration port, the `end_turn` handling and whether 0.19 advertises `embeddedContext` are re-verified against 0.19 in the first CI run, and the pin moves only by a deliberate change.
 
@@ -1186,7 +1186,7 @@ Opened by ADR-0002. Settled ones say so, with the date; the rest are due by the 
 9. **When the pack docs site starts.** Proposal: as its own issue once M5 lands, when the whole run API is there for users to read about.
 10. **Where this plan lives** — *decided 2026-09-17: here*, at the root of this repository, reviewed through pull requests; the desktop phases are listed with their issues in the desktop repository.
 11. **`local` in production** — *decided 2026-09-16: development and the desktop only.* A `local` worker shares the controller's host and network identity, so the trust boundary does not hold for it. A Kubernetes hub always runs `remote`: the hub image ships neither pixi nor a Cog environment, and the chart does not offer `location: local`. The controller still accepts the value, because level 1 is the hub as a plain process. ADR-0002 D12 (Phase 9) records it.
-12. **How a Cog's environment gets the Worker SDK** — *decided 2026-09-16: a git dependency on this repository*, pinned to a commit (`#subdirectory=worker`), so no PyPI release is needed; `dev/cogs/*` may pin it by path.
+12. **How a Cog's environment gets the Worker SDK** — *decided 2026-09-16: a git dependency on this repository*, pinned to a commit (`#subdirectory=worker`), so no PyPI release is needed; `dev/cogs/*` may pin it by path. *Amended 2026-10-22:* a Cog that lives in this repository (`cogs/*`, `dev/cogs/*`) pins the SDK by path, since pull requests are squash-merged and a lock naming a branch commit would name one that does not survive the merge; the git dependency is for a Cog outside it.
 13. **What the first Hermes run binds to** — *decided 2026-09-16:* an OpenAI-compatible endpoint from the hub's `models:` block (Phase 11) — given by environment at level 1, by chart values on a hub — with the stdlib fake model in CI. The llm-serving-pack's internal endpoint is one such entry, not a special case. Until that block exists, the controller delivers the endpoint, its name and its key from its own environment to the Hermes Cog alone (Phase 10), with `dev/fake-model` by default.
 14. **What the first Hermes run may do** — *decided 2026-09-16:* no tools at M4 — prompt in, envelope out. Hub-mediated MCP (Frames, connectors) follows Phase 29's grants.
 15. **Windows for `local`** — *decided 2026-09-16: no.* Linux and macOS in CI; the desktop's local run host (Phase 31) inherits the limit.

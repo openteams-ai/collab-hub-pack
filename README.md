@@ -142,6 +142,12 @@ The [`collab-hub` CLI](cli/README.md) is a terminal client for the hub's REST
 API: it signs in the way the Collab desktop does, and lists the Cogs the hub
 offers.
 
+The [worker SDK](worker/README.md), `collab-hub-cog-worker`, is how a Cog is
+written against the hub's seam: it serves `/invoke` and the envelope, and
+drives the Cog's harness through an adapter — any ACP agent, or a direct
+model call. [`cogs/hermes`](cogs/README.md) is the reference harness Cog on
+it. The hub itself never imports the SDK.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Contributions are accepted under the

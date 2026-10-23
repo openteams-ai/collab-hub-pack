@@ -359,9 +359,14 @@ async def test_google_calendar_status_search_and_read_normalize_events(tmp_path,
         "accepted",
         "tentative",
     ]
-    assert search_event["attendee_details"][0]["self"] is True
-    assert search_event["attendee_details"][0]["organizer"] is True
-    assert search_event["attendee_details"][1]["optional"] is True
+    # Role flags stay on the read; the serialized search hit must not carry them.
+    assert [set(attendee) for attendee in search_event["attendee_details"]] == [
+        {"display_name", "email", "response_status"}
+    ] * 2
+    assert search_event["attendee_details_partial"] is False
+    assert search_event["attendee_count"] == 2
+    assert search_event["attendee_response_counts"] == {"accepted": 1, "tentative": 1}
+    assert search_event["self_response_status"] == "accepted"
     assert search_event["recurring_event_id"] == "series-1"
     assert search_event["original_start"] == "2026-07-03T14:00:00-04:00"
     assert search_response.json()["events"][1]["all_day"] is True
@@ -371,7 +376,16 @@ async def test_google_calendar_status_search_and_read_normalize_events(tmp_path,
     assert read_response.json()["truncated"] is True
     event_detail = read_response.json()["event"]
     assert event_detail["attendees"]
-    assert event_detail["attendee_details"][0]["response_status"] == "accepted"
+    assert event_detail["attendee_details"] == [
+        {
+            "display_name": "Bob",
+            "email": sanitize_connector_text("bob@example.com"),
+            "response_status": "accepted",
+            "optional": True,
+            "organizer": False,
+            "self": False,
+        }
+    ]
     assert event_detail["recurring_event_id"] == "series-1"
     assert event_detail["original_start"] == "2026-07-03T14:00:00-04:00"
     assert event_detail["recurrence"] == ["RRULE:FREQ=WEEKLY"]
@@ -444,6 +458,72 @@ def test_calendar_search_projection_removes_only_attendee_aliases() -> None:
     assert search_event.model_copy(update={"attendees": full_event.attendees}) == full_event
     assert len(search_event.model_dump_json()) < len(full_event.model_dump_json())
     assert search_truncated is full_truncated is False
+
+
+async def test_calendar_search_caps_attendees_and_read_keeps_them(tmp_path, monkeypatch):
+    monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
+    monkeypatch.setenv("FRAMES_BEARER_ALLOW_UNSIGNED", "true")
+    attendees = [
+        {"displayName": f"Person {index}", "email": f"person-{index}@example.com", "responseStatus": "accepted"}
+        for index in range(200)
+    ]
+    attendees[0]["organizer"] = True
+    # Both answers sit past the search preview, so the preview cannot supply them.
+    attendees[120] = {"displayName": "Dana", "email": "dana@example.com", "responseStatus": "declined"}
+    attendees[150] = {"displayName": "Me", "email": "me@example.com", "responseStatus": "tentative", "self": True}
+    event = {
+        "id": "all-hands",
+        "summary": "All Hands",
+        "start": {"dateTime": "2026-07-10T14:00:00-04:00"},
+        "end": {"dateTime": "2026-07-10T15:00:00-04:00"},
+        "attendees": attendees,
+    }
+
+    def handler(request: httpx.Request) -> Response:
+        path = request.url.path
+        if path.endswith("/users/me/calendarList"):
+            return Response(200, json={"items": [{"id": "primary", "summary": "Work", "primary": True}]})
+        if path.endswith("/calendars/primary/events/all-hands"):
+            return Response(200, json=event)
+        if path.endswith("/calendars/primary/events"):
+            return Response(200, json={"items": [event]})
+        return Response(404, json={"error": {"message": "not found"}})
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            search_response = await client.post(
+                "/v1/connectors/google-calendar/search",
+                headers=_auth_header(),
+                json={"since_date": "2026-07-09", "until_date": "2026-07-11", "time_zone": "America/New_York"},
+            )
+            read_response = await client.post(
+                "/v1/connectors/google-calendar/calendars/primary/events/all-hands/read",
+                headers=_auth_header(),
+                json={},
+            )
+
+    assert search_response.status_code == 200
+    hit = search_response.json()["events"][0]
+    assert [attendee["display_name"] for attendee in hit["attendee_details"]] == [f"Person {i}" for i in range(10)]
+    assert hit["attendee_details_partial"] is True
+    assert hit["attendee_count"] == 200
+    assert hit["attendee_response_counts"] == {"accepted": 198, "declined": 1, "tentative": 1}
+    assert hit["self_response_status"] == "tentative"
+
+    assert read_response.status_code == 200
+    detail = read_response.json()["event"]
+    assert len(detail["attendee_details"]) == len(detail["attendees"]) == 200
+    assert detail["attendee_details_partial"] is False
+    assert [
+        {key: attendee[key] for key in ("display_name", "email", "response_status")}
+        for attendee in detail["attendee_details"][:10]
+    ] == hit["attendee_details"]
+    assert detail["attendee_details"][0]["organizer"] is True
+    assert detail["attendee_details"][150]["self"] is True
+    assert [a["display_name"] for a in detail["attendee_details"] if a["response_status"] == "declined"] == ["Dana"]
+    assert detail["self_response_status"] == "tentative"
 
 
 async def test_google_connector_status_requires_new_service_scope(tmp_path, monkeypatch):
@@ -1124,6 +1204,9 @@ def test_google_workspace_openapi_contract_exposes_pagination_without_calendar_u
     assert "html_url" not in schemas["CalendarEventMetadata"]["properties"]
     assert "attendees" in schemas["CalendarEventMetadata"]["properties"]
     assert "attendee_details" in schemas["CalendarEventMetadata"]["properties"]
+    assert "self_response_status" in schemas["CalendarSearchEvent"]["properties"]
+    assert set(schemas["CalendarAttendeePreview"]["properties"]) == {"display_name", "email", "response_status"}
+    assert {"optional", "organizer", "self"} <= set(schemas["CalendarAttendee"]["properties"])
     assert "web_url" not in schemas["DriveFileMetadata"]["properties"]
     assert "time_zone" in schemas["GmailSearchRequest"]["properties"]
     assert "time_zone" in schemas["CalendarSearchRequest"]["properties"]

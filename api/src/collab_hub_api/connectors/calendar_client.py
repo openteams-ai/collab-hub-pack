@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import json
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -13,13 +14,20 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 
 from .connector_text import sanitize_connector_text
-from .models import CalendarAttachment, CalendarAttendee, CalendarEventMetadata
+from .models import (
+    CalendarAttachment,
+    CalendarAttendee,
+    CalendarAttendeePreview,
+    CalendarEventMetadata,
+    CalendarSearchEvent,
+)
 
 _MAX_CALENDARS = 1000
 _MAX_CALENDAR_LIST_PAGES = 20
 _MAX_PROVIDER_PAGES_PER_CALENDAR = 25
 _MAX_SEARCH_CALENDARS = 100
 _MAX_CURSOR_TIME_SPAN = timedelta(days=7301)
+_SEARCH_ATTENDEE_PREVIEW = 10
 
 
 class CalendarUpstreamError(RuntimeError):
@@ -154,7 +162,7 @@ class GoogleCalendarClient:
         until_date: date | None = None,
         time_zone: str = "",
         cursor: str = "",
-    ) -> tuple[list[CalendarEventMetadata], str]:
+    ) -> tuple[list[CalendarSearchEvent], str]:
         """Return a globally chronological page across readable calendars.
 
         Every selected calendar contributes candidates before Collab Hub chooses the
@@ -230,7 +238,7 @@ class GoogleCalendarClient:
             # and same-instant events for the deterministic key filter below.
             provider_lower = max(lower, state.after_start - timedelta(microseconds=1))
 
-        candidates: list[CalendarEventMetadata] = []
+        candidates: list[CalendarSearchEvent] = []
         provider_has_more = False
         for calendar in calendars:
             calendar_candidates, calendar_has_more = await self._calendar_candidates(
@@ -274,7 +282,7 @@ class GoogleCalendarClient:
         time_max: datetime,
         zone: ZoneInfo,
         after_key: tuple[datetime, int, str, str] | None,
-    ) -> tuple[list[CalendarEventMetadata], bool]:
+    ) -> tuple[list[CalendarSearchEvent], bool]:
         """Collect enough ordered candidates from one calendar for a global page.
 
         Google orders events by start time ascending, so all events sharing a
@@ -288,7 +296,7 @@ class GoogleCalendarClient:
         candidate is provably drained (a strictly later start has been seen) or
         the provider is exhausted, then sort and cut deterministically.
         """
-        results: list[CalendarEventMetadata] = []
+        results: list[CalendarSearchEvent] = []
         seen_events: set[tuple[str, str]] = set()
         max_start_seen: datetime | None = None
         page_token = ""
@@ -321,7 +329,7 @@ class GoogleCalendarClient:
             for item in items:
                 if not isinstance(item, dict):
                     continue
-                event, _truncated = _event_metadata(
+                event_metadata, _truncated = _event_metadata(
                     item,
                     calendar_id=calendar.id,
                     calendar_name=calendar.name,
@@ -330,7 +338,11 @@ class GoogleCalendarClient:
                     # the legacy alias field in the schema, but do not repeat
                     # every attendee in high-volume search responses.
                     include_attendee_aliases=False,
+                    # Hit size would otherwise grow with the invite list. The
+                    # event read keeps every attendee.
+                    max_attendee_details=_SEARCH_ATTENDEE_PREVIEW,
                 )
+                event = _search_event(event_metadata)
                 event_identity = (event.id, event.start)
                 if event_identity in seen_events:
                     continue
@@ -464,6 +476,7 @@ def _event_metadata(
     calendar_name: str,
     max_description_chars: int,
     include_attendee_aliases: bool = True,
+    max_attendee_details: int | None = None,
 ) -> tuple[CalendarEventMetadata, bool]:
     start_data = payload.get("start") if isinstance(payload.get("start"), dict) else {}
     end_data = payload.get("end") if isinstance(payload.get("end"), dict) else {}
@@ -485,6 +498,19 @@ def _event_metadata(
         if include_attendee_aliases
         else []
     )
+    attendee_items = [item for item in attendees_data if isinstance(item, dict)]
+    # Counts and the viewer's own status come from the full list, so a capped
+    # preview never hides them.
+    response_counts = Counter(
+        status for status in (_string(item.get("responseStatus")) for item in attendee_items) if status
+    )
+    self_response_status = next(
+        (_string(item.get("responseStatus")) for item in attendee_items if item.get("self") is True),
+        "",
+    )
+    attendee_details_partial = (
+        max_attendee_details is not None and len(attendee_items) > max_attendee_details
+    )
     attendee_details = [
         CalendarAttendee(
             display_name=sanitize_connector_text(_string(item.get("displayName"))),
@@ -494,8 +520,7 @@ def _event_metadata(
             organizer=item.get("organizer") is True,
             self=item.get("self") is True,
         )
-        for item in attendees_data
-        if isinstance(item, dict)
+        for item in (attendee_items[:max_attendee_details] if attendee_details_partial else attendee_items)
     ]
     original_start_data = (
         payload.get("originalStartTime")
@@ -541,6 +566,10 @@ def _event_metadata(
             organizer=sanitize_connector_text(organizer),
             attendees=attendees,
             attendee_details=attendee_details,
+            attendee_details_partial=attendee_details_partial,
+            attendee_count=len(attendee_items),
+            attendee_response_counts=dict(sorted(response_counts.items())),
+            self_response_status=self_response_status,
             recurring_event_id=_string(payload.get("recurringEventId")),
             original_start=original_start,
             recurrence=recurrence,
@@ -548,6 +577,27 @@ def _event_metadata(
             event_type=_string(payload.get("eventType")) or "default",
         ),
         truncated,
+    )
+
+
+def _search_event(event: CalendarEventMetadata) -> CalendarSearchEvent:
+    """Project an event onto the search shape.
+
+    The role flags stay on the event read: the organizer and the viewer's own
+    status are already top-level fields.
+    """
+    return CalendarSearchEvent(
+        **{
+            **dict(event),
+            "attendee_details": [
+                CalendarAttendeePreview(
+                    display_name=attendee.display_name,
+                    email=attendee.email,
+                    response_status=attendee.response_status,
+                )
+                for attendee in event.attendee_details
+            ],
+        }
     )
 
 

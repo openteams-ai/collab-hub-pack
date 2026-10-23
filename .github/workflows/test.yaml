@@ -43,7 +43,7 @@ jobs:
     env:
       COLLAB_HUB_TEST_POSTGRES_URL: postgresql://postgres@localhost:5432/collab_test
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # patch-coverage diffs against the base branch
 
@@ -100,7 +100,7 @@ jobs:
     env:
       UV_PYTHON: "3.13"   # overrides api/.python-version
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5

@@ -237,11 +237,20 @@ class HarborRegistrySource:
         if status == 200:
             return
         # Messages name the path and status only: the credential is never part
-        # of them, and Harbor's error body is not echoed either.
+        # of them, and Harbor's error body is not echoed either. A 403 adds
+        # the permission the route needs, because Harbor's body is a bare
+        # "forbidden" and the usual pull-only robot set does not include
+        # repository:list (see docs/cog-registry.md, "What the credential
+        # must be allowed to do").
         if status in (401, 403):
-            raise RegistrySourceAuthError(
+            message = (
                 f"source {self.id!r}: the registry API refused the configured credential for {path} (HTTP {status})"
             )
+            if status == 403:
+                missing = _permission_for(path)
+                if missing:
+                    message += f"; the credential is probably missing the project-scoped {missing} permission"
+            raise RegistrySourceAuthError(message)
         if status == 404:
             raise RegistrySourceError(f"source {self.id!r}: {path} does not exist on the registry (HTTP 404)")
         raise RegistrySourceProtocolError(f"source {self.id!r}: {path} answered HTTP {status}")
@@ -332,6 +341,21 @@ class HarborRegistrySource:
             RegistryEvent(kind=kind, repo=repo, digest=digest, tags=tuple(sorted(tags)))  # type: ignore[arg-type]
             for digest, tags in sorted(grouped.items(), key=lambda item: item[0] or "")
         ]
+
+
+def _permission_for(path: str) -> str | None:
+    """The Harbor permission a listing route needs, for a 403 message.
+
+    ``/projects/{p}/repositories`` needs ``repository:list``; the artifacts
+    route under it needs ``artifact:list`` (and ``tag:list`` for the
+    ``with_tag`` expansion). ``None`` for any other path.
+    """
+
+    if path.endswith("/artifacts"):
+        return "artifact:list (and tag:list)"
+    if path.endswith("/repositories"):
+        return "repository:list"
+    return None
 
 
 def _origin(url: str) -> str:

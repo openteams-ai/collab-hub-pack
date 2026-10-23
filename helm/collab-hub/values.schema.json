@@ -1039,6 +1039,81 @@
       "additionalProperties": {
         "type": "boolean"
       }
+    },
+    "runs": {
+      "type": "object",
+      "description": "The run API is always served; a run controller beside it runs the Cogs launched through it.",
+      "properties": {
+        "controller": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Run a run controller in the API's pod: Cogs run as processes of that pod."
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+              "description": "The controller's id, the same across restarts and rollouts."
+            },
+            "waitSeconds": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Seconds to wait at start for the Track's tables and the controller's id."
+            },
+            "environment": {
+              "type": "string",
+              "enum": [
+                "pixi",
+                "host"
+              ],
+              "description": "How a Cog's serve runs."
+            },
+            "interactionTimeoutSeconds": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Seconds one interaction may take; 0 for no limit."
+            },
+            "models": {
+              "type": "string",
+              "description": "The models block, in TOML."
+            },
+            "extraEnv": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "Extra environment for the controller."
+            },
+            "cacheSizeLimit": {
+              "type": "string",
+              "description": "The size limit of the volume Cog environments and run output are kept on."
+            },
+            "healthPort": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "The port of the controller's /healthz."
+            },
+            "resources": {
+              "type": "object",
+              "description": "Resources for the controller container."
+            },
+            "workerStartSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Seconds a worker may take to start, building a Cog's environment on its first launch included."
+            },
+            "tmpSizeLimit": {
+              "type": "string",
+              "description": "The size limit of the controller's /tmp, where Cogs write."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,

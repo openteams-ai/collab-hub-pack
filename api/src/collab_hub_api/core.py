@@ -680,6 +680,10 @@ def make_app(config: BaseConfig) -> FastAPI:
     async def runs_unavailable_handler(request: Request, exc: runs_router.RunsUnavailable):
         return frames.error_response(status.HTTP_503_SERVICE_UNAVAILABLE, runs_router.RUNS_UNAVAILABLE, str(exc))
 
+    @app.exception_handler(runs_router.RunsUnavailable)
+    async def runs_unavailable_handler(request: Request, exc: runs_router.RunsUnavailable):
+        return frames.error_response(status.HTTP_503_SERVICE_UNAVAILABLE, runs_router.RUNS_UNAVAILABLE, str(exc))
+
     @app.exception_handler(NoOrganizationError)
     async def no_organization_handler(_request: Request, exc: NoOrganizationError):
         # Registered against the subclass so Starlette's MRO lookup prefers it

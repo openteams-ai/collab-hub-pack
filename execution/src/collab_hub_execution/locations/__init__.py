@@ -23,7 +23,7 @@ from typing import Any
 AGENT_LOCATIONS = ("local", "remote")
 """Every value the ``location`` setting takes, in the order they are built."""
 
-_NOT_YET = {"remote": "Phase 21 (#6)"}
+_NOT_YET = {"remote": "Phase 22 (#6)"}
 
 
 class LocationNotImplemented(NotImplementedError):

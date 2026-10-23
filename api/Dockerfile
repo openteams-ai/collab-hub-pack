@@ -1,6 +1,6 @@
 FROM python:3.14.9-slim-trixie AS python
 FROM ghcr.io/astral-sh/uv:0.13.4 AS uv
-FROM node:24.22.1-bookworm-slim AS node
+FROM node:26.11.1-bookworm-slim AS node
 
 # The admin panel is a built bundle, so it is built here rather than committed.
 # `npm ci --ignore-scripts` installs exactly what package-lock.json pins and

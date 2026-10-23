@@ -265,8 +265,16 @@ async def test_rest_refused_credential_is_a_clear_error_without_the_secret(statu
 
 
 async def test_rest_404_and_5xx_and_bad_bodies() -> None:
-    with pytest.raises(RegistrySourceError, match="does not exist on the registry"):
+    with pytest.raises(RegistrySourceError, match="does not exist on the registry") as missing_project:
         await make_source(lambda r: httpx.Response(404, json={"errors": []})).list_repositories()
+    # A repository that does not exist is the same error to everyone, and one a sweep can tell apart:
+    # sent there by a publish through the Hub that never landed, it reads this as "nothing there".
+    from collab_hub_api.cogs.registry import RegistryRepositoryNotFound
+
+    assert not isinstance(missing_project.value, RegistryRepositoryNotFound)
+    with pytest.raises(RegistrySourceError, match="does not exist on the registry") as missing_repository:
+        await make_source(lambda r: httpx.Response(404, json={"errors": []})).list_artifacts("cogs/never-landed")
+    assert isinstance(missing_repository.value, RegistryRepositoryNotFound)
     with pytest.raises(RegistrySourceProtocolError, match="answered HTTP 503"):
         await make_source(lambda r: httpx.Response(503)).list_repositories()
     with pytest.raises(RegistrySourceProtocolError, match="is not JSON"):

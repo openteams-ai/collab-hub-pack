@@ -61,6 +61,9 @@ DIGEST_PATTERN = re.compile(r"^[a-z0-9]+(?:[.+_-][a-z0-9]+)*:[a-f0-9]{32,}$")
 SOURCE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 SOURCE_ID_MAX_LENGTH = 64
 
+REDIRECT_HOST_PATTERN = re.compile(r"^\.?[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$")
+"""A lowercase DNS name (or IPv4 literal), optionally with a leading dot meaning "any subdomain of"."""
+
 CREATED_ANNOTATION = "org.opencontainers.image.created"
 
 
@@ -69,6 +72,16 @@ class RegistrySourceError(Exception):
 
     OCI failures raised through ``oci()`` keep their ``OCIError`` types; this
     hierarchy covers enumeration and webhook translation.
+    """
+
+
+class RegistryRepositoryNotFound(RegistrySourceError):
+    """The adapter's API says this repository does not exist.
+
+    A :class:`RegistrySourceError` like any other to every caller but one:
+    a sweep that was sent to a repository because of a publish through the
+    Hub (issue #180) reads it as "nothing there", the same answer a generic
+    registry gives with a 404 on the tag listing.
     """
 
 
@@ -110,7 +123,13 @@ class WebhookRequest:
 
 @runtime_checkable
 class RegistrySource(Protocol):
-    """What the indexer (#84) and the webhook receiver (#86) need from a registry."""
+    """What the indexer (#84) and the webhook receiver (#86) need from a registry.
+
+    An adapter whose listing cannot include untagged manifests says so with
+    ``lists_untagged = False``; the indexer then asks the registry about the
+    untagged rows it already has before declaring them gone. Absent means
+    the listing is complete.
+    """
 
     id: str
     """Stable source id stored with every indexed row."""
@@ -290,6 +309,19 @@ class CogRegistrySourceConfig(BaseModel):
     credentials: CogRegistryCredentials = Field(default_factory=CogRegistryCredentials)
     webhook_secret: SecretStr = SecretStr("")
     request_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    publish: bool = False
+    """Whether pushes through the Hub are written to this source (issue #180). At most one source.
+
+    Such a source also enumerates the repositories published through the
+    Hub, so a ``static`` one needs neither ``repositories`` nor ``index_url``.
+    """
+    blob_redirect_hosts: list[str] = Field(default_factory=list)
+    """Hosts a blob redirect from this registry may point at; empty means no allowlist.
+
+    Exact hostnames (``storage.example.com``) or leading-dot suffixes
+    (``.s3.amazonaws.com``). The registry's own origin is always allowed, and
+    loopback and link-local literals never are, whatever this says.
+    """
 
     @field_validator(
         "id", "url", "api_url", "token_url", "index_url", "ca_bundle_path", "webhook_secret", mode="before"
@@ -337,6 +369,22 @@ class CogRegistrySourceConfig(BaseModel):
             cleaned.append(project)
         return cleaned
 
+    @field_validator("blob_redirect_hosts")
+    @classmethod
+    def _check_redirect_hosts(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for host in value:
+            host = host.strip()
+            if not REDIRECT_HOST_PATTERN.match(host):
+                raise ValueError(
+                    f"blob_redirect_hosts entry {host!r} is not a hostname or a leading-dot suffix "
+                    "(lowercase, no scheme, port or path)"
+                )
+            if host in cleaned:
+                raise ValueError(f"blob_redirect_hosts lists {host!r} twice")
+            cleaned.append(host)
+        return cleaned
+
     @field_validator("repositories")
     @classmethod
     def _check_repositories(cls, value: list[str]) -> list[str]:
@@ -366,8 +414,11 @@ class CogRegistrySourceConfig(BaseModel):
                 if getattr(self, name):
                     raise ValueError(f"{label} does not read {name}; that field belongs to kind 'static'")
         elif self.kind == "static":
-            if not self.repositories and not self.index_url:
-                raise ValueError(f"{label} requires repositories and/or index_url: it has no listing API to ask")
+            if not self.repositories and not self.index_url and not self.publish:
+                raise ValueError(
+                    f"{label} requires repositories and/or index_url (or publish: true, whose repositories "
+                    "are the ones published through the Hub): it has no listing API to ask"
+                )
             for name in ("projects", "api_url"):
                 if getattr(self, name):
                     raise ValueError(f"{label} does not read {name}; that field belongs to kind 'harbor'")
@@ -385,13 +436,17 @@ def build_registry_sources(
     *,
     oci_client_factory: OCIClientFactory = OCIClient,
     http_transport: httpx.AsyncBaseTransport | None = None,
+    restrict_redirects: bool = False,
 ) -> list[RegistrySource]:
     """Instantiate one adapter per configured source, or refuse to start.
 
     ``make_app`` calls this once so that a duplicate id or an unsupported kind
     fails the rollout rather than the first sweep. ``http_transport`` exists
     for tests (``httpx.MockTransport``) and is handed to every adapter's own
-    HTTP client and to the OCI client factory.
+    HTTP client and to the OCI client factory. ``restrict_redirects`` turns
+    the OCI client's redirect policy on for every source (see
+    ``OCIClient._check_redirect``); a source that sets
+    ``blob_redirect_hosts`` has it on regardless.
     """
 
     # Adapters import this module for the protocol and config types, so the
@@ -422,10 +477,18 @@ def build_registry_sources(
     for config in configs:
         if config.kind == "harbor":
             source: RegistrySource = HarborRegistrySource(
-                config, oci_client_factory=oci_client_factory, http_transport=http_transport
+                config,
+                oci_client_factory=oci_client_factory,
+                http_transport=http_transport,
+                restrict_redirects=restrict_redirects,
             )
         else:
-            source = StaticRegistrySource(config, oci_client_factory=oci_client_factory, http_transport=http_transport)
+            source = StaticRegistrySource(
+                config,
+                oci_client_factory=oci_client_factory,
+                http_transport=http_transport,
+                restrict_redirects=restrict_redirects,
+            )
         sources.append(source)
     return sources
 

@@ -293,7 +293,326 @@ cases:
           index_url: 'https://robot:REVIEW_SYNTHETIC@registry.example.com/catalog.v1.json'
     app_error: 'must not embed a username or password'
 
+  - name: serving enabled with zero sources
+    layers: [template]
+    values:
+      cogs:
+        serve: {enabled: true, publicUrl: https://hub.example.com}
+    chart_error: 'cogs.serve.enabled=true with no cogs.registry.sources'
+    settings:
+      serve: {enabled: true, public_url: https://hub.example.com}
+    app_error: 'cogs.serve.enabled is true but cogs.registry_sources is empty'
+
+  - name: serving enabled with no public URL to hand out
+    layers: [template]
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+        serve: {enabled: true}
+    chart_error: 'cogs.serve.enabled=true but the Hub.s public URL is unknown'
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+      serve: {enabled: true}
+    app_error: 'cogs.serve.enabled is true but cogs.serve.public_url is empty'
+
+  - name: serve public URL on another host than the API
+    layers: [template]
+    values:
+      api:
+        nebariapp: {enabled: true, hostname: hub.example.com}
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+        serve: {enabled: true, publicUrl: 'https://cogs.example.com', routeTimeout: false}
+    chart_error: 'cogs.serve.publicUrl names host cogs.example.com, but the Hub API is served on hub.example.com'
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+      serve: {enabled: true, public_url: 'https://cogs.example.com'}
+    why_chart_only: >-
+      The API is not told which host the chart routes it on; it sees one
+      public URL and serves /v2 beside /v1 on whatever origin reaches it. It
+      does refuse a public URL that disagrees with web.public_base_url, the
+      one other statement of its own origin, which api/tests covers.
+
+  - name: two publish sources
+    layers: [template]
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: one, kind: static, url: https://one.example.com, publish: true}
+            - {id: two, kind: static, url: https://two.example.com, publish: true}
+        serve: {enabled: true, publicUrl: https://hub.example.com}
+    chart_error: 'marks 2 sources publish: true \(one, two\)'
+    settings:
+      registry_sources:
+        - {id: one, kind: static, url: https://one.example.com, publish: true}
+        - {id: two, kind: static, url: https://two.example.com, publish: true}
+      serve: {enabled: true, public_url: https://hub.example.com}
+    app_error: 'marks 2 sources publish: true \(one, two\)'
+
+  - name: publish source without serving
+    layers: [template]
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, publish: true}
+    chart_error: 'source public is publish: true but cogs.serve.enabled is false'
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, publish: true}
+    app_error: "source 'public' is publish: true but cogs.serve.enabled is false"
+
   # --- structure and grammar: schema, mirrored by the API's own validators -------
+
+  - name: unknown serve key
+    layers: [schema]
+    values:
+      cogs:
+        serve: {enabld: true}
+    chart_error: 'enabld.*not allowed'
+    settings:
+      serve: {enabld: true}
+    app_error: 'enabld\s+Extra inputs are not permitted'
+    compare_render: false   # the chart renders nothing for a key it does not know
+
+  - name: serve public URL with a path
+    layers: [schema]
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+        serve: {enabled: true, publicUrl: 'https://hub.example.com/registry'}
+    chart_error: 'publicUrl.*(pattern|match)'
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+      serve: {enabled: true, public_url: 'https://hub.example.com/registry'}
+    app_error: 'must be a bare origin'
+
+  - name: serve public URL with embedded credentials
+    layers: [schema]
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+        serve: {enabled: true, publicUrl: 'https://user:pw@hub.example.com'}
+    chart_error: 'publicUrl.*(pattern|match)'
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+      serve: {enabled: true, public_url: 'https://user:pw@hub.example.com'}
+    app_error: 'must not embed a username or password'
+
+  - name: serve public URL that is not http(s)
+    layers: [schema]
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+        serve: {enabled: true, publicUrl: 'oci://hub.example.com'}
+    chart_error: 'publicUrl.*(pattern|match)'
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+      serve: {enabled: true, public_url: 'oci://hub.example.com'}
+    app_error: 'must be an http\(s\) origin with a host'
+
+  - name: serve public URL with an out-of-range port
+    layers: [schema]
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+        serve: {enabled: true, publicUrl: 'https://hub.example.com:99999'}
+    chart_error: 'publicUrl.*(pattern|match)'
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+      serve: {enabled: true, public_url: 'https://hub.example.com:99999'}
+    app_error: 'has an invalid port'
+
+  - name: serve public URL with a trailing slash
+    layers: [schema]
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+        serve: {enabled: true, publicUrl: 'https://hub.example.com/'}
+    chart_error: 'publicUrl.*(pattern|match)'
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+      serve: {enabled: true, public_url: 'https://hub.example.com/'}
+    app_error: 'must be a bare origin'
+
+  - name: blob redirect host with a scheme
+    layers: [schema]
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha], blobRedirectHosts: ['https://storage.example.com']}
+    chart_error: 'blobRedirectHosts.*(pattern|match)'
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha], blob_redirect_hosts: ['https://storage.example.com']}
+    app_error: 'is not a hostname or a leading-dot suffix'
+
+  - name: duplicate blob redirect hosts
+    layers: [schema]
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha], blobRedirectHosts: [storage.example.com, storage.example.com]}
+    chart_error: 'blobRedirectHosts.*are equal'
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha], blob_redirect_hosts: [storage.example.com, storage.example.com]}
+    app_error: 'blob_redirect_hosts lists .* twice'
+
+  - name: unknown publish role
+    layers: [schema]
+    values:
+      cogs:
+        publish: {allowedRoles: [admin]}
+    chart_error: 'allowedRoles.*(enum|one of)'
+    settings:
+      publish: {allowed_roles: [admin]}
+    app_error: "Input should be 'operator', 'owner' or 'member'"
+
+  - name: blank publish user
+    layers: [schema]
+    values:
+      cogs:
+        publish: {allowedUsers: ['  ']}
+    chart_error: 'allowedUsers.*(pattern|match)'
+    settings:
+      publish: {allowed_users: ['  ']}
+    app_error: 'allowed_users entries must not be blank'
+
+  - name: a publish role listed twice
+    layers: [schema]
+    values:
+      cogs:
+        publish: {allowedRoles: [owner, owner]}
+    chart_error: 'allowedRoles.*(unique|are equal)'
+    settings:
+      publish: {allowed_roles: [owner, owner]}
+    app_error: "allowed_roles lists 'owner' twice"
+
+  - name: a publish user listed twice
+    layers: [schema]
+    values:
+      cogs:
+        publish: {allowedUsers: [8f2c1d7e-user-id, 8f2c1d7e-user-id]}
+    chart_error: 'allowedUsers.*(unique|are equal)'
+    settings:
+      publish: {allowed_users: [8f2c1d7e-user-id, 8f2c1d7e-user-id]}
+    app_error: "allowed_users lists '8f2c1d7e-user-id' twice"
+
+  - name: no room for a single pending repository
+    layers: [schema]
+    values:
+      cogs:
+        publish: {maxPendingRepositories: 0}
+    chart_error: 'maxPendingRepositories.*(minimum|greater than or equal)'
+    settings:
+      publish: {max_pending_repositories: 0}
+    app_error: 'max_pending_repositories\s+Input should be greater than or equal to 1'
+
+  - name: more pending repositories than the bound allows
+    layers: [schema]
+    values:
+      cogs:
+        publish: {maxPendingRepositories: 1001}
+    chart_error: 'maxPendingRepositories.*(maximum|less than or equal)'
+    settings:
+      publish: {max_pending_repositories: 1001}
+    app_error: 'max_pending_repositories\s+Input should be less than or equal to 1000'
+
+  - name: unknown publish key
+    layers: [schema]
+    values:
+      cogs:
+        publish: {allowedGroups: [x]}
+    chart_error: 'allowedGroups.*not allowed'
+    settings:
+      publish: {allowed_groups: [x]}
+    app_error: 'allowed_groups\s+Extra inputs are not permitted'
+    compare_render: false   # the chart renders nothing for a key it does not know
+
+  - name: registry credential lifetime below the floor
+    layers: [schema]
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+        serve: {enabled: true, publicUrl: https://hub.example.com, credentialTtlSeconds: 5}
+    chart_error: 'credentialTtlSeconds.*(minimum|greater than or equal)'
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+      serve: {enabled: true, public_url: https://hub.example.com, credential_ttl_seconds: 5}
+    app_error: 'greater than or equal to 60'
+
+  - name: pull token lifetime above the ceiling
+    layers: [schema]
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+        serve: {enabled: true, publicUrl: https://hub.example.com, tokenTtlSeconds: 7200}
+    chart_error: 'tokenTtlSeconds.*(maximum|less than or equal)'
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+      serve: {enabled: true, public_url: https://hub.example.com, token_ttl_seconds: 7200}
+    app_error: 'less than or equal to 3600'
+
+  - name: blob size limit of zero
+    layers: [schema]
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+        serve: {enabled: true, publicUrl: https://hub.example.com, maxBlobBytes: 0}
+    chart_error: 'maxBlobBytes.*(minimum|greater than or equal)'
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+      serve: {enabled: true, public_url: https://hub.example.com, max_blob_bytes: 0}
+    app_error: 'greater than or equal to 1'
+
+  - name: blob time limit above the ceiling
+    layers: [schema]
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+        serve: {enabled: true, publicUrl: https://hub.example.com, maxBlobSeconds: 100000}
+    chart_error: 'maxBlobSeconds.*(maximum|less than or equal)'
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+      serve: {enabled: true, public_url: https://hub.example.com, max_blob_seconds: 100000}
+    app_error: 'less than or equal to 21600'
 
   - name: unknown cogs key
     layers: [schema]
@@ -801,3 +1120,84 @@ accepted:
           projects: [cogs, team.x]
           request_timeout_seconds: 60
       index: {enabled: true, interval_seconds: 10}
+
+  - name: serving with an explicit public URL on a port, at every limit
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha], blobRedirectHosts: [storage.example.com, .s3.amazonaws.com, 10.0.0.7]}
+        serve:
+          enabled: true
+          publicUrl: 'https://hub.example.com:8443'
+          credentialTtlSeconds: 60
+          tokenTtlSeconds: 3600
+          maxBlobBytes: 5368709120
+          maxBlobSeconds: 21600
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha], blob_redirect_hosts: [storage.example.com, .s3.amazonaws.com, 10.0.0.7]}
+      serve:
+        enabled: true
+        public_url: 'https://hub.example.com:8443'
+        credential_ttl_seconds: 60
+        token_ttl_seconds: 3600
+        max_blob_bytes: 5368709120
+        max_blob_seconds: 21600
+
+  - name: serving turned off renders nothing, whatever else the block says
+    values:
+      cogs:
+        serve: {enabled: false, publicUrl: 'https://hub.example.com', tokenTtlSeconds: 60}
+    settings:
+      registry_sources: []
+
+  - name: a publish source with nothing configured to enumerate, and who may publish
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, publish: true}
+            - {id: mirror, kind: static, url: https://mirror.example.com, repositories: [cogs/alpha]}
+        serve: {enabled: true, publicUrl: 'https://hub.example.com'}
+        publish: {allowedRoles: [owner, operator], allowedUsers: [8f2c1d7e-user-id], maxPendingRepositories: 1000}
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, publish: true}
+        - {id: mirror, kind: static, url: https://mirror.example.com, repositories: [cogs/alpha]}
+      serve: {enabled: true, public_url: 'https://hub.example.com'}
+      publish: {allowed_roles: [owner, operator], allowed_users: [8f2c1d7e-user-id], max_pending_repositories: 1000}
+
+  # The indexer Deployment's environment is the one compared (it is the
+  # sweeping process): with serving on it must say so, or its sweeps follow
+  # redirects outside the serving policy (docs/cog-registry.md).
+  - name: serving with the indexer on reaches the indexer too
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+        serve: {enabled: true, publicUrl: 'https://hub.example.com'}
+        index: {enabled: true}
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+      serve: {enabled: true, public_url: 'https://hub.example.com'}
+      index: {enabled: true}
+
+  # And a publish source reaches the indexer (it enumerates and settles what
+  # was published through the Hub), which Config refuses without serving on.
+  # Who may publish stays on the API replicas, so it is left out here.
+  - name: a publish source with the indexer on starts the indexer
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, publish: true}
+        serve: {enabled: true, publicUrl: 'https://hub.example.com'}
+        index: {enabled: true}
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, publish: true}
+      serve: {enabled: true, public_url: 'https://hub.example.com'}
+      index: {enabled: true}

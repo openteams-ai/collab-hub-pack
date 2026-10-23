@@ -1696,8 +1696,8 @@ def test_migrations_are_appended_and_shipped_versions_are_untouched():
     """
 
     versions = [version for version, _ in COLLAB_SCHEMA_MIGRATIONS]
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-    assert LATEST_COLLAB_SCHEMA_VERSION == 12
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    assert LATEST_COLLAB_SCHEMA_VERSION == 14
 
     version_two = dict(COLLAB_SCHEMA_MIGRATIONS)[2]
     # v2 has shipped, so its statements are frozen text. If this ever fails,

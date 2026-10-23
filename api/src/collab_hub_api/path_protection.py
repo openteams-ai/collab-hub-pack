@@ -162,6 +162,7 @@ class PathProtectionMiddleware(BaseHTTPMiddleware):
         authenticate: Callable[[Request], object],
         unauthorized_response: Callable[[Request, HTTPException], Response] = default_unauthorized_response,
         authenticate_error_response: Callable[[Request, Exception], Response | None] | None = None,
+        self_authenticating: Callable[[str], bool] | None = None,
     ) -> None:
         super().__init__(app)
         self.rules = list(rules)
@@ -173,8 +174,17 @@ class PathProtectionMiddleware(BaseHTTPMiddleware):
         # re-raises, so a genuine bug still surfaces as a 500 rather than being
         # laundered into a plausible-looking error.
         self.authenticate_error_response = authenticate_error_response
+        # Paths whose routes run their own credential check on every request
+        # and must answer its refusal themselves -- the OCI registry surface,
+        # whose 401 carries the challenge a client follows to its token
+        # endpoint. Passed through whatever the map says; "public" in the map
+        # would say the same thing, but an operator's more specific rule
+        # could then undo it and break every registry client.
+        self.self_authenticating = self_authenticating
 
     async def dispatch(self, request: Request, call_next):
+        if self.self_authenticating is not None and self.self_authenticating(request_path(request)):
+            return await call_next(request)
         if resolve_access(request_path(request), self.rules, self.default_access) == "public":
             return await call_next(request)
         try:

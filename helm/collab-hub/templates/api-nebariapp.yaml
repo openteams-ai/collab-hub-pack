@@ -1,5 +1,22 @@
 {{- if and .Values.api.enabled .Values.api.nebariapp.enabled }}
 {{- $component := "api" }}
+{{- $nebariapp := merge (dict "serviceAccountName" (include "collab-hub.api-service-account-name" .)) (deepCopy .Values.api.nebariapp) }}
+{{- if .Values.cogs.serve.enabled }}
+{{- /* Pulls through the Hub (issue #179): registry clients present their own
+credential on /v2 and follow the app's challenge to its token endpoint, so the
+gateway must not put its browser sign-in in front of it. Added here rather
+than left to values, so turning serving on cannot leave /v2 behind the
+gateway's redirect; a /v2 entry already in publicRoutes is left as written. */}}
+{{- $routing := $nebariapp.routing | default dict }}
+{{- $public := $routing.publicRoutes | default list }}
+{{- $listed := false }}
+{{- range $public }}{{- if eq (toString .pathPrefix) "/v2" }}{{- $listed = true }}{{- end }}{{- end }}
+{{- if not $listed }}
+{{- $public = append $public (dict "pathPrefix" "/v2" "pathType" "PathPrefix") }}
+{{- end }}
+{{- $_ := set $routing "publicRoutes" $public }}
+{{- $_ := set $nebariapp "routing" $routing }}
+{{- end }}
 {{- include "collab-hub.nebariapp" (dict
     "top" .
     "component" $component
@@ -7,6 +24,6 @@
       "name" (include "collab-hub.component-name" (dict "top" . "component" $component))
       "port" .Values.api.service.port
     )
-    "nebariapp" (merge (dict "serviceAccountName" (include "collab-hub.api-service-account-name" .)) .Values.api.nebariapp)
+    "nebariapp" $nebariapp
 ) }}
 {{- end }}

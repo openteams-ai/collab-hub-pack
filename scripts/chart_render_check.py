@@ -53,6 +53,7 @@ class Rendered:
     """The release: the API Deployment (always), the indexer Deployment (when indexing is on), the Services."""
 
     def __init__(self, docs: list[dict]) -> None:
+        self.docs = docs
         deployments = {d["metadata"]["labels"][COMPONENT_LABEL]: d for d in docs if d.get("kind") == "Deployment"}
         assert set(deployments) <= {"api", "indexer"}, sorted(deployments)
         self.api = Workload(deployments["api"])
@@ -237,7 +238,124 @@ def case_features(r: Rendered) -> None:
     }, flags
 
 
+SERVE_PREFIX = "COLLAB_HUB_API__COGS__SERVE__"
+
+
+def serve_env(r: Rendered) -> dict[str, str]:
+    return {n[len(SERVE_PREFIX) :]: r.value(n) for n in r.env if n.startswith(SERVE_PREFIX)}
+
+
+def kind(r: Rendered, name: str) -> dict | None:
+    return next((d for d in r.docs if d.get("kind") == name), None)
+
+
+def case_publish_with_indexer(r: Rendered) -> None:
+    # Who may publish (issue #180) governs push requests, which reach the API
+    # replicas only: they carry it, the indexer carries none of it.
+    publish = {n: r.value(n) for n in r.env if n.startswith("COLLAB_HUB_API__COGS__PUBLISH__")}
+    assert publish == {
+        "COLLAB_HUB_API__COGS__PUBLISH__ALLOWED_ROLES": '["owner"]',
+        "COLLAB_HUB_API__COGS__PUBLISH__MAX_PENDING_REPOSITORIES": "5",
+    }, publish
+    assert r.indexer is not None
+    assert not [n for n in r.indexer.env if n.startswith("COLLAB_HUB_API__COGS__PUBLISH__")], sorted(r.indexer.env)
+
+
+def case_serve_with_indexer(r: Rendered) -> None:
+    # Serving and sweeping both on: /v2 routes to the API replicas only, but
+    # the indexer carries the same serve settings. A sweep is held to the
+    # serving redirect policy when the deployment serves pulls
+    # (docs/cog-registry.md), and a process without cogs.serve.enabled
+    # follows redirects unchecked.
+    assert serve_env(r)["ENABLED"] == "true", serve_env(r)
+    r.indexer_is_the_one_sweeper(interval="300", run_on_startup="true")  # env equal to the API's, serve included
+    assert r.indexer.value(SERVE_PREFIX + "ENABLED") == "true"
+
+
+def case_serve_off(r: Rendered) -> None:
+    # Sources configured, serving left off: no trace of it anywhere.
+    assert serve_env(r) == {}, serve_env(r)
+    app = kind(r, "NebariApp")
+    assert app is not None
+    assert [route["pathPrefix"] for route in app["spec"]["routing"]["publicRoutes"]] == ["/v1", "/mcp", "/health"]
+    assert kind(r, "BackendTrafficPolicy") is None
+
+
+def case_serve_nebariapp(r: Rendered) -> None:
+    # The public URL is derived from the NebariApp hostname, and /v2 joins the
+    # routes the gateway leaves to the app's own authentication.
+    assert serve_env(r) == {
+        "ENABLED": "true",
+        "PUBLIC_URL": "https://hub.example.com",
+        "CREDENTIAL_TTL_SECONDS": "900",
+        "TOKEN_TTL_SECONDS": "300",
+        "MAX_BLOB_BYTES": "1073741824",
+        "MAX_BLOB_SECONDS": "900",
+    }, serve_env(r)
+    public = kind(r, "NebariApp")["spec"]["routing"]["publicRoutes"]
+    assert public[-1] == {"pathPrefix": "/v2", "pathType": "PathPrefix"}, public
+    assert [route["pathPrefix"] for route in public] == ["/v1", "/mcp", "/health", "/v2"]
+    assert kind(r, "HTTPRoute") is None
+    # The route is the operator's and NebariApp carries no timeout, so the
+    # blob time limit reaches the gateway as a policy on the public route,
+    # named the way the operator names it: "<NebariApp name>-public-route".
+    app = kind(r, "NebariApp")
+    policy = kind(r, "BackendTrafficPolicy")
+    assert policy is not None, "no request timeout reaches the route that carries /v2"
+    assert policy["apiVersion"] == "gateway.envoyproxy.io/v1alpha1"
+    assert policy["metadata"]["namespace"] == app["metadata"]["namespace"]
+    assert policy["spec"] == {
+        "targetRefs": [
+            {
+                "group": "gateway.networking.k8s.io",
+                "kind": "HTTPRoute",
+                "name": app["metadata"]["name"] + "-public-route",
+            }
+        ],
+        "timeout": {"http": {"requestTimeout": "930s"}},
+    }, policy["spec"]
+
+
+def case_serve_nebariapp_no_timeout(r: Rendered) -> None:
+    # routeTimeout=false: /v2 is still a public route, and the chart attaches no policy.
+    public = kind(r, "NebariApp")["spec"]["routing"]["publicRoutes"]
+    assert public[-1] == {"pathPrefix": "/v2", "pathType": "PathPrefix"}, public
+    assert kind(r, "BackendTrafficPolicy") is None
+
+
+def case_serve_httproute(r: Rendered) -> None:
+    # An explicit public URL adds a port to the ingress host, a 5 GiB limit renders
+    # as an integer (not 5.36870912e+09), and /v2 gets its own rule, first,
+    # with a request timeout that outlasts the blob time limit.
+    env = serve_env(r)
+    assert env["PUBLIC_URL"] == "https://hub.example.com:8443", env
+    assert env["MAX_BLOB_BYTES"] == "5368709120", env
+    assert env["MAX_BLOB_SECONDS"] == "1800" and env["CREDENTIAL_TTL_SECONDS"] == "600", env
+    rules = kind(r, "HTTPRoute")["spec"]["rules"]
+    assert rules[0]["matches"] == [{"path": {"type": "PathPrefix", "value": "/v2"}}], rules[0]
+    assert rules[0]["timeouts"] == {"request": "1830s"}, rules[0]
+    assert rules[0]["backendRefs"] == rules[1]["backendRefs"]
+    assert rules[1]["matches"] == [{"path": {"type": "PathPrefix", "value": "/"}}] and "timeouts" not in rules[1]
+    # The chart's own route carries the timeout; the Envoy Gateway policy is for the operator's.
+    assert kind(r, "BackendTrafficPolicy") is None
+
+
+def case_serve_httproute_no_timeout(r: Rendered) -> None:
+    # routeTimeout=false (Gateway API CRDs without HTTPRoute timeouts): the
+    # host's own "/" rule carries /v2, and no rule sets a timeout.
+    assert serve_env(r)["PUBLIC_URL"] == "https://hub.example.com"
+    rules = kind(r, "HTTPRoute")["spec"]["rules"]
+    assert len(rules) == 1 and "timeouts" not in rules[0], rules
+
+
 CASES = {
+    "serve-off": case_serve_off,
+    "serve-with-indexer": case_serve_with_indexer,
+    "publish-with-indexer": case_publish_with_indexer,
+    "serve-nebariapp": case_serve_nebariapp,
+    "serve-nebariapp-no-timeout": case_serve_nebariapp_no_timeout,
+    "serve-httproute": case_serve_httproute,
+    "serve-httproute-no-timeout": case_serve_httproute_no_timeout,
     "features": case_features,
     "default": case_default,
     "fixture": case_fixture,

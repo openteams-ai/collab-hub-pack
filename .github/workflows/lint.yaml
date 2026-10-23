@@ -18,12 +18,24 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Set up Helm
-        uses: azure/setup-helm@v5
-        with:
-          # Pinned: when the latest-release lookup fails the action falls back to
-          # Helm 3, whose schema errors the negative render tests do not expect.
-          version: v4.3.0
+      - name: Install Helm
+        # Pinned: when the latest-release lookup in azure/setup-helm failed it
+        # fell back to Helm 3, whose schema errors the negative render tests do
+        # not expect. The version AND its sha256 live here, rather than a
+        # checksum fetched alongside the tarball from the same server, so a
+        # changed download is a CI failure and not a changed CI (#205).
+        # On upgrade, take the sha256 for linux-amd64 from the release notes
+        # at https://github.com/helm/helm/releases and update both lines.
+        run: |
+          set -euo pipefail
+          version=v4.3.0
+          sha256=86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb
+          curl -sSLo helm.tar.gz "https://get.helm.sh/helm-${version}-linux-amd64.tar.gz"
+          echo "${sha256}  helm.tar.gz" | sha256sum -c -
+          tar -xzf helm.tar.gz linux-amd64/helm
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          rm -rf helm.tar.gz linux-amd64
+          helm version --short
 
       - name: helm lint
         run: helm lint helm/collab-hub

@@ -3,7 +3,7 @@
   "private": true,
   "description": "Pins semantic-release and its plugins for .github/workflows/semantic-release.yml; installed with npm ci from package-lock.json.",
   "dependencies": {
-    "@semantic-release/exec": "6.0.3",
+    "@semantic-release/exec": "7.1.0",
     "conventional-changelog-conventionalcommits": "8.0.0",
     "semantic-release": "25.0.9"
   }

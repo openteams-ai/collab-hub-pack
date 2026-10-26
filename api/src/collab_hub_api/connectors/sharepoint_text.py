@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
 import math
 import os
@@ -216,6 +217,42 @@ def worker_environment() -> dict[str, str]:
     return env
 
 
+# prctl(2) operations: PR_SET_DUMPABLE / PR_GET_DUMPABLE.
+_PR_GET_DUMPABLE = 3
+_PR_SET_DUMPABLE = 4
+_inspection_denied = False
+
+
+def deny_parent_inspection() -> bool:
+    """Make this process non-dumpable (Linux), so the worker cannot inspect it.
+
+    A fixed ``env=`` stops the worker from inheriting the API's secrets, but
+    the worker runs as the same Linux user, and Linux lets a user read its
+    own processes' initial environment, memory and open files through
+    ``/proc/<pid>/{environ,mem,maps,fd}`` and ptrace. A non-dumpable process
+    is exempt: the kernel refuses those to everything but root, while the
+    process itself keeps full access to its own ``/proc/self``. The cost is
+    that the API process writes no core dumps and cannot be attached to by a
+    same-user debugger, both right for a process holding deployment secrets.
+
+    Idempotent. Returns True once the property holds; False where it cannot
+    be set (not Linux, or prctl refused), which callers treat as fail-closed.
+    """
+    global _inspection_denied
+    if sys.platform != "linux":
+        return False
+    if _inspection_denied:
+        return True
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+            return False
+        _inspection_denied = libc.prctl(_PR_GET_DUMPABLE, 0, 0, 0, 0) == 0
+    except (OSError, AttributeError):  # pragma: no cover - no usable libc
+        return False
+    return _inspection_denied
+
+
 def worker_command(*, max_chars: int, max_pages: int, memory_limit_bytes: int, cpu_seconds: int) -> list[str]:
     """The argv of one parse worker. Separate so tests can substitute a stand-in."""
     return [
@@ -237,6 +274,11 @@ async def _run_worker(
     timeout_seconds: float,
     memory_limit_bytes: int,
 ) -> tuple[str, bool]:
+    # Before the first worker ever exists, this process stops being readable
+    # by its own user: a worker that is taken over by a file must find neither
+    # secrets in its environment (env= below) nor in ours (non-dumpable).
+    if sys.platform == "linux" and not deny_parent_inspection():
+        raise PdfExtractionError("the API process could not be shielded from the parse worker")
     # The CPU ceiling is a second line behind the wall-clock deadline, for a
     # worker the parent could not kill; a little over the deadline so a normal
     # parse never trips it first.

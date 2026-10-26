@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 import json
+import subprocess
 import sys
 import time
 import types
@@ -1329,8 +1330,10 @@ async def test_the_worker_never_sees_the_api_environment(monkeypatch):
     seen = set(names.split())
     assert _SENTINEL not in seen
     assert not {name for name in seen if name.startswith("COLLAB_HUB_API__") or name.startswith("FRAMES_")}
-    # Nothing beyond the fixed allowlist (plus what the venv launcher itself adds).
-    assert seen <= set(sharepoint_text.worker_environment()) | {"__PYVENV_LAUNCHER__"}
+    # Nothing beyond the fixed allowlist. Names starting with "__" are added by
+    # the OS or the venv launcher, not inherited (macOS: __CF_USER_TEXT_ENCODING;
+    # Windows: __PYVENV_LAUNCHER__), so they are the one exception.
+    assert {name for name in seen if not name.startswith("__")} <= set(sharepoint_text.worker_environment())
 
 
 async def test_the_real_worker_parses_with_only_the_minimal_environment(monkeypatch):
@@ -1352,3 +1355,61 @@ async def test_the_real_worker_parses_with_only_the_minimal_environment(monkeypa
     assert spawned == [sharepoint_text.worker_environment()]
     assert _SENTINEL not in spawned[0]
     assert set(spawned[0]) >= {"PATH", "LANG"}
+
+
+# An API-shaped parent: the sentinel is in its INITIAL environment (what
+# /proc/<pid>/environ exposes), and it runs the production launch path with a
+# worker-shaped stand-in that tries to read that file. Only the report comes
+# back, never the environment itself.
+_API_SHAPED_PARENT = r"""
+import asyncio, json, sys
+from collab_hub_api.connectors import sharepoint_text
+
+INSPECT = (
+    "import json, os, sys\n"
+    "sys.stdin.buffer.read()\n"
+    "try:\n"
+    "    data = open(f'/proc/{os.getppid()}/environ', 'rb').read()\n"
+    "    report = {'readable': True, 'sentinel_seen': b'COLLAB_HUB_API__TEST_SECRET' in data}\n"
+    "except OSError as exc:\n"
+    "    report = {'readable': False, 'error': type(exc).__name__}\n"
+    "print(json.dumps({'text': json.dumps(report), 'truncated': False}))\n"
+)
+sharepoint_text.worker_command = lambda **_kwargs: [sys.executable, "-c", INSPECT]
+text, _ = asyncio.run(
+    sharepoint_text.extract_pdf_text_async(
+        b"%PDF-", max_chars=10000, max_pages=1, timeout_seconds=30, memory_limit_bytes=1 << 20
+    )
+)
+print(text)
+"""
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="/proc and prctl are Linux")
+def test_the_worker_cannot_inspect_the_api_process():
+    # The worker runs as the same Linux user as the API, which would let it read
+    # the API's initial environment through /proc. The API makes itself
+    # non-dumpable before the first spawn, so the kernel refuses the read.
+    env = dict(sharepoint_text.worker_environment())
+    env[_SENTINEL] = "synthetic-secret-" + "z" * 16
+    result = subprocess.run(
+        [sys.executable, "-c", _API_SHAPED_PARENT], env=env, capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr[-600:]
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report == {"readable": False, "error": "PermissionError"}
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="prctl is Linux")
+async def test_spawning_a_worker_makes_the_api_process_non_dumpable(monkeypatch):
+    # The property is set on the production launch path itself, not left to
+    # whoever starts the API.
+    monkeypatch.setattr(sharepoint_text, "_inspection_denied", False)
+    monkeypatch.setattr(
+        sharepoint_text, "worker_command", lambda **_kwargs: [sys.executable, "-c", 'print(\'{"text": "ok"}\')']
+    )
+    await extract_pdf_text_async(b"%PDF-", max_chars=10, max_pages=1, timeout_seconds=30, memory_limit_bytes=1 << 20)
+    import ctypes
+
+    assert ctypes.CDLL(None).prctl(sharepoint_text._PR_GET_DUMPABLE, 0, 0, 0, 0) == 0
+    assert sharepoint_text.deny_parent_inspection() is True  # idempotent once set

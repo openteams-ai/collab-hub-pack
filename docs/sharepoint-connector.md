@@ -155,12 +155,22 @@ carries `content_trust: "external_untrusted"`.
   process (`sharepoint_pdf_worker`) under `extractionTimeoutSeconds` (the
   worker is killed and reaped when it overruns) and
   `extractionMemoryLimitBytes` (an address-space ceiling set inside the worker
-  before PDFium loads, plus a CPU ceiling as a second line). The worker starts
-  with a fixed minimal environment (`PATH`, `LANG`, `PYTHONDONTWRITEBYTECODE`),
-  never the API's: none of the deployment's secrets (database URLs, broker
-  client secrets, cloud credentials) reach the process that parses untrusted
-  bytes. An adverse file costs one dead worker and an `unsupported` answer;
-  the Hub keeps serving.
+  before PDFium loads, plus a CPU ceiling as a second line). An adverse file
+  costs one dead worker and an `unsupported` answer; the Hub keeps serving.
+- **The worker cannot read the API's secrets.** It starts with a fixed minimal
+  environment (`PATH`, `LANG`, `PYTHONDONTWRITEBYTECODE`), never the API's, so
+  none of the deployment's secrets (database URLs, broker client secrets,
+  cloud credentials) are inherited. And before the first worker is spawned the
+  API process makes itself non-dumpable (`prctl(PR_SET_DUMPABLE, 0)`), so a
+  worker that a file has taken over cannot read the API's initial environment,
+  memory or open files through `/proc/<pid>/*` or ptrace either, although it
+  runs as the same Linux user (the kernel refuses those to everyone but root;
+  the API's own `/proc/self` stays usable; the API writes no core dumps). Both
+  are pinned by tests, the second by one that tries the read from a worker on
+  Linux. **Not isolated by this:** the worker shares the pod's Linux user, so
+  it can still read whatever files that user can (including a mounted service
+  account token) and reach the network. Closing those means parsing outside
+  the API pod, which is a separate pattern decision.
 - **Document reads are admitted one at a time, before anything is downloaded.**
   One permit spans a PDF or Office read from before its download (or
   conversion) to after its parse, so a read waiting its turn holds no body:

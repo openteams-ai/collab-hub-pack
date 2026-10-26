@@ -22,6 +22,7 @@ import os
 import signal as signals
 import sys
 import threading
+import time
 from collections.abc import Callable, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -126,7 +127,6 @@ class Worker:
         """How long a turn waits for a session that is opening: a harness's first start can take a while."""
         self.turn_grace = turn_grace
         """How long a turn waits for a session to begin at all, before it is refused."""
-        self._session_began = threading.Event()
         self.farewells = tuple(word.lower() for word in farewells)
         self.work_dir = work_dir
         self._entry_points: dict[str, EntryPoint] = {}
@@ -259,7 +259,6 @@ class Worker:
             if self._session is not None and not self._session.ended.is_set():
                 raise WorkerError("invalid-input", f"{self.cog} already holds a session; one at a time")
             session = self._session = _Session(self._sessions[task.entry_point])
-            self._session_began.set()
         harness = None
         try:
             try:
@@ -292,11 +291,17 @@ class Worker:
 
     def turn(self, text: Any) -> tuple[int, dict[str, Any]]:
         """``POST /turn`` in process: one turn of the session the worker holds."""
-        # A turn may arrive before the session's /invoke has: it waits a moment for one to begin, and then
-        # for the session to open, which a harness's first start can make slow.
-        self._session_began.wait(self.turn_grace)
-        session = self._session
-        if session is None or not session.opened.wait(self.session_start_timeout) or session.ended.is_set():
+        # A turn may arrive before the session's /invoke has: it waits a moment for a session that has not
+        # ended to begin, and then for it to open, which a harness's first start can make slow.
+        deadline = time.monotonic() + self.turn_grace
+        while True:
+            session = self._session
+            if session is not None and not session.ended.is_set():
+                break
+            if time.monotonic() >= deadline:
+                return 404, {"error": "no session is open"}
+            time.sleep(0.02)
+        if not session.opened.wait(self.session_start_timeout) or session.ended.is_set():
             return 404, {"error": "no session is open"}
         harness = session.harness
         if harness is None:

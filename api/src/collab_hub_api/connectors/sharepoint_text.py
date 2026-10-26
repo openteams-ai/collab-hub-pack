@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import sys
 import threading
 import weakref
@@ -91,6 +92,17 @@ async def extraction_permit(wait_seconds: float) -> AsyncIterator[None]:
 
 
 _WORKER_MODULE = "collab_hub_api.connectors.sharepoint_pdf_worker"
+# The whole environment a worker starts with. The API process holds every
+# secret the deployment injects (database URLs, broker client secrets, cloud
+# credentials); a process that parses untrusted bytes with a native library
+# must not inherit any of it, so the worker gets this and nothing else.
+# sys.executable is the venv interpreter and the package is installed into
+# it, so the worker needs no PATH, PYTHONPATH or HOME to import and run.
+_WORKER_ENVIRONMENT = {
+    "PATH": os.defpath,
+    "LANG": "C.UTF-8",
+    "PYTHONDONTWRITEBYTECODE": "1",
+}
 # Largest reply the parent will read from a worker: max_chars of text plus the
 # JSON around it. Anything bigger is a misbehaving worker, not a document, and
 # is treated like a stall: killed, never buffered.
@@ -189,6 +201,21 @@ async def extract_pdf_text_async(
         )
 
 
+def worker_environment() -> dict[str, str]:
+    """The complete environment of one parse worker: fixed, and free of the API's secrets.
+
+    On Windows (development only) the interpreter also needs the Windows
+    directory to start; nothing else from the parent is passed through.
+    """
+    env = dict(_WORKER_ENVIRONMENT)
+    if sys.platform == "win32":  # pragma: no cover - exercised on developer laptops only
+        for name in ("SYSTEMROOT", "SYSTEMDRIVE"):
+            value = os.environ.get(name)
+            if value:
+                env[name] = value
+    return env
+
+
 def worker_command(*, max_chars: int, max_pages: int, memory_limit_bytes: int, cpu_seconds: int) -> list[str]:
     """The argv of one parse worker. Separate so tests can substitute a stand-in."""
     return [
@@ -224,6 +251,7 @@ async def _run_worker(
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
+        env=worker_environment(),
     )
     try:
         stdout = await asyncio.wait_for(_exchange(process, data), timeout_seconds)

@@ -155,8 +155,12 @@ carries `content_trust: "external_untrusted"`.
   process (`sharepoint_pdf_worker`) under `extractionTimeoutSeconds` (the
   worker is killed and reaped when it overruns) and
   `extractionMemoryLimitBytes` (an address-space ceiling set inside the worker
-  before PDFium loads, plus a CPU ceiling as a second line). An adverse file
-  costs one dead worker and an `unsupported` answer; the Hub keeps serving.
+  before PDFium loads, plus a CPU ceiling as a second line). The worker starts
+  with a fixed minimal environment (`PATH`, `LANG`, `PYTHONDONTWRITEBYTECODE`),
+  never the API's: none of the deployment's secrets (database URLs, broker
+  client secrets, cloud credentials) reach the process that parses untrusted
+  bytes. An adverse file costs one dead worker and an `unsupported` answer;
+  the Hub keeps serving.
 - **Document reads are admitted one at a time, before anything is downloaded.**
   One permit spans a PDF or Office read from before its download (or
   conversion) to after its parse, so a read waiting its turn holds no body:

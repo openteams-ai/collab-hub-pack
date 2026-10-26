@@ -1304,3 +1304,51 @@ async def test_extraction_permit_is_one_at_a_time_with_a_bounded_wait():
                 pass
     async with sharepoint_text.extraction_permit(0):  # released once the body ends
         pass
+
+
+# --- the worker's environment ---------------------------------------------------
+
+
+_SENTINEL = "COLLAB_HUB_API__TEST_SECRET"
+
+
+async def test_the_worker_never_sees_the_api_environment(monkeypatch):
+    # A synthetic secret in the API process must not reach the parse worker.
+    # The launch path is the production one (extract_pdf_text_async -> _run_worker
+    # -> env=worker_environment()); only the argv is a stand-in that reports
+    # the names it can see, never their values.
+    monkeypatch.setenv(_SENTINEL, "synthetic-secret-" + "x" * 16)
+    report = (
+        "import json, os, sys; sys.stdin.buffer.read(); "
+        "print(json.dumps({'text': ' '.join(sorted(os.environ)), 'truncated': False}))"
+    )
+    monkeypatch.setattr(sharepoint_text, "worker_command", lambda **_kwargs: [sys.executable, "-c", report])
+    names, _ = await extract_pdf_text_async(
+        b"%PDF-", max_chars=10000, max_pages=1, timeout_seconds=30, memory_limit_bytes=1 << 20
+    )
+    seen = set(names.split())
+    assert _SENTINEL not in seen
+    assert not {name for name in seen if name.startswith("COLLAB_HUB_API__") or name.startswith("FRAMES_")}
+    # Nothing beyond the fixed allowlist (plus what the venv launcher itself adds).
+    assert seen <= set(sharepoint_text.worker_environment()) | {"__PYVENV_LAUNCHER__"}
+
+
+async def test_the_real_worker_parses_with_only_the_minimal_environment(monkeypatch):
+    # The real worker command, with the sentinel set in the parent: the spawn
+    # receives exactly worker_environment(), and PDFium still loads and parses.
+    monkeypatch.setenv(_SENTINEL, "synthetic-secret-" + "y" * 16)
+    spawned: list[dict | None] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def spying_exec(*args, **kwargs):
+        spawned.append(kwargs.get("env"))
+        return await real_exec(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spying_exec)
+    text, truncated = await extract_pdf_text_async(
+        _minimal_pdf("Hello worker"), max_chars=100, max_pages=5, timeout_seconds=30, memory_limit_bytes=256 << 20
+    )
+    assert (text, truncated) == ("Hello worker", False)
+    assert spawned == [sharepoint_text.worker_environment()]
+    assert _SENTINEL not in spawned[0]
+    assert set(spawned[0]) >= {"PATH", "LANG"}

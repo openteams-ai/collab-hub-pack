@@ -127,7 +127,7 @@ def test_a_session_whose_harness_exits_ends_failed(served):
     opening.join(timeout=10)
     [(status, answer)] = outcome
     assert status == 502 and answer["error"]["code"] == "model-call-failed"
-    assert "exited (code 3) during the session, after 1 turns" in answer["error"]["detail"]
+    assert "exited (code 3) during the session, after 0 turns" in answer["error"]["detail"]  # the turn was not answered
 
 
 def test_a_stop_closes_every_harness_including_one_still_starting():
@@ -191,3 +191,38 @@ def test_a_worker_without_a_harness_serves_entry_points_that_need_none():
     assert worker.invoke("run", {"name": "Ada"}) == (200, worker.invoke("run", {"name": "Ada"})[1])
     assert worker.invoke("run", {"name": "Ada"})[1]["payload"] == {"greeting": "Hello, Ada!"}
     assert Context(binding=worker.binding()).binding.bound is False
+
+
+def test_an_exception_from_an_entry_point_or_a_harness_is_still_an_envelope(served):
+    worker, url = served
+    worker.task("broken")(lambda task, harness: {}["missing"])
+    status, answer = _post(url, "/invoke", {"entry_point": "broken"})
+    assert status == 502 and answer["ok"] is False
+    assert answer["error"] == {"code": "model-call-failed", "detail": "KeyError: 'missing'"}
+    # A harness that cannot even be made: the session ends, failed, and the worker can open another.
+    worker.make_harness = lambda context: (_ for _ in ()).throw(RuntimeError("no harness today"))
+    status, answer = _post(url, "/invoke", {"entry_point": "session"})
+    assert status == 502 and answer["error"]["detail"] == "RuntimeError: no harness today"
+    assert _post(url, "/turn", {"text": "hi"}) == (404, {"error": "no session is open"})
+    worker.make_harness = lambda context: AcpHarnessAdapter(fake_agent_command())
+    outcome = []
+    opening = threading.Thread(target=lambda: outcome.append(_post(url, "/invoke", {"entry_point": "session"})))
+    opening.start()
+    assert _post(url, "/turn", {"text": "bye"})[0] == 200
+    opening.join(timeout=10)
+    assert outcome[0][0] == 200
+
+
+def test_each_session_entry_point_answers_turns_its_own_way_and_counts_only_answered_turns():
+    worker = Worker("two", environ={"COLLAB_RUN_TOKEN": TOKEN},
+                    harness=lambda context: AcpHarnessAdapter(fake_agent_command()))
+    worker.session("chat")
+    worker.session("shout", answer=lambda text, harness: harness.interact(text).text.upper())
+    outcome = []
+    opening = threading.Thread(target=lambda: outcome.append(worker.invoke("shout")))
+    opening.start()
+    assert worker.turn("hello") == (200, {"text": "AGENT HEARD: HELLO"})
+    assert worker.turn("fail")[0] == 502  # not answered, not counted
+    assert worker.turn("bye")[0] == 200
+    opening.join(timeout=10)
+    assert outcome[0][1]["payload"] == {"turns": 1}

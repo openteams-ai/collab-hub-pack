@@ -93,9 +93,11 @@ TurnAnswer = Callable[[str, Harness], str]
 
 
 class _Session:
-    def __init__(self) -> None:
+    def __init__(self, answer: TurnAnswer | None) -> None:
         self.opened, self.ended = threading.Event(), threading.Event()
         self.harness: Harness | None = None
+        self.answer = answer
+        """How this session answers a turn: the function its entry point registered, or the harness's answer."""
         self.turns = 0
         self.lock = threading.Lock()
 
@@ -231,9 +233,17 @@ class Worker:
         except Cancelled:
             error = WorkerError("model-call-failed", "the interaction was cancelled before it answered")
             return status_for(error), self._envelope(entry_point, harness, clock, error=error)
+        except Exception as exc:  # noqa: BLE001 - the seam's contract: every /invoke is answered with an envelope
+            error = self._unexpected(exc)
+            return status_for(error), self._envelope(entry_point, harness, clock, error=error)
         finally:
             if harness is not None:
                 self._close(harness)
+
+    @staticmethod
+    def _unexpected(exc: BaseException) -> WorkerError:
+        """What an exception that is neither a WorkerError nor a cancellation becomes: a failed call, named."""
+        return WorkerError("model-call-failed", f"{type(exc).__name__}: {exc}"[:2000])
 
     def _envelope(self, entry_point: Any, harness: Harness | None, clock: Stopwatch, *, payload: Any = None,
                   error: WorkerError | None = None) -> dict[str, Any]:
@@ -248,7 +258,7 @@ class Worker:
         with self._session_lock:
             if self._session is not None and not self._session.ended.is_set():
                 raise WorkerError("invalid-input", f"{self.cog} already holds a session; one at a time")
-            session = self._session = _Session()
+            session = self._session = _Session(self._sessions[task.entry_point])
             self._session_began.set()
         harness = None
         try:
@@ -269,11 +279,14 @@ class Worker:
                                                        f"after {session.turns} turns")
             return 200, self._envelope(task.entry_point, harness, clock, payload={"turns": session.turns})
         except (WorkerError, Cancelled) as failure:
-            session.ended.set()
             error = failure if isinstance(failure, WorkerError) else \
                 WorkerError("model-call-failed", "the session was stopped before it opened")
             return status_for(error), self._envelope(task.entry_point, harness, clock, error=error)
+        except Exception as exc:  # noqa: BLE001 - every /invoke is answered with an envelope
+            error = self._unexpected(exc)
+            return status_for(error), self._envelope(task.entry_point, harness, clock, error=error)
         finally:
+            session.ended.set()  # however it ended, the worker holds no session now, and can open another
             if harness is not None:
                 self._close(harness)
 
@@ -292,11 +305,10 @@ class Worker:
         if text.strip().lower() in self.farewells:
             session.ended.set()
             return 200, {"text": f"Bye! The {self.cog} session ends, and the run completes."}
-        answer = self._sessions.get(next(iter(self._sessions), "session"))
         try:
             with session.lock:
-                session.turns += 1
-                said = answer(text, harness) if answer is not None else harness.interact(text).text
+                said = session.answer(text, harness) if session.answer is not None else harness.interact(text).text
+                session.turns += 1  # a turn that was answered; one that failed is not counted
             return 200, {"text": said}
         except WorkerError as error:
             return 502, {"error": f"{error.code}: {error.detail}"[:2000]}

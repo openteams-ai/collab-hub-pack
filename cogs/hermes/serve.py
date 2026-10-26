@@ -107,7 +107,7 @@ class Hermes(AcpHarnessAdapter):
     def __init__(self, context: Context) -> None:
         super().__init__(AGENT, inherits=HERMES_INHERITS)
         self.config = hermes_config(context.binding)  # a model Hermes cannot use fails the step before it starts
-        self.workspace = Path(tempfile.mkdtemp(prefix=f"hermes-{context.run_id or 'run'}-"))
+        self.workspace = Path(tempfile.mkdtemp(prefix=f"hermes-{context.run_id or 'run'}-")).resolve()
         self.binding = context.binding
 
     def working_directory(self, context: Context) -> str:

@@ -125,9 +125,13 @@ def test_a_permission_the_agent_asks_for_is_granted_only_for_a_declared_tool():
     refusing.start(context)
     assert refusing.interact(Prompt("use a tool"), context, Signal()).text == "permission: cancelled"
     refusing.close()
+    by_title = AcpHarnessAdapter(fake_agent_command(), allowed_tools=("run a command",))  # the agent's own words
+    by_title.start(context)
+    assert by_title.interact(Prompt("use a tool"), context, Signal()).text == "permission: cancelled"
+    by_title.close()
     allowing = AcpHarnessAdapter(fake_agent_command(), allowed_tools=("execute",))
     allowing.start(context)
-    assert allowing.interact(Prompt("use a tool"), context, Signal()).text == "permission: selected"
+    assert allowing.interact(Prompt("use a tool"), context, Signal()).text == "permission: selected allow"
     allowing.close()
 
 
@@ -161,3 +165,22 @@ def test_the_openai_adapter_refuses_to_start_without_an_endpoint_and_reports_an_
     with pytest.raises(WorkerError) as unreachable:
         adapter.interact(Prompt("hi"), context, Signal())
     assert unreachable.value.code == "model-unavailable"
+
+
+def test_an_agent_that_exits_before_answering_initialize_is_model_unavailable_with_its_exit_code():
+    adapter = AcpHarnessAdapter(fake_agent_command("--exit-on-initialize"))
+    with pytest.raises(WorkerError) as refused:
+        adapter.start(Context(binding=Binding()))
+    assert refused.value.code == "model-unavailable"
+    assert "exited (code 4) before answering initialize" in refused.value.detail
+    assert not adapter.alive()
+
+
+def test_a_rate_limit_is_not_a_context_overflow():
+    from collab_hub_cog_worker.limits import looks_like_overflow
+
+    assert not looks_like_overflow("Rate limit reached for model x: Limit 30000 tokens per min, requested 31000")
+    assert not looks_like_overflow("You exceeded your current quota")
+    assert looks_like_overflow("context_length_exceeded: the prompt is too long")
+    assert looks_like_overflow("This model's maximum context length is 8192 tokens")
+    assert looks_like_overflow("prompt is too long: 120000 tokens > 100000 maximum")

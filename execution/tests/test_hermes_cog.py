@@ -126,6 +126,8 @@ def _serve_module():
     """The Hermes Cog's worker module, imported from the package: its environment assembly is tested in-process."""
     import importlib.util
 
+    if str(WORKER_SDK) not in sys.path:
+        sys.path.insert(0, str(WORKER_SDK))  # the worker runs on the SDK from this checkout
     spec = importlib.util.spec_from_file_location("hermes_serve", HERMES / "serve.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

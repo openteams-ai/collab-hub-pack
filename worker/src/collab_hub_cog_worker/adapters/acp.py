@@ -45,8 +45,10 @@ class AcpHarnessAdapter:
 
     ``command`` starts the agent; ``env`` is its whole environment (``inherits``
     from the worker's own when ``None``); ``cwd`` is the session's working
-    directory. ``allowed_tools`` names the tools whose permission requests are
-    granted, by the tool call's ``kind`` or ``title``; everything else is refused.
+    directory. ``allowed_tools`` names the tool kinds (the protocol's
+    ``toolCall.kind``: ``read``, ``edit``, ``execute``, ``fetch`` and so on) whose
+    permission requests are granted, once per request; everything else is
+    refused, and the agent's free-text ``title`` is never matched.
     """
 
     client_name = "collab-hub-cog-worker"
@@ -225,8 +227,12 @@ class AcpHarnessAdapter:
             timeout -= 0.1
             if timeout <= 0:
                 raise WorkerError("model-unavailable", f"the agent did not answer {method} in time")
+        if pending.error is None and pending.result is None:
+            # The reader let go of the request without an answer: the agent closed its stdout.
+            raise WorkerError("model-unavailable",
+                              f"{self.name} exited (code {self._exit_code()}) before answering {method}")
         if pending.error is not None:
-            raise WorkerError("model-unavailable", f"the agent refused {method}: {pending.error.get('message')}")
+            raise WorkerError("model-unavailable", f"{self.name} refused {method}: {pending.error.get('message')}")
         return pending.result
 
     def _exit_code(self) -> int | None:
@@ -286,14 +292,15 @@ class AcpHarnessAdapter:
             pending.done.set()  # the agent closed its stdout: whoever waits sees it is gone
 
     def _answer_request(self, request: Mapping[str, Any]) -> None:
-        """A request from the agent to its client: a permission is granted only for a declared tool."""
+        """A request from the agent to its client: a permission is granted only for a declared tool kind, once."""
         if request["method"] == "session/request_permission":
             params = request.get("params") or {}
             tool = params.get("toolCall") or {}
-            names = {str(tool.get("kind") or ""), str(tool.get("title") or "")}
+            kind = str(tool.get("kind") or "")
             options = params.get("options") or []
-            allow = next((o for o in options if str(o.get("kind", "")).startswith("allow")), None)
-            if names & self.allowed_tools and allow is not None:
+            allow = next((o for o in options if o.get("kind") == "allow_once"), None) \
+                or next((o for o in options if str(o.get("kind", "")).startswith("allow")), None)
+            if kind and kind in self.allowed_tools and allow is not None:
                 outcome = {"outcome": "selected", "optionId": allow.get("optionId")}
             else:
                 outcome = {"outcome": "cancelled"}

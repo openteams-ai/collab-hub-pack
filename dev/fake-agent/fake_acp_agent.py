@@ -1,6 +1,6 @@
 """A fake ACP agent: an agent on stdio that answers without a harness or a model. Standard library only.
 
-    python dev/fake-agent/fake_acp_agent.py [--embedded-context] [--slow-start]
+    python dev/fake-agent/fake_acp_agent.py [--embedded-context] [--slow-start] [--exit-on-initialize]
 
 A stand-in for `hermes acp`, or any agent that speaks the Agent Client Protocol
 (https://agentclientprotocol.com): it echoes each prompt as `agent heard: ...`,
@@ -18,6 +18,8 @@ agent can:
 
 With `--embedded-context` it advertises `promptCapabilities.embeddedContext`
 and echoes each resource block it receives; without it, only text blocks.
+`--exit-on-initialize` exits on the first request, as an agent that fails on
+import does; `--slow-start` sleeps a minute first, as a cold start can.
 """
 
 import json
@@ -80,7 +82,8 @@ def prompt(message, params):
             "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"},
                         {"optionId": "reject", "name": "Reject", "kind": "reject_once"}]}})
         answer = json.loads(sys.stdin.readline())
-        say(f"permission: {answer['result']['outcome']['outcome']}")
+        outcome = answer["result"]["outcome"]
+        say(f"permission: {outcome['outcome']}" + (f" {outcome['optionId']}" if "optionId" in outcome else ""))
     elif first == "env":
         say(json.dumps(environment()))
     else:
@@ -100,6 +103,8 @@ if __name__ == "__main__":
         message = json.loads(line)
         method, params = message.get("method"), message.get("params") or {}
         if method == "initialize":
+            if "--exit-on-initialize" in sys.argv:
+                sys.exit(4)
             capabilities = {"promptCapabilities": {"embeddedContext": EMBEDDED, "image": False, "audio": False}}
             send({"id": message["id"], "result": {"protocolVersion": 1, "agentCapabilities": capabilities,
                                                   "authMethods": [], "agentInfo": {"name": "fake-acp-agent"}}})

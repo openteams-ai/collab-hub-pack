@@ -35,9 +35,15 @@ def check_fits(prompt: Prompt, binding: Binding) -> int:
     return tokens
 
 
+OVERFLOW_PHRASES = ("context_length", "context length", "context window", "maximum context", "prompt is too long",
+                    "input is too long", "input too long", "too many tokens", "exceeds the model's maximum")
+NOT_OVERFLOW_PHRASES = ("rate limit", "rate_limit", "ratelimit", "per min", "per minute", "per day", "quota")
+
+
 def looks_like_overflow(message: str) -> bool:
-    """Whether a model's or harness's error says the context did not fit."""
+    """Whether a model's or harness's error says the context did not fit: a phrase about the context, and
+    not a rate limit, which also talks of tokens and limits and asks for a retry rather than a smaller input."""
     lowered = message.lower()
-    return "context_length" in lowered or "context length" in lowered or "context window" in lowered \
-        or ("token" in lowered
-            and any(word in lowered for word in ("exceed", "too long", "too many", "limit", "maximum")))
+    if any(phrase in lowered for phrase in NOT_OVERFLOW_PHRASES):
+        return False
+    return any(phrase in lowered for phrase in OVERFLOW_PHRASES)

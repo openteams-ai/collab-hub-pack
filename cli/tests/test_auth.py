@@ -292,3 +292,45 @@ def test_a_token_endpoint_with_an_unusable_access_token_is_a_realm_error(token):
         lambda request: httpx.Response(200, json={"access_token": token, "refresh_token": "r"})))
     with pytest.raises(oidc.RealmError, match="answered without tokens"):
         oidc.refresh(http, {"token_endpoint": "https://realm.example.org/token"}, "apollo-desktop", "refresh-token")
+
+
+TOKEN_ENDPOINT = {"token_endpoint": "https://realm.example.org/token"}
+
+
+def _answering(body: dict) -> httpx.Client:
+    """A realm whose token endpoint answers ``body``, NaN and infinity written as JSON allows them."""
+    return httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(
+        200, content=json.dumps(body, allow_nan=True), headers={"content-type": "application/json"})))
+
+
+@pytest.mark.parametrize("extra", [
+    {"expires_in": ""},
+    {"expires_in": "soon"},
+    {"expires_in": "-5"},
+    {"expires_in": "5.5"},
+    {"expires_in": "²"},  # a digit to str.isdigit, and not one int() reads
+    {"expires_in": "1" * 100_000},  # more digits than int() reads from a string
+    {"expires_in": [5]},
+    {"expires_in": -5},
+    {"expires_in": True},
+    {"expires_in": False},
+    {"expires_in": float("nan")},
+    {"expires_in": float("inf")},
+    {"expires_in": 100**400},  # too large to be a float
+    {"refresh_token": 7},
+    {"refresh_token": ""},
+])
+def test_a_token_answer_with_a_malformed_lifetime_or_refresh_token_is_a_realm_error(extra):
+    with pytest.raises(oidc.RealmError, match="token endpoint"):
+        oidc.refresh(_answering({"access_token": "a", **extra}), TOKEN_ENDPOINT, "apollo-desktop", "refresh-token")
+
+
+@pytest.mark.parametrize(("expires_in", "lifetime"), [
+    (300, 300.0), ("300", 300.0), (12.5, 12.5), (0, 0.0), ("0", 0.0), (None, None),
+])
+def test_a_token_lifetime_is_a_number_of_seconds_or_digits(expires_in, lifetime, monkeypatch):
+    # Zero is a lifetime: a token that has already expired, renewed at once, never one without an expiry.
+    monkeypatch.setattr(oidc, "clock", lambda: 1000.0)
+    tokens = oidc.refresh(_answering({"access_token": "a", "expires_in": expires_in}), TOKEN_ENDPOINT,
+                          "apollo-desktop", "r")
+    assert tokens.expires_at == (None if lifetime is None else 1000.0 + lifetime)

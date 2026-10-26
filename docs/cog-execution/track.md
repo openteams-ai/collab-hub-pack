@@ -32,7 +32,7 @@ Three kinds of event share the Track:
 | Event | Payload | Written when |
 |---|---|---|
 | `op_submitted` | `op` — the Op as submitted, its steps with their Gates | a run is submitted; one per run, which the store enforces |
-| `run_picked_up` | — | a controller takes the run |
+| `run_picked_up` | `controller` — the id of the controller that took it, which owns it from here | a controller takes the run, written only if nobody took it or cancelled it first |
 | `gate_escalated` | `step`, `attempt`, `reason`, `escalation` (its id), `envelope` (the result the Gate escalated), `usage`, `approvers` (roles that may decide), `gate` (the policy) | a step's Gate escalates its result |
 | `gate_decided` | `step`, `outcome` (`approve`, `send_back`, `reject`), `escalation` (the id answered), `actor`, `value` (the findings), `envelope_digest` (a stable id of the result decided on) | a person decides an escalation |
 | `completed` | — | every step completed |
@@ -40,7 +40,7 @@ Three kinds of event share the Track:
 | `budget_exceeded` | `step`, `dimension` (`duration`, `tokens`, `cost`), `reason` | a budget stops the run |
 | `cancelled` | `actor` | a client cancels |
 | `interrupted` | `backend` | the host stopped under `none` and the run cannot resume |
-| `retry_requested` | `from_status`, `attempt` (`same` or `new`), `budget_epoch` | a run is retried |
+| `retry_requested` | `from_status`, `attempt` (`same` or `new`), `budget_epoch`, `controller` (the one retrying it, which owns it from here) | a run is retried |
 
 `op_submitted` also carries `submitted_by` (`user`, `org_id`, `workspace_id`,
 and a `name` for showing) when a client submitted the run through the run API,
@@ -57,6 +57,20 @@ if the run has not ended and holds no request yet, so none is ever written
 after a run's end and two racing requests leave one. A request belongs to the
 attempt it was made of: one a run outlived, by ending on its own and being
 retried, does not cancel the retry.
+
+`decision_requested` (`escalation`, `outcome`, `actor`, `findings`) is a
+client's decision on the Gate a run waits at, written with `append_if` only
+while the run waits on that escalation and holds no other decision. The
+controller that owns the run delivers it, and the runner records
+`gate_decided`; when the runner does not take it, the controller records
+`decision_refused` (`escalation`, `error`). Neither moves the run. A decision
+is pending only while the run waits on the escalation it names: one left
+undelivered when the run ends, or when a retry opens a new escalation, lapses
+with it, and is neither delivered nor refused.
+
+A Track written before controllers named themselves has `run_picked_up` with
+no `controller`: such a run belongs to the first controller to start
+([runs.md](runs.md#pickup-and-ownership)).
 
 ### Step facts
 
@@ -103,7 +117,7 @@ the runner around the executor's calls:
 | Event | Payload |
 |---|---|
 | `worker_started` | `step`, `attempt`, `instance`, `location`, `run_token_sha256`, and where the worker is: at `local`, `package` (`name`, `digest`), `pid`, `pgid` and `logs`, the directory its stdout and stderr go to |
-| `worker_stopped` | `step`, `attempt`, `instance` — the worker was torn down, and its run token has expired |
+| `worker_stopped` | `step`, `attempt`, `instance` — the worker was torn down, and its run token has expired; `reaped` when a starting controller wrote it for a run it interrupted, `true` if it killed a worker left alive |
 
 `run_token_sha256` is the hash of the worker's run token; the token itself is
 never recorded. A token is valid while its `worker_started` has no

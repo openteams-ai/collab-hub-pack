@@ -10,12 +10,13 @@ on:
       - "helm/**"
       - ".github/workflows/lint.yaml"
   pull_request: {}   # runs on every PR so it can be a required status check
+  merge_group: {}    # and on each merge-queue group; a required check that never reports there blocks the queue
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Set up Helm
         uses: azure/setup-helm@v5

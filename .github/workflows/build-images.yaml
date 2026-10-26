@@ -9,7 +9,7 @@ name: Build Docker Images
 # that same commit.
 #
 # A dev server deploys a commit of main by its image, sha-<short>: every push to
-# main that touches api/ or this file builds one, and the summary of that run
+# main that touches api/, execution/ or this file builds one, and the summary of that run
 # names the tag. For a commit that touched neither, run this workflow by hand
 # on main (workflow_dispatch).
 
@@ -18,10 +18,12 @@ on:
     branches: [main]
     paths:
       - "api/**"
+      - "execution/**"
       - ".github/workflows/build-images.yaml"
   pull_request:
     paths:
       - "api/**"
+      - "execution/**"
   workflow_dispatch:
 
 jobs:
@@ -33,13 +35,13 @@ jobs:
     env:
       IMAGE: ghcr.io/${{ github.repository }}/api
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         if: ${{ github.event_name != 'pull_request' }}
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -47,7 +49,7 @@ jobs:
 
       - name: Image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE }}
           tags: |
@@ -62,6 +64,10 @@ jobs:
           # so no Dockerfile change is needed for a GHCR-only custom build.
           build-contexts: |
             projectroot=.
+          # Always re-resolve the base images, so a rebuild picks up a base
+          # image republished under the same tag (a ca-certificates fix, say)
+          # rather than a stale local layer.
+          pull: true
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
 

@@ -22,6 +22,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -72,6 +73,28 @@ def _segment(value: str) -> str:
 
 Delivery = Callable[[str, str, str], Mapping[str, str]]
 """What the binding delivers to one worker: called with the Cog, the run and the instance."""
+
+
+def _runs(pid: int, run_id: str) -> bool:
+    """Whether the process ``pid`` is a worker of ``run_id``: its environment names the run.
+
+    Read from ``/proc`` on Linux, and through ``ps`` elsewhere (macOS shows the
+    environment of one's own processes); ``False`` when neither can tell.
+    """
+    wanted = f"{RUN_ENV}={run_id}"
+    try:
+        return wanted.encode() in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except FileNotFoundError:
+        if Path("/proc/self/environ").exists():
+            return False  # Linux, and the process is gone
+    except OSError:
+        return False
+    try:
+        shown = subprocess.run(["ps", "-wwE", "-o", "command=", "-p", str(pid)],  # noqa: S603, S607
+                               capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return wanted in shown.split()
 
 
 class _LocalWorker(_KubernetesWorker):
@@ -259,6 +282,40 @@ class LocalProcessCogExecutor:
         except OSError:
             return ""
         return ": " + " | ".join(text) if text else ""
+
+    # --- reaping what a stopped controller left -----------------------------------------------
+
+    def reap(self, started: Mapping[str, Any], run_id: str) -> bool:
+        """Kill a worker a stopped controller left alive, by the process group ``worker_started`` recorded.
+
+        The launcher kills its worker when the controller dies, so a survivor is
+        one whose launcher died with the controller. It is killed only if the
+        recorded pid still leads the recorded group and is still this run's
+        worker — its environment names the run — so a pid the system handed to
+        another process since is left alone. Returns whether a worker was killed.
+        """
+        pid, pgid = started.get("pid"), started.get("pgid")
+        if started.get("location") != "local" or not isinstance(pid, int) or not isinstance(pgid, int):
+            return False
+        try:
+            if os.getpgid(pid) != pgid:
+                return False
+        except ProcessLookupError:
+            return False  # gone already
+        if not _runs(pid, run_id):
+            return False
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+            deadline = time.monotonic() + self.grace
+            while time.monotonic() < deadline:
+                os.killpg(pgid, 0)
+                time.sleep(0.05)
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            # The group has exited. macOS answers EPERM, not ESRCH, for a group left with only zombies,
+            # to the probe and to SIGKILL alike.
+            pass
+        return True
 
     # --- teardown ----------------------------------------------------------------------------
 

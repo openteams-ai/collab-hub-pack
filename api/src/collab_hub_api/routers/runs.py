@@ -1,9 +1,8 @@
-"""The run API's first slice: launch a Cog, see what is running, stop it.
+"""The run API: launch a Cog, see what is running and what happened, stop it.
 
-Behind the ``cog_runs`` feature flag, and mounted only when it is on. The API
-records intent on the Track and reads a run's status from it; a run controller,
-a separate process over the same Track, advances the runs (ADR-0002 D4). The
-API constructs no executor and never calls the controller.
+The API records intent on the Track and reads a run's status from it; a run
+controller, a separate process over the same Track, advances the runs (ADR-0002
+D4). The API constructs no executor and never calls the controller.
 
 - ``POST /v1/runs`` -- submit an Op: steps naming a Cog package, an entry
   point, an input and a Gate. A step whose ``cog`` is not a package the
@@ -11,6 +10,9 @@ API constructs no executor and never calls the controller.
 - ``GET /v1/runs``, ``GET /v1/runs/{id}`` -- the caller's organization's runs,
   status and each step's state replayed from the Track. The single run also
   carries each completed step's output.
+- ``GET /v1/runs/{id}/events`` -- the run's Track: a page of events after a
+  sequence, or, asked for ``text/event-stream``, a live stream of them until
+  the run ends, resumable from ``Last-Event-ID``.
 - ``POST /v1/runs/{id}/cancel`` -- record a request to cancel; the controller
   tears the worker down and the run ends ``CANCELLED``. A run that has ended
   answers 409, naming its status.
@@ -20,30 +22,35 @@ API constructs no executor and never calls the controller.
   reads back. Every turn and its answer are on the Track.
 - ``GET /v1/runs/launchable`` -- the Cog packages a step may name.
 
-Runs are scoped to the organization that submitted them: another
-organization's run is a 404, never a 403. Events, payloads, decisions and
-retry are later phases of the plan.
+The Track is ``runs.track_path`` when set, a SQLite file for a hub without
+Postgres, and the hub's own database otherwise; with neither, every route
+answers 503. Runs are scoped to the organization that submitted them: another
+organization's run is a 404, never a 403. Payloads, decisions and retry are
+later phases of the plan.
 
-The execution package is imported here and nowhere else in the API, and only
-when the flag is on, so an image that does not ship it starts as before.
+The execution package is imported here and nowhere else in the API.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
+from collections.abc import AsyncIterator
 from typing import Annotated, Any, Literal
 
 from collab_hub_execution import intents
 from collab_hub_execution.gates import POLICIES, Gate
 from collab_hub_execution.locations.packages import DirectoryPackageSource, PackageNotFound, PackageRefused
 from collab_hub_execution.ops import OpDefinition, OpStep
-from collab_hub_execution.track import SqliteTrackStore, TrackStore
-from fastapi import APIRouter, Depends, Path, Query, Request, status
-from fastapi.responses import JSONResponse
+from collab_hub_execution.track import PostgresTrackStore, SqliteTrackStore, TrackEvent, TrackStore, upgrade
+from fastapi import APIRouter, Depends, Header, Path, Query, Request, status
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..config import RunsConfig
 from ..frames.auth import AuthContext, get_auth_context
+from ..frames.db import PostgresPools
 from .frames import error_response
 
 router = APIRouter(prefix="/runs", tags=["runs"])
@@ -51,13 +58,22 @@ router = APIRouter(prefix="/runs", tags=["runs"])
 RUN_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 
 
+class RunsUnavailable(RuntimeError):
+    """The run API has no Track to record runs on: the routes answer 503."""
+
+
+RUNS_UNAVAILABLE = "runs_unavailable"
+
+
 class RunService:
     """What the run routes need: the Track, the packages that can be launched, and what runs them."""
 
-    def __init__(self, track: TrackStore, packages: DirectoryPackageSource | None, *, backend: str,
+    def __init__(self, track: TrackStore | None, packages: DirectoryPackageSource | None, *, backend: str,
                  location: str) -> None:
         self.track = track
-        self.views = intents.RunViews(track)  # read incrementally: a page costs what changed, not all history
+        """``None`` on a hub with neither Postgres nor ``runs.track_path``: every route answers 503."""
+        # Read incrementally: a page costs what changed, not all history.
+        self.views = intents.RunViews(track) if track is not None else None
         self.packages = packages
         self.backend = backend
         self.location = location
@@ -79,20 +95,36 @@ class RunService:
         return None
 
 
-def build_run_service(config: RunsConfig) -> RunService:
-    """The run service of a deployment whose ``cog_runs`` flag is on."""
-    if not config.track_path:
+def build_run_service(config: RunsConfig, postgres_url: str | None, pools: PostgresPools) -> RunService:
+    """The run service: on the hub's own database, else on ``runs.track_path``, else on none.
+
+    Both at once is refused: a hub with a database keeps its runs there, never
+    in a file of the pod's own.
+
+    On Postgres the Track's tables come from the hub's migrations, as every
+    other table of the hub does, so nothing is created here.
+    """
+    if config.track_path and postgres_url:
+        # A pod-local SQLite file would win over the hub's database, and vanish with the pod.
         raise RuntimeError(
-            "the cog_runs feature needs runs.track_path (COLLAB_HUB_API__RUNS__TRACK_PATH): the Track file "
-            "the run controller watches")
-    SqliteTrackStore.ensure_schema(config.track_path)
+            "runs.track_path is for a hub without Postgres: this hub has a database (frames.postgres.url), "
+            "which is its Track; unset COLLAB_HUB_API__RUNS__TRACK_PATH")
+    track: TrackStore | None = None
+    if config.track_path:
+        SqliteTrackStore.ensure_schema(config.track_path)
+        track = SqliteTrackStore(config.track_path)
+    elif postgres_url:
+        track = PostgresTrackStore(pools.database(postgres_url))
     packages = DirectoryPackageSource(config.packages, config.allow) if config.packages else None
-    return RunService(SqliteTrackStore(config.track_path), packages, backend=config.backend,
-                      location=config.location)
+    return RunService(track, packages, backend=config.backend, location=config.location)
 
 
 def get_run_service(request: Request) -> RunService:
-    return request.app.state.run_service
+    service: RunService = request.app.state.run_service
+    if service.track is None:
+        raise RunsUnavailable("this hub records no runs: it has no database (frames.postgres.url) and no "
+                              "runs.track_path")
+    return service
 
 
 class GateRequest(BaseModel):
@@ -167,6 +199,8 @@ class RunStatus(BaseModel):
     submitted_at: str
     updated_at: str
     cancel_requested_by: str | None = None
+    picked_up_by: str | None = None
+    """The run controller that picked the run up, which advances it; ``None`` until one does."""
     error: str | None = None
     reason: str | None = None
     backend: str
@@ -201,6 +235,69 @@ class RunPage(BaseModel):
     next_offset: int | None = None
 
 
+class RunEvent(BaseModel):
+    sequence: int
+    """The event's place on the Track: ``after`` takes it, and the stream names each event by it."""
+    type: str
+    occurred_at: str
+    payload: dict[str, Any]
+
+
+class RunEventPage(BaseModel):
+    items: list[RunEvent]
+    next_after: int | None = None
+    """Pass as ``after`` for the events that follow, when there are more than this page holds."""
+
+
+# What the run API serves of each event's payload, by event type: an allowlist, so a field a
+# controller records later reaches clients only once it is named here. Where a local worker is on the
+# controller's host (its pid, process group and log directory) is never among them: the controller
+# needs it to reap the worker, and no client acts on it. An event type not listed is served with an
+# empty payload.
+_STEP = {"step", "attempt"}
+_OUTCOME = {"problems", "binding"}
+SERVED_FIELDS: dict[str, frozenset[str]] = {name: frozenset(fields) for name, fields in {
+    "op_submitted": {"op", "submitted_by", "name"},
+    "run_picked_up": {"controller"},
+    "gate_escalated": _STEP | {"reason", "escalation", "envelope", "usage", "approvers", "gate"},
+    "gate_decided": {"step", "outcome", "escalation", "actor", "value", "envelope_digest"},
+    "completed": set(),
+    "failed": {"step", "error", "reason", "worker_error", "revise_limit", "escalation", "actor", "value",
+               "envelope_digest"} | _OUTCOME,
+    "budget_exceeded": {"step", "dimension", "reason"},
+    "cancelled": {"actor"},
+    "interrupted": {"backend"},
+    "retry_requested": {"from_status", "attempt", "budget_epoch", "controller"},
+    "step_started": _STEP | {"cog", "digest"},
+    "interaction_usage": _STEP | {"usage"},
+    "step_completed": _STEP | {"cog", "digest", "usage", "frames", "escalation", "payload", "payload_ref"} | _OUTCOME,
+    "step_failed": _STEP | {"key", "cog", "digest", "error", "message", "teardown_error"} | _OUTCOME,
+    "worker_started": _STEP | {"instance", "location", "package", "run_token_sha256"},
+    "worker_stopped": _STEP | {"instance", "reaped"},
+    "materialized": {"cog", "digest"},
+    "ready": {"cog"},
+    "interaction_started": {"step", "entry_point"},
+    "idle": {"step"},
+    "teardown_started": {"step", "reason"},
+    "teardown_failed": {"step", "error"},
+    "cancel_requested": {"actor"},
+    "turn_requested": {"turn", "text", "actor"},
+    "turn_answered": {"turn", "text"},
+    "turn_failed": {"turn", "error"},
+    "decision_requested": {"escalation", "outcome", "actor", "findings"},
+    "decision_refused": {"escalation", "error"},
+}.items()}
+STREAM_POLL_SECONDS = 0.5
+STREAM_KEEPALIVE_SECONDS = 15.0
+
+
+def _event(event: TrackEvent) -> RunEvent:
+    event = upgrade(event)
+    return RunEvent(sequence=event.sequence or 0, type=event.event_type, occurred_at=event.occurred_at.isoformat(),
+                    payload={key: value for key, value in event.payload.items()
+                             if key in SERVED_FIELDS.get(event.event_type, frozenset())})
+
+
 def _status(view: intents.RunView, service: RunService, *, outputs: bool = False) -> RunStatus:
     entry_points = {step.name: step.entry_point for step in view.op.steps}
     return RunStatus(
@@ -211,8 +308,8 @@ def _status(view: intents.RunView, service: RunService, *, outputs: bool = False
                for step in view.steps],
         name=view.name, submitted_by=view.submitted_by.get("user"), submitted_by_name=view.submitted_by.get("name"),
         submitted_at=view.submitted_at.isoformat(), updated_at=view.updated_at.isoformat(),
-        cancel_requested_by=view.cancel_requested_by, error=view.error, reason=view.reason,
-        backend=service.backend, location=service.location,
+        cancel_requested_by=view.cancel_requested_by, picked_up_by=view.controller, error=view.error,
+        reason=view.reason, backend=service.backend, location=service.location,
     )
 
 
@@ -280,6 +377,60 @@ def launchable(auth: AuthDep, service: ServiceDep) -> Launchable:
 def get_run(run_id: RunId, auth: AuthDep, service: ServiceDep) -> RunStatus | JSONResponse:
     view = _visible(service, run_id, auth)
     return _not_found(run_id) if view is None else _status(view, service, outputs=True)
+
+
+@router.get("/{run_id}/events", response_model=RunEventPage,
+            responses={200: {"content": {"text/event-stream": {}}}})
+async def run_events(
+    run_id: RunId, request: Request, auth: AuthDep, service: ServiceDep,
+    after: Annotated[int, Query(ge=0, description="Only the events after this sequence.")] = 0,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 500,
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+) -> RunEventPage | JSONResponse | StreamingResponse:
+    """The run's events after ``after``: a page of them, or, for ``text/event-stream``, a live stream.
+
+    The stream sends each event as it lands, named by its sequence, then an
+    ``end`` event once the run has ended and nothing more is on its Track; a
+    client that lost the connection reconnects with ``Last-Event-ID`` (or
+    ``after``) and misses nothing and repeats nothing.
+    """
+    if await asyncio.to_thread(_visible, service, run_id, auth) is None:
+        return _not_found(run_id)
+    if "text/event-stream" in request.headers.get("accept", ""):
+        start = int(last_event_id) if last_event_id and last_event_id.isdigit() else after
+        return StreamingResponse(_stream(service, run_id, start, request), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+    # One more than the page holds: whether there is a next page, without reading the rest.
+    events = await asyncio.to_thread(service.track.replay, run_id, after_sequence=after, limit=limit + 1)
+    page = events[:limit]
+    return RunEventPage(items=[_event(event) for event in page],
+                        next_after=(page[-1].sequence if len(events) > limit else None))
+
+
+async def _stream(service: RunService, run_id: str, after: int, request: Request) -> AsyncIterator[str]:
+    """The run's events as they land, then `end`: one incremental read of the run per tick drives both,
+    and the view it gives is of the events it gives, so a run that reads as ended has sent its last."""
+    quiet = 0.0
+    while not await request.is_disconnected():
+        try:
+            events, view = await asyncio.to_thread(service.views.after, run_id, after)
+        except intents.RunUnreadable:
+            events, view = (), None
+        for event in events:
+            served = _event(event)
+            after = served.sequence
+            yield f"id: {served.sequence}\nevent: {served.type}\ndata: {served.model_dump_json()}\n\n"
+        if view is None or view.state.ended:
+            yield f"event: end\ndata: {json.dumps({'status': view.status if view else None})}\n\n"
+            return
+        if events:
+            quiet = 0.0
+            continue  # read again at once: more may have landed while these were sent
+        await asyncio.sleep(STREAM_POLL_SECONDS)
+        quiet += STREAM_POLL_SECONDS
+        if quiet >= STREAM_KEEPALIVE_SECONDS:
+            quiet = 0.0
+            yield ": keep-alive\n\n"  # a comment: proxies keep an idle stream open
 
 
 @router.post("/{run_id}/cancel", status_code=status.HTTP_202_ACCEPTED, response_model=RunStatus)

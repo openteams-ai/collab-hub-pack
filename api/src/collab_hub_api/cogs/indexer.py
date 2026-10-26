@@ -17,18 +17,24 @@ One sweep, per configured source:
 
 Three things keep a sweep from doing damage:
 
-- **Single flight, cancellation included.** A sweep runs under the store's
-  sweep lock (a session-level Postgres advisory lock on the shared pool), so
-  replicas starting together do not double-index; the loser logs and waits
-  for the next interval. The sweep's reads and writes ride the very
-  connection the lock is held on (the store's ``_sweep_connection``,
-  issue #128), so a sweeper that dies mid-write loses the write and the lock
-  together -- a write cannot land after another replica has acquired the
-  lock. Store calls run on worker threads, and a worker
-  thread cannot be interrupted -- so cancellation *drains*: a cancelled sweep
-  first waits out whatever store call is in flight, then releases the lock,
-  then propagates. The lock is never released while a write is still running,
-  and a cancellation that lands mid-acquisition still gets a matching release.
+- **Single flight, by deployment shape; the lock is a belt.** The chart
+  runs the indexer as its own one-replica workload with a ``Recreate``
+  strategy (issue #148), so on a healthy release there is never a second
+  sweeper -- not across API replicas, not across a rollout. Under that sits
+  the store's sweep lock (a session-level Postgres advisory lock), which
+  catches what the shape cannot: an operator running two indexer releases
+  against one database. The loser logs and waits for the next interval. The
+  lock hands the winner a connection-bound *view* of the store; every read
+  and write of the sweep goes through it and so rides the lock's own session
+  (issue #128), which is what makes cancellation simple. Every store call
+  of a sweep -- the acquisition, the view's reads and writes, the release --
+  runs on one thread of the sweep's own, in submission order, so a
+  cancelled sweep queues its release behind whatever call is still in
+  flight and moves on without waiting: the release runs the moment that
+  call returns, or, when the pod goes first, the session dies and the
+  server drops the lock and the in-flight write together. No draining, no
+  deadlines, nothing handed to a second thread: what a cancellation leaves
+  behind is one running call, its queued release, and nothing else.
 - **Removal needs a complete picture.** Rows are only marked removed for a
   source whose enumeration fully succeeded this sweep. A registry that
   answers ``list_repositories`` with an error, one repository's listing that
@@ -65,8 +71,9 @@ Targeted entry points for the webhook receiver (#86): :meth:`CogIndexer.reindex`
 for one ``(source_id, repository, digest)`` and :meth:`CogIndexer.mark_removed`
 for a delete. Neither takes the sweep lock -- both are idempotent single-row
 writes, and a sweep running at the same time converges to the same state.
-Neither rides a running sweep's lock session either: their writes check out
-their own pooled connections, so they land concurrently with a sweep.
+Neither can ride a running sweep's lock session either: they write through
+the store itself, whose methods take their own pooled connections and never
+consult the lock (issue #148), so they land concurrently with a sweep.
 """
 
 from __future__ import annotations
@@ -75,7 +82,6 @@ import asyncio
 import json
 import logging
 import random
-import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -93,6 +99,7 @@ from .catalog import (
     CogCatalogDataError,
     CogCatalogStore,
     KnownArtifact,
+    SweepView,
     card_search_fields,
     contains_nul,
 )
@@ -115,55 +122,27 @@ logger = logging.getLogger("frames_server.cogs.indexer")
 DEFAULT_INTERVAL_SECONDS = 300
 
 STORE_WORKER_THREADS = 4
-"""Size of the indexer's own store-call thread pool.
+"""Size of the thread pool the targeted entry points' store calls run on.
 
-Its own, rather than asyncio's default executor, for one reason: the
-``concurrent.futures.Future`` a submit returns is owned by this object and is
-not tied to the event loop, so the lock hand-off below can wait for a worker
-from a plain thread after the loop that started it is gone.
+The sweep does not use it: a sweep's calls run on a single thread of their
+own (see :meth:`CogIndexer.__init__`), so a webhook write never queues
+behind a sweep statement and a sweep's release never queues behind a
+webhook write.
 """
 
-DRAIN_DEADLINE_SECONDS = 30.0
-"""How long a cancelled sweep waits for an in-flight worker thread before handing it off.
-
-A worker thread cannot be interrupted, so a cancelled sweep *drains* -- waits
-for the thread -- before releasing the lock. But an unresponsive established
-connection is not bounded by the pool timeout (which bounds checkout only) or
-by ``statement_timeout`` (which the server cannot enforce if the transport is
-dead), so the wait itself must have a deadline. Past it the sweep coroutine
-stops waiting -- but it does **not** release the lock: ownership of the lock
-and of the still-running worker is handed to a daemon **thread**
-(:meth:`CogIndexer._hand_off`) that releases only once the worker has actually
-finished. A thread, not an asyncio task, because the hand-off has to outlive
-the event loop: at shutdown every task is cancelled and the loop closes, and
-an asyncio owner would simply stop running -- leaving the lock context object
-to be finalized by the garbage collector, whose ``finally`` would unlock while
-the write was still in flight. The lock is therefore never released while a
-write may still be running; what the deadline bounds is the sweep coroutine,
-and through it the lifespan's shutdown wait. Chosen above
-:data:`..catalog.SWEEP_STATEMENT_TIMEOUT_SECONDS` so the server's own abort
-fires first in every case where the transport still works.
-
-If the process exits first, the hand-off thread is a daemon and dies with it
--- which is safe for the same reason abandoning is safe at all: the advisory
-lock is session-scoped, so the server releases it when the connection goes.
-"""
-
-INDEXER_SHUTDOWN_TIMEOUT_SECONDS = DRAIN_DEADLINE_SECONDS + 15.0
+INDEXER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 """Deadline the app lifespan puts on waiting for the cancelled indexer task.
 
-The drain deadline plus room for the lock release. The lifespan waits with
-``asyncio.wait`` (which, unlike ``wait_for``, does not re-cancel and then
-await the task on timeout -- the drain defers repeated cancellations, so that
-would wait the whole drain out again). Past the deadline the task is left
-pending and logged; it dies with the process, and everything it could still
-touch is either process-local or a lock the server drops with the connection.
-
-What this bounds is the **lifespan's wait**, not the termination of the worker
-threads themselves: a store call blocked on a peer that acknowledges packets
-but never answers is not ended by ``statement_timeout`` (the server never runs
-it) nor by keepalives (the peer is not dead). Those threads are daemons or
-pool workers and go when the process does.
+A healthy release is one unlock statement; this is room for that and for a
+release queued behind an in-flight statement that the server will end
+promptly. Past it the task is left pending and logged: it dies with the
+process, and the session takes the lock and any in-flight write with it --
+the outcome issue #148 designs for, since the indexer is one pod that is
+recreated, never rolled over. The bound is on the **lifespan's wait**, not
+on the worker threads: a store call blocked on a peer that acknowledges
+packets but never answers is not ended by ``statement_timeout`` (the server
+never runs it) nor by keepalives (the peer is not dead); those threads go
+when the process does.
 """
 
 MAX_ARTIFACTS_PER_REPOSITORY = 10_000
@@ -231,7 +210,7 @@ class SweepSummary:
     sources_failed: int = 0
     """Sources whose enumeration did not complete; their removal step was skipped."""
     locked_out: bool = False
-    """Another replica held the sweep lock; nothing was done."""
+    """Another sweeper held the sweep lock; nothing was done."""
     duration_seconds: float = 0.0
     errors: list[str] = field(default_factory=list)
     """Source-level (not per-artifact) failures: stage + exception class, never URLs."""
@@ -265,23 +244,25 @@ class CogIndexer:
         max_artifacts_per_repository: int = MAX_ARTIFACTS_PER_REPOSITORY,
         max_new_fetches_per_sweep: int = MAX_NEW_FETCHES_PER_SWEEP,
         max_bytes_per_file: int = DEFAULT_MAX_BUNDLE_FILE_BYTES,
-        drain_deadline_seconds: float = DRAIN_DEADLINE_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._store = store
         self._sources = list(sources)
         self._max_artifacts = max_artifacts_per_repository
-        self._drain_deadline = drain_deadline_seconds
         self._max_new_fetches = max_new_fetches_per_sweep
         self._max_bytes_per_file = max_bytes_per_file
         self._clock = clock
         self.last_summary: SweepSummary | None = None
         self._executor = ThreadPoolExecutor(max_workers=STORE_WORKER_THREADS, thread_name_prefix="cog-index-store")
-        # Workers a cancelled sweep stopped waiting for (see _drain): they
-        # still own whatever they were doing, so the lock release that would
-        # have followed them is handed to a thread instead.
-        self._abandoned: list[Future] = []
-        self._late_releases: set[threading.Thread] = set()
+        # The sweep's own, single thread. Every store call of a sweep -- the
+        # lock acquisition, the view's reads and writes, the release -- is
+        # submitted here and runs in submission order, which is the whole
+        # cancellation story: a release queued behind a call that a
+        # cancellation abandoned mid-flight cannot overtake it (whether the
+        # call is inside psycopg or still building its statement), cannot
+        # run on the event loop, and is not dropped by the cancellation --
+        # the sweep only ever stops waiting for it.
+        self._sweep_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cog-index-sweep")
         # Per-source fairness state for the fetch budget (see _schedule): the
         # interleave phase advances every sweep, and the retry order is a
         # rotating list of (repository, digest) -- identities, not positions,
@@ -294,210 +275,48 @@ class CogIndexer:
     def sources(self) -> list[RegistrySource]:
         return list(self._sources)
 
-    @property
-    def pending_late_releases(self) -> int:
-        """Lock releases handed off to threads that have not completed yet."""
-
-        self._late_releases = {thread for thread in self._late_releases if thread.is_alive()}
-        return len(self._late_releases)
-
     def close(self) -> None:
         """Stop accepting store calls. Does not interrupt calls already running.
 
-        ``cancel_futures`` drops work that never started; a submitted call that
-        is already on a thread runs to completion, which is what the lock
-        hand-off waits for.
+        The targeted pool drops work that never started. The sweep thread
+        does **not**: the only call that can be queued on it is a lock
+        release behind an abandoned call, and that release must still run.
         """
 
         self._executor.shutdown(wait=False, cancel_futures=True)
+        self._sweep_thread.shutdown(wait=False)
 
     # -- threading discipline ---------------------------------------------------
 
     async def _on_thread(self, func, /, *args, **kwargs):
-        """Run a blocking store call on a worker thread; cancellation drains it, bounded.
+        """Run a targeted entry point's store call on the shared worker pool."""
 
-        A worker thread cannot be interrupted, so a plain ``await
-        asyncio.to_thread(...)`` cancelled mid-call leaves the call running
-        after the coroutine has moved on -- which for this module means a
-        sweep could release its lock while a write is still mutating rows, or
-        abandon a lock acquisition that completes a moment later with nobody
-        left to release it. So the future is shielded, and on cancellation
-        this waits for the thread to finish (its result or error discarded)
-        before propagating.
+        return await asyncio.wrap_future(self._executor.submit(func, *args, **kwargs))
 
-        The drain itself is shielded and deadline-bounded (see
-        :meth:`_drain`): repeated cancellations are deferred until the worker
-        completes -- they collapse into the one ``CancelledError`` re-raised
-        here. A worker still running at the deadline (a dead connection the
-        server cannot abort) is recorded in ``_abandoned``: the coroutine
-        moves on, but :meth:`_release` will not release the lock until that
-        worker has finished -- it hands the release to a thread.
+    async def _on_sweep_thread(self, func, /, *args, **kwargs):
+        """Run one of the sweep's store calls on the sweep thread, in order with the rest.
 
-        The call is submitted to this indexer's own executor rather than
-        ``asyncio.to_thread``, so the ``concurrent.futures.Future`` is an
-        object this module owns: the hand-off thread can wait on it without
-        an event loop.
-
-        The worker's outcome travels as a **value**, never as the future's
-        exception, and is re-raised here. That is not style: ``asyncio.shield``
-        attaches a logger to the inner future when the outer is cancelled
-        (``asyncio/tasks.py``'s ``_log_on_exception``), and it hands the raw
-        exception to the loop's exception handler -- for a store call, an
-        exception whose text can name the database URL this module is careful
-        never to log. A future that never fails has nothing to report.
+        Cancellation returns at once: a thread cannot be interrupted, and the
+        sweep does not wait for it (the drain issue #148 removed). The call
+        finishes on the sweep thread and its result is dropped; the release
+        the cancelled sweep queues next runs after it. A call that had not
+        started is dropped unrun (``wrap_future`` cancels it) -- which for
+        the sweep can only be the acquisition, and the release then finds
+        nothing entered.
         """
 
-        worker = self._executor.submit(_capture, func, args, kwargs)
-        future = asyncio.wrap_future(worker)
-        try:
-            failed, value = await asyncio.shield(future)
-        except asyncio.CancelledError:
-            await self._drain(future, worker)
-            raise
-        if failed:
-            raise value
-        return value
+        return await asyncio.wrap_future(self._sweep_thread.submit(func, *args, **kwargs))
 
-    def _observe(self, worker: Future) -> None:
-        """Log an abandoned worker's failure, by class name, when it eventually lands.
+    def _queue_release(self, lock, entering: Future) -> Future:
+        """Queue the lock's exit on the sweep thread, behind whatever call is still running there.
 
-        An abandoned future is dropped by whoever handed it off, so without
-        this its outcome would go unrecorded -- and a store call that failed
-        after the sweep gave up on it is worth a line.
+        Never dropped once queued: the sweep may stop waiting for it (a
+        cancellation), the executor may be closed (``close`` does not cancel
+        queued work), but the exit runs. :func:`_exit_entered` exits nothing
+        if the acquisition never ran or raised.
         """
 
-        def consume(done: Future) -> None:
-            if done.cancelled():
-                return
-            outcome = done.result()
-            failed, value = outcome
-            if failed:
-                logger.error("cog_index_abandoned_worker_failed", extra={"error": type(value).__name__})
-
-        worker.add_done_callback(consume)
-
-    async def _drain(self, future: asyncio.Future, worker: Future) -> None:
-        """Wait for a cancelled call's worker, deferring further cancels, up to the deadline."""
-
-        deadline = self._clock() + self._drain_deadline
-        while not future.done():
-            remaining = deadline - self._clock()
-            if remaining <= 0:
-                # The thread is stuck on something no timeout reached (a dead
-                # transport, most likely). Stop waiting -- hanging shutdown
-                # forever helps nobody -- but do not pretend it finished: the
-                # release that follows must wait for it (see _release), and
-                # whoever ends up dropping it has already arranged for its
-                # outcome to be consumed.
-                logger.error(
-                    "cog_index_worker_drain_expired",
-                    extra={"deadline_seconds": self._drain_deadline},
-                )
-                self._observe(worker)
-                self._abandoned.append(worker)
-                return
-            try:
-                # Shielded: a second cancellation must interrupt this wait
-                # without touching the worker, and then wait again -- the
-                # whole point of the drain is that the lock is not released
-                # while a write is still running, however often the task is
-                # cancelled. The deferred cancellations collapse into the one
-                # CancelledError the caller re-raises.
-                await asyncio.wait_for(asyncio.shield(future), timeout=remaining)
-            except asyncio.CancelledError:
-                continue
-            except TimeoutError:
-                continue
-            except Exception:
-                break  # the worker's own failure: it is done, which is all the drain wants
-        if future.done() and not future.cancelled():
-            # Consume the result/exception so nothing warns about it later.
-            with suppress(Exception):
-                future.exception()
-
-    async def _release(self, lock) -> None:
-        """Release the sweep lock, tolerating both errors and cancellation.
-
-        Runs in ``finally`` blocks, where raising would mask whatever ended
-        the sweep; an exit failure is logged by class name only. Cancellation
-        during the release drains like every other store call, so the unlock
-        (and the pooled connection's return) always completes.
-
-        If an earlier store call of this sweep is still running (its drain
-        expired), the lock is **not** released here: a release under a live
-        worker is exactly the state single-flight exists to prevent -- another
-        replica would acquire and a late write would land under its lock.
-        The release is handed to :meth:`_hand_off` instead, which waits for
-        the worker without a deadline and then exits the lock.
-        """
-
-        if self._abandoned:
-            pending, self._abandoned = self._abandoned, []
-            self._hand_off(lock, pending)
-            return
-        try:
-            await self._on_thread(lock.__exit__, None, None, None)
-        except asyncio.CancelledError:
-            if self._abandoned:
-                # The unlock itself outlived the drain deadline. It is still
-                # running on its thread and will finish the exit on its own,
-                # so there is nothing to hand off -- but the lock object must
-                # stay reachable until it does, or finalizing the context
-                # manager would run the very unlock we are waiting for on
-                # whatever thread happens to collect it.
-                self._hand_off(None, self._abandoned)
-                self._abandoned = []
-                logger.error("cog_index_lock_release_outlived_drain")
-            raise
-        except Exception as exc:
-            logger.error("cog_index_lock_release_failed", extra={"error": type(exc).__name__})
-
-    def _hand_off(self, lock, workers: list[Future]) -> None:
-        """Wait out abandoned workers on a daemon thread -- no deadline -- then exit ``lock``.
-
-        A thread rather than a task because this has to outlive the event
-        loop. At shutdown every task is cancelled and the loop closes; an
-        asyncio owner would stop mid-wait, drop the last reference to the lock
-        context, and leave the garbage collector to run its ``finally`` --
-        unlocking while the write was still in flight, which is the one thing
-        the drain exists to prevent.
-
-        ``lock`` is ``None`` when the unlock is itself the abandoned call: the
-        thread then only holds the reference and waits, so nothing finalizes
-        the context manager underneath it.
-
-        The thread itself is a daemon, but that does **not** mean the process
-        can always leave: the blocked call is running on a
-        ``ThreadPoolExecutor`` worker, and those are joined at interpreter
-        exit. A worker blocked forever therefore needs the process killed from
-        outside. What bounds the wait in every lesser case is the worker:
-        ``statement_timeout`` where the transport works, keepalives where the
-        peer is gone.
-
-        If the process does die here, the lock and any in-flight sweep write
-        are on the *same* connection (the sweep's store calls ride the lock's
-        session -- the store's ``_sweep_connection``, issue #128), so the
-        server drops them together: the write cannot land after another
-        replica has acquired the lock.
-        """
-
-        def run() -> None:
-            for worker in workers:
-                with suppress(BaseException):
-                    worker.result()
-            if lock is None:
-                return
-            try:
-                lock.__exit__(None, None, None)
-            except Exception as exc:
-                logger.error("cog_index_lock_release_failed", extra={"error": type(exc).__name__, "late": True})
-                return
-            logger.warning("cog_index_lock_released_late", extra={"workers": len(workers)})
-
-        thread = threading.Thread(target=run, name="cog-index-late-release", daemon=True)
-        self._late_releases.add(thread)
-        thread.start()
-        logger.error("cog_index_lock_release_deferred", extra={"workers": len(workers)})
+        return self._sweep_thread.submit(_exit_entered, lock, entering)
 
     # -- the sweep ------------------------------------------------------------
 
@@ -506,46 +325,56 @@ class CogIndexer:
 
         Never raises for a per-artifact or per-source failure; does raise for
         a database outage (the store's own errors) and propagates cancellation
-        -- in both cases after the lock is released.
+        -- in both cases after the lock's release has been submitted.
         """
 
         started = self._clock()
         summary = SweepSummary(sources=len(self._sources))
-        # Workers a targeted reindex (which takes no lock) may have left
-        # behind are not this sweep's to wait for. Dropping the reference is
-        # safe: nothing is waiting on their result, they hold no lock, and
-        # _observe already arranged for their outcome to be consumed.
-        self._abandoned = []
         # The lock is taken and released on a worker thread: it is a blocking
         # database call, and the connection it occupies stays checked out for
-        # the whole sweep, carrying the sweep's reads and writes so they die
-        # with the lock session (see the store's sweep_lock contract, #128).
+        # the whole sweep, carrying the sweep's reads and writes through the
+        # view it yields so they die with the lock session (issue #128).
         lock = self._store.sweep_lock()
+        entering: Future = self._sweep_thread.submit(lock.__enter__)
         try:
             try:
-                acquired = await self._on_thread(lock.__enter__)
+                view: SweepView | None = await asyncio.wrap_future(entering)
             except asyncio.CancelledError:
-                # _on_thread drained the worker, so __enter__ finished on its
-                # thread even though this coroutine was cancelled. Whatever it
-                # entered gets its matching exit before the cancellation
-                # propagates; if __enter__ itself failed there is nothing
-                # held and _release swallows the mismatched exit.
-                await self._release(lock)
+                # Cancelled while the acquisition may still be running. Not
+                # waited for, but whatever it enters gets its matching exit:
+                # queued behind it on the sweep thread, so it runs the moment
+                # __enter__ returns. An acquisition that never started is
+                # cancelled unrun, one that raised entered nothing; both
+                # exit nothing.
+                self._queue_release(lock, entering)
                 raise
+            cancelled = False
             try:
-                if not acquired:
+                if view is None:
                     summary.locked_out = True
                     COG_INDEX_SWEEPS.labels(result="locked_out").inc()
-                    logger.info("cog_index_sweep_skipped", extra={"reason": "another replica holds the sweep lock"})
+                    logger.info("cog_index_sweep_skipped", extra={"reason": "another sweeper holds the sweep lock"})
                     return summary
                 for source in self._sources:
-                    await self._sweep_source(source, summary)
+                    await self._sweep_source(source, summary, view)
                 COG_INDEX_SWEEPS.labels(result="completed").inc()
+            except asyncio.CancelledError:
+                # A shutdown mid-sweep, not a failure of the sweep.
+                COG_INDEX_SWEEPS.labels(result="cancelled").inc()
+                cancelled = True
+                raise
             except BaseException:
                 COG_INDEX_SWEEPS.labels(result="failed").inc()
                 raise
             finally:
-                await self._release(lock)
+                # The release goes behind whatever the sweep thread is still
+                # running (a view call a cancellation abandoned, for one). A
+                # cancelled sweep does not wait for it; every other outcome
+                # does -- and a cancellation that lands during that wait
+                # leaves the queued release exactly where it is.
+                release = self._queue_release(lock, entering)
+                if not cancelled:
+                    await _await_without_cancelling(release)
         finally:
             summary.duration_seconds = self._clock() - started
             COG_INDEX_SWEEP_DURATION.observe(summary.duration_seconds)
@@ -553,7 +382,7 @@ class CogIndexer:
             logger.info("cog_index_sweep", extra=summary.as_log_fields())
         return summary
 
-    async def _sweep_source(self, source: RegistrySource, summary: SweepSummary) -> None:
+    async def _sweep_source(self, source: RegistrySource, summary: SweepSummary, view: SweepView) -> None:
         enumeration = await self._enumerate(source)
         if enumeration.errors:
             summary.sources_failed += 1
@@ -565,7 +394,7 @@ class CogIndexer:
             # declared gone.
             return
 
-        known = {(row.repository, row.digest): row for row in await self._on_thread(self._store.known, source.id)}
+        known = {(row.repository, row.digest): row for row in await self._on_sweep_thread(view.known, source.id)}
         # Three classes, mirroring _reconcile's decision: bookkeeping (known,
         # not failed) costs no budget; a fetch happens for digests the catalog
         # has never seen and for retries of failed rows. Which fetches get
@@ -581,7 +410,7 @@ class CogIndexer:
                 elif known_row.status == STATUS_FAILED:
                     retries.append((repository, artifact, known_row))
                 else:
-                    outcome = await self._reconcile(source, repository, artifact, known_row)
+                    outcome = await self._reconcile(source, repository, artifact, known_row, view)
                     _count(summary, outcome)
         fetch, deferred = self._schedule(source.id, unseen, retries)
         for repository, artifact, known_row in fetch:
@@ -590,7 +419,7 @@ class CogIndexer:
                 # planned: a sweep that raises or is cancelled partway must
                 # not rotate past candidates it never tried.
                 self._note_retry_attempt(source.id, (repository, artifact.digest))
-            _count(summary, await self._reconcile(source, repository, artifact, known_row))
+            _count(summary, await self._reconcile(source, repository, artifact, known_row, view))
         for _ in range(deferred):
             _count(summary, OUTCOME_DEFERRED)
 
@@ -601,8 +430,8 @@ class CogIndexer:
         # reconciled. Deferred fetches do NOT skip removal: those artifacts
         # were enumerated and stand in the present set.
         present = {repo: [artifact.digest for artifact in artifacts] for repo, artifacts in enumeration.present.items()}
-        removed = await self._on_thread(
-            self._store.mark_removed, source.id, present, excluding=enumeration.failed_repositories
+        removed = await self._on_sweep_thread(
+            view.mark_removed, source.id, present, excluding=enumeration.failed_repositories
         )
         summary.removed += removed
         if removed:
@@ -721,6 +550,7 @@ class CogIndexer:
         repository: str,
         artifact: ArtifactRef,
         known: KnownArtifact | None,
+        view: SweepView,
     ) -> str:
         tags = tuple(sorted(set(artifact.tags)))
         if known is not None and known.status != STATUS_FAILED:
@@ -729,19 +559,19 @@ class CogIndexer:
             # Tag change, or a digest that is back after being marked removed:
             # the card is the digest's and cannot have changed. Write the tags
             # (which also clears removed_at) and move on without a fetch.
-            await self._on_thread(
-                self._store.update_tags, source.id, repository, artifact.digest, tags, pushed_at=artifact.pushed_at
+            await self._on_sweep_thread(
+                view.update_tags, source.id, repository, artifact.digest, tags, pushed_at=artifact.pushed_at
             )
             return OUTCOME_RETAGGED
         row = await self._read_artifact(source, repository, artifact)
-        row = await self._store_row(row)
+        row = await self._store_row(row, view, self._on_sweep_thread)
         if row.status == STATUS_INDEXED:
             return OUTCOME_INDEXED
         if row.status == STATUS_NON_COG:
             return OUTCOME_NON_COG
         return OUTCOME_FAILED
 
-    async def _store_row(self, row: CogArtifact, *, targeted: bool = False) -> CogArtifact:
+    async def _store_row(self, row: CogArtifact, view: SweepView, run: Callable) -> CogArtifact:
         """Upsert the row; a card the database refuses becomes a ``failed`` row, not a poisoned sweep.
 
         The card is pre-validated (:func:`_card_unstorable`), so this catch is
@@ -750,17 +580,19 @@ class CogIndexer:
         is caught -- an outage raises through, because retrying every artifact
         against a dead database is not resilience.
 
-        ``targeted`` marks the lock-less :meth:`reindex` path, whose write
-        must take its own pooled connection instead of riding a concurrent
-        sweep's lock session (issue #128).
+        ``view`` is the sweep's connection-bound view under the lock and
+        ``run`` the sweep thread, or -- for the lock-less :meth:`reindex`
+        path -- the store itself and the targeted pool, so the write takes a
+        pooled connection of its own (issue #148). Passed explicitly rather
+        than inferred: the in-memory store is its own view.
         """
 
         try:
-            await self._on_thread(self._store.upsert, row, targeted=targeted)
+            await run(view.upsert, row)
             return row
         except CogCatalogDataError as exc:
             fallback = _with(row, status=STATUS_FAILED, card=None, read_errors=_errors(f"store: {type(exc).__name__}"))
-            await self._on_thread(self._store.upsert, fallback, targeted=targeted)
+            await run(view.upsert, fallback)
             return fallback
 
     # -- targeted entry points (webhook receiver, #86) --------------------------
@@ -784,7 +616,7 @@ class CogIndexer:
         source = self._source(source_id)
         ref = ArtifactRef(digest=digest, tags=tuple(sorted(set(tags))), pushed_at=pushed_at)
         row = await self._read_artifact(source, repository, ref)
-        return await self._store_row(row, targeted=True)
+        return await self._store_row(row, self._store, self._on_thread)
 
     async def mark_removed(self, source_id: str, repository: str, digest: str) -> bool:
         """Mark one artifact removed (a delete event). Returns whether a present row was marked."""
@@ -903,8 +735,8 @@ class CogIndexer:
         class, never with a chain that could echo somebody's URL -- and the
         loop continues: the next interval retries. Cancellation propagates.
         ``jitter`` is a fraction of the interval added or removed at random so
-        replicas that start together drift apart instead of contending for
-        the lock at the same instant every cycle.
+        two sweepers that do exist (two releases on one database) drift apart
+        instead of contending for the lock at the same instant every cycle.
         """
 
         if interval_seconds <= 0:
@@ -932,17 +764,52 @@ class CogIndexer:
 # -- helpers ------------------------------------------------------------------
 
 
-def _capture(func, args, kwargs):
-    """Run ``func`` on the worker thread and return ``(failed, value_or_error)``.
+def _exit_entered(lock, entering: Future) -> None:
+    """Exit ``lock`` if its acquisition entered anything; the sweep thread's release step.
 
-    See :meth:`CogIndexer._on_thread`: the outcome must not become the
-    future's exception, or asyncio reports it for us with its text intact.
+    Runs on the sweep thread after the acquisition (same thread, submission
+    order), so ``entering`` is done: a cancelled future never ran, a failed
+    one entered nothing, and either way there is nothing to exit -- calling
+    ``__exit__`` on a context that was never entered would *run* the
+    acquisition. An exit failure is logged by class name; raising would only
+    reach a sweep that may no longer be waiting.
     """
 
+    if entering.cancelled() or entering.exception() is not None:
+        return
     try:
-        return False, func(*args, **kwargs)
-    except BaseException as exc:  # noqa: BLE001 - re-raised by the caller, or logged by class name
-        return True, exc
+        lock.__exit__(None, None, None)
+    except Exception as exc:
+        logger.error("cog_index_lock_release_failed", extra={"error": type(exc).__name__})
+
+
+async def _await_without_cancelling(worker: Future):
+    """Await a concurrent future without cancelling it when the awaiter is cancelled.
+
+    ``asyncio.wrap_future`` cancels a not-yet-started future when the
+    awaiting task is cancelled -- right for a view call, wrong for a queued
+    lock release, which must run whether or not anybody still waits for it.
+    """
+
+    loop = asyncio.get_running_loop()
+    done: asyncio.Future = loop.create_future()
+
+    def settle() -> None:
+        if done.cancelled():
+            return
+        if worker.cancelled():
+            done.set_exception(RuntimeError("the release was cancelled before it ran"))
+        elif (exc := worker.exception()) is not None:
+            done.set_exception(exc)
+        else:
+            done.set_result(worker.result())
+
+    def deliver(_: Future) -> None:
+        with suppress(RuntimeError):  # the loop is closed: nobody is waiting
+            loop.call_soon_threadsafe(settle)
+
+    worker.add_done_callback(deliver)
+    return await done
 
 
 def _count(summary: SweepSummary, outcome: str) -> None:

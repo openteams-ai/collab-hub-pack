@@ -24,18 +24,92 @@ def env_id(source_id: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in source_id.upper())
 
 
+COMPONENT_LABEL = "app.kubernetes.io/component"
+INDEX_VARS = (
+    "COLLAB_HUB_API__COGS__INDEX__ENABLED",
+    "COLLAB_HUB_API__COGS__INDEX__INTERVAL_SECONDS",
+    "COLLAB_HUB_API__COGS__INDEX__RUN_ON_STARTUP",
+)
+
+
+class Workload:
+    """One rendered Deployment: its pod spec and first container, indexed for assertions."""
+
+    def __init__(self, deployment: dict) -> None:
+        self.deployment = deployment
+        self.spec = deployment["spec"]
+        self.pod = self.spec["template"]["spec"]
+        self.container = self.pod["containers"][0]
+        self.env = {e["name"]: e for e in self.container["env"]}
+        self.mounts = {m["name"]: m for m in self.container.get("volumeMounts", [])}
+        self.volumes = {v["name"]: v for v in self.pod.get("volumes", [])}
+        self.selector = self.spec["selector"]["matchLabels"]
+
+    def value(self, name: str) -> str:
+        return self.env[name]["value"]
+
+
 class Rendered:
+    """The release: the API Deployment (always), the indexer Deployment (when indexing is on), the Services."""
+
     def __init__(self, docs: list[dict]) -> None:
-        deployment = next(d for d in docs if d.get("kind") == "Deployment")
-        pod = deployment["spec"]["template"]["spec"]
-        container = pod["containers"][0]
-        self.env = {e["name"]: e for e in container["env"]}
-        self.mounts = {m["name"]: m for m in container.get("volumeMounts", [])}
-        self.volumes = {v["name"]: v for v in pod.get("volumes", [])}
+        deployments = {d["metadata"]["labels"][COMPONENT_LABEL]: d for d in docs if d.get("kind") == "Deployment"}
+        assert set(deployments) <= {"api", "indexer"}, sorted(deployments)
+        self.api = Workload(deployments["api"])
+        self.indexer = Workload(deployments["indexer"]) if "indexer" in deployments else None
+        self.services = [d for d in docs if d.get("kind") == "Service"]
+        # The API container is what the source/credential assertions read;
+        # the indexer's env is asserted equal to it where it must be.
+        self.env = self.api.env
+        self.mounts = self.api.mounts
+        self.volumes = self.api.volumes
         self.cogs_env = sorted(n for n in self.env if "COGS" in n)
         self.sources_json = self.env[SOURCES_VAR]["value"] if SOURCES_VAR in self.env else None
         self.sources = {s["id"]: s for s in json.loads(self.sources_json)} if self.sources_json else {}
         self.source_order = [s["id"] for s in json.loads(self.sources_json)] if self.sources_json else []
+
+    def api_does_not_sweep(self) -> None:
+        # Issue #148: whatever the values say, the API replicas render the
+        # index switch off and none of its tuning -- sweeping is the indexer
+        # workload's alone.
+        assert self.value("COLLAB_HUB_API__COGS__INDEX__ENABLED") == "false", "an API replica must never sweep"
+        for name in INDEX_VARS[1:]:
+            assert name not in self.env, f"{name} rendered on the API deployment"
+
+    def no_indexer(self) -> None:
+        assert self.indexer is None, "an indexer Deployment rendered with cogs.index.enabled=false"
+
+    def indexer_is_the_one_sweeper(self, *, interval: str, run_on_startup: str) -> None:
+        """The indexer Deployment: one replica, Recreate, the API's image and settings, index on."""
+
+        indexer = self.indexer
+        assert indexer is not None, "cogs.index.enabled=true must render the indexer Deployment"
+        assert indexer.spec["replicas"] == 1, indexer.spec.get("replicas")
+        assert indexer.spec["strategy"] == {"type": "Recreate"}, indexer.spec.get("strategy")
+        assert indexer.value("COLLAB_HUB_API__COGS__INDEX__ENABLED") == "true"
+        assert indexer.value("COLLAB_HUB_API__COGS__INDEX__INTERVAL_SECONDS") == interval
+        assert indexer.value("COLLAB_HUB_API__COGS__INDEX__RUN_ON_STARTUP") == run_on_startup
+        # Same process image and settings as the API: everything but the
+        # index switch and its tuning is identical, Secret refs included.
+        api = self.api
+        assert indexer.container["image"] == api.container["image"]
+        assert indexer.pod["serviceAccountName"] == api.pod["serviceAccountName"]
+        assert indexer.pod.get("securityContext") == api.pod.get("securityContext")
+        assert indexer.container.get("securityContext") == api.container.get("securityContext")
+        api_env = {name: entry for name, entry in api.env.items() if name not in INDEX_VARS}
+        indexer_env = {name: entry for name, entry in indexer.env.items() if name not in INDEX_VARS}
+        assert indexer_env == api_env, "the indexer's environment differs from the API's beyond the index switch"
+        # Nothing routes to it: its component label is its own, and no
+        # Service selects it.
+        assert indexer.selector[COMPONENT_LABEL] == "indexer"
+        assert api.selector[COMPONENT_LABEL] == "api"
+        for service in self.services:
+            assert service["spec"]["selector"][COMPONENT_LABEL] != "indexer", service["metadata"]["name"]
+        # Its frames-storage mount is an emptyDir: the API's claim stays the
+        # API's, and the process only needs the path to start.
+        assert indexer.mounts["frames-storage"]["mountPath"] == api.mounts["frames-storage"]["mountPath"]
+        assert indexer.volumes["frames-storage"] == {"name": "frames-storage", "emptyDir": {}}
+        assert indexer.container["resources"] == api.container["resources"], "empty indexer resources follow the API"
 
     def value(self, name: str) -> str:
         return self.env[name]["value"]
@@ -76,14 +150,14 @@ class Rendered:
 def case_default(r: Rendered) -> None:
     assert r.cogs_env == ["COLLAB_HUB_API__COGS__INDEX__ENABLED"], r.cogs_env
     assert not [n for n in r.env if n.startswith("COLLAB_HUB_API__FEATURES__")], "flag vars rendered with no flags set"
-    assert r.value("COLLAB_HUB_API__COGS__INDEX__ENABLED") == "false"
+    r.api_does_not_sweep()
+    r.no_indexer()
     assert "cogs-ca-bundle" not in r.mounts and "cogs-ca-bundle" not in r.volumes
 
 
 def case_fixture(r: Rendered) -> None:
-    assert r.value("COLLAB_HUB_API__COGS__INDEX__ENABLED") == "true"
-    assert r.value("COLLAB_HUB_API__COGS__INDEX__INTERVAL_SECONDS") == "120"
-    assert r.value("COLLAB_HUB_API__COGS__INDEX__RUN_ON_STARTUP") == "false"
+    r.api_does_not_sweep()
+    r.indexer_is_the_one_sweeper(interval="120", run_on_startup="false")
     assert r.source_order == ["harbor-main", "public.mirror"]
     harbor = r.sources["harbor-main"]
     assert harbor["kind"] == "harbor"
@@ -106,14 +180,19 @@ def case_fixture(r: Rendered) -> None:
     volume = r.volumes["cogs-ca-bundle"]["configMap"]
     assert volume["name"] == "collab-hub-cogs-ca"
     assert volume["items"] == [{"key": "ca.crt", "path": "ca.crt"}]
+    # The indexer is the process that talks to the registries, so the CA
+    # bundle is mounted there the same way.
+    assert r.indexer is not None
+    assert r.indexer.mounts["cogs-ca-bundle"] == mount
+    assert r.indexer.volumes["cogs-ca-bundle"] == r.volumes["cogs-ca-bundle"]
 
 
 def case_static_only(r: Rendered) -> None:
     # Sources with the indexer off: the source JSON still renders (the read
-    # API needs it), the two tuning vars do not.
-    assert r.value("COLLAB_HUB_API__COGS__INDEX__ENABLED") == "false"
-    assert "COLLAB_HUB_API__COGS__INDEX__INTERVAL_SECONDS" not in r.env
-    assert "COLLAB_HUB_API__COGS__INDEX__RUN_ON_STARTUP" not in r.env
+    # API needs it), the two tuning vars do not, and no indexer Deployment
+    # does either.
+    r.api_does_not_sweep()
+    r.no_indexer()
     assert r.source_order == ["public"]
     assert "ca_bundle_path" not in r.sources["public"], "no CA bundle configured, none passed"
     assert "cogs-ca-bundle" not in r.mounts
@@ -135,6 +214,19 @@ def case_reordered(r: Rendered) -> None:
     r.credentials_attached("harbor-main", "robot-a")
     assert "webhook_secret_env" not in r.sources["harbor-main"]
     r.no_source_vars_for("mid.one")
+
+
+def case_indexer_resources(r: Rendered) -> None:
+    # cogs.indexer.resources set: the indexer container carries them and the
+    # API keeps its own; everything else about the two stays identical.
+    r.api_does_not_sweep()
+    indexer = r.indexer
+    assert indexer is not None
+    assert indexer.spec["replicas"] == 1 and indexer.spec["strategy"] == {"type": "Recreate"}
+    assert indexer.value("COLLAB_HUB_API__COGS__INDEX__ENABLED") == "true"
+    assert indexer.container["resources"] == {"requests": {"memory": "1Gi"}, "limits": {"memory": "2Gi"}}
+    assert r.api.container["resources"] != indexer.container["resources"]
+    assert indexer.container["image"] == r.api.container["image"]
 
 
 def case_features(r: Rendered) -> None:
@@ -164,6 +256,7 @@ CASES = {
     "static-only": case_static_only,
     "three-sources": case_three_sources,
     "reordered": case_reordered,
+    "indexer-resources": case_indexer_resources,
 }
 
 

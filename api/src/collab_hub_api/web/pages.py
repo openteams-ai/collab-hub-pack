@@ -209,9 +209,8 @@ class WebSecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Apply the surface's security headers to **every** response it owns.
 
     Per-response headers were not enough, and the gap was not theoretical: a
-    redirect, an asset, a 405 from an unsupported method, and — because the
-    MCP app is mounted at ``/`` and matches whatever the routers did not
-    (issue #86) — any unmatched ``/web/*`` path all produced responses that
+    redirect, an asset, a 405 from an unsupported method, and any unmatched
+    ``/web/*`` path (the router's own 404) all produced responses that
     the route handlers never touched, and so answered without
     ``Referrer-Policy``, without ``no-store``, and without a CSP.
 

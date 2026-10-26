@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .cogs.indexer import INDEXER_SHUTDOWN_TIMEOUT_SECONDS
@@ -82,6 +83,7 @@ from .routers import (
     user_directory,
     web,
 )
+from .routers import runs as runs_router
 from .web.authz import platform_role_source_name, verify_web_route_protection
 from .web.guard import WebSessionGuardMiddleware
 from .web.pages import WebSecurityHeadersMiddleware
@@ -149,8 +151,8 @@ def _unavailable_response(exc: Exception, database_errors: tuple[type[Exception]
 class McpAuthMiddleware(BaseHTTPMiddleware):
     """Authenticate MCP traffic, which never reaches the outer app's handlers.
 
-    The MCP app is mounted, so nothing registered on the outer FastAPI app
-    applies to it: every outcome of the credential check has to be turned into
+    The MCP app is a separate ASGI app routed at its own path, so nothing
+    registered on the outer FastAPI app applies to it: every outcome of the credential check has to be turned into
     a response right here. Responses use the same ``{"error": {"code", ...}}``
     envelope as the HTTP API, because a plain-text body would erase exactly the
     distinctions that matter — ``no_organization`` against a plain refusal, and
@@ -275,17 +277,18 @@ def make_app(config: BaseConfig) -> FastAPI:
     migrate_collab_schema(config, postgres_pools)
     # The Cog catalog (issue #84) rides the same collab_ migration (version
     # 7) and is always built so the catalog read API is up whether or not
-    # this replica sweeps registries. The indexer -- and the registry
-    # sources it owns -- exist only when cogs.index.enabled (issue #87).
+    # this process sweeps registries. The indexer -- and the registry
+    # sources it owns -- is built wherever sources are configured, so the
+    # API replicas hold its targeted entry points; only its sweep loop
+    # waits on cogs.index.enabled (issue #87), which the chart sets on its
+    # one-replica indexer workload alone and never on the API replicas
+    # (issue #148).
     cog_catalog_store = build_cog_catalog_store(config, postgres_pools)
     cog_indexing = build_cog_indexing(config, cog_catalog_store)
-    # The run API (/v1/runs) is behind a feature flag, and so is its import: it is the one
-    # place the API uses the execution package, which an image need not ship until it is on.
-    run_service = None
-    if config.features.enabled("cog_runs"):
-        from .routers import runs as runs_router
-
-        run_service = runs_router.build_run_service(config.runs)
+    # The run API (/v1/runs): its Track is runs.track_path, else the hub's own database, else none
+    # (the routes answer 503). Its router is the one module of the API that imports the execution
+    # package, which writes intent and reads runs and never constructs an executor.
+    run_service = runs_router.build_run_service(config.runs, config.frames.postgres.url, postgres_pools)
     if org_source_resolves_membership():
         # Third membership precondition (the env-only ones are checked above):
         # the organization store must have a real backend. Membership is an
@@ -328,7 +331,7 @@ def make_app(config: BaseConfig) -> FastAPI:
     mcp_app = mcp.streamable_http_app()
     # MCP traffic authenticates through the same get_auth_context, which
     # records seen users and resolves membership off the owning app's state —
-    # the mounted MCP app has its own state object, so give it both stores.
+    # the MCP app has its own state object, so give it both stores.
     mcp_app.state.usage_store = usage_store
     mcp_app.state.org_store = org_store
 
@@ -377,17 +380,38 @@ def make_app(config: BaseConfig) -> FastAPI:
             # cap (max_waiting) stays a monitored deferral, not a blind one.
             app.state.github_api_get_waiters = 0
             # For the catalog API (#85) and the webhook receiver (#86):
-            # the store is always there; the indexer and its sources only
-            # on a sweeping replica.
+            # the store is always there; the indexer and its sources
+            # wherever sources are configured, sweeping or not.
             app.state.cog_catalog_store = cog_catalog_store
             app.state.cog_indexer = cog_indexing.indexer if cog_indexing is not None else None
             app.state.cog_registry_sources = cog_indexing.indexer.sources if cog_indexing is not None else []
             cog_index_task: asyncio.Task | None = None
-            if cog_indexing is not None:
+            if cog_indexing is not None and cog_indexing.sweeps:
+                indexer = cog_indexing.indexer
+
+                def _settle_cog_index_task(task: asyncio.Task) -> None:
+                    """The one place a finished indexer task is observed and its executors closed.
+
+                    Whether it finished inside the shutdown wait or long
+                    after (as a done-callback), the same thing happens:
+                    run() swallows ordinary sweep failures, so an exception
+                    here is a bug in the loop itself -- retrieved and logged
+                    by class name, which also keeps asyncio from reporting
+                    it at collection with a text this module never logs --
+                    and then the executors stop accepting calls. Work
+                    already on a thread, a queued lock release included,
+                    still finishes.
+                    """
+
+                    if not task.cancelled() and task.exception() is not None:
+                        logger.error("cog_indexer_task_failed", extra={"error": type(task.exception()).__name__})
+                    indexer.close()
+
                 # After the migration (which ran in make_app) and after the
-                # pools opened: the first sweep may be immediate. The loop
-                # jitters its interval so replicas drift apart, and the
-                # store's advisory lock keeps them from sweeping at once.
+                # pools opened: the first sweep may be immediate. Single
+                # flight is the chart's doing (one indexer replica, recreated
+                # never rolled); the store's advisory lock is the belt under
+                # it, for two releases on one database (issue #148).
                 cog_index_task = asyncio.create_task(
                     cog_indexing.indexer.run(
                         interval_seconds=cog_indexing.interval_seconds,
@@ -412,53 +436,44 @@ def make_app(config: BaseConfig) -> FastAPI:
             try:
                 yield
             finally:
-                # First, before the pools close: a sweep in flight may hold
-                # the lock connection and be mid-write. Cancel, wait for it
-                # to unwind (its finally releases the lock), then close the
-                # registry clients it was talking to.
+                # First, before the pools close: a sweep in flight holds the
+                # lock connection and may be mid-write. Cancel, give it a
+                # moment to unwind (its finally submits the lock release,
+                # which on Postgres queues behind the in-flight statement),
+                # then close the registry clients it was talking to.
                 if cog_index_task is not None:
-                    # Bounded: the indexer's drain already has a deadline, and
-                    # this is the outer wall -- a database that stopped
-                    # answering must not be able to hang app shutdown.
-                    # asyncio.wait, not wait_for: wait_for cancels the task
-                    # again on timeout and then AWAITS it, and the indexer
-                    # defers repeated cancellations until its worker finishes
-                    # -- which is the wait this deadline exists to bound.
-                    # Past the deadline the task stays pending and dies with
-                    # the process; any lock it still holds is the server's to
-                    # release with the connection. A reference is kept below
-                    # for as long as this frame lives so it is not finalized
-                    # while pending.
+                    # Bounded, and short: a database that stopped answering
+                    # must not hang app shutdown, and nothing is lost by
+                    # leaving -- the indexer is one pod, recreated never
+                    # rolled (issue #148), so its exit ends the session and
+                    # the server drops the lock and any in-flight write with
+                    # it. asyncio.wait, not wait_for: wait_for would cancel
+                    # the task again and then await it. Past the deadline the
+                    # task stays pending and dies with the process; a
+                    # reference is kept for as long as this frame lives so it
+                    # is not finalized while pending.
                     cog_index_task.cancel()
                     _, still_pending = await asyncio.wait({cog_index_task}, timeout=INDEXER_SHUTDOWN_TIMEOUT_SECONDS)
                     if still_pending:
-                        # Deliberately NOT closing the indexer's executor here:
-                        # the abandoned task may yet come back and need to
-                        # submit its lock release, and a shut-down executor
-                        # would turn that into an exception -- losing the
-                        # unlock this whole path exists to protect. Close it
-                        # when the task does finish, whenever that is, so a
-                        # process that outlives this lifespan (a reload, a
-                        # test holding the app) does not keep idle workers.
-                        if cog_indexing is not None:
-                            indexer = cog_indexing.indexer
-                            cog_index_task.add_done_callback(lambda _task: indexer.close())
+                        # The executors are not closed here: the task may yet
+                        # come back and submit its lock release, and a
+                        # shut-down executor would turn that into an
+                        # exception. The one settlement below runs when the
+                        # task does finish, whenever that is, so a process
+                        # that outlives this lifespan (a reload, a test
+                        # holding the app) does not keep idle workers and a
+                        # late failure is still observed.
+                        cog_index_task.add_done_callback(_settle_cog_index_task)
                         logger.error(
                             "cog_indexer_shutdown_abandoned",
                             extra={"timeout_seconds": INDEXER_SHUTDOWN_TIMEOUT_SECONDS},
                         )
                     else:
-                        if cog_indexing is not None and cog_indexing.indexer.pending_late_releases:
-                            logger.warning(
-                                "cog_indexer_shutdown_with_late_release_pending",
-                                extra={"pending": cog_indexing.indexer.pending_late_releases},
-                            )
-                        if cog_indexing is not None:
-                            # The task is done, so no further store calls are
-                            # coming: stop accepting them. Work already on a
-                            # thread -- including a hand-off waiting to
-                            # release the lock -- still finishes.
-                            cog_indexing.indexer.close()
+                        _settle_cog_index_task(cog_index_task)
+                elif cog_indexing is not None:
+                    # No loop ran here (an API replica): nothing to settle,
+                    # only the targeted pool to stop.
+                    cog_indexing.indexer.close()
                 if cog_indexing is not None:
                     for source in cog_indexing.indexer.sources:
                         with suppress(Exception):
@@ -561,8 +576,7 @@ def make_app(config: BaseConfig) -> FastAPI:
         # response on its paths — including ones no handler of that surface
         # produced: redirects, 405s, the path-protection middleware's own
         # refusals, the guard's own sign-in redirects, an exception escaping a
-        # page, and whatever the mounted MCP catch-all answers for an
-        # unmatched /web path (issue #86).
+        # page, and the router's own 404 for an unmatched /web path.
         app.add_middleware(WebSecurityHeadersMiddleware, prefixes=WEB_SURFACE_PREFIXES)
 
     @app.get("/", include_in_schema=False)
@@ -638,16 +652,33 @@ def make_app(config: BaseConfig) -> FastAPI:
     async def metrics() -> Response:
         return metrics_response()
 
-    @app.exception_handler(HTTPException)
-    async def frames_http_exception_handler(request: Request, exc: HTTPException):
-        if not _api_path(request.url.path):
+    # Registered against Starlette's HTTPException, the base class of FastAPI's:
+    # routing itself raises the base class for an unmatched path or a bad
+    # method, and those errors owe API callers the same envelope as the ones
+    # our handlers raise. While the MCP app was mounted at "/" it answered
+    # every unmatched path, so they never reached a handler at all (#67).
+    @app.exception_handler(StarletteHTTPException)
+    async def frames_http_exception_handler(request: Request, exc: StarletteHTTPException):
+        # Classified by request_path, the app-relative path the router matched
+        # on, exactly as _unauthorized_response classifies a middleware 401:
+        # one rule, so a refusal has the same body whichever layer raised it,
+        # under a `server.root_path` prefix included.
+        if not _api_path(request_path(request)):
             return await http_exception_handler(request, exc)
         code = {
             status.HTTP_401_UNAUTHORIZED: error_codes.UNAUTHORIZED,
             status.HTTP_403_FORBIDDEN: error_codes.FORBIDDEN,
             status.HTTP_404_NOT_FOUND: error_codes.NOT_FOUND,
         }.get(exc.status_code, error_codes.HTTP_ERROR)
-        return frames.error_response(exc.status_code, code, str(exc.detail))
+        response = frames.error_response(exc.status_code, code, str(exc.detail))
+        if exc.headers:
+            # Keeps the `Allow` header Starlette attaches to its 405s.
+            response.headers.update(exc.headers)
+        return response
+
+    @app.exception_handler(runs_router.RunsUnavailable)
+    async def runs_unavailable_handler(request: Request, exc: runs_router.RunsUnavailable):
+        return frames.error_response(status.HTTP_503_SERVICE_UNAVAILABLE, runs_router.RUNS_UNAVAILABLE, str(exc))
 
     @app.exception_handler(NoOrganizationError)
     async def no_organization_handler(_request: Request, exc: NoOrganizationError):
@@ -746,8 +777,7 @@ def make_app(config: BaseConfig) -> FastAPI:
     # The Cog catalog read API (#85). /v1 only: it post-dates the unprefixed
     # legacy mounts, so there is no old client to keep answering.
     app.include_router(cogs.router, prefix="/v1")
-    if run_service is not None:
-        app.include_router(runs_router.router, prefix="/v1")
+    app.include_router(runs_router.router, prefix="/v1")
     # Who is calling, and how the collab-hub CLI signs in. /auth/cli is public:
     # the hardened map lists it, since a client asks it before it holds a token.
     app.include_router(identity.router, prefix="/v1")
@@ -898,7 +928,17 @@ def make_app(config: BaseConfig) -> FastAPI:
     verify_protected_routes(app)
 
     mcp_app.add_middleware(McpAuthMiddleware, authenticate=get_auth_context)
-    app.mount("/", mcp_app)
+    # Register the MCP app at exactly the paths it serves instead of mounting it
+    # at "/". A catch-all mount matched every path this app does not route, so
+    # McpAuthMiddleware answered a bare 401 for a trailing-slash typo like
+    # `/v1/usage/summary/` (which should redirect), and MCP's plain-text 404
+    # answered unmatched paths that owe callers the frames error envelope
+    # (#67). MCP keeps the `/mcp` address (its `streamable_http_path`) that
+    # clients, the docs and the chart's ingress already use, while everything
+    # else falls through to this app's own redirect/404 handling. The route
+    # delegates to `mcp_app` whole, so its middleware stack — McpAuthMiddleware
+    # included — still wraps every MCP request.
+    app.add_route(mcp.settings.streamable_http_path, mcp_app)
 
     if config.web.enabled:
         # Everything this function registers has now been registered, so this

@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/nebari-dev/collab-hub-pack/security/advisories/new
+    url: https://github.com/openteams-ai/collab-hub-pack/security/advisories/new
     about: Report security issues privately — do not open a public issue.

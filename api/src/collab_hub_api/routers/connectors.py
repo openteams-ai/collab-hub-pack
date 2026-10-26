@@ -618,6 +618,8 @@ async def search_github(
     _auth=Depends(get_auth_context),
     config: ConnectorsConfig = Depends(get_connectors_config),
 ) -> GitHubSearchResponse:
+    if body.repo.strip():
+        _validate_github_repo(body.repo)
     client = await _github_client(request, config)
     try:
         hits, next_page_token, incomplete = await client.search(

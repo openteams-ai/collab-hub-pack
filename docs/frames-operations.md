@@ -137,7 +137,7 @@ Two consequences to plan for:
   service-account subjects are all valid, and the server does not infer identity
   from syntax. (Whether a subject is a real member is a membership question, not
   a syntax one; the scoped member check arrives with
-  [#99](https://github.com/nebari-dev/collab-hub-pack/issues/99).) Clients
+  [#99](https://github.com/openteams-ai/collab-hub-pack/issues/99).) Clients
   need a member picker that submits subject ids before this is turned on.
   Removal routes (`DELETE .../owners/{id}`) and reads of stored records are
   *not* validated, so principals written before the pin still load and can be
@@ -641,7 +641,7 @@ Migration version 8 adds `collab_audit_events_actor_idx` on `(actor, id DESC)`
 and `collab_audit_events_action_idx` on `(action, id DESC)`, which serve the
 actor and action filters; the unfiltered listing uses the primary key.
 Retention and erasure-request handling are tracked for resolution before GA
-in [#113](https://github.com/nebari-dev/collab-hub-pack/issues/113).
+in [#113](https://github.com/openteams-ai/collab-hub-pack/issues/113).
 
 #### Actions the admin panel and sign-in sync record
 
@@ -733,9 +733,9 @@ that one is the note that you did it, and the `UPDATE` is the state change.
 it, because a failed retry removes no membership somebody already holds.
 
 There is no automated sweep yet
-([#180](https://github.com/nebari-dev/collab-hub-pack/issues/180) records
+([#180](https://github.com/openteams-ai/collab-hub-pack/issues/180) records
 what is owed; the operator surface that finishes one is
-[#176](https://github.com/nebari-dev/collab-hub-pack/issues/176)).
+[#176](https://github.com/openteams-ai/collab-hub-pack/issues/176)).
 
 #### The audit trail for a grant (`service_access.grant`)
 
@@ -1224,13 +1224,25 @@ reason instead of a sweep-aborting error. Fetching is budgeted per sweep
 across successive sweeps rather than starved; deferred artifacts still count
 as present, so removal stays correct. Safety rules operators should know:
 
-- **Single flight.** A sweep takes the session-level advisory lock
-  `pg_try_advisory_lock(<"cogidx_1">)` on one pooled connection for its whole
-  duration (outside any transaction, so a minutes-long sweep pins no
-  snapshot). Replicas starting together do not double-index: the loser logs
-  `cog_index_sweep_skipped` and waits for its next interval. That connection
-  is one slot of the shared pool while a sweep runs, and it carries the
-  sweep's reads and writes (see the fencing bullet below).
+- **Single flight is the deployment's shape; the lock is a belt.** With
+  `cogs.index.enabled` the chart renders a dedicated **indexer** Deployment
+  (`<release>-indexer`, issue #148): the API image and settings, `replicas:
+  1` (fixed in the template, not a value), `strategy: Recreate` and no
+  Service — so a rolling update of the API never starts a sweep, and a
+  rollout of the indexer never overlaps two. The API replicas render
+  `cogs.index.enabled=false` whatever the values say, and keep serving the
+  read API. That switch gates the sweep loop alone: every process with
+  sources and the catalog database builds the indexer, so the API replicas
+  hold its lock-less targeted entry points for the webhook receiver (issue
+  #86) to call. Under that shape a sweep
+  still takes the session-level advisory lock
+  `pg_try_advisory_lock(<"cogidx_1">)` on one pooled connection for its
+  whole duration (outside any transaction, so a minutes-long sweep pins no
+  snapshot); what the lock catches now is two indexer releases against one
+  database — the loser logs `cog_index_sweep_skipped` and waits for its next
+  interval. That connection is one slot of the indexer's pool while a sweep
+  runs, and it carries the sweep's reads and writes (see the fencing bullet
+  below).
 - **Removal needs a complete picture — per repository.** Rows are marked
   removed only in repositories whose listing fully succeeded this sweep. If the
   source's *repository list* cannot be obtained, nothing is reconciled and
@@ -1262,53 +1274,54 @@ as present, so removal stays correct. Safety rules operators should know:
   behind it waits. Never-seen artifacts keep enumeration order; once indexed
   they cost nothing, so the tail of a large registry is reached across sweeps
   without rotation.
-- **The lock is never released under a live write.** A cancelled sweep waits for
-  its in-flight worker thread up to a drain deadline (30 s), however many times
-  it is cancelled. Past that deadline the sweep stops waiting — but it does
-  **not** release the lock: it logs `cog_index_worker_drain_expired` and
-  `cog_index_lock_release_deferred`, and hands the lock to a daemon thread
-  (`cog-index-late-release`) that releases it only once the worker has actually
-  finished (`cog_index_lock_released_late`). A thread rather than a task because
-  it must outlive the event loop: at shutdown every task is cancelled and the
-  loop closes, and an asyncio owner would stop mid-wait and leave the lock
-  context to be finalized by the garbage collector — unlocking while the write
-  was still in flight. Until the hand-off completes, other replicas keep seeing
-  `cog_index_sweep_skipped`, which is correct: a write may still be running.
-- **Shutdown bounds the wait, not the workers.** The app lifespan waits at most
-  45 s for the cancelled indexer task and otherwise leaves it pending with
-  `cog_indexer_shutdown_abandoned`. Sweep-path statements carry a server-side
-  `statement_timeout` and every pooled connection sets TCP keepalives (a dead
-  peer is noticed in about 90 s), which covers the ordinary partition; neither
-  ends a call to a peer whose kernel still answers probes while the database
-  process is stopped. The hand-off thread is a daemon, but the blocked call
-  itself runs on a pool worker, and those are joined at interpreter exit — so a
-  permanently blocked store call means the pod needs its `SIGKILL` (the
-  `terminationGracePeriodSeconds` deadline) rather than exiting on its own.
-- **Sweep writes ride the lock's session.** The sweep's reads and writes run
-  on the very connection the sweep lock is held on, so a sweeper that dies
-  mid-write loses the write and the lock together: the server drops both with
-  the one session, and no write of a dead sweep can land after another replica
-  has acquired the lock (issue #128). The targeted webhook writes (`reindex`
-  and `mark_removed_one`) deliberately do **not** share that session — they
-  check out their own pooled connections, so a push or delete event lands
-  concurrently with a running sweep.
+- **Sweep writes ride the lock's session — through the view the lock
+  returns.** The lock hands the sweep a connection-bound view of the store,
+  and every read and write of the sweep goes through it, so a sweeper that
+  dies mid-write loses the write and the lock together: the server drops
+  both with the one session, and no write of a dead sweep can land after
+  another sweeper has acquired the lock (issue #128). The store itself has
+  no notion of a running sweep: its own methods — the targeted webhook
+  writes (`reindex` and `mark_removed_one`), a direct call — always check out
+  their own pooled, statement-bounded connection, so a push or delete event
+  lands concurrently with a sweep and nothing but the view can ride, or die
+  with, the lock session (issue #148).
+- **A cancelled sweep releases the lock or dies with its session.** Nothing
+  drains: a store call in flight is not waited for. Every store call of a
+  sweep — the acquisition, the view's reads and writes, the release — runs
+  on one thread of the sweep's own, in submission order, so a cancelled
+  sweep queues its release behind the call it abandoned and moves on; the
+  unlock runs the moment that call returns and can neither overtake it nor
+  be dropped by a later cancellation or by shutdown. If the pod exits first,
+  the session ends and the server drops the lock and the write together —
+  which, for a one-replica workload that is recreated rather than rolled, is
+  the designed outcome. The app lifespan waits at most 5 s for the cancelled
+  indexer task (in practice it returns at once, since it waits for nothing)
+  and otherwise leaves it pending with `cog_indexer_shutdown_abandoned`.
+  Sweep-path statements carry a 20 s server-side `statement_timeout` and
+  every pooled connection sets TCP keepalives, which covers the ordinary
+  partition; a peer whose kernel still answers probes while the database
+  process is stopped is ended by the pod's `SIGKILL` at
+  `terminationGracePeriodSeconds`.
 - **A doubtful lock connection is discarded, not returned.** If any step of
   taking or giving back the lock fails (setting autocommit, the acquire, the
   unlock, `RESET statement_timeout`, restoring autocommit), the connection is
   **closed** (`cog_index_lock_connection_discarded`) so the pool opens a fresh
   one instead of handing a session with an altered timeout — or one still
   holding the lock — to the next borrower.
-- **Indexing needs two pooled connections.** The sweep occupies one connection
-  of the shared `frames.postgres` pool for its whole duration (the lock is
-  held on it and the sweep's reads and writes ride it), so the API refuses to
-  start with `cogs.index.enabled` and `frames.postgres.pool.max_size < 2`:
-  everything else — API reads, the webhook's targeted writes — needs a
-  connection while a sweep runs.
+- **Indexing needs two pooled connections — on the indexer.** The sweep
+  occupies one connection of the indexer's `frames.postgres` pool for its
+  whole duration (the lock is held on it and the sweep's reads and writes
+  ride it), so the sweeping process refuses to start with `cogs.index.enabled`
+  and `frames.postgres.pool.max_size < 2`: everything else it does — the
+  catalog reads and webhook writes it can also serve — needs a connection
+  while a sweep runs. The check never constrains an API replica, which the
+  chart starts with `cogs.index.enabled=false`.
 
 Every sweep logs one `cog_index_sweep` line (indexed / skipped / retagged /
 non_cog / failed / removed / sources_failed / duration) and exports the same
 counts as `frames_server_cog_index_artifacts_total{outcome}`,
-`frames_server_cog_index_sweeps_total{result}` and
+`frames_server_cog_index_sweeps_total{result}` (`completed`, `locked_out`,
+`failed`, or `cancelled` for a sweep a shutdown interrupted) and
 `frames_server_cog_index_sweep_duration_seconds`. Per-artifact failures are
 stored in the row's `read_errors` and never abort the sweep.
 

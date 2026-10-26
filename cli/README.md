@@ -107,7 +107,7 @@ toad acp "collab-hub run connect run-c42c387d6e23"       # the same Cog, from an
 
 `run terminate` asks the hub to cancel the run and waits until the controller has ended it; `--no-wait` returns once the request is recorded. A run that has already ended is refused, naming its status.
 
-These commands need a hub with the run API on (the `cog_runs` feature flag). [`examples/cog-local`](../examples/cog-local/README.md) runs all of them against a hub on your own machine.
+These commands need a hub with Cog packages to launch and a run controller beside it. [`examples/cog-local`](../examples/cog-local/README.md) runs all of them against a hub on your own machine.
 
 ## Output and exit codes
 

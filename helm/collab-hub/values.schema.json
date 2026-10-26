@@ -1056,6 +1056,15 @@
             }
           },
           "additionalProperties": false
+        },
+        "indexer": {
+          "type": "object",
+          "properties": {
+            "resources": {
+              "$ref": "#/$defs/resources"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

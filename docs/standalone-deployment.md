@@ -212,6 +212,11 @@ combination, but not restating the list is the better habit.)
   the CLI signs in with and whether dev auth is on — nothing the realm's own
   discovery document does not already publish. `GET /v1/me`, which the CLI's
   `whoami` reads, stays behind the default like every other route.
+- `/v1/runs/**`, the run API, needs no entry either, and is never made public:
+  every run route also carries its own auth dependency, and scopes each run to
+  the organization that launched it, another organization's run being a 404. A
+  request without credentials is a 401 there under the hardened map
+  ([runs.md](cog-execution/runs.md#the-run-controller-and-the-run-api)).
 - The API routes under `/v1` need no entry: the default covers them, and each
   also carries its own auth dependency, so a `public` entry does not make
   frames or tasks anonymous. The one exception is the Cog catalog: a `public`
@@ -257,7 +262,7 @@ hole. Unhardened installs never see these entries at all: the chart passes
 false.
 
 `/admin` was listed ahead of its routes for merge ordering: the operator page
-(nebari-dev/collab-hub-pack#91) added `/admin` routes without a values change,
+(openteams-ai/collab-hub-pack#91) added `/admin` routes without a values change,
 so with the entry on neither side a hardened install would have refused to
 start between the two merges. `/admin` now serves the admin panel (`/admin/`,
 `/admin/assets/*` and the JSON API under `/admin/api/*`) on an install that
@@ -286,7 +291,7 @@ On a gateway install nothing changes: `/metrics` stays unauthenticated and
 in-cluster scrapes keep working. Under enforcement it answers 401 unless the
 scraper carries a credential `get_auth_context` accepts. There is no
 scrape-token mode yet — that is
-[nebari-dev/collab-hub-pack#97](https://github.com/nebari-dev/collab-hub-pack/issues/97).
+[openteams-ai/collab-hub-pack#97](https://github.com/openteams-ai/collab-hub-pack/issues/97).
 
 To let an in-cluster Prometheus scrape a hardened deployment, open the one
 path and keep it off the internet:

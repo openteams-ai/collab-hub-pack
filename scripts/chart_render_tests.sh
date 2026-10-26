@@ -46,6 +46,7 @@ check "ci fixture: harbor + static, Secrets attached, CA mounted read-only" fixt
 check "sources with the indexer off: JSON renders, tuning vars do not" static-only $STATIC
 check "three sources: each credential attached to its own source" three-sources -f "$TESTDATA/cogs-three-sources.yaml"
 check "middle source removed and order reversed: attachments follow the id" reordered -f "$TESTDATA/cogs-reordered.yaml"
+check "indexer on with its own resources: one Recreate replica, the API's env, the API does not sweep" indexer-resources $STATIC --set cogs.index.enabled=true --set cogs.indexer.resources.requests.memory=1Gi --set cogs.indexer.resources.limits.memory=2Gi
 check "feature flags: each entry renders as its variable" features --set features.cogs_ui=true --set features.new_thing=false
 refused() { # <label> <needle> <helm args...>: the chart must refuse to render, naming <needle>
   local label="$1" needle="$2" out
@@ -62,6 +63,10 @@ refused "feature flags: a non-boolean value is refused" "/features/cogs_ui" --se
 refused "feature flags: a dashed name is refused" "cogs-ui" --set features.cogs-ui=true
 refused "feature flags: a name with a double underscore is refused" "cogs__ui" --set features.cogs__ui=true
 refused "feature flags: an uppercase name is refused" "Cogs_ui" --set features.Cogs_ui=true
+
+# The indexer's replica count is fixed in the template (issue #148): there is
+# no value to set, so the schema refuses one.
+refused "indexer: a replica count is not a value" "replicas" $STATIC --set cogs.index.enabled=true --set cogs.indexer.replicas=2
 
 # server.rootPath is a prefix with a leading and no trailing slash; config.py
 # refuses the same values (api/tests/test_path_protection.py).

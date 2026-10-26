@@ -38,9 +38,11 @@ submission, is refused if its Op differs, and otherwise returns the status; a
 second `retry` or `decide` is refused; and `start()` leaves a claimed run alone. See
 [`docs/cog-execution/runs.md`](../docs/cog-execution/runs.md#one-run-one-call-at-a-time).
 
-Only one host may advance the runs on a Track at a time: `start()` takes every
-unfinished run as its own, and run pickup by a controller (#121) is what lets
-hosts share a Track. The reference worker does not persist results by key, so
+A runner named for a controller (`controller=`) shares its Track with other
+controllers: it picks a run up only if nobody has, moves only the runs it
+picked up, and `start()` interrupts only those, reaping their workers left
+alive. An unnamed runner is a host alone on its Track, and `start()` takes
+every unfinished run as its own. The reference worker does not persist results by key, so
 a retried attempt may repeat a completed side effect until the keyed claim
 (#102) answers for it.
 
@@ -53,14 +55,19 @@ Token and cost accounting happens after an interaction and can overshoot.
 
 ## The run controller and intents
 
-`python -m collab_hub_execution.controller --track FILE --packages DIR --work-dir DIR`
-is the process that advances runs (ADR-0002 D4). It watches a SQLite Track,
-starts each run that was submitted and not picked up, and delivers each request
-to cancel. `collab_hub_execution.intents` is the other half, used by the hub's
-API: `submit()` and `request_cancel()` record what a client asked for, and
-`describe()` and `list_runs()` read runs back, each step with its state and its
-output. Neither half calls the other; the Track is all they share. One
-controller per Track for now: it holds a lock beside the file. See
+`collab-hub-run-controller --track FILE_OR_URL --id NAME --packages DIR --work-dir DIR [--models FILE]`
+(or `python -m collab_hub_execution.controller`) is the process that advances
+runs (ADR-0002 D4). It watches a Track, a SQLite file or Postgres (install the
+`postgres` extra), picks up each run that was submitted and not picked up, and
+delivers what was asked of the runs it owns: cancels, turns, and decisions on
+Gates. Several controllers share a Track, each under its own id, and one picks
+up each run. `--models` is the hub's `models:` block (`binding.ModelsBlock`),
+and `--health-port` serves `/healthz` and `/readyz`.
+`collab_hub_execution.intents` is the other half, used by the hub's API:
+`submit()`, `request_cancel()`, `request_turn()` and `request_decision()`
+record what a client asked for, and `describe()` and `list_runs()` read runs
+back, each step with its state and its output, and the controller that owns
+it. Neither half calls the other; the Track is all they share. See
 [`docs/cog-execution/runs.md`](../docs/cog-execution/runs.md#the-run-controller-and-the-run-api).
 
 ## The lifecycle runner

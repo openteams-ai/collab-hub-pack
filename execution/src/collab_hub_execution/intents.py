@@ -12,13 +12,15 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+from collections import OrderedDict
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
 from .ops import OpDefinition, _deserialize_op, _serialize_op
 from .states import InvalidTransition, Run, RunState
+from .states.run import DECISIONS
 from .track import SCHEMA_VERSION, TrackEvent, TrackStore, upgrade
 
 CANCEL_REQUESTED = "cancel_requested"
@@ -112,6 +114,10 @@ class RunView:
     reason: str | None = None
     name: str | None = None
     """What the client called the run when it submitted it, if anything: a label, never an id."""
+    controller: str | None = None
+    """The controller that picked the run up, which alone advances it; ``None`` until one does."""
+    decision: Mapping[str, Any] | None = None
+    """A decision on the open Gate that a client asked for and the controller has not delivered yet."""
 
     @property
     def status(self) -> str:
@@ -165,7 +171,8 @@ def _view(run_id: str, events: tuple[TrackEvent, ...]) -> RunView | None:
         steps=tuple(StepView(name=step.name, cog=step.cog, **steps[step.name]) for step in op.steps),
         submitted_by=dict(submission.payload.get("submitted_by") or {}), name=submission.payload.get("name"),
         submitted_at=submission.occurred_at, updated_at=events[-1].occurred_at,
-        cancel_requested_by=cancel_requested_by, error=error, reason=reason,
+        cancel_requested_by=cancel_requested_by, error=error, reason=reason, controller=run.controller,
+        decision=pending_decision(events) if run.state is RunState.WAITING_AT_GATE else None,
     )
 
 
@@ -187,9 +194,14 @@ class _Kept:
     view: RunView | None = None
     turns: dict[str, TurnView] | None = None
     unreadable: str | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    """Held while this one run is read and rebuilt: reads of different runs never wait on each other."""
 
 
 _NEVER_SUBMITTED = _Kept(events=[])
+KEPT_RUNS = 10_000
+"""How many runs a :class:`RunViews` keeps at most; the least recently read are let go, and read again
+in full should they be asked for."""
 
 
 class RunViews:
@@ -201,25 +213,43 @@ class RunViews:
     replayed is set aside, logged once, and left out of :meth:`views`: one
     unreadable run never hides every other. Safe to share between threads.
 
-    What is kept stays bounded by what is useful: a run id with no events
-    leaves nothing behind, and a run that has ended keeps its view and its turns
-    but lets its events go, read again in full only should it ever move.
-    :meth:`forget` drops a run altogether.
+    Each run is read under a lock of its own, so one run's read never waits for
+    another's, and the store's query runs outside the lock that guards which
+    runs are kept. What is kept stays bounded: a run id with no events leaves
+    nothing behind, a run that has ended keeps its view and its turns but lets
+    its events go, and past ``kept`` runs the least recently read are let go,
+    to be read again in full should they be asked for. :meth:`forget` drops a
+    run altogether.
     """
 
-    def __init__(self, track: TrackStore) -> None:
+    def __init__(self, track: TrackStore, *, kept: int = KEPT_RUNS) -> None:
         self.track = track
         self._lock = threading.Lock()
-        self._kept: dict[str, _Kept] = {}
+        self._kept: OrderedDict[str, _Kept] = OrderedDict()
+        self._most = kept
 
-    def _refresh(self, run_id: str) -> _Kept:
+    def _entry(self, run_id: str) -> tuple[_Kept, bool]:
+        """The run's entry, made fresh when it has none; and whether it was."""
         with self._lock:
             kept = self._kept.get(run_id)
-            if kept is None:
+            if kept is not None:
+                self._kept.move_to_end(run_id)
+                return kept, False
+            kept = self._kept[run_id] = _Kept(events=[])
+            while len(self._kept) > self._most:
+                self._kept.popitem(last=False)
+            return kept, True
+
+    def _refresh(self, run_id: str) -> _Kept:
+        kept, new = self._entry(run_id)
+        with kept.lock:
+            if new or kept.built_at == -1:
                 fresh = self.track.replay(run_id)
                 if not fresh:
-                    return _NEVER_SUBMITTED  # nothing to keep for an id nobody submitted
-                kept = self._kept[run_id] = _Kept(events=[])
+                    with self._lock:
+                        if self._kept.get(run_id) is kept:
+                            del self._kept[run_id]  # nothing to keep for an id nobody submitted
+                    return _NEVER_SUBMITTED
             else:
                 fresh = self.track.replay(run_id, after_sequence=kept.last_sequence)
                 if fresh and kept.events is None:
@@ -250,6 +280,26 @@ class RunViews:
             return tuple(upgrade(event) for event in self.track.replay(run_id))
         return tuple(kept.events)
 
+    def after(self, run_id: str, sequence: int) -> tuple[tuple[TrackEvent, ...], RunView | None]:
+        """The run's events after ``sequence`` and its view, from one read: the view is of those events.
+
+        So a run that reads as ended has its last event among them, or before
+        ``sequence``: nothing can land between the two. ``RunUnreadable`` for a
+        run that cannot be read.
+        """
+        kept = self._refresh(run_id)
+        if kept.unreadable is not None:
+            raise RunUnreadable(f"run {run_id!r} cannot be read: {kept.unreadable}")
+        with kept.lock:
+            view, kept_events, last = kept.view, kept.events, kept.last_sequence
+        if kept_events is None:
+            # Ended, its events let go: they are read from the store, up to what the view was built on.
+            tail = tuple(upgrade(event) for event in self.track.replay(run_id, after_sequence=sequence)
+                         if (event.sequence or 0) <= last)
+        else:
+            tail = tuple(event for event in kept_events if (event.sequence or 0) > sequence)
+        return tail, view
+
     def view(self, run_id: str) -> RunView | None:
         """The run's view; ``None`` for a run never submitted. :class:`RunUnreadable` for one that cannot be read."""
         kept = self._refresh(run_id)
@@ -259,7 +309,7 @@ class RunViews:
 
     def turns(self, run_id: str) -> dict[str, TurnView]:
         kept = self._refresh(run_id)
-        with self._lock:
+        with kept.lock:
             if kept.turns is None:
                 kept.turns = turns(kept.events or [])
             return kept.turns
@@ -363,3 +413,89 @@ def answer_turn(track: TrackStore, run_id: str, turn: str, *, text: str | None =
         _append(track, run_id, TURN_ANSWERED, {"turn": turn, "text": text})
     else:
         _append(track, run_id, TURN_FAILED, {"turn": turn, "error": error})
+
+
+# --- decisions: a person answering a Gate ---------------------------------------------------------
+#
+# A run waiting at a Gate waits on one escalation. A client asks for a decision on it here; the
+# controller that owns the run delivers it to its runner, which records `gate_decided` and advances
+# the run, or the controller records why it could not (`decision_refused`).
+
+DECISION_REQUESTED, DECISION_REFUSED = "decision_requested", "decision_refused"
+
+
+class StaleDecision(ValueError):
+    """A decision on an escalation the run no longer waits on, or while another one is still pending."""
+
+
+def pending_decision(events: Iterable[TrackEvent]) -> dict[str, Any] | None:
+    """The decision asked for on the run's open escalation and not yet delivered; ``None`` when there is none.
+
+    A decision is pending only while the run still waits on the escalation it
+    names: it is delivered when that escalation is decided or refused, or ends
+    the run (a send back past the revision limit fails it), and it lapses when
+    the run ends or moves on without it, as when its controller restarts and
+    the run is retried under a new escalation.
+    """
+    pending = None
+    for event in events:
+        if event.event_type == DECISION_REQUESTED:
+            pending = dict(event.payload)
+        elif event.event_type in _CLOSES_DECISION:
+            # The escalation the decision answers is no longer the one the run waits on: it was
+            # decided or refused, the run ended with it (interrupted, say, while its controller was
+            # down), or a retry opened a new attempt. A decision left over from before is not
+            # pending against the new escalation.
+            pending = None
+    return pending
+
+
+_CLOSES_DECISION = frozenset({
+    "gate_decided", DECISION_REFUSED, "failed", "completed", "cancelled", "interrupted",
+    "retry_requested", "gate_escalated", "step_started",
+})
+
+
+def request_decision(track: TrackStore, run_id: str, *, escalation: str, outcome: str, actor: str,
+                     findings: Sequence[Any] = ()) -> RunView:
+    """Record that ``actor`` decided on the escalation a run waits at: ``approve``, ``send_back`` or ``reject``.
+
+    The controller that owns the run delivers it. ``LookupError`` for a run
+    never submitted, :class:`RunEnded` for one that has ended,
+    :class:`StaleDecision` for one not waiting on that escalation, or already
+    holding a decision on it. The check and the append are one step on the
+    Track, so of two people deciding at once, one decision is recorded.
+    """
+    if outcome not in DECISIONS:
+        raise ValueError(f"a decision is one of {', '.join(sorted(DECISIONS))}, not {outcome!r}")
+    if not actor:
+        raise ValueError("a decision names its actor")
+    if isinstance(findings, (str, bytes)) or not isinstance(findings, Sequence):
+        # The runner's own rule, checked before the intent is recorded: one string, a mapping or a set
+        # would be recorded as its characters, its keys, or an arbitrary order.
+        raise ValueError("findings are a sequence of findings, not one string, mapping or set")
+
+    def open_on_it(events: tuple[TrackEvent, ...]) -> bool:
+        events = tuple(upgrade(event) for event in events)
+        run = Run.replay(events)
+        return (run is not None and run.state is RunState.WAITING_AT_GATE and run.open_escalation == escalation
+                and pending_decision(events) is None)
+
+    request = TrackEvent(run_id=run_id, event_type=DECISION_REQUESTED, schema=SCHEMA_VERSION, payload={
+        "escalation": escalation, "outcome": outcome, "actor": actor, "findings": list(findings)})
+    recorded = track.append_if(request, open_on_it)
+    view = describe(track, run_id)
+    if view is None:
+        raise LookupError(f"no run {run_id!r} on the Track")
+    if recorded is None:
+        if view.state.ended:
+            raise RunEnded(view.state, DECISION_REQUESTED, f"the run has ended {view.status}")
+        if view.decision is not None:
+            raise StaleDecision(f"a decision on run {run_id!r} is already waiting to be delivered")
+        raise StaleDecision(f"run {run_id!r} is {view.status}, and does not wait on escalation {escalation!r}")
+    return view
+
+
+def refuse_decision(track: TrackStore, run_id: str, *, escalation: str, error: str) -> None:
+    """The controller's record of a decision its runner did not take, and why."""
+    _append(track, run_id, DECISION_REFUSED, {"escalation": escalation, "error": error[:1024]})

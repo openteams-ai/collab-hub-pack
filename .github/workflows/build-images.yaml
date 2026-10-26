@@ -19,11 +19,18 @@ on:
     paths:
       - "api/**"
       - "execution/**"
+      # The Cogs the image ships (runs.controller in the chart).
+      - "cogs/hermes/**"
+      - "worker/**"
+      - "examples/cog-local/cogs/hello/**"
       - ".github/workflows/build-images.yaml"
   pull_request:
     paths:
       - "api/**"
       - "execution/**"
+      - "cogs/hermes/**"
+      - "worker/**"
+      - "examples/cog-local/cogs/hello/**"
   workflow_dispatch:
 
 jobs:
@@ -35,13 +42,13 @@ jobs:
     env:
       IMAGE: ghcr.io/${{ github.repository }}/api
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         if: ${{ github.event_name != 'pull_request' }}
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -49,7 +56,7 @@ jobs:
 
       - name: Image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE }}
           tags: |
@@ -64,10 +71,6 @@ jobs:
           # so no Dockerfile change is needed for a GHCR-only custom build.
           build-contexts: |
             projectroot=.
-          # Always re-resolve the base images, so a rebuild picks up a base
-          # image republished under the same tag (a ca-certificates fix, say)
-          # rather than a stale local layer.
-          pull: true
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
 

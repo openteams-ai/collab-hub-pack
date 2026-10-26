@@ -516,7 +516,7 @@ class LifecycleRunner(WorkflowEngine):
         recorded ``interrupted`` rather than left looking alive, and continues only
         when a person retries it (ADR-0002 D2). A run this host is advancing right
         now is left alone. Returns the runs it interrupted. A durable backend
-        resumes its runs instead, which Phases 26 and 32 build.
+        resumes its runs instead, which Phases 27 and 33 build.
 
         A runner named for a controller takes only the runs that controller
         picked up, and those a host picked up before controllers named

@@ -415,6 +415,81 @@ refuses them two ways:
 Gateway-only installs are unaffected in both cases — that is where the dev and
 smoke-test workflows that need these switches actually run.
 
+## Running Cogs beside the API
+
+The run API (`/v1/runs`) is always served, on the hub's database. Something
+must also run what it launches: a run controller. `runs.controller.enabled`
+runs one in the API's pod, as a second container of the same image
+(`collab-hub-run-controller`), and it runs each Cog launched through the API
+as a process of that pod, the `local` agent location
+([runs.md](cog-execution/runs.md#agent-locations)).
+
+```yaml
+runs:
+  controller:
+    enabled: true
+    models: |
+      [models.default]
+      provider = "anthropic"
+      model = "claude-opus-5-5"
+      auth_ref = "env:ANTHROPIC_API_KEY"
+
+      [cogs]
+      hermes = "default"
+    extraEnv:
+      - name: ANTHROPIC_API_KEY
+        valueFrom:
+          secretKeyRef: {name: claude, key: api-key}
+```
+
+- **What it runs.** The Cog packages the image ships under
+  `/opt/collab-hub/cogs`: `hello`, the smallest Cog that holds a session, and
+  `hermes`, the Hermes harness Cog. The API is told the same directory, so
+  `collab-hub cog list --launchable` names them. With `environment: pixi`, the
+  default, a Cog runs in the environment its lock pins, which pixi builds the
+  first time the Cog is launched: it downloads the packages, so the pod needs
+  egress to conda-forge and PyPI, and Hermes's first launch takes a few
+  minutes, within `workerStartSeconds` (900 by default), how long a worker
+  may take to start. Environments and each run's output are kept on an `emptyDir`
+  (`cacheSizeLimit`), and what Cogs write under `/tmp` on another
+  (`tmpSizeLimit`), so a new pod builds them again. Past either limit the
+  kubelet evicts the whole pod, the API with it, and with one API pod that
+  is an outage until the pod is rescheduled.
+- **Its Track** is the hub's database (`frames.postgres`), the one the API
+  records runs in; the chart refuses the controller without it.
+- **One API pod.** Each pod would run a controller under the same id, so the
+  chart refuses the controller with `replicaCount` above 1 or autoscaling on.
+  In a rollout, the new pod's controller waits (`waitSeconds`) until the old
+  pod's has stopped, then takes its id, and records the runs the old one left
+  unfinished `interrupted`. It waits the same way for a database that does
+  not answer yet and for the Track's tables, logging why; a misconfigured
+  Track, a URL of another scheme, stops it at once. It has a liveness probe
+  and no readiness probe, so waiting never holds the API out of service.
+- **Models and keys.** `models` is the hub's models block, in TOML
+  ([runs.md](cog-execution/runs.md#configuration-health-and-models)), rendered
+  into a ConfigMap; the controller reads it once, at start, so a changed block
+  rolls the pod (a checksum of it is on the pod template). A key is named by
+  `auth_ref = "env:NAME"` and arrives in `extraEnv` from a Secret. A worker
+  inherits only the key of the model its Cog is bound to, but every key is in
+  the controller's own environment, which any worker can read (below): keep
+  to the keys the shipped Cogs need.
+- **Not isolated.** A Cog's worker is a process of the API's pod, run as the
+  same user, and shares that pod with the API and the controller:
+  - **Their environment.** A worker inherits none of it, but it can read it
+    through `/proc`: the database URL, and every model key in `extraEnv`.
+  - **The pod's credentials.** The controller's container has the API's
+    ServiceAccount token mounted; the chart grants it no RBAC. With IRSA on
+    EKS (`api.serviceAccount.annotations`), the pod's AWS web identity, which
+    the S3 frame store uses, would be projected into every container, so the
+    chart marks the controller's container `eks.amazonaws.com/skip-containers`
+    and it gets none. Other identity webhooks need the same exclusion.
+  - **Its network and filesystem**, as any process of the pod.
+
+  Run only Cogs you trust this way, the ones the image ships, on a
+  development hub. The `remote` location, a pod per worker under a
+  least-privilege controller, is a later phase of
+  [`COG_EXECUTION.md`](../COG_EXECUTION.md).
+
 ## Configuring the admin panel
 
 The admin panel at `/admin` ships in the image: the Docker build copies the

@@ -20,15 +20,18 @@ redirections.
   launch are the Cog packages its controller is given, which `cog list
   --launchable` names; without a controller, a launched run stays `SUBMITTED`.
 
-  **A hub deployed with the Helm chart launches nothing yet.** The chart runs
-  no run controller and gives the API no Cog packages, so `cog list
-  --launchable` is empty there and a launch is refused naming none. The Cogs
-  `cog list` shows are the hub's catalog, which is not launchable by name
-  until a Cog is installed by its digest. These steps work against a hub run
-  from a checkout of this repository: [`dev/`](../dev/README.md#running-cogs-and-ops),
-  or [`examples/cog-local`](../examples/cog-local/README.md). The chart gains
-  a controller, and Cogs that run as pods, in later phases of
-  [`COG_EXECUTION.md`](../COG_EXECUTION.md).
+  **On a hub deployed with the Helm chart**, the run controller is off unless
+  `runs.controller.enabled` is set. With it on, the controller runs in the
+  API's pod and runs each Cog as a process of that pod: the Cogs the image
+  ships, `hello` and `hermes`, which `cog list --launchable` names
+  ([`standalone-deployment.md`](standalone-deployment.md#running-cogs-beside-the-api)).
+  Such a worker is not isolated from the hub, which suits a development hub;
+  Cogs that run as pods of their own come in a later phase of
+  [`COG_EXECUTION.md`](../COG_EXECUTION.md). The Cogs `cog list` shows are the
+  hub's catalog, which is not launchable by name until a Cog is installed by
+  its digest. A hub run from a checkout of this repository works the same way:
+  [`dev/`](../dev/README.md#running-cogs-and-ops), or
+  [`examples/cog-local`](../examples/cog-local/README.md).
 - An account in the hub's realm.
 - To chat with a Cog from a terminal interface:
   [Toad](https://github.com/batrachianai/toad), an ACP client

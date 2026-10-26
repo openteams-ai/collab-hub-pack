@@ -52,7 +52,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -238,7 +238,7 @@ jobs:
         run: echo "version=$(cat .github/pixi-version)" >> "$GITHUB_OUTPUT"
 
       - name: Install pixi
-        uses: prefix-dev/setup-pixi@v0.10.2
+        uses: prefix-dev/setup-pixi@v0.11.2
         with:
           pixi-version: ${{ steps.pixi.outputs.version }}
           run-install: false
@@ -284,7 +284,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -457,7 +457,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Set up Helm
         uses: azure/setup-helm@v5

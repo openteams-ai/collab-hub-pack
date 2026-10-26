@@ -2,7 +2,7 @@
 # collab_hub_execution is copied verbatim from its source. Serves as both the Cog
 # worker runner (default CMD) and the Op driver (the Job overrides the command).
 # Build context is the repo root.
-FROM python:3.13.17-slim
+FROM python:3.14.7-slim
 WORKDIR /app
 # pip verifies PyPI against the image's Debian trust store (its truststore
 # feature, default since pip 24.2), which is fixed only when Debian ships its

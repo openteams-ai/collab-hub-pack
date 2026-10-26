@@ -1303,7 +1303,7 @@ name while it runs, so a second one refuses to start while the first runs. Run
 it could pick up the run `make op` just recorded; `make submit` is the way to
 hand a controller an Op. `BACKEND=dbos` and
 `BACKEND=temporal` are refused until those backends are built, and so is
-`LOCATION=remote` until Phase 21 puts the cluster executor behind the switch.
+`LOCATION=remote` until Phase 22 puts the cluster executor behind the switch.
 The fake Cogs' pixi environments, `cogs/<name>/.pixi/`, are git-ignored and
 survive `make clean`; delete them to install afresh.
 

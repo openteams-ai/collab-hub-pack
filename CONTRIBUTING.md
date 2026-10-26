@@ -81,12 +81,17 @@ helm template helm/collab-hub | kubeconform -strict -ignore-missing-schemas -
 
 ## Pull requests
 
+Follow [the PR style guide](docs/pr-style-guide.md) for descriptions and squash
+commit messages. Include applicable validation and review evidence below the
+reviewer-context marker; a repeated contribution checklist is not required.
+
 - Open an issue first for anything non-trivial, and link it from the PR with a
   closing keyword (`Fixes #123`).
 - CI (`lint`, `test`, including the `admin-ui` job) must pass. Add tests with your change: unit tests for new
   functionality, regression tests for bug fixes.
 - A [code owner](.github/CODEOWNERS) must approve before merge. Take PRs out of
   draft before requesting code-owner review.
+- User-facing UI changes include useful before/after screenshots.
 - Keep the change focused; describe *how* it addresses the issue.
 - Work that lands on `main` before it's ready to expose goes behind a feature
   flag: declare the flag, gate the code on it, and retire it once the feature
@@ -101,8 +106,12 @@ helm template helm/collab-hub | kubeconform -strict -ignore-missing-schemas -
 ## PR titles and releases
 
 PRs are squash-merged, and the squash commit takes the PR title as its
-subject and the PR description as its body. Leave both as they are in the
-merge dialog: the squash commit is what the release reads. Every merge to
+subject and the summary above the `<!-- reviewer-context -->` marker as its
+body. Keep the Conventional Commits title unchanged in the merge dialog.
+Preserve issue references, `BREAKING CHANGE:` footers, and revert metadata;
+remove reviewer context and template boilerplate as described in the
+[PR style guide](docs/pr-style-guide.md). The squash commit is what the release
+reads. Every merge to
 `main` whose title calls for a release is released automatically, so the
 title decides the version.
 

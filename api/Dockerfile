@@ -1,6 +1,6 @@
-FROM python:3.14-slim-trixie AS python
-FROM ghcr.io/astral-sh/uv:0.12.7 AS uv
-FROM node:24-bookworm-slim AS node
+FROM python:3.14.9-slim-trixie AS python
+FROM ghcr.io/astral-sh/uv:0.13.5 AS uv
+FROM node:24.22.1-bookworm-slim AS node
 
 # The admin panel is a built bundle, so it is built here rather than committed.
 # `npm ci --ignore-scripts` installs exactly what package-lock.json pins and
@@ -21,10 +21,16 @@ FROM python AS builder
 WORKDIR /var/collab-hub-api
 
 COPY pyproject.toml uv.lock ./
+# The execution package (the run API's Track and intents, and the run controller's
+# entrypoint, collab-hub-run-controller) is a path dependency at ../execution: it
+# comes from the repository root through the projectroot context, and is installed
+# into the virtual environment as a package, not linked to this source.
+COPY --from=projectroot execution/pyproject.toml /var/execution/pyproject.toml
+COPY --from=projectroot execution/src /var/execution/src
 RUN --mount=from=uv,source=/uv,target=/bin/uv \
     uv sync \
     --no-progress --link-mode=copy --compile-bytecode \
-    --frozen --python=$(which python) --no-default-groups --no-install-project
+    --frozen --python=$(which python) --no-default-groups --no-install-project --no-editable
 
 COPY src ./src
 RUN --mount=from=uv,source=/uv,target=/bin/uv \

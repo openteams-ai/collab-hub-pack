@@ -27,7 +27,7 @@ jobs:
     steps:
       # The group's commits are those on its head but not yet on the base
       # branch; the clone needs that branch to list them.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         if: github.event_name == 'merge_group'
         with:
           fetch-depth: 0

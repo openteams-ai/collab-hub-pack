@@ -16,7 +16,9 @@ echo "== ensure kind cluster '${CLUSTER}'"
 kind get clusters 2>/dev/null | grep -qx "$CLUSTER" || kind create cluster --name "$CLUSTER"
 
 echo "== build + load the E2E image (context: repo root)"
-docker build -t "$IMAGE" -f "$HERE/Dockerfile" "$ROOT"
+# --pull: re-resolve the base image, so a rebuild picks up one republished under the
+# same tag (a ca-certificates fix, say) rather than a stale local layer.
+docker build --pull -t "$IMAGE" -f "$HERE/Dockerfile" "$ROOT"
 kind load docker-image "$IMAGE" --name "$CLUSTER"
 
 echo "== apply namespace, RBAC, and the driver Job"

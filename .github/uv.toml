@@ -1,0 +1,7 @@
+# The uv that CI installs: every workflow's setup-uv step reads this file
+# (`uv-file`), so the next bump is a one-line change here. It lives under
+# .github on purpose, outside uv's own config discovery (uv reads a uv.toml
+# from a project's directory and its parents only): an enforced
+# required-version in a project would stop Dependabot, whose updater runs an
+# older uv (see dependabot.yml).
+required-version = "==0.13.4"

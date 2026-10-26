@@ -21,6 +21,11 @@ DIMENSIONS = frozenset({"duration", "tokens", "cost"})
 DECISIONS = frozenset({"approve", "send_back", "reject"})
 
 
+def _owner(controller: str | None) -> dict[str, str]:
+    """What a record that hands a run to a controller says of it: its name, when it has one."""
+    return {} if controller is None else {"controller": controller}
+
+
 class StaleEscalation(InvalidTransition):
     """A decision that names an escalation other than the open one."""
 
@@ -88,8 +93,10 @@ class Submitted(RunState):
     name = "SUBMITTED"
 
     @accepts("RUNNING")
-    def pickup(self, run: Run, **_: Any) -> Transition[Run]:
-        return move(run, RunState.RUNNING, Record("run_picked_up", {}))
+    def pickup(self, run: Run, *, controller: str | None = None, **_: Any) -> Transition[Run]:
+        # The controller that picked the run up owns it from here: it alone advances it, and
+        # under `none` the run ends `interrupted` with it.
+        return move(run, RunState.RUNNING, Record("run_picked_up", _owner(controller)), controller=controller)
 
     @accepts("CANCELLED")
     def cancel(self, run: Run, *, actor: str | None = None, **_: Any) -> Transition[Run]:
@@ -199,9 +206,10 @@ class Failed(RunState):
     name = "FAILED"
 
     @accepts("RUNNING")
-    def retry(self, run: Run, **_: Any) -> Transition[Run]:
+    def retry(self, run: Run, *, controller: str | None = None, **_: Any) -> Transition[Run]:
         # A recorded failure runs again as a new attempt, under a new key.
-        return move(run, RunState.RUNNING, Record("retry_requested", {"from_status": self.value, "attempt": "new"}))
+        payload = {"from_status": self.value, "attempt": "new", **_owner(controller)}
+        return move(run, RunState.RUNNING, Record("retry_requested", payload), controller=controller)
 
 
 class Rejected(RunState):
@@ -216,19 +224,20 @@ class BudgetExceeded(RunState):
     name = "BUDGET_EXCEEDED"
 
     @accepts("RUNNING")
-    def retry(self, run: Run, **_: Any) -> Transition[Run]:
+    def retry(self, run: Run, *, controller: str | None = None, **_: Any) -> Transition[Run]:
         # The stop fell between steps, so no attempt was in flight; the budget starts again.
-        payload = {"from_status": self.value, "attempt": "same", "budget_epoch": "new"}
-        return move(run, RunState.RUNNING, Record("retry_requested", payload))
+        payload = {"from_status": self.value, "attempt": "same", "budget_epoch": "new", **_owner(controller)}
+        return move(run, RunState.RUNNING, Record("retry_requested", payload), controller=controller)
 
 
 class Interrupted(RunState):
     name = "INTERRUPTED"
 
     @accepts("RUNNING")
-    def retry(self, run: Run, **_: Any) -> Transition[Run]:
+    def retry(self, run: Run, *, controller: str | None = None, **_: Any) -> Transition[Run]:
         # The attempt in flight continues under its key, so a committed claim answers.
-        return move(run, RunState.RUNNING, Record("retry_requested", {"from_status": self.value, "attempt": "same"}))
+        payload = {"from_status": self.value, "attempt": "same", **_owner(controller)}
+        return move(run, RunState.RUNNING, Record("retry_requested", payload), controller=controller)
 
 
 RUN = Machine(
@@ -255,6 +264,9 @@ class Run(Context):
     open_step: str | None = None
     open_escalation: str | None = None
     escalations: Mapping[str, int] = field(default_factory=dict)
+    controller: str | None = None
+    """The controller that picked the run up, or took its last retry: the one that advances it. ``None``
+    for a run nobody has picked up, or one a host picked up before controllers named themselves."""
 
     @classmethod
     def submit(cls, run_id: str, op: Mapping[str, Any], *, by: Mapping[str, Any] | None = None,
@@ -268,8 +280,8 @@ class Run(Context):
             payload["name"] = name
         return Transition(cls(run_id=run_id), (Record("op_submitted", payload),))
 
-    def pickup(self) -> Transition[Run]:
-        return self.dispatch("pickup")
+    def pickup(self, *, controller: str | None = None) -> Transition[Run]:
+        return self.dispatch("pickup", controller=controller)
 
     def escalate(
         self, *, step: str, reason: str | None = None, escalation: str | None = None,
@@ -304,8 +316,8 @@ class Run(Context):
     def host_stopped(self, *, backend: str) -> Transition[Run]:
         return self.dispatch("host_stopped", backend=backend)
 
-    def retry(self) -> Transition[Run]:
-        return self.dispatch("retry")
+    def retry(self, *, controller: str | None = None) -> Transition[Run]:
+        return self.dispatch("retry", controller=controller)
 
     def apply(self, fact: TrackFact) -> Run:
         """The run after one recorded Track event.
@@ -401,6 +413,9 @@ _FACTS = frozenset({
     # A turn of a session Cog: asked by a client through the API, answered through the
     # controller. Neither moves the run.
     "turn_requested", "turn_answered", "turn_failed",
+    # A decision on a Gate, asked by a client for the controller to deliver; `gate_decided` records it
+    # when the run's runner takes it, and `decision_refused` when it does not.
+    "decision_requested", "decision_refused",
 })
 
 # The payload fields that decide where a replayed event leads; a record and its replay must agree on them.
@@ -413,7 +428,7 @@ _PICKED_UP_BY = frozenset({
 })
 
 _REPLAY: dict[str, Callable[[Run, Mapping[str, Any]], Transition[Run]]] = {
-    "run_picked_up": lambda run, payload: run.pickup(),
+    "run_picked_up": lambda run, payload: run.pickup(controller=payload.get("controller")),
     "gate_escalated": lambda run, payload: run.escalate(
         step=payload.get("step", ""), reason=payload.get("reason"), escalation=payload.get("escalation")
     ),
@@ -426,5 +441,5 @@ _REPLAY: dict[str, Callable[[Run, Mapping[str, Any]], Transition[Run]]] = {
     ),
     "cancelled": lambda run, payload: run.cancel(actor=payload.get("actor", "")),
     "interrupted": lambda run, payload: run.host_stopped(backend=payload.get("backend", "none")),
-    "retry_requested": lambda run, payload: run.retry(),
+    "retry_requested": lambda run, payload: run.retry(controller=payload.get("controller")),
 }

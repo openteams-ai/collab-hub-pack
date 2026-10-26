@@ -246,6 +246,10 @@ class RunBusy(RuntimeError):
     """The run is claimed by another call in this host."""
 
 
+class RunOwnedElsewhere(RuntimeError):
+    """The run was picked up by another controller, which alone advances it, cancels it and decides on it."""
+
+
 @dataclass
 class _Advancing:
     """A run claimed by one call in this host, and whether someone asked to cancel it.
@@ -295,6 +299,7 @@ class LifecycleRunner(WorkflowEngine):
         backend: str = "none",
         location: str | None = None,
         location_settings: Mapping[str, Any] | None = None,
+        controller: str | None = None,
     ) -> None:
         if (executor is None) == (location is None):
             raise ValueError("a runner takes a location, 'local' or 'remote', or an executor handed to it; not both")
@@ -309,6 +314,10 @@ class LifecycleRunner(WorkflowEngine):
         self.backend: DurabilityBackend = select_backend(backend)
         self._lock = threading.Lock()
         self._advancing: dict[str, _Advancing] = {}
+        self.controller = controller
+        """The controller this runner advances runs for, named on each run it picks up; ``None`` for a host
+        alone on its Track. Named, a runner shares its Track with other controllers: of several picking up
+        one run, one does, and each takes on start and moves only the runs it picked up."""
 
     def _append(self, run_id: str, event_type: str, payload: Mapping[str, Any],
                 into: list[TrackEvent] | None = None) -> TrackEvent:
@@ -363,6 +372,38 @@ class LifecycleRunner(WorkflowEngine):
         for record in transition.records:
             self._append(run_id, record.event_type, record.payload, into)
         return transition.after
+
+    def _record_if_still(self, run_id: str, transition: Transition[Run], seen: Run,
+                         into: list[TrackEvent] | None = None) -> Run | None:
+        """Write a run's one-record transition only if, as it lands, the run is where ``seen`` was.
+
+        Where is its state and the controller that has it. The check and the
+        write are one step on the Track (``append_if``), so of two controllers
+        moving one run from the same place, one does, and the other gets ``None``.
+        """
+        (record,) = transition.records
+        event = TrackEvent(run_id=run_id, event_type=record.event_type, payload=dict(record.payload),
+                           schema=SCHEMA_VERSION)
+
+        def still(events: tuple[TrackEvent, ...]) -> bool:
+            run = Run.replay(tuple(upgrade(e) for e in events))
+            return run is not None and (run.state, run.controller) == (seen.state, seen.controller)
+
+        stored = self.track.append_if(event, still)
+        if stored is None:
+            return None
+        if into is not None:
+            into.append(stored)
+        return transition.after
+
+    def _owns(self, run: Run) -> bool:
+        """Whether this runner may move a run that has been picked up: one it, or a host before controllers
+        named themselves, picked up. A runner with no name owns every run on its Track."""
+        return self.controller is None or run.controller in (None, self.controller)
+
+    def _refuse_elsewhere(self, run_id: str, run: Run) -> None:
+        if not self._owns(run):
+            raise RunOwnedElsewhere(f"run {run_id!r} is advanced by controller {run.controller!r}, not this one")
 
     def _read(self, run_id: str) -> tuple[TrackEvent, ...]:
         """The run's Track, read once and in schema v1 whatever version it was written in."""
@@ -477,9 +518,13 @@ class LifecycleRunner(WorkflowEngine):
         now is left alone. Returns the runs it interrupted. A durable backend
         resumes its runs instead, which Phases 26 and 32 build.
 
-        Every unfinished run on the Track is taken as this host's, the single
-        owner the runner assumes; run pickup by a controller (Phase 11) narrows
-        this to the runs the starting controller picked up.
+        A runner named for a controller takes only the runs that controller
+        picked up, and those a host picked up before controllers named
+        themselves; one with no name takes every unfinished run on the Track.
+        Each is written only if it is still where it was read, so two
+        controllers starting at once interrupt it once. A worker of an
+        interrupted run that is still alive — whose ``worker_started`` has no
+        ``worker_stopped`` — is reaped through the executor, and its stop recorded.
         """
         if self.backend.durable:
             return ()
@@ -489,10 +534,16 @@ class LifecycleRunner(WorkflowEngine):
             # before it writes, so a run it is starting is never taken for one left behind.
             try:
                 with self._claim(run_id):
-                    run = Run.replay(self._read(run_id))
-                    if run is not None and run.state in (RunState.RUNNING, RunState.WAITING_AT_GATE):
-                        self._record(run_id, run.host_stopped(backend=self.backend.name))
-                        interrupted.append(run_id)
+                    events = self._read(run_id)
+                    run = Run.replay(events)
+                    if run is None or run.state not in (RunState.RUNNING, RunState.WAITING_AT_GATE):
+                        continue
+                    if not self._owns(run):
+                        continue  # another controller's, which records it when it starts
+                    if self._record_if_still(run_id, run.host_stopped(backend=self.backend.name), run) is None:
+                        continue  # it moved as it was read: whoever moved it has it
+                    interrupted.append(run_id)
+                    self._reap(run_id, events)
             except RunBusy:
                 continue
             except InvalidTransition as exc:
@@ -500,6 +551,27 @@ class LifecycleRunner(WorkflowEngine):
                 # it: one such run never keeps a host from starting, and nothing is written to it.
                 _log.warning("run %s cannot be read, and is left as it is: %s", run_id, exc)
         return tuple(interrupted)
+
+    def _reap(self, run_id: str, events: Sequence[TrackEvent]) -> None:
+        """Stop each worker of the run that was started and never recorded stopped, and record its stop."""
+        stopped = {(e.payload.get("step"), e.payload.get("attempt"), e.payload.get("instance"))
+                   for e in events if e.event_type == "worker_stopped"}
+        reap = getattr(self.executor, "reap", None)
+        for event in events:
+            if event.event_type != "worker_started":
+                continue
+            started = event.payload
+            which = (started.get("step"), started.get("attempt"), started.get("instance"))
+            if which in stopped:
+                continue
+            try:
+                reaped = bool(reap(started, run_id)) if reap is not None else False
+            except Exception:  # noqa: BLE001 - one worker that could not be reaped never stops a start
+                _log.exception("reaping the worker of %s step %s failed", run_id, which[0])
+                reaped = False
+            # Recorded either way: the worker's run token expires here, alive or not.
+            self._append(run_id, "worker_stopped", {"step": which[0], "attempt": which[1], "instance": which[2],
+                                                    "reaped": reaped})
 
     def live_worker(self, run_id: str) -> CogWorker | None:
         """The worker this host has invoked for the run and not yet let go of; ``None`` otherwise.
@@ -557,7 +629,11 @@ class LifecycleRunner(WorkflowEngine):
                     run = Run.replay(self._read(run_id))
                     if run is None:
                         raise LookupError(f"no run {run_id!r} on the Track")
-                    return self._record(run_id, run.cancel(actor=actor)).state
+                    self._refuse_elsewhere(run_id, run)
+                    cancelled = self._record_if_still(run_id, run.cancel(actor=actor), run)
+                    if cancelled is not None:
+                        return cancelled.state
+                    # It moved as it was read — picked up by a controller, say: look at it again.
             except RunBusy:
                 continue
 
@@ -725,7 +801,8 @@ class LifecycleRunner(WorkflowEngine):
             raise ValueError(f"run {run_id!r} {done}; nothing to retry (start a new run instead)")
         op = self._submitted_definition(run_id, events)
         written: list[TrackEvent] = []
-        self._record(run_id, run.retry(), into=written)
+        if self._record_if_still(run_id, run.retry(controller=self.controller), run, written) is None:
+            raise ValueError(f"run {run_id!r} moved while it was being retried; look at it again")
         return self._advance(_Pass(self, run_id, (*events, *written), advancing), op)
 
     # --- advancing a run ------------------------------------------------------------------------
@@ -743,7 +820,12 @@ class LifecycleRunner(WorkflowEngine):
             now.advancing.changed.notify_all()
         run = Run.replay(now.history)
         if run.state is RunState.SUBMITTED:
-            run = now.record(run.pickup())
+            # Picked up only if nobody picked it up, or cancelled it, as this lands: of several
+            # controllers sharing the Track, one starts the run.
+            picked = self._record_if_still(now.run_id, run.pickup(controller=self.controller), run, now.history)
+            if picked is None:
+                return self.observe(now.run_id)
+            run = picked
         completed = self._completed_steps(now.history)
         retries = self._retry_count(now.history)
         spent_on: str | None = None
@@ -1092,6 +1174,7 @@ class LifecycleRunner(WorkflowEngine):
         run = Run.replay(events)
         if run is None or run.state is not RunState.WAITING_AT_GATE:
             raise ValueError(f"run {run_id!r} is not waiting at a Gate")
+        self._refuse_elsewhere(run_id, run)
         waiting_on = self._open_escalation(events, run)
         if outcome == "approve" and waiting_on is not None and waiting_on["envelope"] is None:
             # An escalation recorded before Gates holds no result, so there is nothing to

@@ -91,19 +91,27 @@ and network identity, so the isolation a cluster gives a worker does not hold.
 
 The process that accepts runs is not the one that advances them (ADR-0002 D4).
 
-- **The API** (`/v1/runs`, behind the `cog_runs` [feature flag](../feature-flags.md)) records intent on the
-  Track and reads a run's status from it. It constructs no executor and never
-  calls the controller. The code is `collab_hub_execution.intents`.
-- **The run controller** (`python -m collab_hub_execution.controller`) watches the
-  Track. It starts each run that was submitted and not yet picked up on the
-  lifecycle runner, and delivers each request to cancel, which tears the run's
-  worker down and ends it `CANCELLED`. It alone constructs an executor.
+- **The API** (`/v1/runs`) records intent on the Track and reads a run's
+  status from it. It constructs no executor and never calls the controller.
+  The code is `collab_hub_execution.intents`. Its Track is the hub's own
+  database (`frames.postgres.url`), whose tables come from the hub's
+  migrations, or `runs.track_path`, a SQLite file for a hub without Postgres;
+  with neither, every route answers 503 `runs_unavailable`. The Cogs it can
+  launch are the packages under `runs.packages`, the same directories its
+  controller is given.
+- **The run controller** (`collab-hub-run-controller`, or
+  `python -m collab_hub_execution.controller`) watches the Track. It picks up
+  each run that was submitted and not yet picked up and starts it on the
+  lifecycle runner, and delivers what clients asked of the runs it owns: a
+  cancel, which tears the run's worker down and ends it `CANCELLED`, a turn, and
+  a decision on a Gate. It alone constructs an executor.
 
 | Route | What it does |
 |---|---|
 | `POST /v1/runs` | Submit an Op: `steps`, each with `name`, `cog`, `entry_point`, `input` and `gate`, and optionally the run's own `name`, a label for listings. Records `op_submitted` with who submitted it, and answers 201 with the run, `SUBMITTED`. A `cog` that is not a package the controller can launch is a 422 naming the packages it can |
 | `GET /v1/runs` | The caller's organization's runs, newest first; `status`, `limit` and `offset` |
-| `GET /v1/runs/{id}` | One run: its status, each step's state, and each completed step's `output` |
+| `GET /v1/runs/{id}` | One run: its status, each step's state, each completed step's `output`, and `picked_up_by`, the controller that advances it |
+| `GET /v1/runs/{id}/events` | The run's Track: the events after `after` (a sequence), `limit` at a time, with `next_after` when there are more. Asked for `text/event-stream`, a live stream instead: each event as it lands, named by its sequence, then an `end` event with the run's status once it has ended; a client that lost the connection reconnects with `Last-Event-ID` and misses nothing and repeats nothing. Each event's payload carries only the fields named for its type (an allowlist, so a field recorded later is not served until it is named); where a local worker is on the controller's host (`pid`, `pgid`, `logs`) is never among them |
 | `GET /v1/runs/launchable` | The Cog packages a step's `cog` may name |
 | `POST /v1/runs/{id}/turns` | Ask a Cog whose step holds a session something: records `turn_requested` with the caller and answers 202 with the turn, `pending`. A run that has ended is a 409 |
 | `GET /v1/runs/{id}/turns/{turn}` | The turn: `pending`, then `answered` with the Cog's text, or `failed` with why |
@@ -116,67 +124,100 @@ is reported in the state the run ended in. A run belongs to the organization tha
 is a 404. The routes are authenticated, like every route the protection map
 does not open.
 
-This is the controller's and the API's first form, enough for one host:
+### Pickup and ownership
 
-- The Track is a SQLite file both processes open (`runs.track_path` for the
-  API, `--track` for the controller). Postgres, and pickup that two controller
-  replicas can race for, come with the run controller's own phase of the plan.
-- One controller per Track: it holds a lock beside the file, and a second one
-  refuses to start. When it starts, every run a stopped controller left
-  unfinished is recorded `interrupted`.
-- The controller polls the Track. Event streams, payloads by reference, Gate
-  decisions and retry are later phases; until then a run waiting at a Gate can
-  only be cancelled.
+Several controllers can share one Track: a SQLite file on one host, or
+Postgres (`--track postgresql://...`) anywhere. Each is known by its id
+(`--id`, the host's name by default), which it holds for as long as it runs — a
+lock beside a SQLite Track, a Postgres advisory lock — so a second controller
+under the same id refuses to start, and one that loses its hold stops.
 
-**Turns.** Some entry points hold a session: `hello`'s `session` keeps its
-`/invoke` open and answers turns until it is told `bye` or its run is
-terminated. A client asks for a turn through the API; the controller delivers
-waiting turns to the run's live worker, one at a time and in order, on the
-worker's `POST /turn`, and records the answer (`turn_answered`) or why there
-is none (`turn_failed`). A turn asked before the worker is up waits for it; one
-still waiting when the run ends fails with it. Nothing reaches a worker but
-through the controller, and every turn and its answer are on the Track. A
-worker that holds no session answers `/turn` with 404: within 30 seconds of the
-first such answer the controller takes it for a session still opening and tries
-again, after that it fails the turn and leaves the run as it was. A run waiting
-at a Gate takes no turns (409), since nothing can answer them until the Gate is
-decided.
+- **Pickup is atomic.** A controller picks a run up by recording
+  `run_picked_up` with its id, and the record lands only if, as it does,
+  nobody has picked the run up or cancelled it: the check and the write are
+  one step on the Track (`append_if`). Of several controllers passing over one
+  submitted run, one starts it.
+- **A picked-up run is its controller's.** Under `none`, that controller alone
+  advances it and delivers its cancel, its turns and the decision on its Gate;
+  another refuses to (`RunOwnedElsewhere`). A run nobody has picked up is
+  cancelled by whichever controller gets there first, with the same
+  conditional write. Under `dbos` and `temporal` the engine takes ownership
+  after pickup, and decides which replica resumes a run (Phases 26 and 32).
+- **A retry hands the run to the controller that retries it**, named on
+  `retry_requested`.
+- **When a controller starts**, it records `interrupted` for every run it
+  picked up and did not finish, and only those; another controller's runs are
+  left for that controller's own restart. A run picked up before controllers
+  named themselves is taken by the first to start. A worker of an interrupted
+  run that is still alive — its `worker_started` has no `worker_stopped` — is
+  reaped by the pid and process group `worker_started` recorded, once the pid
+  is shown to still be that run's worker, and `worker_stopped` records
+  `reaped: true`; a pid the system has given to another process since is left
+  alone. Normally there is nothing to reap: the launcher kills its worker when
+  the controller dies, and the stop is recorded `reaped: false`.
 
-Both processes read a run incrementally (`intents.RunViews`): each read asks
-the Track only for the events after the last one seen, and rebuilds a run's
-view only when it has new ones, so listing runs and watching them cost what
-changed rather than all of their history. A run whose Track cannot be replayed
-is logged once and left out of listings and of the controller's passes; it
-never hides another.
+An id is what lets a restarted controller take its runs back, so it is the
+same across restarts and different between replicas: a StatefulSet's pod
+names, or `CONTROLLER_ID=` in `dev/`. On Postgres the id is held as a
+session-level advisory lock, so `--track` must reach Postgres on a direct
+connection: through a transaction-pooling PgBouncer the lock would not outlive
+the transaction that took it, and two controllers could hold one id.
 
-The `collab-hub` CLI is a client of these routes (`cog launch`, `cog list
---launchable`, `run list`, `run show`, `run watch`, `run say`, `run connect`,
-`run terminate`); `run connect` serves a run as an
-[ACP](https://agentclientprotocol.com) agent, so an ACP client such as Toad
-talks to the Cog turn by turn. `run list` gives, in its `CONNECT` column, the
-command such a client starts for each run that has not ended: ACP is spoken on
-a command's stdin and stdout, so a command, naming the CLI by its path, its
-configuration directory when one was chosen, and the hub, is what a client
-connects with, from any shell.
-[`examples/cog-local`](../../examples/cog-local/README.md) walks through all of
-it on one machine.
+### Signals travel through the Track
 
-## Statuses
+The API records what a client asked for; the controller that owns the run
+delivers it. Nothing calls the controller, so the API needs no route to it and
+no engine client.
 
-A run's status is its Track replayed through the run machine
-([states.md](states.md)). The ones a caller acts on:
-
-| Status | Meaning | What can happen next |
+| Asked | Recorded by the API | Delivered by the controller |
 |---|---|---|
-| `SUBMITTED` | recorded, not yet picked up | it starts; `cancel` |
-| `RUNNING` | a host is advancing it | `cancel`; if its host stops, `interrupted` |
-| `WAITING_AT_GATE` | a step's Gate escalated its result | `decide` (approve, send back, reject); `cancel` |
-| `COMPLETED` | every step completed | — |
-| `FAILED` | a step produced no result, or its worker could not be torn down | `retry`, as a new attempt |
-| `REJECTED` | a person rejected an escalated result | — |
-| `CANCELLED` | a person cancelled it; the Track names who | — |
-| `BUDGET_EXCEEDED` | a duration, token or cost budget ran out | a new run |
-| `INTERRUPTED` | its host stopped under `none`, which cannot resume it | `retry`, continuing the attempt in flight |
+| Cancel | `cancel_requested`, once, while the run has not ended | `cancelled`, the worker torn down |
+| A turn | `turn_requested` | `turn_answered`, or `turn_failed` |
+| A decision on a Gate | `decision_requested` with the escalation, the outcome, the actor and any findings, only while the run waits on that escalation and holds no other decision | `gate_decided`, and the run advances; or `decision_refused` with why |
+
+`intents.request_decision` writes a decision; the route that calls it is the
+run API's later phase.
+
+### Configuration, health and models
+
+| | |
+|---|---|
+| `--track` | A SQLite file, or a `postgresql://` URL (`collab-hub-execution[postgres]`). On Postgres the Track's tables come from the hub's migrations; the controller refuses a database without them |
+| `--id` | The controller's name, held while it runs, recorded on each run it picks up |
+| `--packages`, `--allow`, `--work-dir`, `--environment` | The `local` location's directory package source, and where workers write their output |
+| `--backend`, `--location` | The two axes, `none` and `local` built |
+| `--models FILE` | The hub's `models:` block, below |
+| `--health-port`, `--health-host` | `GET /healthz`, 200 while the controller passes over the Track, and `GET /readyz`, 200 once it has started and its last pass read the Track; 503 otherwise, with the reason |
+
+Each option also reads the `COLLAB_CONTROLLER_*` variable named after it, for a
+container: `COLLAB_CONTROLLER_TRACK`, `COLLAB_CONTROLLER_ID`,
+`COLLAB_CONTROLLER_ENVIRONMENT`, `COLLAB_CONTROLLER_HEALTH_PORT` and so on;
+`COLLAB_CONTROLLER_PACKAGES` is a path list (`:`-separated) and
+`COLLAB_CONTROLLER_ALLOW` a comma-separated one. The command line wins.
+
+The **`models:` block** is the models the hub offers and which Cog talks to
+which, in TOML, until a Cog's own binding resolves it (Phase 24, whose
+inventory is generated from it):
+
+```toml
+[models.default]
+provider = "openai-compatible"        # or "anthropic"
+endpoint = "http://127.0.0.1:8090/v1"
+model = "fake-model"
+auth_ref = "env:MODEL_KEY"            # the variable the key is in; never the key
+context_window = 131072               # optional
+max_output_tokens = 8192              # optional
+
+[cogs]
+hermes = "default"
+```
+
+Each worker of a Cog the block binds receives its model as `COLLAB_MODEL_*`
+variables, and no other Cog's worker does. The key is read from the
+controller's environment when the worker starts, so a rotated secret reaches
+the next worker, and it is never written to the Track or a file. A block that
+names an unknown key, an unknown model, or a key that is not set is refused when
+the controller starts.
 
 ## What a restart does under `none`
 
@@ -200,10 +241,10 @@ never correct.
 - **A run submitted and never picked up** had nothing in flight, so it is not
   interrupted; submitting it starts it.
 
-One host per Track until run pickup (#121): `start()` takes every unfinished
-run on the Track as its own, so two hosts sharing a Track would interrupt each
-other's live runs. At dev level 1, `make op` holds a lock on its Track for that
-reason.
+A runner named for a controller (`controller=`) takes only the runs that
+controller picked up, as above; an unnamed one is a host alone on its Track
+and takes every unfinished run. At dev level 1, `make op` is the controller
+`make-op`.
 
 ## Cancelling a run
 
@@ -238,7 +279,14 @@ leaves it alone.
 
 At dev level 1, with no container: `make -C dev op OP=<name>` runs an Op from
 `dev/ops/` with the fake Cogs of `dev/cogs/` on `none`, over a SQLite Track in
-`dev/.local/`, and prints its Track and status. The fake Cogs answer in the
+`dev/.local/`, in one process, and prints its Track and status. `make -C dev
+controller` and `make -C dev submit OP=<name>` run it across two processes, as
+the run API and the controller do: `submit` records it, the controller picks
+it up, and `submit` follows it to its end and says which controller picked it
+up. Kill the controller mid-run and start it again, and it records the run
+`interrupted`; start two (`CONTROLLER_ID=one`, `CONTROLLER_ID=two`) and each
+run is picked up once. `TRACK=postgresql://...` puts the Track on the level-2
+Postgres. The fake Cogs answer in the
 same process; add `LOCATION=local` (which needs pixi) and each step's worker is
 a real process, whose `worker_started` and `worker_stopped` appear on the
 Track and whose output is under `dev/.local/runs/`. `make -C dev api` and

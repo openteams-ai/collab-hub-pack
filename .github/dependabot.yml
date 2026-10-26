@@ -1,0 +1,59 @@
+# Dependabot covers every lockfile and pinned tool in the repo, not only the
+# ones it finds by default (/api and /api/admin-ui). The seven pixi.lock files
+# (cogs/hermes, dev/cogs/*, examples/cog-local/cogs/hello) have no Dependabot
+# ecosystem and are refreshed by hand with `pixi update`. Minor and patch
+# version updates arrive grouped per ecosystem (one PR per directory a week);
+# majors and security updates come on their own, so each gets its own review.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directories:
+      - /api
+      - /cli
+      - /execution
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      uv-minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+  - package-ecosystem: npm
+    directories:
+      - /api/admin-ui
+      - /scripts/release/semantic-release
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      npm-minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+  - package-ecosystem: docker
+    directories:
+      - /api
+      - /scripts/cog-execution-e2e
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      docker-minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions-minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]

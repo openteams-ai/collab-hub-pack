@@ -47,7 +47,9 @@ for line in sys.stdin:
                                    "run_token": "COLLAB_RUN_TOKEN" in os.environ,
                                    "api_key_env": "COLLAB_MODEL_API_KEY" in os.environ,
                                    "anthropic_key": os.environ.get("ANTHROPIC_API_KEY"),
-                                   "gemini_key": "GEMINI_API_KEY" in os.environ}))
+                                   "gemini_key": "GEMINI_API_KEY" in os.environ,
+                                   "ssl_cert_file": os.environ.get("SSL_CERT_FILE"),
+                                   "requests_ca_bundle": os.environ.get("REQUESTS_CA_BUNDLE")}))
         else:
             say("s-1", "agent heard: ")
             say("s-1", text)

@@ -270,15 +270,22 @@ to the Cog's worker (`POST /turn`), and the worker's answer recorded beside it.
 an ACP client into one. (`docs/cog-execution/runs.md`.)
 
 **Run intent.** What a client asked of a run, recorded on its Track by the
-API for the run controller to act on: `op_submitted`, `cancel_requested`, and
-`turn_requested`.
+API for the run controller to act on: `op_submitted`, `cancel_requested`,
+`turn_requested` and `decision_requested`.
 The API writes intent and reads status; it never calls the controller.
 (ADR-0002 D4.)
 
-**Run pickup.** Under `none`, how exactly one run controller starts a
-submitted run: an atomic pickup record. The run then belongs to that
-controller, and ends `interrupted` if the controller stops. `dbos` and
-`temporal` replace pickup with their own queues. (ADR-0002 D4.)
+**Run pickup.** How exactly one of several run controllers starts a
+submitted run, under every backend: `run_picked_up`, naming the controller,
+written only if nobody picked the run up first. Under `none` the run then
+belongs to that controller, which alone advances it, and ends `interrupted`
+when the controller next starts after stopping; under `dbos` and `temporal` the
+engine takes ownership after pickup. (ADR-0002 D4,
+`docs/cog-execution/runs.md`.)
+
+**Run controller id.** The name a run controller holds while it runs and
+records on each run it picks up: the same across its restarts, so a restarted
+controller takes its runs back, and different between replicas.
 
 **Run target.** Where Collab sends a run: the hub, or the local host on the
 user's machine. Both serve the same run API. Placement chooses the target,

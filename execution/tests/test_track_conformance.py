@@ -335,3 +335,16 @@ def test_append_if_is_one_step_so_racing_callers_cannot_all_pass_the_check(store
         thread.join()
     assert len([event for event in stored if event is not None]) == 1
     assert [event.event_type for event in store.replay("r")] == ["op_submitted", "cancel_requested"]
+
+
+def test_replay_reads_at_most_limit_events_after_a_sequence(store):
+    from collab_hub_execution.track import SCHEMA_VERSION, TrackEvent
+
+    for n in range(5):
+        store.append(TrackEvent(run_id="limited", event_type="op_submitted" if n == 0 else "step_started",
+                                payload={"n": n}, schema=SCHEMA_VERSION))
+    every = store.replay("limited")
+    assert [e.sequence for e in store.replay("limited", limit=2)] == [e.sequence for e in every[:2]]
+    assert [e.sequence for e in store.replay("limited", after_sequence=every[1].sequence, limit=2)] == \
+        [e.sequence for e in every[2:4]]
+    assert len(store.replay("limited", limit=None)) == 5

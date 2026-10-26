@@ -86,6 +86,7 @@ from .routers import (
     user_directory,
     web,
 )
+from .routers import runs as runs_router
 from .web.authz import platform_role_source_name, verify_web_route_protection
 from .web.guard import WebSessionGuardMiddleware
 from .web.pages import WebSecurityHeadersMiddleware
@@ -296,12 +297,10 @@ def make_app(config: BaseConfig) -> FastAPI:
     cog_registry_serving = build_cog_registry_serving(
         config, cog_catalog_store, postgres_pools, cog_publish_store
     )
-    # Import the execution package only when its run API feature is enabled.
-    run_service = None
-    if config.features.enabled("cog_runs"):
-        from .routers import runs as runs_router
-
-        run_service = runs_router.build_run_service(config.runs)
+    # The run API (/v1/runs): its Track is runs.track_path, else the hub's own database, else none
+    # (the routes answer 503). Its router is the one module of the API that imports the execution
+    # package, which writes intent and reads runs and never constructs an executor.
+    run_service = runs_router.build_run_service(config.runs, config.frames.postgres.url, postgres_pools)
     if org_source_resolves_membership():
         # Third membership precondition (the env-only ones are checked above):
         # the organization store must have a real backend. Membership is an
@@ -701,6 +700,10 @@ def make_app(config: BaseConfig) -> FastAPI:
             response.headers.update(exc.headers)
         return response
 
+    @app.exception_handler(runs_router.RunsUnavailable)
+    async def runs_unavailable_handler(request: Request, exc: runs_router.RunsUnavailable):
+        return frames.error_response(status.HTTP_503_SERVICE_UNAVAILABLE, runs_router.RUNS_UNAVAILABLE, str(exc))
+
     @app.exception_handler(NoOrganizationError)
     async def no_organization_handler(_request: Request, exc: NoOrganizationError):
         # Registered against the subclass so Starlette's MRO lookup prefers it
@@ -802,8 +805,7 @@ def make_app(config: BaseConfig) -> FastAPI:
         # The OCI read API (#179), at the host root: registry clients address
         # /v2/ there and nowhere else. Absent unless cogs.serve.enabled.
         app.include_router(registry.router)
-    if run_service is not None:
-        app.include_router(runs_router.router, prefix="/v1")
+    app.include_router(runs_router.router, prefix="/v1")
     # Who is calling, and how the collab-hub CLI signs in. /auth/cli is public:
     # the hardened map lists it, since a client asks it before it holds a token.
     app.include_router(identity.router, prefix="/v1")

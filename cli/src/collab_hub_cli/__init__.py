@@ -7,4 +7,4 @@ See cli/README.md.
 
 # Pinned per release with pyproject.toml by scripts/release/bump-version.py, so
 # it names the code that is running rather than whichever copy is installed.
-__version__ = "0.0.0.dev0"
+__version__ = "0.11.0"

@@ -415,19 +415,65 @@ refuses them two ways:
 Gateway-only installs are unaffected in both cases — that is where the dev and
 smoke-test workflows that need these switches actually run.
 
-## Running Cogs beside the API
+## Running Cogs in pods
 
 The run API (`/v1/runs`) is always served, on the hub's database. Something
 must also run what it launches: a run controller. `runs.controller.enabled`
-runs one in the API's pod, as a second container of the same image
-(`collab-hub-run-controller`), and it runs each Cog launched through the API
-as a process of that pod, the `local` agent location
-([runs.md](cog-execution/runs.md#agent-locations)).
+runs one, and `runs.controller.location` says where each Cog's worker runs.
+`remote`, the default, is how a hub is deployed:
 
 ```yaml
 runs:
   controller:
     enabled: true
+    location: remote
+    models: |
+      [models.default]
+      provider = "anthropic"
+      model = "claude-opus-5-5"
+      auth_ref = "env:ANTHROPIC_API_KEY"
+
+      [cogs]
+      hermes = "default"
+    extraEnv:
+      - name: ANTHROPIC_API_KEY
+        valueFrom:
+          secretKeyRef: {name: claude, key: api-key}
+```
+
+- **The controller is a Deployment of its own**, one replica of the API's
+  image running `collab-hub-run-controller`, with a ServiceAccount and a
+  namespace-scoped Role over exactly the kinds it makes (Deployments,
+  Services, NetworkPolicies) and the verbs it uses. The API pod holds no
+  workload permissions, and may have as many replicas as its frame store
+  allows. The controller's id (`id`) is the same across rollouts; the new
+  pod's controller waits (`waitSeconds`) for the old one to let it go, and a
+  run picked up by an id that never returns is ended by a live controller.
+- **Each worker is a pod of its own**: the same image, running the Cog
+  package's `serve` task in the environment pixi builds on the pod's own
+  volumes the first time, so each pod builds it (`workerStartSeconds` bounds
+  that; materialization from a published artifact with a cache is #105). It
+  carries no ServiceAccount token, and a NetworkPolicy per worker admits only
+  the controller's pods to its `/invoke`, enforced by a policy-enforcing CNI.
+  The run token travels in the pod's environment, and only its hash is on
+  the Track. Workers need egress to conda-forge and PyPI to build their
+  environment, and to the model endpoints the binding names.
+- **Its Track** is the hub's database (`frames.postgres`); the chart refuses
+  the controller without it. `models` and `extraEnv` are as below.
+
+## Running Cogs beside the API
+
+For a development hub, `runs.controller.location: local` runs the controller
+in the API's pod instead, as a second container of the same image, and it
+runs each Cog launched through the API as a process of that pod, the `local`
+agent location ([runs.md](cog-execution/runs.md#agent-locations)). What
+follows is that shape.
+
+```yaml
+runs:
+  controller:
+    enabled: true
+    location: local
     models: |
       [models.default]
       provider = "anthropic"

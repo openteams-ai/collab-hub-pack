@@ -8,10 +8,9 @@ next, and it writes nothing to the Track.
 
 A location is chosen by configuration, ``local`` or ``remote``, through
 :func:`select_executor`, and callers never import an executor. ``local`` is
-implemented: the worker is a process on the controller's host. ``remote``, the
-worker as a workload on a cluster, is refused when a runner starts until Phase
-21 of the plan puts it behind this switch, so the configuration shape is fixed
-now.
+the worker as a process on the controller's host; ``remote`` is the worker as
+a Deployment and Service on the cluster the controller runs in, reached over
+service DNS, which only the run controller's identity may create.
 """
 
 from __future__ import annotations
@@ -21,9 +20,9 @@ from pathlib import Path
 from typing import Any
 
 AGENT_LOCATIONS = ("local", "remote")
-"""Every value the ``location`` setting takes, in the order they are built."""
+"""Every value the ``location`` setting takes, in the order they were built."""
 
-_NOT_YET = {"remote": "Phase 22 (#6)"}
+_NOT_YET: dict[str, str] = {}
 
 
 class LocationNotImplemented(NotImplementedError):
@@ -45,6 +44,13 @@ def select_executor(
     and ``work_dir``, where each run's worker output goes. Further settings are
     the executor's own (``environment``, ``pixi``, ``deliver``,
     ``ready_timeout``).
+
+    ``remote`` takes ``image``, the image a worker pod runs (the hub's own,
+    which ships the Cog packages under ``packages_root``), ``namespace``, and
+    ``allow_ingress_from``, the labels of the pods that may reach a worker's
+    ``/invoke`` (the run controller's), or ``insecure_skip_network_policy``;
+    ``packages`` and ``work_dir`` mean nothing to it, since a pod runs from
+    the image and writes on volumes of its own.
     """
     if location == "local":
         from .local import LocalProcessCogExecutor
@@ -52,7 +58,18 @@ def select_executor(
 
         if work_dir is None:
             raise ValueError("the 'local' location needs a work_dir: where each run's worker output goes")
+        settings.pop("image", None)
         return LocalProcessCogExecutor(source=DirectoryPackageSource(packages, allow), work_dir=work_dir, **settings)
+    if location == "remote":
+        from ..kubernetes import KubernetesCogExecutor
+
+        image = settings.pop("image", None)
+        if not image:
+            raise ValueError("the 'remote' location needs an image: the one a worker pod runs, which ships the "
+                             "Cog packages")
+        for local_only in ("environment", "pixi", "grace"):
+            settings.pop(local_only, None)
+        return KubernetesCogExecutor(runner_image=image, **settings)
     if location in _NOT_YET:
         raise LocationNotImplemented(f"the {location!r} agent location is not implemented yet: it arrives with "
                                      f"{_NOT_YET[location]}; use 'local'")

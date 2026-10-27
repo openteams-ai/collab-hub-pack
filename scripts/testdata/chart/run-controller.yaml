@@ -6,6 +6,7 @@ frames:
 runs:
   controller:
     enabled: true
+    location: local
     models: |
       [models.default]
       provider = "anthropic"

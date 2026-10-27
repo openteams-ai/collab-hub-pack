@@ -68,6 +68,12 @@ is pending only while the run waits on the escalation it names: one left
 undelivered when the run ends, or when a retry opens a new escalation, lapses
 with it, and is neither delivered nor refused.
 
+`interrupted` (`backend`) is written by the host that finds a run it was
+advancing when it starts again; written by another controller, having found
+the run's owner no longer holds its id, it also names `taken_over_by` and
+`from_controller`. `worker_started` at the remote location carries the
+workloads' `name` and `namespace`, by which a later controller reaps a pod.
+
 `retry_asked` (`actor`) is a client's request that an ended run run again,
 written with `append_if` only while the run has ended in a state the run
 machine retries from and holds no request yet. A controller takes it: the

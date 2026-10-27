@@ -50,3 +50,17 @@ jobs:
         working-directory: execution
         run: uv run --group test pytest
 
+
+  test-execution-macos:
+    # The local location's workers and reaper on macOS, which dev/ supports at level 1. No Postgres
+    # service on these runners: the Postgres Track tests skip here and run in the job above.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+
+      - name: Test
+        working-directory: execution
+        run: uv run -p 3.13 --group test pytest

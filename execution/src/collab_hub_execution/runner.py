@@ -530,7 +530,7 @@ class LifecycleRunner(WorkflowEngine):
         if self.backend.durable:
             return ()
         interrupted = []
-        for run_id in self.track.run_ids():
+        for run_id in self._unfinished():
             # Claimed first, then read: a retry or a decision in this host claims its run
             # before it writes, so a run it is starting is never taken for one left behind.
             try:
@@ -552,6 +552,41 @@ class LifecycleRunner(WorkflowEngine):
                 # it: one such run never keeps a host from starting, and nothing is written to it.
                 _log.warning("run %s cannot be read, and is left as it is: %s", run_id, exc)
         return tuple(interrupted)
+
+    def _unfinished(self) -> tuple[str, ...]:
+        """The runs left running or waiting at a Gate, from the Track's index: a start costs what is unfinished,
+        not the Track's history."""
+        rows = [*self.track.runs(status=RunState.RUNNING.name), *self.track.runs(status=RunState.WAITING_AT_GATE.name)]
+        return tuple(dict.fromkeys(row.run_id for row in sorted(rows, key=lambda row: row.submitted_at)))
+
+    def take_over(self, run_id: str, *, from_controller: str) -> RunState | None:
+        """End a run whose owner no longer holds its id: ``cancelled`` if a cancel was asked, else ``interrupted``.
+
+        What a live controller does for a run picked up by a controller that
+        never started again (a replaced pod), so the run does not wait on it
+        for good. Written only if the run is still where it was read, and only
+        for a run that ``from_controller`` owns; its workers are reaped where
+        this host can reach them. Returns the run's state after, or ``None``
+        when nothing was done.
+        """
+        with self._claim_or_refuse(run_id) as advancing:
+            events = self._read(run_id)
+            run = Run.replay(events)
+            if run is None or run.state.ended or run.controller != from_controller:
+                return None
+            cancelled_by = next((e.payload.get("actor") for e in reversed(events)
+                                 if e.event_type == "cancel_requested"), None)
+            if cancelled_by and RUN.accepts(run.state, "cancel"):
+                transition = run.cancel(actor=cancelled_by)
+            else:
+                transition = run.host_stopped(backend=self.backend.name, taken_over_by=self.controller,
+                                              from_controller=from_controller)
+            written: list[TrackEvent] = []
+            if self._record_if_still(run_id, transition, run, written) is None:
+                return None
+            self._reap(run_id, events)
+            del advancing
+            return transition.after.state
 
     def _reap(self, run_id: str, events: Sequence[TrackEvent]) -> None:
         """Stop each worker of the run that was started and never recorded stopped, and record its stop."""

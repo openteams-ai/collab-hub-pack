@@ -73,12 +73,17 @@ def _cancel(state: RunState, run: Run, actor: str | None) -> Transition[Run]:
     return move(run, RunState.CANCELLED, Record("cancelled", {"actor": actor}), open_step=None, open_escalation=None)
 
 
-def _host_stopped(state: RunState, run: Run, backend: str) -> Transition[Run]:
+def _host_stopped(state: RunState, run: Run, backend: str, taken_over_by: str | None = None,
+                  from_controller: str | None = None) -> Transition[Run]:
     # Only `none` cannot resume a run; under `dbos` or `temporal` a host stop
     # leaves the run where it was, and the engine resumes it.
     if backend != "none":
         state.refuse("host_stopped", f"the {backend!r} backend resumes the run; only 'none' interrupts it")
-    return move(run, RunState.INTERRUPTED, Record("interrupted", {"backend": backend}))
+    payload: dict[str, Any] = {"backend": backend}
+    if taken_over_by:
+        # Another controller ended the run, having found its owner no longer holds its id.
+        payload.update(taken_over_by=taken_over_by, from_controller=from_controller)
+    return move(run, RunState.INTERRUPTED, Record("interrupted", payload))
 
 
 def _failed(step: str | None, error: str, reason: str | None, details: Mapping[str, Any] | None) -> Record:
@@ -148,8 +153,9 @@ class Running(RunState):
         return _cancel(self, run, actor)
 
     @accepts("INTERRUPTED")
-    def host_stopped(self, run: Run, *, backend: str = "none", **_: Any) -> Transition[Run]:
-        return _host_stopped(self, run, backend)
+    def host_stopped(self, run: Run, *, backend: str = "none", taken_over_by: str | None = None,
+                     from_controller: str | None = None, **_: Any) -> Transition[Run]:
+        return _host_stopped(self, run, backend, taken_over_by, from_controller)
 
 
 class WaitingAtGate(RunState):
@@ -194,8 +200,9 @@ class WaitingAtGate(RunState):
         return _cancel(self, run, actor)
 
     @accepts("INTERRUPTED")
-    def host_stopped(self, run: Run, *, backend: str = "none", **_: Any) -> Transition[Run]:
-        return _host_stopped(self, run, backend)
+    def host_stopped(self, run: Run, *, backend: str = "none", taken_over_by: str | None = None,
+                     from_controller: str | None = None, **_: Any) -> Transition[Run]:
+        return _host_stopped(self, run, backend, taken_over_by, from_controller)
 
 
 class Completed(RunState):
@@ -313,8 +320,12 @@ class Run(Context):
     def cancel(self, *, actor: str) -> Transition[Run]:
         return self.dispatch("cancel", actor=actor)
 
-    def host_stopped(self, *, backend: str) -> Transition[Run]:
-        return self.dispatch("host_stopped", backend=backend)
+    def host_stopped(self, *, backend: str, taken_over_by: str | None = None,
+                     from_controller: str | None = None) -> Transition[Run]:
+        """The host advancing the run stopped: ``taken_over_by`` when another controller records it, having
+        found the run's owner (``from_controller``) no longer holds its id."""
+        return self.dispatch("host_stopped", backend=backend, taken_over_by=taken_over_by,
+                             from_controller=from_controller)
 
     def retry(self, *, controller: str | None = None) -> Transition[Run]:
         return self.dispatch("retry", controller=controller)

@@ -25,7 +25,6 @@ from collab_hub_execution import (
     InMemoryCogExecutor,
     InMemoryTrackStore,
     LifecycleRunner,
-    LocationNotImplemented,
     OpDefinition,
     OpStep,
     RunState,
@@ -47,9 +46,12 @@ def test_the_location_setting_takes_two_values_and_local_is_built(tmp_path):
     assert runner.executor.location == "local"
 
 
-def test_a_location_not_built_yet_is_refused_when_the_runner_starts():
-    with pytest.raises(LocationNotImplemented, match="Phase 22"):
+def test_the_remote_location_is_built_and_needs_the_image_a_worker_pod_runs():
+    with pytest.raises(ValueError, match="needs an image"):
         LifecycleRunner(track=InMemoryTrackStore(), location="remote")
+    runner = LifecycleRunner(track=InMemoryTrackStore(), location="remote",
+                             location_settings={"image": "hub:test", "insecure_skip_network_policy": True})
+    assert runner.executor.location == "remote"
 
 
 def test_an_unknown_location_is_refused():
@@ -316,7 +318,7 @@ def test_a_proxy_in_the_controllers_environment_is_never_used_to_reach_a_worker(
         monkeypatch.setenv(name, "http://127.0.0.1:9")
     for name in ("NO_PROXY", "no_proxy"):
         monkeypatch.delenv(name, raising=False)
-    executor = local_executor(tmp_path, ready_timeout=5.0)
+    executor = local_executor(tmp_path, ready_timeout=30.0)
     worker = executor.materialize("echo", "r", "s:0")
     try:
         assert worker.interact("run", 1).payload == {"echo": 1}

@@ -33,11 +33,12 @@ import hashlib
 import logging
 import os
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 from httpx import ConnectError, ConnectTimeout
 
+from . import run_tokens
 from .envelope import CODE_FOR_STATUS, EnvelopeInvalid, ResultEnvelope
 from .ops import _NO_SIGNAL
 
@@ -45,6 +46,10 @@ _log = logging.getLogger(__name__)
 
 DEFAULT_NAMESPACE = "collab-hub"
 RUNNER_PORT = 8080
+PACKAGES_ROOT = "/opt/collab-hub/cogs"
+"""Where the hub's image ships the Cog packages a worker pod runs from."""
+CACHE_PATH, TMP_PATH = "/var/cache/collab-hub", "/tmp"
+"""Where a worker pod writes: the pixi environment its package needs, and what the Cog writes under HOME."""
 MAX_DNS_LABEL = 63
 TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"  # noqa: S105 - path, not a secret
 CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
@@ -116,7 +121,7 @@ class K8sApi(Protocol):
 
 
 class WorkerHttp(Protocol):
-    def post(self, url: str, *, json: Any) -> Any: ...
+    def post(self, url: str, *, json: Any, headers: Mapping[str, str] | None = None) -> Any: ...
 
 
 def _in_cluster_api() -> Any:
@@ -144,10 +149,24 @@ def _default_worker_http(interaction_timeout: float | None = 60.0) -> Any:
     )
 
 
+Delivery = Callable[[str, str, str], Mapping[str, str]]
+
+
 class KubernetesCogExecutor:
-    """Materialize a Cog worker as a Deployment + Service and reach it by DNS."""
+    """The ``remote`` agent location: a Cog worker as a Deployment + Service, reached by DNS.
+
+    The pod runs ``runner_image``, the hub's own image, which ships the Cog
+    packages under ``packages_root`` and pixi: the worker is the package's
+    ``serve`` task in the environment its lock pins, as a local worker is, with
+    the seam's variables and the run token in its environment and what the
+    binding delivers (``deliver``) beside them. ``worker_command`` replaces that
+    command for an image of another shape, as the kind E2E's is. The executor
+    holds no lifecycle logic: it brings a worker up, says where it is, and
+    tears it down; ``controller`` only labels the workloads with who made them.
+    """
 
     name = "kubernetes"
+    location = "remote"
 
     def __init__(
         self,
@@ -162,6 +181,12 @@ class KubernetesCogExecutor:
         interaction_timeout: float | None = 60.0,
         ready_timeout: float = 60.0,
         poll_interval: float = 1.0,
+        packages_root: str = PACKAGES_ROOT,
+        worker_command: Sequence[str] | None = None,
+        deliver: Delivery | None = None,
+        controller: str | None = None,
+        resources: Mapping[str, Any] | None = None,
+        security_context: Mapping[str, Any] | None = None,
     ) -> None:
         # A worker's /invoke endpoint is unauthenticated, so the network boundary is
         # the control. Force an explicit choice at construction — the secure path
@@ -193,6 +218,13 @@ class KubernetesCogExecutor:
         self.interaction_timeout = interaction_timeout
         self.ready_timeout = ready_timeout
         self.poll_interval = poll_interval
+        self.packages_root = packages_root
+        self.worker_command = list(worker_command) if worker_command else None
+        self.deliver = deliver
+        self.controller = controller
+        self.resources = dict(resources) if resources else {
+            "requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"cpu": "500m", "memory": "256Mi"}}
+        self.security_context = dict(security_context) if security_context else None
 
     @property
     def api(self) -> K8sApi:
@@ -209,16 +241,54 @@ class KubernetesCogExecutor:
     def _service_url(self, name: str) -> str:
         return f"http://{name}.{self.namespace}.svc.cluster.local:{RUNNER_PORT}"
 
-    def _manifests(self, cog: str, run_id: str, name: str) -> tuple[dict, dict]:
+    def _labels(self, cog: str, run_id: str, name: str) -> dict[str, str]:
         labels = {
             "app": name,
             "collab-hub/cog": cog_slug(cog),
             "collab-hub/run": label_value(run_id),
             "app.kubernetes.io/managed-by": "collab-hub-executor",
         }
+        if self.controller:
+            labels["collab-hub/controller"] = label_value(self.controller)
+        return labels
+
+    def _command(self, cog: str) -> list[str]:
+        """What the pod runs: the package's ``serve`` task in its pixi environment, from the image's packages."""
+        if self.worker_command:
+            return list(self.worker_command)
+        return ["pixi", "run", "--locked", "--manifest-path", f"{self.packages_root}/{cog}/pixi.toml", "serve"]
+
+    def _environment(self, cog: str, run_id: str, instance: str, token: str) -> list[dict[str, str]]:
+        """What the worker gets: the seam's variables, its run token, and what the binding delivers."""
+        env = {"COG_ID": cog, "COLLAB_COG_ID": cog, "COLLAB_RUN_ID": run_id, "COLLAB_COG_HOST": "0.0.0.0",
+               "COLLAB_COG_PORT": str(RUNNER_PORT), "HOME": TMP_PATH}
+        if self.deliver is not None:
+            env.update(self.deliver(cog, run_id, instance))
+        env[run_tokens.RUN_TOKEN_ENV] = token
+        return [{"name": name, "value": value} for name, value in env.items()]
+
+    def _manifests(self, cog: str, run_id: str, name: str, instance: str = "", token: str = "") -> tuple[dict, dict]:
+        labels = self._labels(cog, run_id, name)
         # Label values are charset/length-constrained; keep the exact run id in an
         # annotation (unconstrained) so nothing is lost and creation never fails.
         annotations = {"collab-hub/run-id": run_id}
+        container = {
+            "name": "runner",
+            "image": self.runner_image,
+            "imagePullPolicy": "IfNotPresent",
+            "command": self._command(cog),
+            "ports": [{"containerPort": RUNNER_PORT}],
+            "env": self._environment(cog, run_id, instance, token),
+            "readinessProbe": {
+                "httpGet": {"path": "/healthz", "port": RUNNER_PORT},
+                "initialDelaySeconds": 1,
+                "periodSeconds": 1,
+            },
+            "resources": self.resources,
+            "volumeMounts": [{"name": "cache", "mountPath": CACHE_PATH}, {"name": "tmp", "mountPath": TMP_PATH}],
+        }
+        if self.security_context:
+            container["securityContext"] = self.security_context
         deployment = {
             "apiVersion": "apps/v1",
             "kind": "Deployment",
@@ -233,24 +303,10 @@ class KubernetesCogExecutor:
                         # it should not carry a ServiceAccount token it could use
                         # (or leak) against the API server.
                         "automountServiceAccountToken": False,
-                        "containers": [
-                            {
-                                "name": "runner",
-                                "image": self.runner_image,
-                                "imagePullPolicy": "IfNotPresent",
-                                "ports": [{"containerPort": RUNNER_PORT}],
-                                "env": [{"name": "COG_ID", "value": cog}],
-                                "readinessProbe": {
-                                    "httpGet": {"path": "/healthz", "port": RUNNER_PORT},
-                                    "initialDelaySeconds": 1,
-                                    "periodSeconds": 1,
-                                },
-                                "resources": {
-                                    "requests": {"cpu": "50m", "memory": "64Mi"},
-                                    "limits": {"cpu": "500m", "memory": "256Mi"},
-                                },
-                            }
-                        ]
+                        "containers": [container],
+                        # The pixi environment its package needs, and what the Cog writes: a pod's own,
+                        # gone with it (materialization from the artifact, with a cache, is #105).
+                        "volumes": [{"name": "cache", "emptyDir": {}}, {"name": "tmp", "emptyDir": {}}],
                     },
                 },
             },
@@ -276,12 +332,7 @@ class KubernetesCogExecutor:
         namespace (both selectors AND within one peer). (Egress restriction to
         hub-mediated paths is #11.)
         """
-        labels = {
-            "app": name,
-            "collab-hub/cog": cog_slug(cog),
-            "collab-hub/run": label_value(run_id),
-            "app.kubernetes.io/managed-by": "collab-hub-executor",
-        }
+        labels = self._labels(cog, run_id, name)
         peer = {"podSelector": {"matchLabels": self.allow_ingress_from}}
         if self.allow_ingress_from_namespace is not None:
             peer["namespaceSelector"] = {"matchLabels": self.allow_ingress_from_namespace}
@@ -347,7 +398,8 @@ class KubernetesCogExecutor:
 
     def materialize(self, cog: str, run_id: str, instance: str = "") -> "_KubernetesWorker":
         name = resource_name(cog, run_id, instance)
-        deployment, service = self._manifests(cog, run_id, name)
+        token = run_tokens.mint()
+        deployment, service = self._manifests(cog, run_id, name, instance, token)
         try:
             if self.allow_ingress_from is not None:
                 # Put the ingress restriction in place before the pod can serve.
@@ -368,7 +420,28 @@ class KubernetesCogExecutor:
             # best-effort, then re-raise the original failure.
             self._cleanup(name)
             raise
-        return _KubernetesWorker(cog, name, self._service_url(name), self.worker_http)
+        details = {"location": "remote", "name": name, "namespace": self.namespace, "image": self.runner_image}
+        return _KubernetesWorker(cog, name, self._service_url(name), self.worker_http, run_token=token,
+                                 details=details)
+
+    def reap(self, started: Mapping[str, Any], run_id: str) -> bool:
+        """Delete the workloads of a worker a stopped controller left behind, by the name ``worker_started`` recorded.
+
+        A pod outlives the controller that made it, so a controller's next
+        start, or another controller taking the run over, deletes it by name.
+        Returns whether anything was there to delete.
+        """
+        name = started.get("name")
+        if started.get("location") != "remote" or not isinstance(name, str) or not name:
+            return False
+        found = False
+        for path in self._resource_paths(name):
+            response = self.api.delete(path)
+            if response.status_code in (200, 202):
+                found = True
+            elif response.status_code != 404:
+                response.raise_for_status()
+        return found
 
     def _cleanup(self, name: str) -> None:
         """Best-effort delete of a (possibly partial) materialization by name.
@@ -395,14 +468,47 @@ class KubernetesCogExecutor:
                 response.raise_for_status()
 
 
+class TurnRefused(RuntimeError):
+    """A turn the worker did not answer: it holds no session, refused it, or answered something else."""
+
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 class _KubernetesWorker:
     """A materialized Cog reached over its service DNS via its declared entry point."""
 
-    def __init__(self, cog: str, name: str, url: str, http: WorkerHttp) -> None:
+    def __init__(self, cog: str, name: str, url: str, http: WorkerHttp, *, run_token: str | None = None,
+                 details: Mapping[str, Any] | None = None) -> None:
         self.cog = cog
         self.name = name
         self.url = url
         self.http = http
+        self._run_token = run_token  # held in memory for as long as the worker is up, and nowhere else
+        if run_token is not None:
+            self.run_token_digest = run_tokens.digest(run_token)
+            """The sha256 of the worker's run token: what the Track records of it."""
+            self.details = dict(details or {})
+            """Where the worker is, for the Track: its workloads' name and namespace. No secret."""
+
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._run_token}"} if self._run_token else {}
+
+    def turn(self, turn: str, text: str) -> str:
+        """One turn of a session the worker holds: ``POST /turn``, answered with ``{"text": ...}``."""
+        response = self.http.post(f"{self.url}/turn", json={"turn": turn, "text": text}, headers=self._headers())
+        if response.status_code != 200:
+            raise TurnRefused(f"the worker answered HTTP {response.status_code}"
+                              + (": it holds no session" if response.status_code == 404 else ""),
+                              status=response.status_code)
+        try:
+            answer = response.json()["text"]
+        except (ValueError, KeyError, TypeError):
+            answer = None
+        if not isinstance(answer, str):
+            raise TurnRefused("the worker's answer to a turn is not {\"text\": ...}")
+        return answer
 
     def interact(
         self, entry_point: str, input: Any = None, idempotency_key: str | None = None,
@@ -448,7 +554,7 @@ class _KubernetesWorker:
         last: Exception | None = None
         for _ in range(attempts):
             try:
-                return self.http.post(url, json=payload)
+                return self.http.post(url, json=payload, headers=self._headers())
             except (ConnectError, ConnectTimeout) as exc:
                 last = exc
                 time.sleep(delay)

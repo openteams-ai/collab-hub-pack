@@ -39,13 +39,29 @@ and asks the executor to tear it down. An executor holds no lifecycle logic.
 | Location | Setting | Built | A worker is | For |
 |---|---|---|---|---|
 | `local` | `location="local"` | yes | a process on the controller's host: the Cog package's `serve` task, in the package's own pixi environment, on a loopback port | development and the desktop |
-| `remote` | `location="remote"` | Phase 22 of the plan (#6) | a workload on a cluster, reached over the cluster's network | a Kubernetes hub, always |
+| `remote` | `location="remote"` | yes | a Deployment and a Service on the cluster the controller runs in: the hub's own image running the Cog package's `serve` task, reached over service DNS | a Kubernetes hub, always |
 
-The setting is the only switch: nothing imports an executor, and a runner
-configured with a location that is not built yet refuses to start
-(`LocationNotImplemented`). The Kubernetes executor that exists today is what
-`remote` will select; until Phase 22 it is handed to a runner directly, as the
-in-memory executor of the tests is.
+The setting is the only switch: nothing imports an executor.
+
+**What a remote worker is.** A pod the run controller makes, of the hub's
+image, which ships the Cog packages under `/opt/collab-hub/cogs` and pixi:
+the package's `serve` task in the environment its lock pins, built on the
+pod's own volumes (materialization from a published artifact, with a cache,
+is #105). It is given what a local worker is given, in its environment:
+`COLLAB_COG_HOST` (`0.0.0.0`) and `COLLAB_COG_PORT`, `COLLAB_COG_ID`,
+`COLLAB_RUN_ID`, `COLLAB_RUN_TOKEN`, and what the binding delivers. It
+carries no ServiceAccount token, and a NetworkPolicy per worker admits only
+the controller's pods to its `/invoke`; the controller presents the run
+token on every request, turns included. `worker_started` records the
+workloads' `name` and `namespace` and the token's sha256. Teardown deletes
+the Deployment, the Service and the policy by name. A pod outlives a
+controller that dies, so the next controller to find the run, its own on
+restart or another taking the run over, reaps the pod by the name the Track
+recorded, and `worker_stopped` says so. The only identity that may create
+these workloads is the controller's; the API never does (ADR-0002 invariant
+3). The controller takes `--image`, `--namespace` and `--allow-ingress-from`
+(the labels of its own pods, as JSON), or `--insecure-skip-network-policy`
+for a trusted namespace.
 
 **What a local worker is given.** Its environment, and nothing else of its
 controller: `PATH`, `HOME` and the few variables a process needs to run at all;
@@ -160,8 +176,21 @@ under the same id refuses to start, and one that loses its hold stops.
   the controller dies, and the stop is recorded `reaped: false`.
 
 An id is what lets a restarted controller take its runs back, so it is the
-same across restarts and different between replicas: a StatefulSet's pod
-names, or `CONTROLLER_ID=` in `dev/`. On Postgres the id is held as a
+same across restarts and different between replicas: the chart's
+`runs.controller.id`, or `CONTROLLER_ID=` in `dev/`.
+
+- **An owner that never returns.** A run picked up by a controller whose id
+  is no longer held, a replaced pod's say, is ended by a live controller:
+  it probes the owner's id (the lock beside a SQLite Track, the advisory
+  lock on Postgres, tried and let go at once, at most every thirty seconds
+  per owner) and, finding it free, records `interrupted` naming itself as
+  `taken_over_by` and the owner as `from_controller`, or `cancelled` when a
+  cancel was asked, and reaps the workers it can reach. A controller that is
+  alive keeps its runs: a held id is never taken. A controller given no
+  `--track` to probe through leaves other owners' runs alone.
+- **Starting costs what is unfinished.** A controller's start reads the
+  Track's index for the runs left running or waiting at a Gate, not every
+  run's events. On Postgres the id is held as a
 session-level advisory lock, so `--track` must reach Postgres on a direct
 connection: through a transaction-pooling PgBouncer the lock would not outlive
 the transaction that took it, and two controllers could hold one id.
@@ -188,7 +217,8 @@ run API's later phase.
 | `--track` | A SQLite file, or a `postgresql://` URL (`collab-hub-execution[postgres]`). On Postgres the Track's tables come from the hub's migrations; the controller refuses a database without them |
 | `--id` | The controller's name, held while it runs, recorded on each run it picks up |
 | `--packages`, `--allow`, `--work-dir`, `--environment` | The `local` location's directory package source, and where workers write their output |
-| `--backend`, `--location` | The two axes, `none` and `local` built |
+| `--image`, `--namespace`, `--allow-ingress-from`, `--insecure-skip-network-policy` | The `remote` location: the image a worker pod runs, where, and which pods may reach it |
+| `--backend`, `--location` | The two axes: `none` built; `local` and `remote` built |
 | `--models FILE` | The hub's `models:` block, below |
 | `--health-port`, `--health-host` | `GET /healthz`, 200 while the controller passes over the Track, and `GET /readyz`, 200 once it has started and its last pass read the Track; 503 otherwise, with the reason |
 

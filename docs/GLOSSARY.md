@@ -247,9 +247,13 @@ cog-execution README.)
 files, `nebi run` executes one of its entry points, and publishing goes
 through Nebi to an OCI registry the hub indexes. (ADR-0001 D6.)
 
-**Remote worker.** A Cog worker at the `remote` agent location: a workload
-on a cluster, reached over the cluster's network through the same seam as a
-local worker. What a Kubernetes hub always runs. (ADR-0002 D12.)
+**Remote worker.** A Cog worker at the `remote` agent location: a Deployment
+and a Service the run controller makes on its own cluster, of the hub's image
+running the Cog package's `serve` task, reached over service DNS through the
+same seam as a local worker, with no ServiceAccount token and a NetworkPolicy
+admitting only the controller. It outlives a controller that dies, and is
+reaped by name by the next controller to find its run. What a Kubernetes hub
+always runs. (ADR-0002 D12.)
 
 **Result envelope.** The structured return of a usage entry point: `ok`,
 `payload`, `problems`, `binding`, plus usage and timing — exactly what

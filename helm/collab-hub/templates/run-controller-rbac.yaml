@@ -1,0 +1,53 @@
+{{- $controller := .Values.runs.controller }}
+{{- if and .Values.api.enabled $controller.enabled (eq $controller.location "remote") }}
+{{- $component := "run-controller" }}
+{{- $name := include "collab-hub.component-name" (dict "top" . "component" $component) }}
+{{- /* The run controller's identity, and the only workload permissions the chart grants (ADR-0002
+invariant 3): over the kinds it materializes, in its namespace, with the verbs it uses, and nothing
+on the API's ServiceAccount. Workers themselves carry no ServiceAccount token. */}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+  {{- with $controller.serviceAccountAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "get", "list", "watch", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "list", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ $name }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

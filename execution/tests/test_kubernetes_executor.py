@@ -93,6 +93,8 @@ class FakeK8sApi:
         self, *, conflict_on_deployment: bool = False, ready_after: int = 0, fail_delete: bool = False
     ) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.bodies: list[tuple[str, dict]] = []  # what was POSTed, path and manifest
+        self.deleted_missing: set[str] = set()  # paths whose delete answers 404
         self.conflict_on_deployment = conflict_on_deployment
         self._gets = 0
         self._ready_after = ready_after
@@ -100,6 +102,7 @@ class FakeK8sApi:
 
     def post(self, path: str, *, json: dict) -> FakeResponse:
         self.calls.append(("POST", path))
+        self.bodies.append((path, json))
         if self.conflict_on_deployment and "deployments" in path:
             return FakeResponse(409)
         return FakeResponse(201)
@@ -112,6 +115,8 @@ class FakeK8sApi:
         self.calls.append(("DELETE", path))
         # httpx does not raise on 4xx/5xx; a real failed delete returns an error
         # response the caller must inspect.
+        if path in self.deleted_missing:
+            return FakeResponse(404)
         return FakeResponse(500 if self.fail_delete else 200)
 
     def get(self, path: str) -> FakeResponse:
@@ -124,9 +129,13 @@ class FakeK8sApi:
 class FakeWorkerHttp:
     def __init__(self) -> None:
         self.posts: list[tuple[str, dict]] = []
+        self.headers: list[dict] = []
 
-    def post(self, url: str, *, json: dict) -> FakeResponse:
+    def post(self, url: str, *, json: dict, headers: dict | None = None) -> FakeResponse:
         self.posts.append((url, json))
+        self.headers.append(dict(headers or {}))
+        if url.endswith("/turn"):
+            return FakeResponse(200, {"text": f"you said: {json['text']}"})
         return FakeResponse(200, {"envelope": 1, "ok": True, "payload": f"handled:{json['entry_point']}"})
 
 
@@ -197,7 +206,7 @@ def test_teardown_deletes_deployment_and_service_by_worker_name():
 
 
 class PausingWorkerHttp:
-    def post(self, url: str, *, json: dict) -> FakeResponse:
+    def post(self, url: str, *, json: dict, headers: dict | None = None) -> FakeResponse:
         return FakeResponse(200, {"pause": True, "reason": "needs approval"})
 
 

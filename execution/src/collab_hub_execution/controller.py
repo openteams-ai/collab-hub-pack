@@ -66,12 +66,19 @@ TRACK_TABLES = ("collab_track_events", "collab_track_payloads")
 class RunController:
     """Watches a Track and advances what it finds there, on one lifecycle runner."""
 
-    def __init__(self, runner: LifecycleRunner, *, poll_interval: float = 0.25, session_grace: float = 30.0) -> None:
+    def __init__(self, runner: LifecycleRunner, *, poll_interval: float = 0.25, session_grace: float = 30.0,
+                 track_spec: str | None = None, owner_check_interval: float = 30.0) -> None:
         self.runner = runner
         self.poll_interval = poll_interval
         self.session_grace = session_grace
         """How long a worker that was invoked may answer a turn "no session" before the turn fails."""
         self._ended: set[str] = set()
+        self.track_spec = track_spec
+        """The Track as `--track` names it, through which another controller's id can be probed; ``None`` leaves
+        the runs of an owner that never returns to that owner."""
+        self.owner_check_interval = owner_check_interval
+        self._owners: dict[str, tuple[float, bool]] = {}  # controller id -> (when probed, still holds its id)
+        self._taking_over: dict[str, threading.Thread] = {}
         self._advancing: dict[str, threading.Thread] = {}
         self._cancelling: dict[str, threading.Thread] = {}
         self._turning: dict[str, threading.Thread] = {}
@@ -138,6 +145,11 @@ class RunController:
             self.views.forget(run_id)  # never read again here: keep nothing of it
             return
         mine = self._mine(view)
+        if not mine and view.controller and not self._owner_holds_id(view.controller):
+            # Picked up by a controller that never started again: a live one ends the run for it.
+            if not self._alive(self._taking_over, run_id):
+                self._spawn(self._taking_over, run_id, self._take_over, run_id, view.controller)
+            return
         if view.cancel_requested_by is not None:
             # A run nobody picked up is cancelled by whichever controller gets there; any other, by its own.
             if (view.state is RunState.SUBMITTED or mine) and not self._alive(self._cancelling, run_id):
@@ -184,6 +196,35 @@ class RunController:
             _log.exception("cancelling %s failed", run_id)
             return
         _log.info("cancel of %s by %s delivered", run_id, actor)
+
+    def _owner_holds_id(self, controller: str) -> bool:
+        """Whether ``controller`` still holds its id on the Track; ``True`` when it cannot be known.
+
+        Probed at most every ``owner_check_interval`` per controller, by trying
+        its id's lock and letting it go at once: held, the owner is alive.
+        """
+        if self.track_spec is None:
+            return True
+        now = time.monotonic()
+        probed = self._owners.get(controller)
+        if probed is not None and now - probed[0] < self.owner_check_interval:
+            return probed[1]
+        try:
+            holds = id_held(self.track_spec, controller)
+        except Exception:  # noqa: BLE001 - a probe that fails says nothing: the owner is left its run
+            _log.exception("probing whether controller %r holds its id failed", controller)
+            holds = True
+        self._owners[controller] = (now, holds)
+        return holds
+
+    def _take_over(self, run_id: str, owner: str) -> None:
+        try:
+            state = self.runner.take_over(run_id, from_controller=owner)
+        except Exception:  # noqa: BLE001 - one run's failure never stops the controller
+            _log.exception("taking %s over from %s failed", run_id, owner)
+            return
+        if state is not None:
+            _log.info("%s was picked up by %s, which no longer holds its id: it is %s", run_id, owner, state.name)
 
     def _retry(self, run_id: str, actor: str) -> None:
         """Take a retry asked for: the runner records `retry_requested` and advances the run; or say why not."""
@@ -359,6 +400,32 @@ def open_track(spec: str) -> tuple[TrackStore, Any]:
     return SqliteTrackStore(path), None
 
 
+def id_held(spec: str, controller: str) -> bool:
+    """Whether a live controller holds ``controller`` on the Track: its lock is tried and let go at once."""
+    if spec.startswith(POSTGRES_SCHEMES):
+        import psycopg
+
+        with psycopg.connect(spec, autocommit=True) as connection:
+            got = connection.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                                     (f"collab-run-controller:{controller}",)).fetchone()[0]
+            if got:
+                connection.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                                   (f"collab-run-controller:{controller}",))
+            return not got
+    path = Path(spec)
+    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in controller)
+    lock_path = path.with_name(f"{path.name}.{safe}.controller.lock")
+    if not lock_path.exists():
+        return False
+    with open(lock_path) as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        return False
+
+
 def hold_id(spec: str, controller: str):
     """Hold ``controller`` on the Track for as long as this process runs; returns a check that it still does.
 
@@ -449,6 +516,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--health-port", type=int, default=number("COLLAB_CONTROLLER_HEALTH_PORT", "0", int),
                         help="serve /healthz and /readyz on this port; none when 0")
     parser.add_argument("--health-host", default=env("COLLAB_CONTROLLER_HEALTH_HOST", "127.0.0.1"))
+    parser.add_argument("--image", default=env("COLLAB_CONTROLLER_IMAGE"), metavar="IMAGE",
+                        help="at the remote location, the image a worker pod runs: the hub's own, which ships "
+                             "the Cog packages under /opt/collab-hub/cogs")
+    parser.add_argument("--namespace", default=env("COLLAB_CONTROLLER_NAMESPACE", "collab-hub"),
+                        help="at the remote location, the namespace worker pods are made in")
+    parser.add_argument("--allow-ingress-from", default=env("COLLAB_CONTROLLER_ALLOW_INGRESS_FROM"), metavar="JSON",
+                        help="at the remote location, the labels of the pods that may reach a worker's /invoke, "
+                             "as a JSON object: the run controller's own; or --insecure-skip-network-policy")
+    parser.add_argument("--insecure-skip-network-policy", action="store_true",
+                        default=env("COLLAB_CONTROLLER_INSECURE_SKIP_NETWORK_POLICY", "") == "true",
+                        help="at the remote location, make no NetworkPolicy for workers (a trusted namespace only)")
     parser.add_argument("--worker-start-timeout", type=float, metavar="SECONDS",
                         default=number("COLLAB_CONTROLLER_WORKER_START_TIMEOUT", "120", float),
                         help="how long a worker may take to start and answer /healthz, which includes pixi building "
@@ -466,11 +544,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(f"--environment is pixi or host, not {args.environment!r}")
     if args.location not in AGENT_LOCATIONS:
         parser.error(f"--location is one of {', '.join(AGENT_LOCATIONS)}, not {args.location!r}")
-    for required in ("track", "work_dir"):
-        if not getattr(args, required):
-            parser.error(f"--{required.replace('_', '-')} is required")
-    if not args.packages:
-        parser.error("--packages is required")
+    if not args.track:
+        parser.error("--track is required")
+    if args.location == "local":
+        if not args.work_dir:
+            parser.error("--work-dir is required at the local location")
+        if not args.packages:
+            parser.error("--packages is required at the local location")
+    else:
+        if not args.image:
+            parser.error("--image is required at the remote location: the image a worker pod runs")
+        if args.allow_ingress_from:
+            try:
+                args.allow_ingress_from = json.loads(args.allow_ingress_from)
+            except ValueError:
+                parser.error("--allow-ingress-from is a JSON object of labels")
+            if not isinstance(args.allow_ingress_from, dict) or not args.allow_ingress_from:
+                parser.error("--allow-ingress-from is a JSON object of labels, and not empty")
+        elif not args.insecure_skip_network_policy:
+            parser.error("the remote location needs --allow-ingress-from, the labels of the pods that may reach a "
+                         "worker, or --insecure-skip-network-policy")
     return args
 
 
@@ -530,14 +623,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}: each controller on a Track has its own --id", file=sys.stderr)
         return 1
 
+    if args.location == "local":
+        location_settings: dict[str, Any] = {
+            "packages": args.packages, "allow": args.allow, "work_dir": args.work_dir,
+            "environment": args.environment}
+    else:
+        location_settings = {
+            "image": args.image, "namespace": args.namespace, "controller": args.id,
+            "allow_ingress_from": args.allow_ingress_from or None,
+            "insecure_skip_network_policy": bool(args.insecure_skip_network_policy)}
     runner = LifecycleRunner(
         track=track, backend=args.backend, location=args.location, controller=args.id,
-        location_settings={"packages": args.packages, "allow": args.allow, "work_dir": args.work_dir,
-                           "environment": args.environment,
-                           "interaction_timeout": args.interaction_timeout or None,
-                           "ready_timeout": args.worker_start_timeout,
-                           "deliver": deliver})
-    controller = RunController(runner, poll_interval=args.poll_interval)
+        location_settings={**location_settings, "interaction_timeout": args.interaction_timeout or None,
+                           "ready_timeout": args.worker_start_timeout, "deliver": deliver})
+    controller = RunController(runner, poll_interval=args.poll_interval, track_spec=args.track)
     controller.start()
     starting["controller"] = controller
 

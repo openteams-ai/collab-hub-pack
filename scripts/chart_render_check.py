@@ -57,9 +57,13 @@ class Rendered:
 
     def __init__(self, docs: list[dict]) -> None:
         deployments = {d["metadata"]["labels"][COMPONENT_LABEL]: d for d in docs if d.get("kind") == "Deployment"}
-        assert set(deployments) <= {"api", "indexer"}, sorted(deployments)
+        assert set(deployments) <= {"api", "indexer", "run-controller"}, sorted(deployments)
         self.api = Workload(deployments["api"])
         self.indexer = Workload(deployments["indexer"]) if "indexer" in deployments else None
+        self.controller = Workload(deployments["run-controller"]) if "run-controller" in deployments else None
+        self.roles = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "Role"}
+        self.bindings = [d for d in docs if d.get("kind") == "RoleBinding"]
+        self.service_accounts = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "ServiceAccount"}
         self.services = [d for d in docs if d.get("kind") == "Service"]
         self.configmaps = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "ConfigMap"}
         # The API container is what the source/credential assertions read;
@@ -269,9 +273,9 @@ def case_run_controller(r: Rendered) -> None:
     assert "frames-storage" not in mounts, "the controller reaches the API's frames"
     assert r.volumes["run-models"]["configMap"]["name"] == "t-collab-hub-run-models"
     assert 'auth_ref = "env:ANTHROPIC_API_KEY"' in r.configmaps["t-collab-hub-run-models"]["data"]["models.toml"]
-    # The controller is the API pod's, and no other workload's: the indexer runs no Cog.
-    if r.indexer is not None:
-        assert sorted(r.indexer.containers) == ["api"], sorted(r.indexer.containers)
+    # At the local location the controller is the API pod's: no Deployment and no Role of its own.
+    assert r.controller is None and not r.roles and not r.bindings
+    assert r.value("COLLAB_HUB_API__RUNS__LOCATION") == "local"
 
 
 def case_no_run_controller(r: Rendered) -> None:
@@ -279,10 +283,48 @@ def case_no_run_controller(r: Rendered) -> None:
     assert not r.annotations, r.annotations
     assert "COLLAB_HUB_API__RUNS__PACKAGES" not in r.env
     assert not r.configmaps.get("t-collab-hub-run-models")
+    assert r.controller is None and not r.roles and not r.bindings
+
+
+def case_run_controller_remote(r: Rendered) -> None:
+    # The API pod runs the API alone, told where its Cogs and their workers are; it may create nothing.
+    assert sorted(r.containers) == ["api"], sorted(r.containers)
+    assert r.value("COLLAB_HUB_API__RUNS__PACKAGES") == "/opt/collab-hub/cogs"
+    assert r.value("COLLAB_HUB_API__RUNS__LOCATION") == "remote"
+    assert r.api.spec["replicas"] == 2  # more than one API pod is fine: the controller is not in it
+    api_sa = r.api.pod["serviceAccountName"]
+    assert not [b for b in r.bindings if any(s["name"] == api_sa for s in b["subjects"])], "the API holds a Role"
+    # The controller: its own Deployment, one replica under one id, its own ServiceAccount and Role.
+    controller = r.controller
+    assert controller is not None, "no run-controller Deployment"
+    assert controller.spec["replicas"] == 1 and controller.spec["strategy"] == {"type": "Recreate"}
+    assert controller.container["command"] == ["collab-hub-run-controller"]
+    assert controller.container["image"] == r.api.container["image"]
+    assert controller.value("COLLAB_CONTROLLER_LOCATION") == "remote"
+    assert controller.value("COLLAB_CONTROLLER_IMAGE") == r.api.container["image"]
+    assert controller.value("COLLAB_CONTROLLER_ID") == "hub" and controller.value("COLLAB_CONTROLLER_NAMESPACE")
+    assert controller.env["COLLAB_CONTROLLER_TRACK"]["valueFrom"]["secretKeyRef"] == {"name": "hub-db", "key": "url"}
+    assert controller.value("COLLAB_CONTROLLER_MODELS") == "/etc/collab-hub/runs/models.toml"
+    allow = json.loads(controller.value("COLLAB_CONTROLLER_ALLOW_INGRESS_FROM"))
+    assert allow == controller.selector, (allow, controller.selector)  # only the controller's pods reach a worker
+    assert "livenessProbe" in controller.container and "readinessProbe" not in controller.container
+    assert re.fullmatch(r"[0-9a-f]{64}", controller.annotations.get("checksum/run-models", "")), controller.annotations
+    sa = controller.pod["serviceAccountName"]
+    assert sa == "t-collab-hub-run-controller" and sa in r.service_accounts
+    [binding] = [b for b in r.bindings if any(s["name"] == sa for s in b["subjects"])]
+    role = r.roles[binding["roleRef"]["name"]]
+    rules = {(rule["apiGroups"][0], rule["resources"][0]): sorted(rule["verbs"]) for rule in role["rules"]}
+    assert rules == {
+        ("apps", "deployments"): ["create", "delete", "get", "list", "patch", "watch"],
+        ("", "services"): ["create", "delete", "get", "list"],
+        ("networking.k8s.io", "networkpolicies"): ["create", "delete", "get", "list", "patch"],
+    }, rules
+    assert "run-cache" not in r.volumes and "run-tmp" not in r.volumes  # nothing of a worker's on the API pod
 
 
 CASES = {
     "run-controller": case_run_controller,
+    "run-controller-remote": case_run_controller_remote,
     "no-run-controller": case_no_run_controller,
     "features": case_features,
     "default": case_default,

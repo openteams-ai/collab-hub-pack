@@ -368,7 +368,7 @@ def _until(check, what, within=30.0):
         time.sleep(0.05)
 
 
-def test_a_killed_controllers_run_ends_interrupted_when_it_starts_again_and_not_before(tmp_path):
+def test_a_killed_controllers_run_is_ended_by_a_live_controller_once_its_id_is_free(tmp_path):
     track_path = tmp_path / "track.sqlite"
     SqliteTrackStore.ensure_schema(track_path)
     track = SqliteTrackStore(track_path)
@@ -388,10 +388,15 @@ def test_a_killed_controllers_run_ends_interrupted_when_it_starts_again_and_not_
         two, _ = controllers.start("two")
         intents.submit(track, OpDefinition("echo", (OpStep("a", "echo", "run", {"n": 1}),)), by=BY)
         _until(lambda: intents.describe(track, "echo").state is RunState.COMPLETED, "two never ran echo")
-        assert intents.describe(track, "slow").state is RunState.RUNNING  # one's run: two leaves it
-        controllers.start("one")
-        _until(lambda: intents.describe(track, "slow").state is RunState.INTERRUPTED, "one never interrupted it")
+        # One's id is free, so two ends the run one left: it was picked up by a controller that is gone.
+        _until(lambda: intents.describe(track, "slow").state is RunState.INTERRUPTED, "two never took it over")
+        [ended] = [e.payload for e in track.replay("slow") if e.event_type == "interrupted"]
+        assert ended["taken_over_by"] == "two" and ended["from_controller"] == "one"
         assert [e.payload.get("reaped") for e in track.replay("slow") if e.event_type == "worker_stopped"] == [False]
+        controllers.start("one")  # back under its id, it finds nothing of its own left unfinished
+        intents.submit(track, OpDefinition("again", (OpStep("a", "echo", "run", {"n": 2}),)), by=BY)
+        _until(lambda: intents.describe(track, "again").state is RunState.COMPLETED, "the runs stopped")
+        assert _types(track, "slow").count("interrupted") == 1
     finally:
         controllers.close()
 

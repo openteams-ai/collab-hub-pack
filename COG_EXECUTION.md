@@ -314,7 +314,7 @@ Each phase is one pull request from the branch it names, numbered in build order
 | 19 |#126, closes it|Decide, read and retry runs from the `collab-hub` CLI|`feat/cli-runs`|16, 18|S| in review, #251, with Phases 16 and 18 |
 | 20 | apollo-desktop#825 | Launch and watch hub runs from the desktop | `feat/hub-run-client-690` | 12, 18 | M | not started |
 | 21 | apollo-desktop#719 | Let a human approve, reject, or send back a paused step from the desktop | `feat/run-view-gate-decisions-719` | 4, 20 | M | not started |
-| 22 | #6 | The remote location: Cog workers in pods, and least-privilege RBAC for the controller | `feat/cog-remote-location-6` | 9, 11 | M | in review, with #223, #165 and #214 folded in |
+| 22 | #6 | The remote location: Cog workers in pods, and least-privilege RBAC for the controller | `feat/cog-remote-location-6` | 9, 11 | M | in review, #252, with #223, #165 and #214 folded in |
 | 23 | #105 | Materialize a Cog worker from its published artifact, running its own `serve` | `feat/cog-materialize-serve` | 15, 22 | L | not started |
 | 24 | #106 | Install and uninstall a Cog by digest | `feat/cog-install-by-digest` | 12, 23 | M | not started |
 | 25 | #3 | Resolve a Cog's model binding into its worker's connection config | `feat/cog-model-binding-3` | 24 | M | not started |
@@ -833,7 +833,7 @@ Needs only the run API, Phases 12 and 18, so it lands before the worker becomes 
 The same runner, backend and Cog; the worker becomes a pod. Then the rest of the lifecycle a production hub needs: the artifact, install, the Cog's own `resolve`, budgets.
 
 #### Phase 22 — The `remote` location: workers in pods, and least-privilege RBAC
-**Issue** #6 · **Branch** `feat/cog-remote-location-6` · **Depends on** Phases 9, 11 · **Size** M · **Status** in review, one pull request, on Phase 18's
+**Issue** #6 · **Branch** `feat/cog-remote-location-6` · **Depends on** Phases 9, 11 · **Size** M · **Status** in review, #252, on Phase 18's #251
 
 Same runner, same `none`, same Hermes Cog — the worker becomes a pod. The only identity able to create workloads is the controller, never the public API.
 

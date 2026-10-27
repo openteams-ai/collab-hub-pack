@@ -791,3 +791,42 @@ cogs:
 # flag is off until it is listed here and set to true; each entry becomes
 # COLLAB_HUB_API__FEATURES__<NAME>. See docs/feature-flags.md.
 features: {}
+
+# The run API (/v1/runs) is always served, on the hub's database (frames.postgres). A run controller beside it
+# is what runs the Cogs launched through it.
+runs:
+  controller:
+    # -- Run a run controller in the API's pod, so this hub runs the Cogs launched through /v1/runs: each Cog
+    # as a process of that pod (the `local` location), from the Cog packages the image ships under
+    # /opt/collab-hub/cogs. A first step, for a development hub: a Cog's worker shares the pod with the
+    # controller and the API, so it is not isolated from them; the `remote` location, a pod per worker,
+    # replaces it. Needs frames.postgres, the Track, and one API replica.
+    enabled: false
+    # -- The controller's id, recorded on each run it picks up: the same across restarts and rollouts, so the
+    # controller of a new pod takes the runs of the one it replaces.
+    id: hub
+    # -- Seconds the controller waits at start for the Track's tables (the API's migrations create them) and
+    # for its id (held by the controller of the pod a rollout replaces, until that pod stops).
+    waitSeconds: 600
+    # -- How a Cog's `serve` runs: `pixi`, in the environment its lock pins, built the first time the Cog is
+    # launched (it downloads its packages), or `host`, with the image's Python and nothing installed.
+    environment: pixi
+    # -- Seconds one interaction with a worker may take; 0 for no limit, which a Cog holding a session needs.
+    interactionTimeoutSeconds: 0
+    # -- Seconds a worker may take to start and answer, which includes pixi building a Cog's environment the
+    # first time the Cog is launched on a pod: several minutes for Hermes.
+    workerStartSeconds: 900
+    # -- The models block, in TOML: the models the controller hands Cogs, and which Cog talks to which
+    # (docs/cog-execution/runs.md). A key is named by `auth_ref = "env:NAME"`, and comes in through extraEnv.
+    models: ""
+    # -- Extra environment for the controller: the variables a models block's auth_ref names, from Secrets.
+    extraEnv: []
+    # -- The size limit of the volume Cog environments and run output are kept on (an emptyDir). Past it, the
+    # kubelet evicts the whole pod, the API with it.
+    cacheSizeLimit: 20Gi
+    # -- The size limit of the controller's /tmp, where Cogs write (HOME is /tmp). Past it, the pod is evicted.
+    tmpSizeLimit: 5Gi
+    # -- The port of the controller's /healthz, which its liveness probe reads.
+    healthPort: 8771
+    # -- Resources for the controller container, which also runs the Cogs' workers.
+    resources: {}

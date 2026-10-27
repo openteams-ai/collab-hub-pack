@@ -48,7 +48,7 @@ def test_the_backend_setting_takes_three_values_and_none_is_built():
     assert runner.backend.name == "none" and runner.backend.durable is False
 
 
-@pytest.mark.parametrize(("name", "phase"), [("dbos", "Phase 26"), ("temporal", "Phase 32")])
+@pytest.mark.parametrize(("name", "phase"), [("dbos", "Phase 27"), ("temporal", "Phase 33")])
 def test_a_backend_not_built_yet_is_refused_when_the_runner_starts(name, phase):
     with pytest.raises(BackendNotImplemented, match=phase):
         LifecycleRunner(executor=InMemoryCogExecutor({}), track=InMemoryTrackStore(), backend=name)

@@ -271,7 +271,7 @@ def test_a_numeric_variable_that_is_not_a_number_is_a_usage_error(monkeypatch, t
     monkeypatch.setenv("COLLAB_CONTROLLER_TRACK", str(tmp_path / "t.sqlite"))
     monkeypatch.setenv("COLLAB_CONTROLLER_WORK_DIR", str(tmp_path / "runs"))
     monkeypatch.setenv("COLLAB_CONTROLLER_PACKAGES", "/a")
-    for name in ("POLL_INTERVAL", "INTERACTION_TIMEOUT", "HEALTH_PORT"):
+    for name in ("POLL_INTERVAL", "INTERACTION_TIMEOUT", "HEALTH_PORT", "WORKER_START_TIMEOUT", "WAIT"):
         monkeypatch.setenv(f"COLLAB_CONTROLLER_{name}", "soon")
         with pytest.raises(SystemExit) as stopped:
             parse_args([])
@@ -470,11 +470,13 @@ def test_every_option_reads_its_variable_and_the_command_line_wins(monkeypatch, 
     for name, value in {"TRACK": str(tmp_path / "t.sqlite"), "WORK_DIR": str(tmp_path / "runs"),
                         "PACKAGES": os.pathsep.join(["/a", "/b"]), "ALLOW": "echo,slow", "ENVIRONMENT": "host",
                         "POLL_INTERVAL": "0.5", "INTERACTION_TIMEOUT": "0", "HEALTH_PORT": "8770",
+                        "WORKER_START_TIMEOUT": "900",
                         "ID": "one"}.items():
         monkeypatch.setenv(f"COLLAB_CONTROLLER_{name}", value)
     args = parse_args([])
     assert (args.packages, args.allow, args.environment, args.poll_interval, args.interaction_timeout,
-            args.health_port, args.id) == (["/a", "/b"], ["echo", "slow"], "host", 0.5, 0.0, 8770, "one")
+            args.health_port, args.id, args.worker_start_timeout) == (
+        ["/a", "/b"], ["echo", "slow"], "host", 0.5, 0.0, 8770, "one", 900.0)
     args = parse_args(["--packages", "/c", "--environment", "pixi"])
     assert args.packages == ["/c"] and args.environment == "pixi"
     monkeypatch.setenv("COLLAB_CONTROLLER_ENVIRONMENT", "docker")
@@ -513,3 +515,73 @@ def test_a_postgres_with_part_of_a_track_is_refused_naming_what_is_missing():
     finally:
         with psycopg.connect(TEST_PG, autocommit=True) as admin:
             admin.execute("DROP DATABASE IF EXISTS track_partial WITH (FORCE)")
+
+
+def test_a_controller_told_to_wait_takes_its_id_over_once_the_one_holding_it_stops(tmp_path):
+    # A rollout: the new pod's controller starts while the old one still holds the id, and waits for it
+    # rather than exiting; once the old one stops, it takes the id and its runs over.
+    track_path = tmp_path / "track.sqlite"
+    SqliteTrackStore.ensure_schema(track_path)
+    track = SqliteTrackStore(track_path)
+    controllers = _Controllers(tmp_path, str(track_path))
+    try:
+        old, _ = controllers.start("hub")
+        intents.submit(track, OpDefinition("slow", (OpStep("a", "slow", "run", {"seconds": 60}),)), by=BY)
+        _until(lambda: "interaction_started" in _types(track, "slow"), "the slow step never started")
+        port = _free_port()
+        new = subprocess.Popen([*controllers.base, "--id", "hub", "--wait", "60", "--health-port", str(port)],
+                               stderr=subprocess.DEVNULL, start_new_session=True)
+        controllers.processes.append(new)
+        time.sleep(2)
+        # Waiting, not refused: alive, so a liveness probe leaves it be, and not ready, saying for what.
+        assert new.poll() is None and _get(port, "/healthz")[0] == 200
+        status, waiting = _get(port, "/readyz")
+        assert status == 503 and "holds the id 'hub'" in waiting["error"]
+        old.terminate()
+        old.wait(30)
+        _until(lambda: _get(port, "/readyz")[0] == 200, "the waiting controller never took the id", within=60)
+        _until(lambda: intents.describe(track, "slow").state is RunState.INTERRUPTED,
+               "the new controller did not take the old one's run")
+    finally:
+        controllers.close()
+
+
+def test_a_controller_told_to_wait_still_refuses_a_taken_id_once_its_wait_is_over(tmp_path):
+    track_path = tmp_path / "track.sqlite"
+    controllers = _Controllers(tmp_path, str(track_path))
+    try:
+        controllers.start("hub")
+        started = time.monotonic()
+        second = subprocess.run([*controllers.base, "--id", "hub", "--wait", "2"], capture_output=True, text=True,
+                                timeout=60)
+        assert second.returncode == 1 and "a controller named 'hub' is running" in second.stderr
+        assert time.monotonic() - started >= 2
+    finally:
+        controllers.close()
+
+
+def test_a_track_url_of_another_kind_is_refused_not_taken_for_a_file(tmp_path, monkeypatch):
+    from collab_hub_execution.controller import open_track
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit, match="postgresql://"):
+        open_track("mysql://hub/runs")
+    assert list(tmp_path.iterdir()) == []  # no file named after the URL
+
+
+def test_a_misconfigured_track_stops_the_controller_at_once_even_told_to_wait(tmp_path):
+    # Only a Track that may be ready soon is waited for; a wrong scheme never will be.
+    started = time.monotonic()
+    refused = subprocess.run([sys.executable, "-m", "collab_hub_execution.controller", "--track", "mysql://hub/runs",
+                              "--packages", str(tmp_path), "--work-dir", str(tmp_path / "runs"), "--wait", "60"],
+                             capture_output=True, text=True, timeout=60)
+    assert refused.returncode != 0 and "postgresql://" in refused.stderr
+    assert time.monotonic() - started < 30
+
+
+@pytest.mark.skipif(not TEST_PG, reason="set TEST_POSTGRES_URL to run the Postgres controller tests")
+def test_a_database_that_does_not_answer_is_waited_for_like_missing_tables():
+    from collab_hub_execution.controller import TrackNotReady, open_track
+
+    with pytest.raises(TrackNotReady, match="does not answer"):
+        open_track("postgresql://nobody:x@127.0.0.1:1/none")

@@ -95,9 +95,9 @@ class DeclaredCapabilityResolver(CapabilityResolver):
 
 # --- the hub's models: block --------------------------------------------------------------------
 #
-# Until a Cog's own `resolve` binds it to a model (Phase 24), the run controller is configured with
+# Until a Cog's own `resolve` binds it to a model (Phase 25), the run controller is configured with
 # the models the hub offers and which Cog talks to which, and delivers each model to the workers of
-# its Cogs, and to no other. Phase 24's inventory is generated from the same block.
+# its Cogs, and to no other. Phase 25's inventory is generated from the same block.
 
 PROVIDERS = ("openai-compatible", "anthropic")
 _MODEL_KEYS = {"provider", "endpoint", "model", "auth_ref", "context_window", "max_output_tokens"}

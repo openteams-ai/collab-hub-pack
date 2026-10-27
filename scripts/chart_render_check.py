@@ -12,6 +12,7 @@ happens to contain the right name. Needs PyYAML.
 from __future__ import annotations
 
 import json
+import re
 import sys
 
 import yaml
@@ -40,6 +41,8 @@ class Workload:
         self.spec = deployment["spec"]
         self.pod = self.spec["template"]["spec"]
         self.container = self.pod["containers"][0]
+        self.containers = {c["name"]: c for c in self.pod["containers"]}
+        self.annotations = self.spec["template"]["metadata"].get("annotations") or {}
         self.env = {e["name"]: e for e in self.container["env"]}
         self.mounts = {m["name"]: m for m in self.container.get("volumeMounts", [])}
         self.volumes = {v["name"]: v for v in self.pod.get("volumes", [])}
@@ -59,11 +62,14 @@ class Rendered:
         self.api = Workload(deployments["api"])
         self.indexer = Workload(deployments["indexer"]) if "indexer" in deployments else None
         self.services = [d for d in docs if d.get("kind") == "Service"]
+        self.configmaps = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "ConfigMap"}
         # The API container is what the source/credential assertions read;
         # the indexer's env is asserted equal to it where it must be.
         self.env = self.api.env
         self.mounts = self.api.mounts
         self.volumes = self.api.volumes
+        self.containers = self.api.containers
+        self.annotations = self.api.annotations
         self.cogs_env = sorted(n for n in self.env if "COGS" in n)
         self.sources_json = self.env[SOURCES_VAR]["value"] if SOURCES_VAR in self.env else None
         self.sources = {s["id"]: s for s in json.loads(self.sources_json)} if self.sources_json else {}
@@ -336,6 +342,44 @@ def case_serve_httproute_no_timeout(r: Rendered) -> None:
     assert len(rules) == 1 and "timeouts" not in rules[0], rules
 
 
+def case_run_controller(r: Rendered) -> None:
+    # The API is told where the Cogs are; the controller is a second container of the same pod.
+    assert r.value("COLLAB_HUB_API__RUNS__PACKAGES") == "/opt/collab-hub/cogs"
+    controller = r.containers.get("run-controller")
+    assert controller is not None, f"no run-controller container: {sorted(r.containers)}"
+    assert controller["command"] == ["collab-hub-run-controller"]
+    assert controller["image"] == r.containers["api"]["image"], "the controller runs another image"
+    env = {e["name"]: e for e in controller["env"]}
+    assert env["COLLAB_CONTROLLER_TRACK"]["valueFrom"]["secretKeyRef"] == {"name": "hub-db", "key": "url"}
+    assert env["COLLAB_CONTROLLER_ID"]["value"] == "hub" and env["COLLAB_CONTROLLER_WAIT"]["value"] == "600"
+    assert env["COLLAB_CONTROLLER_MODELS"]["value"] == "/etc/collab-hub/runs/models.toml"
+    assert env["COLLAB_CONTROLLER_WORKER_START_TIMEOUT"]["value"] == "900"
+    # The pod rolls when its models block changes: the controller reads it once, at start.
+    assert re.fullmatch(r"[0-9a-f]{64}", r.annotations.get("checksum/run-models", "")), r.annotations
+    # No AWS web identity in the container Cogs run in.
+    assert r.annotations.get("eks.amazonaws.com/skip-containers") == "run-controller", r.annotations
+    assert r.volumes["run-tmp"]["emptyDir"]["sizeLimit"] == "5Gi" and r.volumes["run-cache"]["emptyDir"]["sizeLimit"]
+    assert env["ANTHROPIC_API_KEY"]["valueFrom"]["secretKeyRef"]["name"] == "claude"
+    # Liveness only: a readiness probe would hold the pod out while the controller waits for its id.
+    assert "livenessProbe" in controller and "readinessProbe" not in controller and "startupProbe" not in controller
+    assert controller["securityContext"]["readOnlyRootFilesystem"] is True
+    mounts = {m["name"]: m["mountPath"] for m in controller["volumeMounts"]}
+    assert mounts == {"run-cache": "/var/cache/collab-hub", "run-tmp": "/tmp", "run-models": "/etc/collab-hub/runs"}
+    assert "frames-storage" not in mounts, "the controller reaches the API's frames"
+    assert r.volumes["run-models"]["configMap"]["name"] == "t-collab-hub-run-models"
+    assert 'auth_ref = "env:ANTHROPIC_API_KEY"' in r.configmaps["t-collab-hub-run-models"]["data"]["models.toml"]
+    # The controller is the API pod's, and no other workload's: the indexer runs no Cog.
+    if r.indexer is not None:
+        assert sorted(r.indexer.containers) == ["api"], sorted(r.indexer.containers)
+
+
+def case_no_run_controller(r: Rendered) -> None:
+    assert sorted(r.containers) == ["api"], sorted(r.containers)
+    assert not r.annotations, r.annotations
+    assert "COLLAB_HUB_API__RUNS__PACKAGES" not in r.env
+    assert not r.configmaps.get("t-collab-hub-run-models")
+
+
 CASES = {
     "serve-off": case_serve_off,
     "serve-with-indexer": case_serve_with_indexer,
@@ -343,6 +387,8 @@ CASES = {
     "serve-nebariapp-no-timeout": case_serve_nebariapp_no_timeout,
     "serve-httproute": case_serve_httproute,
     "serve-httproute-no-timeout": case_serve_httproute_no_timeout,
+    "run-controller": case_run_controller,
+    "no-run-controller": case_no_run_controller,
     "features": case_features,
     "default": case_default,
     "fixture": case_fixture,

@@ -83,7 +83,8 @@ helm template helm/collab-hub | kubeconform -strict -ignore-missing-schemas -
 
 Follow [the PR style guide](docs/pr-style-guide.md) for descriptions and squash
 commit messages. Include applicable validation and review evidence below the
-reviewer-context marker; a repeated contribution checklist is not required.
+reviewer-context marker. Complete the applicable template checklist items
+and explain any that do not apply.
 
 - Open an issue first for anything non-trivial, and link it from the PR with a
   closing keyword (`Fixes #123`).
@@ -105,13 +106,14 @@ reviewer-context marker; a repeated contribution checklist is not required.
 
 ## PR titles and releases
 
-PRs are squash-merged, and the squash commit takes the PR title as its
-subject and the summary above the `<!-- reviewer-context -->` marker as its
-body. Keep the Conventional Commits title unchanged in the merge dialog.
-Preserve issue references, `BREAKING CHANGE:` footers, and revert metadata;
-remove reviewer context and template boilerplate as described in the
-[PR style guide](docs/pr-style-guide.md). The squash commit is what the release
-reads. Every merge to
+PRs are squash-merged. Keep the Conventional Commits PR title as the subject
+in the merge dialog. The merger must run `python3 scripts/strip_pr_body.py`
+on the PR description and use its output as the squash commit body;
+CLI mergers must pass the output with `--body-file`.
+Preserve issue references, `BREAKING CHANGE:` footers, and revert metadata
+as described in the [PR style guide](docs/pr-style-guide.md).
+
+The squash commit is what the release reads. Every merge to
 `main` whose title calls for a release is released automatically, so the
 title decides the version.
 

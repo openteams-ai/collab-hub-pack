@@ -5,7 +5,7 @@ future readers understand why it was made. Structure descriptions so the
 essential explanation is easy to reuse as the commit message.
 
 These conventions apply to human-written, agent-generated, and dependency-update
-PRs. Existing contribution, validation, and code-owner requirements still apply.
+PRs. Existing [contribution requirements](../CONTRIBUTING.md), including validation and code-owner review, still apply.
 
 ## Titles
 
@@ -66,16 +66,55 @@ merge or bypass required review and checks.
 The merger is responsible for the final commit message, whether merging through
 GitHub, a CLI, or an agent.
 
-Keep the PR's Conventional Commits title as the subject. Use the summary above
-the marker as the body, preserving issue references and release metadata.
-Inspect both before merging. Exclude the marker, reviewer context, template
-instructions, checklists, and automatically appended lists of intermediate
-commits. The marker is a convention; GitHub does not strip it automatically.
+Keep the PR's Conventional Commits title as the subject. The merger must prepare
+the body; GitHub does not strip the marker or reviewer context automatically.
+Humans and agents merging through the CLI must run
+[`scripts/strip_pr_body.py`](../scripts/strip_pr_body.py) and pass its output
+explicitly to `gh pr merge --body-file`.
 
-For older PRs or bot PRs without the marker, prepare a concise summary manually
-rather than copying the entire description. For dependency updates, include
-the dependency and version change, plus relevant compatibility information.
+The script reads UTF-8 PR text from stdin and writes the cleaned body to stdout:
 
-Merge automation should follow the same rules. A deterministic helper can be
-added separately once the convention is agreed; this change does not introduce
-a merge script or change merge permissions.
+1. Remove the first `<!-- reviewer-context -->` marker and everything after it.
+2. Remove everything from the first opening `<details>` tag through the last
+   closing `</details>` tag in the remaining text, including the tags. This
+   handles Dependabot release notes and commit lists, including nested blocks.
+3. Trim surrounding whitespace while preserving the remaining text, including
+   issue references, release footers, and any trailing Dependabot metadata.
+
+Keep essential summary and release metadata outside `<details>` blocks and above
+the marker. Text between separate details blocks is removed too. Unmatched
+opening or closing details tags cause an error with no output; inspect and fix
+the source rather than merging with an accidentally empty body.
+
+From the repository root, prepare the message (replace `123` with the PR number).
+Run each command only if the preceding command succeeded:
+
+```sh
+pr=123
+body_file=$(mktemp)
+gh pr view "$pr" --json body --jq .body > "$body_file.source"
+python3 scripts/strip_pr_body.py < "$body_file.source" > "$body_file"
+cat "$body_file"
+```
+
+Inspect the cleaned file and PR title before merging. If correct and the PR is
+approved and ready to merge, use that exact file:
+
+```sh
+gh pr merge "$pr" --squash --body-file "$body_file"
+rm "$body_file" "$body_file.source"
+```
+
+In the GitHub UI, run the same script on the PR description and paste its output
+into the squash commit body. Keep the PR title as the subject and remove any
+automatically appended list of intermediate commits.
+
+For a Dependabot PR without the marker, the script still removes the details
+blocks while preserving the dependency/version summary. For a legacy PR with
+neither the marker nor details blocks, it preserves the description: first edit
+the PR to place reviewer-only material below the marker, then run the script.
+Do not assume an unmarked legacy description is already a concise commit body.
+
+These steps do not grant permission to merge or bypass required reviews and
+checks. Marker enforcement in CI is a separate follow-up; this change does not
+require existing open PRs to adopt the marker immediately.

@@ -107,15 +107,32 @@ jobs:
         with:
           version-file: .github/uv.toml
 
-      # ruff targets the floor, so it reports syntax newer than 3.13 -- such as
-      # the unparenthesized `except A, B:` that only 3.14 accepts.
-      - name: Lint
-        working-directory: api
-        run: uv run --with ruff ruff check src tests
-
       - name: Run tests
         working-directory: api
         run: uv run --group test pytest
+
+  ruff:
+    # Its own job so a lint failure reads as a lint failure rather than as a
+    # test failure, and so it never stops the tests from running. It used to be
+    # a step in `Test (Python 3.13)`, which is not a required check, so a ruff
+    # failure blocked nothing.
+    name: Ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version-file: .github/uv.toml
+
+      # ruff targets the floor (target-version in pyproject.toml), so it reports
+      # syntax newer than 3.13 -- such as the unparenthesized `except A, B:`
+      # that only 3.14 accepts -- whichever Python this job runs.
+      - name: ruff check
+        working-directory: api
+        run: uv run --only-group lint ruff check src tests
+
   admin-ui:
     # The admin panel's own suite. Separate job rather than a step on the
     # Python one: the two share no toolchain, and a Node failure should read as

@@ -28,6 +28,11 @@ dependencies = [
 ]
 
 [dependency-groups]
+# uv.lock pins the exact version, so CI and a local `uv run --group lint` agree
+# on what ruff reports and a new ruff release cannot fail CI on its own.
+lint = [
+    "ruff>=0.17.3",
+]
 test = [
     "diff-cover>=9.0.0",
     "httpx>=0.28.0",
@@ -57,6 +62,7 @@ select = [
     "E",
     "F",
     "I001",
+    "W",
 ]
 
 [tool.pytest.ini_options]

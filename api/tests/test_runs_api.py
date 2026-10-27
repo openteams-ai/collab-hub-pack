@@ -757,8 +757,13 @@ async def test_a_gate_is_decided_through_the_api_naming_its_escalation(runs_clie
     events = (await runs_client.get(f"/v1/runs/{run_id}/events")).json()["items"]
     [decided] = [e["payload"] for e in events if e["type"] == "gate_decided"]
     assert decided["actor"] == "dev-user" and decided["escalation"] == escalation and decided["outcome"] == "approve"
+    # The decision asked once more after its delivery is the one on the Track: a client that lost the first
+    # answer gets the run, not a conflict. A different decision on the ended run is one.
+    delivered = await runs_client.post(f"/v1/runs/{run_id}/steps/draft/decision",
+                                       json={"escalation": escalation, "outcome": "approve"})
+    assert delivered.status_code == 202 and delivered.json()["status"] == "COMPLETED"
     ended = await runs_client.post(f"/v1/runs/{run_id}/steps/draft/decision",
-                                   json={"escalation": escalation, "outcome": "approve"})
+                                   json={"escalation": escalation, "outcome": "reject"})
     assert ended.status_code == 409 and ended.json()["error"]["code"] == "run_ended"
 
 
@@ -787,6 +792,14 @@ async def test_a_send_back_reruns_the_step_with_the_findings_and_a_stale_approva
                                    json={"escalation": first, "outcome": "approve"})
     assert stale.status_code == 409 and stale.json()["error"]["details"] == {"escalation": second["escalation"]}
     assert (await runs_client.get(f"/v1/runs/{run_id}")).json()["status"] == "WAITING_AT_GATE"
+
+
+async def test_a_gate_naming_an_approver_role_the_hub_does_not_resolve_is_refused(runs_client):
+    submitted = await runs_client.post("/v1/runs", json={"steps": [
+        {"name": "draft", "cog": "echo", "entry_point": "run", "input": {"text": "hi"},
+         "gate": {"escalate": "always", "approvers": ["owner", "reviewer"]}}]})
+    assert submitted.status_code == 422, submitted.text
+    assert "reviewer" in submitted.text and "owner, member, operator" in submitted.text
 
 
 async def test_who_may_decide_is_the_gates_approvers_and_without_a_role_model_the_submitter(

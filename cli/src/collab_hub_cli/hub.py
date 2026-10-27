@@ -8,6 +8,7 @@ expires. A request the hub refuses as unauthenticated is an :class:`AuthError`
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -22,6 +23,12 @@ transport: httpx.BaseTransport | None = None
 
 RENEW_BEFORE_SECONDS = 30
 TIMEOUT_SECONDS = 30
+
+
+STREAM_RETRIES = 5
+"""How many times in a row a run's event stream may end without the run ending before `events` gives up."""
+STREAM_BACKOFF = 0.2
+"""Seconds before an ended stream is reopened; doubled each time in a row, up to five seconds."""
 
 
 class HubError(Exception):
@@ -168,6 +175,7 @@ class Hub:
         reopened from the last event seen, so nothing is missed or repeated.
         """
         last = after
+        drops = 0
         while True:
             headers = {"Accept": "text/event-stream"}
             if last:
@@ -192,12 +200,16 @@ class Hub:
                             last = event_id
                         yield event_id, kind, data
             except httpx.HTTPError as exc:
-                if not delivered and last == after:
+                if not delivered and last == after and drops == 0:
                     raise HubError(f"cannot reach the hub at {self.url}: {exc}") from exc
-            # The stream ended before the run did, with or without an error: reopen it from the last event
-            # seen. One that ends having delivered nothing is a hub that is not streaming this run.
-            if not delivered:
-                raise HubError(f"the hub ended the event stream of {path} before the run ended")
+                delivered = False
+            # The stream ended before the run did, with or without an error: reopen it from the last event seen,
+            # after a pause that grows while the hub keeps dropping it. One that ends having delivered nothing
+            # several times in a row is a hub that is not streaming this run.
+            drops = 0 if delivered else drops + 1
+            if drops > STREAM_RETRIES:
+                raise HubError(f"the hub ended the event stream of {path} {drops} times before the run ended")
+            time.sleep(min(STREAM_BACKOFF * 2 ** (drops - 1), 5.0) if drops else 0)
 
     def pages(self, path: str, params: dict[str, Any], limit: int = 200) -> Iterator[dict]:
         """Every item of a paged listing (``items`` + ``next_offset``), following pages to the end."""

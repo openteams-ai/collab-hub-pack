@@ -107,7 +107,9 @@ class RunService:
         if self._indexed or self.track is None:
             return
         try:
-            if not self.track.runs(limit=1) and self.track.run_ids():
+            # Any submitted run without a row, not an empty index: a controller may have written a row
+            # (an `interrupted` at its start) before the API first ran.
+            if self.track.has_unindexed():
                 self.track.reindex()
             self._indexed = True
         except Exception as exc:  # noqa: BLE001 - the database answers 503 through the routes until it is back
@@ -164,11 +166,25 @@ def get_run_service(request: Request) -> RunService:
     return service
 
 
+KNOWN_ROLES = ("owner", "member", "operator")
+"""The role names a Gate's approvers may name: the organization roles and the platform role the hub resolves."""
+
+
 class GateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     escalate: str = "error"
     approvers: list[str] = Field(default_factory=list)
+    """Who may decide the Gate's escalations, by role; the organization's owners and platform operators when empty."""
+
+    @field_validator("approvers")
+    @classmethod
+    def _known_roles(cls, value: list[str]) -> list[str]:
+        unknown = [role for role in value if role not in KNOWN_ROLES]
+        if unknown:
+            raise ValueError(f"approvers are roles the hub resolves, {', '.join(KNOWN_ROLES)}; not "
+                             f"{', '.join(unknown)}: a Gate nobody can decide would hold the run until cancelled")
+        return value
 
     @field_validator("escalate")
     @classmethod
@@ -270,7 +286,9 @@ class RunStatus(BaseModel):
     decision: DecisionStatus | None = None
     """A decision asked for on that escalation and not yet delivered by the controller."""
     retry_asked_by: str | None = None
-    """Who asked for an ended run to be retried, until a controller takes it."""
+    """Who asked for the run to be retried since it ended, while no controller has taken it."""
+    sequence: int = 0
+    """The sequence of the run's last event; `GET /{run_id}/events?after=` or `Last-Event-ID` continue from it."""
     frames: dict[str, list[StepFrame]] = Field(default_factory=dict)
     """The Frames each step is grounded in, by step name, as snapshotted at submit."""
 
@@ -401,7 +419,7 @@ def _status(view: intents.RunView, service: RunService, *, outputs: bool = False
         escalation=view.escalation, approvers=list(view.approvers),
         decision=DecisionStatus(escalation=str(decision.get("escalation")), outcome=str(decision.get("outcome")),
                                 actor=str(decision.get("actor"))) if decision else None,
-        retry_asked_by=view.retry_asked_by,
+        retry_asked_by=view.retry_asked_by, sequence=view.sequence,
         frames={step.name: [StepFrame(id=frame.id, name=frame.name, digest=frame.digest) for frame in step.frames]
                 for step in view.op.steps if step.frames},
     )
@@ -643,6 +661,16 @@ def step_payload(run_id: RunId, step: Annotated[str, Path(min_length=1, max_leng
                           f"Step {step} of run {run_id} is {found.state}: it has no output yet", {"state": found.state})
 
 
+def _already_decided(service: RunService, run_id: str, step: str, body: DecisionRequest, actor: str) -> bool:
+    """Whether this very decision was recorded on the Track already: the same escalation, outcome and actor."""
+    for event in service.views.events(run_id):
+        if event.event_type == "gate_decided" and event.payload.get("step") == step \
+                and event.payload.get("escalation") == body.escalation \
+                and event.payload.get("outcome") == body.outcome and event.payload.get("actor") == actor:
+            return True
+    return False
+
+
 def _may_decide(view: intents.RunView, auth: AuthContext) -> bool:
     """Whether the caller may decide the run's open escalation.
 
@@ -666,6 +694,8 @@ def decide_step(run_id: RunId, step: Annotated[str, Path(min_length=1, max_lengt
     view = _visible(service, run_id, auth)
     if view is None:
         return _not_found(run_id)
+    if _already_decided(service, run_id, step, body, auth.user):
+        return _status(view, service)  # the same decision, delivered since: a client retrying after a timeout
     if view.state.ended:
         return error_response(status.HTTP_409_CONFLICT, "run_ended", f"Run {run_id} has ended {view.status}")
     waiting = next((s for s in view.steps if s.state == "waiting_at_gate"), None)
@@ -693,11 +723,11 @@ def decide_step(run_id: RunId, step: Annotated[str, Path(min_length=1, max_lengt
                                         actor=auth.user, findings=body.findings)
     except intents.RunEnded as exc:
         return error_response(status.HTTP_409_CONFLICT, "run_ended", f"Run {run_id} has ended: {exc.reason}")
+    except intents.PendingDecision:
+        return error_response(status.HTTP_409_CONFLICT, "decision_pending",
+                              f"A decision on run {run_id} is already waiting to be delivered",
+                              {"escalation": body.escalation})
     except intents.StaleDecision as exc:
-        if "already waiting" in str(exc):
-            return error_response(status.HTTP_409_CONFLICT, "decision_pending",
-                                  f"A decision on run {run_id} is already waiting to be delivered",
-                                  {"escalation": body.escalation})
         fresh = _visible(service, run_id, auth)
         return error_response(status.HTTP_409_CONFLICT, "stale_decision", str(exc),
                               {"escalation": fresh.escalation if fresh else None})

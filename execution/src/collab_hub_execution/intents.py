@@ -125,6 +125,8 @@ class RunView:
     """Who may decide the open escalation: the roles its Gate declared, or the default ones."""
     retry_asked_by: str | None = None
     """Who asked for the run to be retried since it ended, while no controller has taken it."""
+    sequence: int = 0
+    """The sequence of the run's last event: where a client watching from this view continues the stream."""
 
     @property
     def status(self) -> str:
@@ -189,6 +191,7 @@ def _view(run_id: str, events: tuple[TrackEvent, ...]) -> RunView | None:
         decision=pending_decision(events) if waiting else None,
         escalation=run.open_escalation if waiting else None, approvers=approvers,
         retry_asked_by=retry_ask(events) if run.state.ended else None,
+        sequence=max((e.sequence or 0 for e in events), default=0),
     )
 
 
@@ -441,7 +444,11 @@ DECISION_REQUESTED, DECISION_REFUSED = "decision_requested", "decision_refused"
 
 
 class StaleDecision(ValueError):
-    """A decision on an escalation the run no longer waits on, or while another one is still pending."""
+    """A decision on an escalation the run no longer waits on."""
+
+
+class PendingDecision(StaleDecision):
+    """A decision asked while another one on the run is still waiting to be delivered."""
 
 
 def pending_decision(events: Iterable[TrackEvent]) -> dict[str, Any] | None:
@@ -507,7 +514,7 @@ def request_decision(track: TrackStore, run_id: str, *, escalation: str, outcome
         if view.state.ended:
             raise RunEnded(view.state, DECISION_REQUESTED, f"the run has ended {view.status}")
         if view.decision is not None:
-            raise StaleDecision(f"a decision on run {run_id!r} is already waiting to be delivered")
+            raise PendingDecision(f"a decision on run {run_id!r} is already waiting to be delivered")
         raise StaleDecision(f"run {run_id!r} is {view.status}, and does not wait on escalation {escalation!r}")
     return view
 

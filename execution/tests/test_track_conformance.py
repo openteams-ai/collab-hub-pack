@@ -413,3 +413,22 @@ def test_reindex_derives_the_index_from_the_events_again(store):
         assert store.runs() == ()
     assert store.reindex() == 2
     assert store.runs() == before
+
+
+def test_a_submitted_run_without_an_index_row_is_what_asks_for_a_reindex(store):
+    """A Track written before the index existed is told apart by a run with no row, not by an empty index: a
+    controller may have written one row (an `interrupted` at its start) before the first API with an index ran."""
+    _submit(store, "r1")
+    assert not store.has_unindexed()
+    if isinstance(store, SqliteTrackStore):
+        with sqlite3.connect(store.path) as connection:
+            connection.execute("DELETE FROM collab_track_runs WHERE run_id = 'r1'")
+    elif isinstance(store, PostgresTrackStore):
+        with store.pool.connection() as connection:
+            connection.execute("DELETE FROM collab_track_runs WHERE run_id = 'r1'")
+    else:
+        return  # derived on each read: never out of date
+    _submit(store, "r2")  # the index is not empty, and r1 is still missing from it
+    assert store.runs() != () and store.has_unindexed()
+    store.reindex()
+    assert not store.has_unindexed() and [run.run_id for run in store.runs()] == ["r2", "r1"]

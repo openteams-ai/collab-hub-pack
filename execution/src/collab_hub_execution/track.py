@@ -160,6 +160,9 @@ class TrackStore(Protocol):
         that moves its run, so it never disagrees with the Track.
         """
 
+    def has_unindexed(self) -> bool:
+        """Whether a run was submitted that has no index row: a Track written before the index existed."""
+
     def reindex(self) -> int:
         """Derive the index from every run's events again, and return how many runs it holds.
 
@@ -333,8 +336,15 @@ class InMemoryTrackStore:
             rows = [row for run_id, events in self._events.items() if (row := index_of(run_id, events)) is not None]
         return _select_index(rows, org_id=org_id, status=status, retry_asked=retry_asked, limit=limit, offset=offset)
 
+    def has_unindexed(self) -> bool:
+        return False  # derived on each read
+
     def reindex(self) -> int:
         return len(self.runs())
+
+
+_UNINDEXED = ("SELECT 1 FROM collab_track_events e WHERE e.event_type IN ('op_submitted', 'submitted') "
+              "AND NOT EXISTS (SELECT 1 FROM collab_track_runs r WHERE r.run_id = e.run_id) LIMIT 1")
 
 
 _INDEX_COLUMNS = "run_id, org_id, status, submitted_at, updated_at, retry_asked"
@@ -552,6 +562,10 @@ class SqliteTrackStore:
         params = [int(p) if isinstance(p, bool) else p for p in params]
         with self._connect() as connection:
             return tuple(_index_row(row) for row in connection.execute(sql, params).fetchall())
+
+    def has_unindexed(self) -> bool:
+        with self._connect() as connection:
+            return connection.execute(_UNINDEXED).fetchone() is not None
 
     def reindex(self) -> int:
         with self._connect() as connection:
@@ -790,6 +804,10 @@ class PostgresTrackStore:
         params = [None if p == -1 and isinstance(p, int) and not isinstance(p, bool) else p for p in params]
         with self.pool.connection() as connection:
             return tuple(_index_row(row) for row in connection.execute(sql, params).fetchall())
+
+    def has_unindexed(self) -> bool:
+        with self.pool.connection() as connection:
+            return connection.execute(_UNINDEXED).fetchone() is not None
 
     def reindex(self) -> int:
         count = 0

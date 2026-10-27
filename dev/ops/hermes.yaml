@@ -1,0 +1,11 @@
+# The Hermes harness Cog's `ask`, as one step: prompt in, answer out, against the model the
+# controller delivers (`make fake-model` by default). `gate: never`, since deciding a Gate from a
+# client arrives later in the plan: a step that escalated could only be terminated.
+#   make op OP=hermes LOCATION=local      (Hermes's environment: make -C ../examples/cog-local env)
+name: hermes
+steps:
+  - name: ask
+    cog: hermes
+    entry_point: ask
+    input: {prompt: "In one sentence, what is a Cog?"}
+    gate: {escalate: never}

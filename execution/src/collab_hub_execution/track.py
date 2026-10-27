@@ -630,7 +630,7 @@ class PostgresTrackStore:
         )
         """,
         "CREATE INDEX IF NOT EXISTS collab_track_payloads_run ON collab_track_payloads (run_id)",
-        # The index of runs (migration 13): one row per run, derived from its events by the store in
+        # The index of runs (migration 15): one row per run, derived from its events by the store in
         # the same transaction as each event that moves the run, so a listing is one indexed query.
         """
         CREATE TABLE IF NOT EXISTS collab_track_runs (

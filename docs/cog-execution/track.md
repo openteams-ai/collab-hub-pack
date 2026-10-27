@@ -87,7 +87,7 @@ submitted and last moved, and whether a retry is asked for. Status is still
 the Track's, replayed through the run machine; the row is a projection a
 listing or a controller's pass reads instead of every Track, and `reindex()`
 rebuilds it from the events. On Postgres it is `collab_track_runs`, from
-migration 13.
+migration 15.
 
 A Track written before controllers named themselves has `run_picked_up` with
 no `controller`: such a run belongs to the first controller to start

@@ -24,7 +24,8 @@ from collab_hub_execution.controller import RunController
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 HERMES = REPOSITORY / "cogs" / "hermes"
-FAKE_AGENT = Path(__file__).resolve().parent / "fake_acp_agent.py"
+FAKE_AGENT = REPOSITORY / "dev" / "fake-agent" / "fake_acp_agent.py"
+WORKER_SDK = REPOSITORY / "worker" / "src"  # the worker runs on the SDK from this checkout, under this Python
 FAKE_MODEL = REPOSITORY / "dev" / "fake-model" / "fake_model.py"
 BY = {"user": "alice", "org_id": "acme"}
 
@@ -36,7 +37,8 @@ def _controller(tmp_path, track, environment):
     manifest = root / "hermes" / "pixi.toml"
     manifest.write_text(re.sub(r'^serve = .*$', f'serve = "{sys.executable} serve.py"', manifest.read_text(),
                                flags=re.M))
-    environment = {"COLLAB_HERMES_COMMAND": f"{sys.executable} {FAKE_AGENT}", **environment}
+    environment = {"COLLAB_HERMES_COMMAND": f"{sys.executable} {FAKE_AGENT}", "PYTHONPATH": str(WORKER_SDK),
+                   **environment}
     runner = LifecycleRunner(track=track, location="local", location_settings={
         "packages": [root], "work_dir": tmp_path / "runs", "environment": "host", "interaction_timeout": None,
         "deliver": lambda cog, run_id, instance: environment if cog == "hermes" else {}})
@@ -124,6 +126,8 @@ def _serve_module():
     """The Hermes Cog's worker module, imported from the package: its environment assembly is tested in-process."""
     import importlib.util
 
+    if str(WORKER_SDK) not in sys.path:
+        sys.path.insert(0, str(WORKER_SDK))  # the worker runs on the SDK from this checkout
     spec = importlib.util.spec_from_file_location("hermes_serve", HERMES / "serve.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -236,9 +240,18 @@ NEEDS_HERMES = pytest.mark.skipif(
     reason="the Hermes Cog's pixi environment is not installed (make -C examples/cog-local env)")
 
 
-def _hermes_session(tmp_path, model_command, port):
-    """Hermes itself, in its own environment, in a session, against a model this test runs."""
-    model = subprocess.Popen([sys.executable, *model_command], stderr=open(tmp_path / "model.log", "w"))
+def _free_port():
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _hermes_session(tmp_path, model_command):
+    """Hermes itself, in its own environment, in a session, against a model this test runs, on a free port."""
+    port = _free_port()
+    model = subprocess.Popen([sys.executable, *model_command(port)], stderr=open(tmp_path / "model.log", "w"))
     track = InMemoryTrackStore()
     runner = LifecycleRunner(track=track, location="local", location_settings={
         "packages": [REPOSITORY / "cogs"], "allow": ["hermes"], "work_dir": tmp_path / "runs",
@@ -261,7 +274,7 @@ def _end(model, track, controller):
 
 @NEEDS_HERMES
 def test_hermes_itself_answers_through_the_fake_model(tmp_path):
-    model, track, controller = _hermes_session(tmp_path, [str(FAKE_MODEL), "--port", "18791"], 18791)
+    model, track, controller = _hermes_session(tmp_path, lambda port: [str(FAKE_MODEL), "--port", str(port)])
     try:
         assert _answer(controller, track, "r", "hello hermes") == "The fake model heard: hello hermes"
     finally:
@@ -273,7 +286,7 @@ def test_hermes_runs_no_command_even_when_its_model_orders_one(tmp_path):
     # Decision 14: prompt in, answer out. The model asks for the `terminal` tool; Hermes has none to run.
     marker = tmp_path / "hermes-ran-a-command"
     ordering = Path(__file__).resolve().parent / "tool_ordering_model.py"
-    model, track, controller = _hermes_session(tmp_path, [str(ordering), "18792", str(marker)], 18792)
+    model, track, controller = _hermes_session(tmp_path, lambda port: [str(ordering), str(port), str(marker)])
     try:
         answer = _answer(controller, track, "r", "please run a command")
     finally:
@@ -284,11 +297,13 @@ def test_hermes_runs_no_command_even_when_its_model_orders_one(tmp_path):
 
 
 BEDROCK_PROBE = """
-import os, subprocess, sys, tempfile
+import os, subprocess, sys
 sys.path.insert(0, os.getcwd())
 import serve
-root = tempfile.mkdtemp()
-os.environ.update(HERMES_HOME=str(serve.hermes_home(root)), HOME=root)
+from collab_hub_cog_worker import Context, load_binding
+context = Context(binding=load_binding())
+env = serve.Hermes(context).environment(context)
+os.environ.update(HERMES_HOME=env["HERMES_HOME"], HOME=env["HOME"])
 installs = []
 run = subprocess.run
 subprocess.run = lambda *a, **k: (installs.append(str(a[0] if a else k.get("args"))), run(*a, **k))[1]

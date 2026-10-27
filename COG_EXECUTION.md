@@ -290,6 +290,8 @@ Each phase is one pull request from the branch it names, numbered in build order
 
 ### Index
 
+The open phases are tracked as workstream issues since 2026-10-26, one per piece of work that lands together rather than one per phase: #103 (Phases 16, 18, 19), #104 (17, 27), #6 (22, with #223, #165 and #214 folded in), #105 (23, 24, 25), #8 (29, 30), #4 (26) and #9 (28). #1, #2 and #7 are closed as delivered by the phases that built them; #110 is closed as not for A4; #125 is closed, sign-in being what the desktop does. The phases keep their numbers, since the plan, the docs and the code cite them.
+
 | Phase | Issue | Title | Branch | Depends on | Size | Status |
 |---|---|---|---|---|---|---|
 | 0 | #96 | Record the decisions for running Ops: lifecycle runner, durability backends, placement (ADR-0002) | `docs/adr-0002-cog-runs` | — | S | merged, #112 |
@@ -303,29 +305,29 @@ Each phase is one pull request from the branch it names, numbered in build order
 | 8 | #101 | Run Ops without a durability engine (`none`), and mark interrupted runs honestly | `feat/cog-durability-none` | 7 | L | merged, #163 |
 | 9 | #109 | Agent location: run a Cog as a local process first, a pod behind the same switch | `feat/cog-agent-location` | 8 | M | merged, #174 |
 | 10 | #177 | Hermes as a Cog, launched from the `collab-hub` CLI on a local hub and talked to from Toad: an example | `feat/cog-local-example` | 6, 9 | M | merged, #178 |
-| 11 | #121 | Run controller and run pickup | `feat/cog-run-controller` | 8, 9, 10 | M | in review, #186 |
-| 12 | #103, first half | The hub run API: launch, list and terminate runs | `feat/cog-run-launch` | 10, 11 | M | in review, #202 |
-| 13 | #211 | Run the Cogs launched through a deployed hub, as processes in its pod | `feat/cog-hub-pod-runs` | 11, 12 | M | in review, #212 |
-| 14 | #107 | Add a Worker SDK with Harness adapters, ACP first | `feat/cog-worker-sdk` | 2, 9 | M | not started |
-| 15 | #108 | Publish a Hermes harness Cog, launched by the hub as a local process | `feat/hermes-acp-harness` | 9, 12, 14 | M | not started |
-| 16 | #126, first half | Launch, list and terminate Cogs from the `collab-hub` CLI | `feat/cli-launch` | 6, 10, 12 | S | not started |
-| 17 | #102 | Never repeat a completed side effect when a step is invoked again | `feat/cog-keyed-claim` | 8, 11, 14 | M | not started |
-| 18 | #103, closes it | The hub run API: Frames, payloads, decisions and retry | `feat/cog-run-api` | 12, 15, 17 | M | not started |
-| 19 | #126, closes it | Decide, read and retry runs from the `collab-hub` CLI | `feat/cli-runs` | 16, 18 | S | not started |
+| 11 |#121|Run controller and run pickup|`feat/cog-run-controller`|8, 9, 10|M| merged, #186 |
+| 12 |#103, first half|The hub run API: launch, list and terminate runs|`feat/cog-run-launch`|10, 11|M| merged, #186 (#202 merged into it) |
+| 13 |#211|Run the Cogs launched through a deployed hub, as processes in its pod|`feat/cog-hub-pod-runs`|11, 12|M| merged, #212 |
+| 14 |#107|Add a Worker SDK with Harness adapters, ACP first|`feat/cog-worker-sdk`|2, 9|M| in review, #224, with Phase 15 |
+| 15 | #108 |Publish a Hermes harness Cog, launched by the hub as a local process| `feat/cog-worker-sdk` |9, 12, 14|M| in review, #224, with Phase 14 |
+| 16 | #103, with Phases 18 and 19 |Launch, list and terminate Cogs from the `collab-hub` CLI|`feat/cli-launch`|6, 10, 12|S|not started|
+| 17 | #104, with Phase 27 |Never repeat a completed side effect when a step is invoked again|`feat/cog-keyed-claim`|8, 11, 14|M|not started|
+| 18 | #103, with Phases 16 and 19 |The hub run API: Frames, payloads, decisions and retry|`feat/cog-run-api`|12, 15, 17|M|not started|
+| 19 | #103, with Phases 16 and 18 |Decide, read and retry runs from the `collab-hub` CLI|`feat/cli-runs`|16, 18|S|not started|
 | 20 | apollo-desktop#825 | Launch and watch hub runs from the desktop | `feat/hub-run-client-690` | 12, 18 | M | not started |
 | 21 | apollo-desktop#719 | Let a human approve, reject, or send back a paused step from the desktop | `feat/run-view-gate-decisions-719` | 4, 20 | M | not started |
-| 22 | #6 | The remote location: Cog workers in pods, and least-privilege RBAC for the controller | `feat/cog-remote-location-6` | 9, 11 | M | not started |
-| 23 | #105 | Materialize a Cog worker from its published artifact, running its own `serve` | `feat/cog-materialize-serve` | 15, 22 | L | not started |
-| 24 | #106 | Install and uninstall a Cog by digest | `feat/cog-install-by-digest` | 12, 23 | M | not started |
-| 25 | #3 | Resolve a Cog's model binding into its worker's connection config | `feat/cog-model-binding-3` | 24 | M | not started |
+| 22 | #6, with #223, #165 and #214 folded in |The remote location: Cog workers in pods, and least-privilege RBAC for the controller|`feat/cog-remote-location-6`|9, 11|M|not started|
+| 23 | #105, with Phases 24 and 25 |Materialize a Cog worker from its published artifact, running its own `serve`|`feat/cog-materialize-serve`|15, 22|L|not started|
+| 24 | #105, with Phases 23 and 25 |Install and uninstall a Cog by digest|`feat/cog-install-by-digest`|12, 23|M|not started|
+| 25 | #105, with Phases 23 and 24 |Resolve a Cog's model binding into its worker's connection config|`feat/cog-model-binding-3`|24|M|not started|
 | 26 | #4 | Enforce time and cost limits on every Cog run, and clean up idle workers | `feat/cog-budgets-warm-workers-4` | 8, 25 | M | not started |
-| 27 | #104 | Add a DBOS durability backend so a restart does not lose a run | `feat/cog-durability-dbos` | 8, 11, 17 | L | not started |
+| 27 | #104, with Phase 17 |Add a DBOS durability backend so a restart does not lose a run|`feat/cog-durability-dbos`|8, 11, 17|L|not started|
 | 28 | #9 | Check Cog outputs with Guards, not just schema | `feat/cog-guards-9` | 4, 5, 8 | M | not started |
-| 29 | #11 | Restrict a Cog worker's network egress to hub-mediated paths | `feat/cog-worker-egress-11` | 14, 23, 25 | L | not started |
-| 30 | #8 | Let a Cog act as the user for its connectors when it runs unattended on the hub | `feat/cog-connector-grants-8` | 29 | L | not started |
+| 29 | #8, with Phase 30 |Restrict a Cog worker's network egress to hub-mediated paths|`feat/cog-worker-egress-11`|14, 23, 25|L|not started|
+| 30 | #8, with Phase 29 |Let a Cog act as the user for its connectors when it runs unattended on the hub|`feat/cog-connector-grants-8`|29|L|not started|
 | 31 | apollo-desktop#826 | Grant and revoke unattended connector access from the desktop | `feat/connector-grants` | 20, 30 | S | not started |
 | 32 | apollo-desktop#827 | Run Ops locally from the desktop through an embedded run host | `feat/local-run-host` | 9, 20, 27 | M | not started |
-| 33 | #110 | Add a Temporal durability backend | `feat/cog-durability-temporal` | 8, 11, 17 | L | not started |
+| 33 | #110, closed |Add a Temporal durability backend|`feat/cog-durability-temporal`|8, 11, 17|L| not for A4: two backends behind one interface prove it swappable; reopen on a need |
 
 ### The desktop side (apollo-desktop, private)
 

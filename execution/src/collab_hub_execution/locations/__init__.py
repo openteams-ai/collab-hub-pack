@@ -50,7 +50,9 @@ def select_executor(
     ``allow_ingress_from``, the labels of the pods that may reach a worker's
     ``/invoke`` (the run controller's), or ``insecure_skip_network_policy``;
     ``packages`` and ``work_dir`` mean nothing to it, since a pod runs from
-    the image and writes on volumes of its own.
+    the image and writes on volumes of its own. Its pods' ``resources``,
+    ``security_context`` and the ``cache_size_limit`` and ``tmp_size_limit`` of
+    their volumes have defaults a Pod Security ``restricted`` namespace admits.
     """
     if location == "local":
         from .local import LocalProcessCogExecutor

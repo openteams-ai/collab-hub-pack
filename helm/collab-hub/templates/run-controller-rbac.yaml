@@ -27,13 +27,19 @@ metadata:
 rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["create", "get", "list", "watch", "patch", "delete"]
+    verbs: ["create", "get", "list", "watch", "patch", "delete", "deletecollection"]
   - apiGroups: [""]
     resources: ["services"]
-    verbs: ["create", "get", "list", "delete"]
+    verbs: ["create", "get", "list", "delete", "deletecollection"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["create", "get", "list", "patch", "delete"]
+    verbs: ["create", "get", "list", "patch", "delete", "deletecollection"]
+  {{- /* One Secret per worker carries its run token and what the models block delivers (a model key), so
+  neither is a literal on a pod template that `get deployments` reads. No `get` or `list`: the controller
+  writes Secrets and deletes them, by name or by its labels, and never reads one. */}}
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "patch", "delete", "deletecollection"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

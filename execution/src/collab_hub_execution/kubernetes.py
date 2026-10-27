@@ -52,6 +52,21 @@ CACHE_PATH, TMP_PATH = "/var/cache/collab-hub", "/tmp"
 """Where a worker pod writes: the pixi environment its package needs, and what the Cog writes under HOME."""
 MAX_DNS_LABEL = 63
 TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"  # noqa: S105 - path, not a secret
+DEFAULT_SECURITY_CONTEXT: dict[str, Any] = {
+    "runAsNonRoot": True,
+    "allowPrivilegeEscalation": False,
+    "capabilities": {"drop": ["ALL"]},
+    "seccompProfile": {"type": "RuntimeDefault"},
+}
+"""The worker container's securityContext unless one is given: what Pod Security `restricted` admits."""
+DEFAULT_POD_SECURITY_CONTEXT: dict[str, Any] = {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}}
+"""The worker pod's securityContext unless one is given."""
+DEFAULT_RESOURCES: dict[str, Any] = {
+    "requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"cpu": "500m", "memory": "256Mi"}}
+DEFAULT_CACHE_SIZE_LIMIT = "10Gi"
+"""The size limit of a worker's cache volume, where pixi builds the Cog's environment."""
+DEFAULT_TMP_SIZE_LIMIT = "2Gi"
+"""The size limit of a worker's /tmp, its HOME, where the Cog writes."""
 CA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
 
@@ -158,11 +173,12 @@ class KubernetesCogExecutor:
     The pod runs ``runner_image``, the hub's own image, which ships the Cog
     packages under ``packages_root`` and pixi: the worker is the package's
     ``serve`` task in the environment its lock pins, as a local worker is, with
-    the seam's variables and the run token in its environment and what the
-    binding delivers (``deliver``) beside them. ``worker_command`` replaces that
-    command for an image of another shape, as the kind E2E's is. The executor
-    holds no lifecycle logic: it brings a worker up, says where it is, and
-    tears it down; ``controller`` only labels the workloads with who made them.
+    the seam's variables in its environment, and the run token and what the
+    binding delivers (``deliver``) beside them through a Secret of its own.
+    ``worker_command`` replaces that command for an image of another shape, as
+    the kind E2E's is. The executor holds no lifecycle logic: it brings a
+    worker up, says where it is, and tears it down; ``controller`` labels the
+    workloads with who made them, which is what ``sweep`` deletes by.
     """
 
     name = "kubernetes"
@@ -187,6 +203,9 @@ class KubernetesCogExecutor:
         controller: str | None = None,
         resources: Mapping[str, Any] | None = None,
         security_context: Mapping[str, Any] | None = None,
+        pod_security_context: Mapping[str, Any] | None = None,
+        cache_size_limit: str = DEFAULT_CACHE_SIZE_LIMIT,
+        tmp_size_limit: str = DEFAULT_TMP_SIZE_LIMIT,
     ) -> None:
         # A worker's /invoke endpoint is unauthenticated, so the network boundary is
         # the control. Force an explicit choice at construction — the secure path
@@ -222,9 +241,12 @@ class KubernetesCogExecutor:
         self.worker_command = list(worker_command) if worker_command else None
         self.deliver = deliver
         self.controller = controller
-        self.resources = dict(resources) if resources else {
-            "requests": {"cpu": "50m", "memory": "64Mi"}, "limits": {"cpu": "500m", "memory": "256Mi"}}
-        self.security_context = dict(security_context) if security_context else None
+        self.resources = dict(resources) if resources else dict(DEFAULT_RESOURCES)
+        self.security_context = dict(security_context) if security_context else dict(DEFAULT_SECURITY_CONTEXT)
+        self.pod_security_context = (dict(pod_security_context) if pod_security_context
+                                     else dict(DEFAULT_POD_SECURITY_CONTEXT))
+        self.cache_size_limit = cache_size_limit
+        self.tmp_size_limit = tmp_size_limit
 
     @property
     def api(self) -> K8sApi:
@@ -258,16 +280,35 @@ class KubernetesCogExecutor:
             return list(self.worker_command)
         return ["pixi", "run", "--locked", "--manifest-path", f"{self.packages_root}/{cog}/pixi.toml", "serve"]
 
-    def _environment(self, cog: str, run_id: str, instance: str, token: str) -> list[dict[str, str]]:
-        """What the worker gets: the seam's variables, its run token, and what the binding delivers."""
+    def _environment(self, cog: str, run_id: str) -> list[dict[str, str]]:
+        """The seam's variables, which name nothing secret: on the pod template as literal values."""
         env = {"COG_ID": cog, "COLLAB_COG_ID": cog, "COLLAB_RUN_ID": run_id, "COLLAB_COG_HOST": "0.0.0.0",
                "COLLAB_COG_PORT": str(RUNNER_PORT), "HOME": TMP_PATH}
-        if self.deliver is not None:
-            env.update(self.deliver(cog, run_id, instance))
-        env[run_tokens.RUN_TOKEN_ENV] = token
         return [{"name": name, "value": value} for name, value in env.items()]
 
-    def _manifests(self, cog: str, run_id: str, name: str, instance: str = "", token: str = "") -> tuple[dict, dict]:
+    def _delivered(self, cog: str, run_id: str, instance: str, token: str) -> dict[str, str]:
+        """What the worker alone may read: its run token, and what the binding delivers (a model key, say).
+
+        These enter the worker's environment through a Secret of the worker's
+        own (``envFrom``), never the pod template: a Deployment and its
+        ReplicaSet are readable by anyone with ``get`` on them, which the
+        built-in ``view`` ClusterRole grants, and Secrets are what it leaves out.
+        """
+        delivered = dict(self.deliver(cog, run_id, instance)) if self.deliver is not None else {}
+        delivered[run_tokens.RUN_TOKEN_ENV] = token
+        return delivered
+
+    def _secret(self, cog: str, run_id: str, name: str, data: Mapping[str, str]) -> dict:
+        return {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "type": "Opaque",
+            "metadata": {"name": name, "namespace": self.namespace, "labels": self._labels(cog, run_id, name),
+                         "annotations": {"collab-hub/run-id": run_id}},
+            "stringData": dict(data),
+        }
+
+    def _manifests(self, cog: str, run_id: str, name: str) -> tuple[dict, dict]:
         labels = self._labels(cog, run_id, name)
         # Label values are charset/length-constrained; keep the exact run id in an
         # annotation (unconstrained) so nothing is lost and creation never fails.
@@ -278,17 +319,17 @@ class KubernetesCogExecutor:
             "imagePullPolicy": "IfNotPresent",
             "command": self._command(cog),
             "ports": [{"containerPort": RUNNER_PORT}],
-            "env": self._environment(cog, run_id, instance, token),
+            "env": self._environment(cog, run_id),
+            "envFrom": [{"secretRef": {"name": name}}],
             "readinessProbe": {
                 "httpGet": {"path": "/healthz", "port": RUNNER_PORT},
                 "initialDelaySeconds": 1,
                 "periodSeconds": 1,
             },
             "resources": self.resources,
+            "securityContext": self.security_context,
             "volumeMounts": [{"name": "cache", "mountPath": CACHE_PATH}, {"name": "tmp", "mountPath": TMP_PATH}],
         }
-        if self.security_context:
-            container["securityContext"] = self.security_context
         deployment = {
             "apiVersion": "apps/v1",
             "kind": "Deployment",
@@ -303,10 +344,14 @@ class KubernetesCogExecutor:
                         # it should not carry a ServiceAccount token it could use
                         # (or leak) against the API server.
                         "automountServiceAccountToken": False,
+                        "securityContext": self.pod_security_context,
                         "containers": [container],
                         # The pixi environment its package needs, and what the Cog writes: a pod's own,
-                        # gone with it (materialization from the artifact, with a cache, is #105).
-                        "volumes": [{"name": "cache", "emptyDir": {}}, {"name": "tmp", "emptyDir": {}}],
+                        # gone with it (materialization from the artifact, with a cache, is #105). Past a
+                        # volume's limit the kubelet evicts the pod, which the controller reads as its step's
+                        # failure, rather than the node filling up.
+                        "volumes": [{"name": "cache", "emptyDir": {"sizeLimit": self.cache_size_limit}},
+                                    {"name": "tmp", "emptyDir": {"sizeLimit": self.tmp_size_limit}}],
                     },
                 },
             },
@@ -387,20 +432,55 @@ class KubernetesCogExecutor:
     def _network_policy_collection(self) -> str:
         return f"/apis/networking.k8s.io/v1/namespaces/{self.namespace}/networkpolicies"
 
-    def _resource_paths(self, name: str) -> tuple[str, ...]:
-        paths = [
-            f"/apis/apps/v1/namespaces/{self.namespace}/deployments/{name}",
-            f"/api/v1/namespaces/{self.namespace}/services/{name}",
+    def _collections(self) -> tuple[str, ...]:
+        """Where each kind the executor makes lives, in the order a worker's are deleted: its Deployment (and
+        with it the pod), its Service, its NetworkPolicy, and last the Secret the pod reads at start."""
+        collections = [
+            f"/apis/apps/v1/namespaces/{self.namespace}/deployments",
+            f"/api/v1/namespaces/{self.namespace}/services",
         ]
         if self.allow_ingress_from is not None:
-            paths.append(f"{self._network_policy_collection()}/{name}")
-        return tuple(paths)
+            collections.append(self._network_policy_collection())
+        collections.append(f"/api/v1/namespaces/{self.namespace}/secrets")
+        return tuple(collections)
+
+    def _resource_paths(self, name: str) -> tuple[str, ...]:
+        return tuple(f"{collection}/{name}" for collection in self._collections())
+
+    def sweep(self, *, controller: str | None = None, run_id: str | None = None) -> int:
+        """Delete every workload this executor's kind made for ``controller``, or for the run, by its labels.
+
+        What reaping by a recorded name cannot reach: a worker whose controller
+        died while it was starting, before ``worker_started`` named it on the
+        Track. A controller sweeps its own id's workloads at start, when none of
+        them can be live (each run it was advancing is recorded interrupted
+        then), and a run's when it takes the run over. Returns how many
+        collections answered the delete.
+        """
+        selector = []
+        if controller is not None:
+            selector.append(f"collab-hub/controller={label_value(controller)}")
+        if run_id is not None:
+            selector.append(f"collab-hub/run={label_value(run_id)}")
+        if not selector:
+            raise ValueError("sweep by a controller, a run, or both")
+        swept = 0
+        for collection in self._collections():
+            response = self.api.delete(f"{collection}?labelSelector={','.join(selector)}")
+            if response.status_code in (200, 202):
+                swept += 1
+            elif response.status_code != 404:
+                response.raise_for_status()
+        return swept
 
     def materialize(self, cog: str, run_id: str, instance: str = "") -> "_KubernetesWorker":
         name = resource_name(cog, run_id, instance)
         token = run_tokens.mint()
-        deployment, service = self._manifests(cog, run_id, name, instance, token)
+        deployment, service = self._manifests(cog, run_id, name)
+        secret = self._secret(cog, run_id, name, self._delivered(cog, run_id, instance, token))
         try:
+            # The Secret first: the pod reads it as it starts.
+            self._apply(f"/api/v1/namespaces/{self.namespace}/secrets", name, secret, replaceable=True)
             if self.allow_ingress_from is not None:
                 # Put the ingress restriction in place before the pod can serve.
                 self._apply(
@@ -429,7 +509,8 @@ class KubernetesCogExecutor:
 
         A pod outlives the controller that made it, so a controller's next
         start, or another controller taking the run over, deletes it by name.
-        Returns whether anything was there to delete.
+        Returns whether anything was there to delete. What was made but never
+        recorded is ``sweep``'s.
         """
         name = started.get("name")
         if started.get("location") != "remote" or not isinstance(name, str) or not name:

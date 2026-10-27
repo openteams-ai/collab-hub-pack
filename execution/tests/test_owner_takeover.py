@@ -45,7 +45,33 @@ def _base(tmp_path, spec):
 
 
 def _start(base, name):
-    return subprocess.Popen([*base, "--id", name], stderr=subprocess.DEVNULL, start_new_session=True)
+    log = open(f"{base[8]}-{name}.log", "w")  # noqa: SIM115 - beside the work dir; closed with the process
+    process = subprocess.Popen([*base, "--id", name], stderr=log, start_new_session=True,
+                               env={**os.environ, "PYTHONFAULTHANDLER": "1"})
+    process.log = log
+    return process
+
+
+def _stop(processes):
+    """Stop the controllers, and fail on one that does not stop: killed, its threads dumped to its log."""
+    hung = []
+    for process in processes:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(10)
+            except subprocess.TimeoutExpired:
+                os.kill(process.pid, signal.SIGABRT)
+                try:
+                    process.wait(5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(5)
+                hung.append(process)
+        process.log.close()
+    if hung:
+        dumps = "\n".join(f"--- {p.log.name}\n{open(p.log.name).read()[-6000:]}" for p in hung)
+        raise AssertionError(f"{len(hung)} controller(s) did not stop within 10s of SIGTERM:\n{dumps}")
 
 
 @pytest.fixture(params=["sqlite", pytest.param("postgres", marks=pytest.mark.skipif(
@@ -99,10 +125,7 @@ def test_a_run_whose_owner_never_starts_again_is_ended_by_a_live_controller(tmp_
         for run_id in ("slow", "asked"):
             assert [e.payload["reaped"] for e in track.replay(run_id) if e.event_type == "worker_stopped"] == [False]
     finally:
-        for process in processes:
-            if process.poll() is None:
-                process.terminate()
-                process.wait(10)
+        _stop(processes)
 
 
 def test_a_run_whose_owner_is_alive_is_never_touched_by_another_controller(tmp_path):

@@ -8,11 +8,14 @@ that outlived its controller is reaped.
 
 from __future__ import annotations
 
+import json
+
 from test_kubernetes_executor import FakeK8sApi, FakeWorkerHttp
 
 from collab_hub_execution import InMemoryTrackStore, LifecycleRunner, OpDefinition, OpStep, RunState, intents
 from collab_hub_execution.locations import location_of, select_executor
 from collab_hub_execution.run_tokens import digest
+from collab_hub_execution.track import SCHEMA_VERSION, TrackEvent
 
 BY = {"user": "alice", "org_id": "acme"}
 
@@ -43,20 +46,75 @@ def test_a_run_at_the_remote_location_materializes_a_pod_of_the_hubs_image_runni
                                     "/opt/collab-hub/cogs/hermes/pixi.toml", "serve"]
     env = {e["name"]: e["value"] for e in container["env"]}
     assert env["COLLAB_COG_ID"] == "hermes" and env["COLLAB_RUN_ID"] == "r" and env["COLLAB_COG_HOST"] == "0.0.0.0"
-    assert env["COLLAB_COG_PORT"] == "8080" and env["COLLAB_MODEL_BASE_URL"] == "http://model/v1"
+    assert env["COLLAB_COG_PORT"] == "8080"
     assert pod["automountServiceAccountToken"] is False  # a worker never talks to the API server
     assert {v["name"] for v in pod["volumes"]} == {"cache", "tmp"}
     assert {m["mountPath"] for m in container["volumeMounts"]} == {"/var/cache/collab-hub", "/tmp"}
     assert deployment["metadata"]["labels"]["collab-hub/controller"] == "hub"
+    # What the binding delivers and the run token reach the pod through a Secret of its own, made before the
+    # Deployment, and are nowhere on the pod template.
+    [(_, secret)] = [(p, b) for p, b in api.bodies if p.endswith("/secrets")]
+    name = deployment["metadata"]["name"]
+    assert secret["metadata"]["name"] == name and container["envFrom"] == [{"secretRef": {"name": name}}]
+    assert secret["stringData"]["COLLAB_MODEL_BASE_URL"] == "http://model/v1"
+    token = secret["stringData"]["COLLAB_RUN_TOKEN"]
+    assert "http://model/v1" not in json.dumps(deployment) and token not in json.dumps(deployment)
+    posted = [p for p, _ in api.bodies]
+    assert posted.index("/api/v1/namespaces/hub/secrets") < posted.index("/apis/apps/v1/namespaces/hub/deployments")
     # The controller presented the worker's run token; the Track names it only by its hash, with the pod.
     [started] = [e.payload for e in track.replay("r") if e.event_type == "worker_started"]
-    assert started["location"] == "remote" and started["name"] == deployment["metadata"]["name"]
+    assert started["location"] == "remote" and started["name"] == name
     assert started["namespace"] == "hub" and "run_token" not in started
-    assert http.headers[-1]["Authorization"] == f"Bearer {env['COLLAB_RUN_TOKEN']}"
-    assert started["run_token_sha256"] == digest(env["COLLAB_RUN_TOKEN"])
-    # Torn down after the step: the Deployment and the Service, by name.
-    assert ("DELETE", f"/apis/apps/v1/namespaces/hub/deployments/{started['name']}") in api.calls
-    assert ("DELETE", f"/api/v1/namespaces/hub/services/{started['name']}") in api.calls
+    assert http.headers[-1]["Authorization"] == f"Bearer {token}"
+    assert started["run_token_sha256"] == digest(token)
+    # Torn down after the step: the Deployment, the Service and the Secret, by name.
+    assert ("DELETE", f"/apis/apps/v1/namespaces/hub/deployments/{name}") in api.calls
+    assert ("DELETE", f"/api/v1/namespaces/hub/services/{name}") in api.calls
+    assert ("DELETE", f"/api/v1/namespaces/hub/secrets/{name}") in api.calls
+
+
+def test_a_worker_pod_runs_restricted_with_bounded_volumes_unless_told_otherwise():
+    api, http = FakeK8sApi(), FakeWorkerHttp()
+    runner, _ = _runner(InMemoryTrackStore(), api, http)
+    assert runner.submit(OpDefinition("r", (OpStep("a", "x", "run"),))) is RunState.COMPLETED
+    [(_, deployment)] = [(p, b) for p, b in api.bodies if p.endswith("/deployments")]
+    pod = deployment["spec"]["template"]["spec"]
+    [container] = pod["containers"]
+    assert container["securityContext"] == {"runAsNonRoot": True, "allowPrivilegeEscalation": False,
+                                            "capabilities": {"drop": ["ALL"]},
+                                            "seccompProfile": {"type": "RuntimeDefault"}}
+    assert pod["securityContext"] == {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}}
+    assert {v["name"]: v["emptyDir"]["sizeLimit"] for v in pod["volumes"]} == {"cache": "10Gi", "tmp": "2Gi"}
+    assert container["resources"]["limits"] == {"cpu": "500m", "memory": "256Mi"}
+    api, http = FakeK8sApi(), FakeWorkerHttp()
+    runner, _ = _runner(InMemoryTrackStore(), api, http, resources={"limits": {"memory": "2Gi"}},
+                        cache_size_limit="40Gi", tmp_size_limit="5Gi")
+    assert runner.submit(OpDefinition("r", (OpStep("a", "x", "run"),))) is RunState.COMPLETED
+    [(_, deployment)] = [(p, b) for p, b in api.bodies if p.endswith("/deployments")]
+    pod = deployment["spec"]["template"]["spec"]
+    assert pod["containers"][0]["resources"] == {"limits": {"memory": "2Gi"}}
+    assert {v["name"]: v["emptyDir"]["sizeLimit"] for v in pod["volumes"]} == {"cache": "40Gi", "tmp": "5Gi"}
+
+
+def test_a_start_sweeps_the_controllers_workloads_by_label_and_a_takeover_the_runs():
+    """A worker whose controller died while it was starting has no `worker_started` to reap it by: what the
+    labels on every workload the executor makes are for."""
+    api, http = FakeK8sApi(), FakeWorkerHttp()
+    track = InMemoryTrackStore()
+    runner, _ = _runner(track, api, http)
+    runner.start()
+    swept = [p for m, p in api.calls if m == "DELETE" and "labelSelector" in p]
+    assert swept == [f"{c}?labelSelector=collab-hub/controller=hub" for c in (
+        "/apis/apps/v1/namespaces/hub/deployments", "/api/v1/namespaces/hub/services",
+        "/api/v1/namespaces/hub/secrets")]  # and the NetworkPolicies, on an executor that makes them
+    # Another controller's run, picked up and left: taking it over sweeps that run's workloads, whoever made them.
+    intents.submit(track, OpDefinition("left", (OpStep("a", "x", "run"),)), by={"user": "u", "org_id": "o"})
+    track.append(TrackEvent(run_id="left", event_type="run_picked_up", payload={"controller": "old"},
+                            schema=SCHEMA_VERSION))
+    api.calls.clear()
+    assert runner.take_over("left", from_controller="old") is RunState.INTERRUPTED
+    swept = [p for m, p in api.calls if m == "DELETE" and "labelSelector" in p]
+    assert swept and all(p.endswith("?labelSelector=collab-hub/run=left") for p in swept)
 
 
 def test_an_image_of_another_shape_runs_the_command_it_is_given():
@@ -101,7 +159,8 @@ def test_a_pod_that_outlived_its_controller_is_reaped_by_name_on_the_next_start(
     assert stopped["reaped"] is True and intents.describe(track, "r").state is RunState.INTERRUPTED
     # Nothing to reap the second time: the pod is gone, and the Track says so.
     api.deleted_missing = {f"/apis/apps/v1/namespaces/hub/deployments/{worker.name}",
-                           f"/api/v1/namespaces/hub/services/{worker.name}"}
+                           f"/api/v1/namespaces/hub/services/{worker.name}",
+                           f"/api/v1/namespaces/hub/secrets/{worker.name}"}
     assert executor.reap(worker.details, "r") is False
 
 

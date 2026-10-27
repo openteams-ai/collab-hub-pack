@@ -1026,7 +1026,11 @@
               "uniqueItems": true,
               "items": {
                 "type": "string",
-                "enum": ["operator", "owner", "member"]
+                "enum": [
+                  "operator",
+                  "owner",
+                  "member"
+                ]
               }
             },
             "allowedUsers": {
@@ -1177,11 +1181,30 @@
                 "local",
                 "remote"
               ],
-              "description": "Where a Cog's worker runs: a pod of its own (remote), or a process of the API's pod (local)."
+              "description": "Where a Cog's worker runs: a pod of its own (remote), or a process of the API's pod (local, the default)."
             },
             "serviceAccountAnnotations": {
               "type": "object",
               "description": "Annotations on the controller's ServiceAccount, at the remote location."
+            },
+            "worker": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "At the remote location, each worker pod: its resources and the size limits of its cache and /tmp volumes.",
+              "properties": {
+                "resources": {
+                  "type": "object",
+                  "description": "Resources for a worker pod's container."
+                },
+                "cacheSizeLimit": {
+                  "type": "string",
+                  "description": "The size limit of a worker's cache volume, where pixi builds the Cog's environment."
+                },
+                "tmpSizeLimit": {
+                  "type": "string",
+                  "description": "The size limit of a worker's /tmp, its HOME."
+                }
+              }
             }
           },
           "additionalProperties": false

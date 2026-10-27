@@ -48,20 +48,33 @@ image, which ships the Cog packages under `/opt/collab-hub/cogs` and pixi:
 the package's `serve` task in the environment its lock pins, built on the
 pod's own volumes (materialization from a published artifact, with a cache,
 is #105). It is given what a local worker is given, in its environment:
-`COLLAB_COG_HOST` (`0.0.0.0`) and `COLLAB_COG_PORT`, `COLLAB_COG_ID`,
-`COLLAB_RUN_ID`, `COLLAB_RUN_TOKEN`, and what the binding delivers. It
-carries no ServiceAccount token, and a NetworkPolicy per worker admits only
-the controller's pods to its `/invoke`; the controller presents the run
-token on every request, turns included. `worker_started` records the
-workloads' `name` and `namespace` and the token's sha256. Teardown deletes
-the Deployment, the Service and the policy by name. A pod outlives a
-controller that dies, so the next controller to find the run, its own on
-restart or another taking the run over, reaps the pod by the name the Track
-recorded, and `worker_stopped` says so. The only identity that may create
-these workloads is the controller's; the API never does (ADR-0002 invariant
-3). The controller takes `--image`, `--namespace` and `--allow-ingress-from`
-(the labels of its own pods, as JSON), or `--insecure-skip-network-policy`
-for a trusted namespace.
+`COLLAB_COG_HOST` (`0.0.0.0`) and `COLLAB_COG_PORT`, `COLLAB_COG_ID` and
+`COLLAB_RUN_ID` as literals on the pod template; `COLLAB_RUN_TOKEN` and what
+the binding delivers (a model key) through a Secret of the worker's own,
+made before the Deployment and read by `envFrom`, so neither is on a
+Deployment or ReplicaSet that `get` reads. It carries no ServiceAccount
+token, and a NetworkPolicy per worker admits only the controller's pods to
+its `/invoke`; the controller presents the run token on every request,
+turns included. The pod runs under the executor's securityContext unless
+given another: `runAsNonRoot`, no privilege escalation, every capability
+dropped, the runtime's seccomp profile, which Pod Security `restricted`
+admits; its two emptyDirs, the cache pixi builds on and its `/tmp`, have
+size limits (`cache_size_limit`, `tmp_size_limit`), and `resources` are the
+pod's. `worker_started` records the workloads' `name` and `namespace` and
+the token's sha256. Teardown deletes the Deployment, the Service, the policy
+and the Secret by name. A pod outlives a controller that dies, so the next
+controller to find the run, its own on restart or another taking the run
+over, reaps the pod by the name the Track recorded, and `worker_stopped`
+says so. A worker whose controller died while it was starting, before
+`worker_started` named it, is reached another way: every workload carries
+`collab-hub/controller` and `collab-hub/run` labels, and a controller sweeps
+its own id's workloads at start, when none can be live, and a run's when it
+takes the run over. The only identity that may create these workloads is
+the controller's; the API never does (ADR-0002 invariant 3). The controller
+takes `--image`, `--namespace` and `--allow-ingress-from` (the labels of its
+own pods, as JSON), or `--insecure-skip-network-policy` for a trusted
+namespace, and `--worker-resources`, `--worker-cache-size-limit` and
+`--worker-tmp-size-limit` for the pods.
 
 **What a local worker is given.** Its environment, and nothing else of its
 controller: `PATH`, `HOME` and the few variables a process needs to run at all;
@@ -217,7 +230,7 @@ run API's later phase.
 | `--track` | A SQLite file, or a `postgresql://` URL (`collab-hub-execution[postgres]`). On Postgres the Track's tables come from the hub's migrations; the controller refuses a database without them |
 | `--id` | The controller's name, held while it runs, recorded on each run it picks up |
 | `--packages`, `--allow`, `--work-dir`, `--environment` | The `local` location's directory package source, and where workers write their output |
-| `--image`, `--namespace`, `--allow-ingress-from`, `--insecure-skip-network-policy` | The `remote` location: the image a worker pod runs, where, and which pods may reach it |
+| `--image`, `--namespace`, `--allow-ingress-from`, `--insecure-skip-network-policy`, `--worker-resources`, `--worker-cache-size-limit`, `--worker-tmp-size-limit` | The `remote` location: the image a worker pod runs, where, which pods may reach it, and the pod's resources and volume limits |
 | `--backend`, `--location` | The two axes: `none` built; `local` and `remote` built |
 | `--models FILE` | The hub's `models:` block, below |
 | `--health-port`, `--health-host` | `GET /healthz`, 200 while the controller passes over the Track, and `GET /readyz`, 200 once it has started and its last pass read the Track; 503 otherwise, with the reason |

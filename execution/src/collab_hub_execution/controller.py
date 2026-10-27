@@ -35,6 +35,7 @@ and its last pass read the Track.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import json
 import logging
@@ -44,7 +45,7 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -78,6 +79,8 @@ class RunController:
         the runs of an owner that never returns to that owner."""
         self.owner_check_interval = owner_check_interval
         self._owners: dict[str, tuple[float, bool]] = {}  # controller id -> (when probed, still holds its id)
+        self._holding: dict[str, threading.Lock] = {}  # controller id -> held by a takeover of this process
+        self._holding_lock = threading.Lock()
         self._taking_over: dict[str, threading.Thread] = {}
         self._advancing: dict[str, threading.Thread] = {}
         self._cancelling: dict[str, threading.Thread] = {}
@@ -200,11 +203,15 @@ class RunController:
     def _owner_holds_id(self, controller: str) -> bool:
         """Whether ``controller`` still holds its id on the Track; ``True`` when it cannot be known.
 
-        Probed at most every ``owner_check_interval`` per controller, by trying
-        its id's lock and letting it go at once: held, the owner is alive.
+        Probed by trying its id's lock and letting it go at once: held, the
+        owner is alive, and that is remembered for ``owner_check_interval``. A
+        free id is never remembered: the owner may start again at any moment,
+        and ``_take_over`` holds its id while it decides.
         """
         if self.track_spec is None:
             return True
+        if self._owner_hold(controller).locked():
+            return False  # a takeover of this process holds the id: free of its owner, by definition
         now = time.monotonic()
         probed = self._owners.get(controller)
         if probed is not None and now - probed[0] < self.owner_check_interval:
@@ -214,12 +221,33 @@ class RunController:
         except Exception:  # noqa: BLE001 - a probe that fails says nothing: the owner is left its run
             _log.exception("probing whether controller %r holds its id failed", controller)
             holds = True
-        self._owners[controller] = (now, holds)
+        if holds:
+            self._owners[controller] = (now, holds)
+        else:
+            self._owners.pop(controller, None)
         return holds
 
+    def _owner_hold(self, owner: str) -> threading.Lock:
+        with self._holding_lock:
+            return self._holding.setdefault(owner, threading.Lock())
+
     def _take_over(self, run_id: str, owner: str) -> None:
+        """Take the run over while holding its owner's id, so the owner cannot start and pick it up meanwhile.
+
+        Between a probe that found the id free and the write, the owner could
+        start again, take its id back and carry the run on; the `interrupted`
+        would then land on a run that is alive, and the Track would no longer
+        replay. Held by this controller, the id stays free of the owner (one
+        starting waits for it, or refuses) until the run is ended or found
+        moved.
+        """
         try:
-            state = self.runner.take_over(run_id, from_controller=owner)
+            # One takeover of an owner's runs at a time in this process: a second thread trying the owner's
+            # lock while a first holds it would read its own process as the owner, alive.
+            with self._owner_hold(owner), holding_id(self.track_spec, owner) as held:
+                if not held:
+                    return  # the owner is back: the run is its
+                state = self.runner.take_over(run_id, from_controller=owner)
         except Exception:  # noqa: BLE001 - one run's failure never stops the controller
             _log.exception("taking %s over from %s failed", run_id, owner)
             return
@@ -430,6 +458,40 @@ def id_held(spec: str, controller: str) -> bool:
         return False
 
 
+@contextlib.contextmanager
+def holding_id(spec: str | None, controller: str) -> Iterator[bool]:
+    """Hold ``controller``'s id for the block, when it is free: ``True`` inside when held, ``False`` when a live
+    controller holds it (nothing is waited for). A ``None`` spec is a Track with no ids to hold: ``True``."""
+    if spec is None:
+        yield True
+        return
+    if spec.startswith(POSTGRES_SCHEMES):
+        import psycopg
+
+        with psycopg.connect(spec, autocommit=True) as connection:
+            got = connection.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                                     (f"collab-run-controller:{controller}",)).fetchone()[0]
+            try:
+                yield bool(got)
+            finally:
+                if got:
+                    connection.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                                       (f"collab-run-controller:{controller}",))
+        return
+    path = Path(spec)
+    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in controller)
+    with open(path.with_name(f"{path.name}.{safe}.controller.lock"), "a") as lock:  # never truncated: flock only
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def hold_id(spec: str, controller: str):
     """Hold ``controller`` on the Track for as long as this process runs; returns a check that it still does.
 
@@ -528,6 +590,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--allow-ingress-from", default=env("COLLAB_CONTROLLER_ALLOW_INGRESS_FROM"), metavar="JSON",
                         help="at the remote location, the labels of the pods that may reach a worker's /invoke, "
                              "as a JSON object: the run controller's own; or --insecure-skip-network-policy")
+    parser.add_argument("--worker-resources", default=env("COLLAB_CONTROLLER_WORKER_RESOURCES"), metavar="JSON",
+                        help="at the remote location, a worker pod's resources (requests and limits), as JSON")
+    parser.add_argument("--worker-cache-size-limit", default=env("COLLAB_CONTROLLER_WORKER_CACHE_SIZE_LIMIT"),
+                        metavar="SIZE", help="at the remote location, the size limit of a worker's cache volume, "
+                                             "where pixi builds the Cog's environment (10Gi unless given)")
+    parser.add_argument("--worker-tmp-size-limit", default=env("COLLAB_CONTROLLER_WORKER_TMP_SIZE_LIMIT"),
+                        metavar="SIZE", help="at the remote location, the size limit of a worker's /tmp, its "
+                                             "HOME (2Gi unless given)")
     parser.add_argument("--insecure-skip-network-policy", action="store_true",
                         default=env("COLLAB_CONTROLLER_INSECURE_SKIP_NETWORK_POLICY", "") == "true",
                         help="at the remote location, make no NetworkPolicy for workers (a trusted namespace only)")
@@ -636,6 +706,17 @@ def main(argv: list[str] | None = None) -> int:
             "image": args.image, "namespace": args.namespace, "controller": args.id,
             "allow_ingress_from": args.allow_ingress_from or None,
             "insecure_skip_network_policy": bool(args.insecure_skip_network_policy)}
+        if args.worker_resources:
+            try:
+                location_settings["resources"] = json.loads(args.worker_resources)
+            except ValueError:
+                print("error: --worker-resources is a JSON object: {\"requests\": {...}, \"limits\": {...}}",
+                      file=sys.stderr)
+                return 2
+        for option, setting in (("worker_cache_size_limit", "cache_size_limit"),
+                                ("worker_tmp_size_limit", "tmp_size_limit")):
+            if getattr(args, option):
+                location_settings[setting] = getattr(args, option)
     runner = LifecycleRunner(
         track=track, backend=args.backend, location=args.location, controller=args.id,
         location_settings={**location_settings, "interaction_timeout": args.interaction_timeout or None,

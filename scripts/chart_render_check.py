@@ -426,10 +426,16 @@ def case_run_controller_remote(r: Rendered) -> None:
     role = r.roles[binding["roleRef"]["name"]]
     rules = {(rule["apiGroups"][0], rule["resources"][0]): sorted(rule["verbs"]) for rule in role["rules"]}
     assert rules == {
-        ("apps", "deployments"): ["create", "delete", "get", "list", "patch", "watch"],
-        ("", "services"): ["create", "delete", "get", "list"],
-        ("networking.k8s.io", "networkpolicies"): ["create", "delete", "get", "list", "patch"],
+        ("apps", "deployments"): ["create", "delete", "deletecollection", "get", "list", "patch", "watch"],
+        ("", "services"): ["create", "delete", "deletecollection", "get", "list"],
+        ("networking.k8s.io", "networkpolicies"): ["create", "delete", "deletecollection", "get", "list", "patch"],
+        ("", "secrets"): ["create", "delete", "deletecollection", "patch"],  # written, never read
     }, rules
+    # A worker pod's resources and volume limits reach the controller from the chart.
+    assert json.loads(controller.value("COLLAB_CONTROLLER_WORKER_RESOURCES")) == {
+        "requests": {"cpu": "100m", "memory": "512Mi"}, "limits": {"cpu": "2", "memory": "4Gi"}}
+    assert controller.value("COLLAB_CONTROLLER_WORKER_CACHE_SIZE_LIMIT") == "10Gi"
+    assert controller.value("COLLAB_CONTROLLER_WORKER_TMP_SIZE_LIMIT") == "2Gi"
     assert "run-cache" not in r.volumes and "run-tmp" not in r.volumes  # nothing of a worker's on the API pod
 
 

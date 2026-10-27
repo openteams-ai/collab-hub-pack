@@ -538,6 +538,7 @@ class LifecycleRunner(WorkflowEngine):
         if self.backend.durable:
             return ()
         interrupted = []
+        self._sweep(controller=self.controller)
         for run_id in self._unfinished():
             # Claimed first, then read: a retry or a decision in this host claims its run
             # before it writes, so a run it is starting is never taken for one left behind.
@@ -593,8 +594,20 @@ class LifecycleRunner(WorkflowEngine):
             if self._record_if_still(run_id, transition, run, written) is None:
                 return None
             self._reap(run_id, events)
+            self._sweep(run_id=run_id)
             del advancing
             return transition.after.state
+
+    def _sweep(self, *, controller: str | None = None, run_id: str | None = None) -> None:
+        """Delete what the executor made for the controller, or the run, that no ``worker_started`` names: a
+        worker whose controller died while it was starting. Only an executor that can (the remote one) does."""
+        sweep = getattr(self.executor, "sweep", None)
+        if sweep is None or (controller is None and run_id is None):
+            return
+        try:
+            sweep(controller=controller, run_id=run_id)
+        except Exception:  # noqa: BLE001 - a sweep that fails never stops a start or a takeover
+            _log.exception("sweeping the workloads left by %s failed", controller or run_id)
 
     def _reap(self, run_id: str, events: Sequence[TrackEvent]) -> None:
         """Stop each worker of the run that was started and never recorded stopped, and record its stop."""

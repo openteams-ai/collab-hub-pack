@@ -75,6 +75,14 @@ spec:
               value: {{ $controller.waitSeconds | quote }}
             - name: COLLAB_CONTROLLER_WORKER_START_TIMEOUT
               value: {{ $controller.workerStartSeconds | quote }}
+            # Each worker pod's resources and the limits of its volumes; its securityContext is the executor's
+            # restricted-compatible default.
+            - name: COLLAB_CONTROLLER_WORKER_RESOURCES
+              value: {{ $controller.worker.resources | toJson | quote }}
+            - name: COLLAB_CONTROLLER_WORKER_CACHE_SIZE_LIMIT
+              value: {{ $controller.worker.cacheSizeLimit | quote }}
+            - name: COLLAB_CONTROLLER_WORKER_TMP_SIZE_LIMIT
+              value: {{ $controller.worker.tmpSizeLimit | quote }}
             - name: COLLAB_CONTROLLER_HEALTH_HOST
               value: "0.0.0.0"
             - name: COLLAB_CONTROLLER_HEALTH_PORT

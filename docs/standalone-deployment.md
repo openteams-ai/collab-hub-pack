@@ -420,7 +420,9 @@ smoke-test workflows that need these switches actually run.
 The run API (`/v1/runs`) is always served, on the hub's database. Something
 must also run what it launches: a run controller. `runs.controller.enabled`
 runs one, and `runs.controller.location` says where each Cog's worker runs.
-`remote`, the default, is how a hub is deployed:
+`remote` is how a hub is deployed; the default is `local`, the shape a hub
+that enabled the controller before `location` existed already has, so an
+upgrade changes nothing until the values say `remote`:
 
 ```yaml
 runs:
@@ -444,9 +446,13 @@ runs:
 - **The controller is a Deployment of its own**, one replica of the API's
   image running `collab-hub-run-controller`, with a ServiceAccount and a
   namespace-scoped Role over exactly the kinds it makes (Deployments,
-  Services, NetworkPolicies) and the verbs it uses. The API pod holds no
+  Services, NetworkPolicies, and a Secret per worker, which it writes and
+  deletes and never reads) and the verbs it uses. The API pod holds no
   workload permissions, and may have as many replicas as its frame store
-  allows. The controller's id (`id`) is the same across rollouts; the new
+  allows. The Role is in the release namespace, so the controller's identity
+  can start a pod under any ServiceAccount there and mount any Secret there,
+  the database URL among them: what putting workers beside the hub costs. A
+  namespace of the workers' own, holding the Role to them alone, is #253. The controller's id (`id`) is the same across rollouts; the new
   pod's controller waits (`waitSeconds`) for the old one to let it go, and a
   run picked up by an id that never returns is ended by a live controller.
 - **Each worker is a pod of its own**: the same image, running the Cog
@@ -455,9 +461,16 @@ runs:
   that; materialization from a published artifact with a cache is #105). It
   carries no ServiceAccount token, and a NetworkPolicy per worker admits only
   the controller's pods to its `/invoke`, enforced by a policy-enforcing CNI.
-  The run token travels in the pod's environment, and only its hash is on
-  the Track. Workers need egress to conda-forge and PyPI to build their
-  environment, and to the model endpoints the binding names.
+  The run token and the model key its Cog is bound to reach the pod through
+  a Secret of the worker's own (`envFrom`), never the pod template, and only
+  the token's hash is on the Track. The pod runs restricted (`runAsNonRoot`,
+  no privilege escalation, capabilities dropped, the runtime's seccomp
+  profile), with `worker.resources` and size limits on its two volumes
+  (`worker.cacheSizeLimit`, the environment pixi builds, several GiB for
+  Hermes; `worker.tmpSizeLimit`, its HOME). Workers need egress to
+  conda-forge and PyPI to build their environment, and to the model
+  endpoints the binding names; egress is otherwise open (#11), the database
+  service included.
 - **Its Track** is the hub's database (`frames.postgres`); the chart refuses
   the controller without it. `models` and `extraEnv` are as below.
 

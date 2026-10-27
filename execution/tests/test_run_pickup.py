@@ -341,12 +341,18 @@ class _Controllers:
         self.base = [sys.executable, "-m", "collab_hub_execution.controller", "--track", track_spec,
                      "--packages", str(packages(tmp_path)), "--work-dir", str(tmp_path / "runs"),
                      "--poll-interval", "0.02", "--environment", "host"]
+        self.logs = tmp_path / "controllers"
+        self.logs.mkdir(exist_ok=True)
         self.processes: list[subprocess.Popen] = []
 
     def start(self, name):
         port = _free_port()
-        process = subprocess.Popen([*self.base, "--id", name, "--health-port", str(port)],
-                                   stderr=subprocess.DEVNULL, start_new_session=True)
+        # Each controller's stderr goes to a file, and PYTHONFAULTHANDLER makes one that will not stop dump its
+        # threads there (close() aborts it), so a hang is read rather than guessed at.
+        log = open(self.logs / f"{name}-{port}.log", "w")  # noqa: SIM115 - closed with the process
+        process = subprocess.Popen([*self.base, "--id", name, "--health-port", str(port)], stderr=log,
+                                   start_new_session=True, env={**os.environ, "PYTHONFAULTHANDLER": "1"})
+        process.log = log
         self.processes.append(process)
         deadline = time.monotonic() + 30
         while _get(port, "/readyz")[0] != 200:
@@ -355,10 +361,26 @@ class _Controllers:
         return process, port
 
     def close(self):
+        """Stop every controller, and fail on one that does not stop: killed, so it holds nothing (an id on a
+        Postgres Track, say) that a later test would find taken, with its threads dumped to its log."""
+        hung = []
         for process in self.processes:
             if process.poll() is None:
                 process.terminate()
-            process.wait(30)
+            try:
+                process.wait(30)
+            except subprocess.TimeoutExpired:
+                os.kill(process.pid, signal.SIGABRT)
+                try:
+                    process.wait(5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(5)
+                hung.append(process)
+            process.log.close()
+        if hung:
+            dumps = "\n".join(f"--- {p.log.name}\n{open(p.log.name).read()[-6000:]}" for p in hung)
+            raise AssertionError(f"{len(hung)} controller(s) did not stop within 30s of SIGTERM:\n{dumps}")
 
 
 def _until(check, what, within=30.0):

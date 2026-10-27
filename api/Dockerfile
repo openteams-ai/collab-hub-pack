@@ -53,6 +53,10 @@ RUN groupadd --gid 1000 nonroot && \
 # only: pixi keeps every environment, and its downloads, under /var/cache/collab-hub, which the chart
 # mounts writable, and builds a Cog's environment the first time that Cog is launched.
 COPY --from=pixi /usr/local/bin/pixi /usr/local/bin/pixi
+# The worker SDK, beside the Cogs: cogs/hermes pins it by path (../../worker), so it lives at the same
+# distance here as in the repository.
+COPY --from=projectroot worker/pyproject.toml worker/README.md /opt/collab-hub/worker/
+COPY --from=projectroot worker/src /opt/collab-hub/worker/src
 COPY --from=projectroot cogs/hermes/pixi.toml cogs/hermes/pixi.lock cogs/hermes/serve.py cogs/hermes/hermes_acp.py \
      /opt/collab-hub/cogs/hermes/
 COPY --from=projectroot examples/cog-local/cogs/hello/pixi.toml examples/cog-local/cogs/hello/pixi.lock \

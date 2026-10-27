@@ -692,6 +692,17 @@ cogs:
     #   indexUrl: catalog.v1.json URL listing repositories (static)
     #   caBundlePath: per-source CA bundle path; defaults to cogs.caBundle when that is set
     #   requestTimeoutSeconds: HTTP timeout, default 10
+    #   publish: true on exactly one source makes it the one pushes through the Hub
+    #         are written to (cogs.serve.enabled required). The Hub writes with
+    #         this source's own credential, which therefore needs push. Such a
+    #         source also enumerates what is published through the Hub, so a
+    #         static one needs neither repositories nor indexUrl.
+    #   blobRedirectHosts: hosts a blob redirect from this registry may point at
+    #         (its object storage): exact names or IPv4 addresses, or
+    #         leading-dot suffixes such as ".s3.amazonaws.com". Empty means no
+    #         allowlist; loopback, link-local and metadata addresses are
+    #         refused either way, and a private IP literal is followed only
+    #         when it is listed here.
     #   credentials:
     #     existingSecret: Secret holding the robot/service credential (required if the block is present)
     #     usernameKey: key in that Secret, default "username"
@@ -730,6 +741,44 @@ cogs:
     intervalSeconds: 300
     # -- Whether a sweep runs when the indexer starts, before the first interval.
     runOnStartup: true
+  serve:
+    # -- Whether the Hub serves Cog pulls itself: the OCI read API (`/v2/`)
+    # on the Hub host, in front of `registry.sources`, so installing a Cog
+    # needs only a Hub sign-in and no client holds a credential for the
+    # backing registry. Off (the default) mounts nothing under `/v2/` and
+    # leaves every catalog `reference` naming the backing registry, which is
+    # what clients released before this pull from. On, references name the
+    # Hub. Needs at least one source. See docs/cog-registry.md.
+    enabled: false
+    # -- The Hub's external origin: `https://host[:port]`, no path and no
+    # trailing slash. This is
+    # the origin of the Hub API itself, not a separate registry hostname:
+    # `/v2/` is served on the same host as `/v1`, and clients accept a
+    # registry credential only for the exact origin they exchanged it at.
+    # Empty derives `https://<host>` from api.nebariapp.hostname, else from
+    # api.ingress.host. Set it only to add a port or to say `http`; a value
+    # naming another host than the one the chart routes fails the render.
+    publicUrl: ""
+    # -- Lifetime of a registry credential exchanged from a Hub session
+    # (60..86400). It, and every pull token minted from it, stops here, so
+    # size it to the longest single install.
+    credentialTtlSeconds: 900
+    # -- Lifetime of a repository-scoped pull token (30..3600).
+    tokenTtlSeconds: 300
+    # -- Largest blob the Hub will relay, in bytes. Larger ones are refused.
+    maxBlobBytes: 1073741824
+    # -- Wall-clock limit on one blob response, in seconds (10..21600).
+    maxBlobSeconds: 900
+    # -- Give the route that carries `/v2` a request timeout of
+    # maxBlobSeconds (plus a margin) so the gateway does not cut a large blob
+    # short. With api.ingress.kind=HTTPRoute it is `timeouts` on the chart's
+    # own `/v2` rule (Gateway API v1.2 standard channel). With
+    # api.nebariapp.enabled the route is the operator's, so it is an Envoy
+    # Gateway BackendTrafficPolicy on the NebariApp's public route, which
+    # covers every public path and takes the place of a Gateway-level
+    # BackendTrafficPolicy for that route. Set false on older CRDs, or where
+    # the cluster manages that policy, and configure the gateway instead.
+    routeTimeout: true
   indexer:
     # The Cog indexer workload, rendered when `index.enabled`: the API image
     # and settings as one extra Deployment with cogs.index.enabled=true, a
@@ -742,6 +791,24 @@ cogs:
     # `api.deployment.resources`; a sweep of a large registry may want more
     # memory than a request-serving replica.
     resources: {}
+
+  publish:
+    # Who may publish Cogs through the Hub, once one source is marked
+    # `publish: true`. Nobody, by default; being able to pull never implies it.
+    # -- Roles that hold the publish permission: any of "operator" (the
+    # platform role), "owner" and "member" (the caller's role in their
+    # organization). Roles exist only where the Hub resolves organizations
+    # from membership.
+    allowedRoles: []
+    # -- User ids (the Hub's ACL principal) that hold the publish permission
+    # whatever their role. The only way to grant it under claims-sourced auth.
+    allowedUsers: []
+    # -- How many repositories one organization may have pending at once. A
+    # repository is pending from its first publish until the registry is
+    # known to have accepted a manifest for it, and nothing pending expires,
+    # so this bounds the names an organization can hold through a registry
+    # outage. Publishing again to a pending name is never refused by it.
+    maxPendingRepositories: 20
 
 # Feature flags for work in progress that is on main but not yet exposed. Every
 # flag is off until it is listed here and set to true; each entry becomes

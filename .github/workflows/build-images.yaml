@@ -21,6 +21,7 @@ on:
       - "execution/**"
       # The Cogs the image ships (runs.controller in the chart).
       - "cogs/hermes/**"
+      - "worker/**"
       - "examples/cog-local/cogs/hello/**"
       - ".github/workflows/build-images.yaml"
   pull_request:
@@ -28,6 +29,7 @@ on:
       - "api/**"
       - "execution/**"
       - "cogs/hermes/**"
+      - "worker/**"
       - "examples/cog-local/cogs/hello/**"
   workflow_dispatch:
 

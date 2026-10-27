@@ -13,6 +13,7 @@ on:
     paths:
       - "examples/**"
       - "cogs/**"
+      - "worker/**"
       - "cli/**"
       - "api/**"
       - "execution/**"
@@ -22,6 +23,7 @@ on:
     paths:
       - "examples/**"
       - "cogs/**"
+      - "worker/**"
       - "cli/**"
       - "api/**"
       - "execution/**"

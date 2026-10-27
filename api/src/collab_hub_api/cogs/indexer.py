@@ -79,15 +79,17 @@ consult the lock (issue #148), so they land concurrently with a sweep.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import random
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
+from functools import partial
 
 from ..frames.observability import COG_INDEX_ARTIFACTS, COG_INDEX_SWEEP_DURATION, COG_INDEX_SWEEPS
 from .bundle import COG_ENTRY_FILE, PROG_KIND, CogCard, read_cog_bundle
@@ -115,7 +117,7 @@ from .oci import (
     select_bundle_layers,
 )
 from .profile import PIXI_MANIFEST, PROFILE_PARSED
-from .registry import ArtifactRef, RegistrySource
+from .registry import ArtifactRef, RegistryRepositoryNotFound, RegistrySource
 
 logger = logging.getLogger("frames_server.cogs.indexer")
 
@@ -167,6 +169,13 @@ the expensive part, one manifest plus up to three blobs each -- is capped.
 Digests already in the catalog cost nothing against the budget, so each sweep
 fetches the next batch beyond what earlier sweeps indexed. Artifacts past the
 budget are counted as ``deferred`` and picked up next sweep.
+"""
+
+MAX_UNTAGGED_CHECKS_PER_SOURCE = 256
+"""Untagged rows asked about directly per sweep, for a source that lists by tag; past it they are kept unasked.
+
+One ``HEAD`` each. A source that lists by tag gets an untagged row only from
+a publish by digest or a tag that moved on, so this is generous.
 """
 
 MAX_CARD_BYTES = 8 * 1024 * 1024
@@ -245,9 +254,20 @@ class CogIndexer:
         max_new_fetches_per_sweep: int = MAX_NEW_FETCHES_PER_SWEEP,
         max_bytes_per_file: int = DEFAULT_MAX_BUNDLE_FILE_BYTES,
         clock: Callable[[], float] = time.monotonic,
+        published_repositories: Callable[[str], Sequence[str]] | None = None,
+        repositories_found: Callable[[str, Mapping[str, Sequence[str]]], object] | None = None,
     ) -> None:
         self._store = store
         self._sources = list(sources)
+        # Repositories published through the Hub into a source (issue #180):
+        # enumerated along with whatever the source itself lists, so the
+        # publish target needs no configured repository list.
+        self._published_repositories = published_repositories
+        # Told, after each source is swept, what each repository was found
+        # to hold: a repository whose publish was accepted by the registry
+        # but never recorded as such is settled by this, if what was found
+        # is what was published.
+        self._repositories_found = repositories_found
         self._max_artifacts = max_artifacts_per_repository
         self._max_new_fetches = max_new_fetches_per_sweep
         self._max_bytes_per_file = max_bytes_per_file
@@ -289,9 +309,18 @@ class CogIndexer:
     # -- threading discipline ---------------------------------------------------
 
     async def _on_thread(self, func, /, *args, **kwargs):
-        """Run a targeted entry point's store call on the shared worker pool."""
+        """Run a targeted entry point's store call on the shared worker pool.
 
-        return await asyncio.wrap_future(self._executor.submit(func, *args, **kwargs))
+        The call runs in a copy of the caller's context, as
+        ``asyncio.to_thread`` would run it. For the write a publish makes
+        inside a ``/v2/`` request (issue #180) that is what carries the
+        request's deadline (:mod:`.deadline`) to the worker, so the write is
+        bounded by the request's budget.
+        """
+
+        return await asyncio.wrap_future(
+            self._executor.submit(contextvars.copy_context().run, func, *args, **kwargs)
+        )
 
     async def _on_sweep_thread(self, func, /, *args, **kwargs):
         """Run one of the sweep's store calls on the sweep thread, in order with the rest.
@@ -383,6 +412,16 @@ class CogIndexer:
         return summary
 
     async def _sweep_source(self, source: RegistrySource, summary: SweepSummary, view: SweepView) -> None:
+        # With publishing through the Hub, rows are also written outside the
+        # sweep, at any moment: a new version, or one that had been removed
+        # and is published again. The store's clock is read before this
+        # source is enumerated, and the removal below is limited -- in its own
+        # statement -- to rows last written before that reading, so a row
+        # written since is not declared gone by a listing that may predate
+        # it. The next sweep, whose listing can include it, judges it.
+        started: datetime | None = None
+        if self._published_repositories is not None:
+            started = await self._on_sweep_thread(view.clock)
         enumeration = await self._enumerate(source)
         if enumeration.errors:
             summary.sources_failed += 1
@@ -430,12 +469,63 @@ class CogIndexer:
         # reconciled. Deferred fetches do NOT skip removal: those artifacts
         # were enumerated and stand in the present set.
         present = {repo: [artifact.digest for artifact in artifacts] for repo, artifacts in enumeration.present.items()}
+        if not getattr(source, "lists_untagged", True):
+            await self._keep_untagged(source, known, present)
         removed = await self._on_sweep_thread(
-            view.mark_removed, source.id, present, excluding=enumeration.failed_repositories
+            view.mark_removed,
+            source.id,
+            present,
+            excluding=enumeration.failed_repositories,
+            **({"written_before": started} if started is not None else {}),
         )
+        if self._repositories_found is not None:
+            await self._on_thread(self._repositories_found, source.id, present)
         summary.removed += removed
         if removed:
             COG_INDEX_ARTIFACTS.labels(outcome=OUTCOME_REMOVED).inc(removed)
+
+    async def _keep_untagged(
+        self, source: RegistrySource, known: dict[tuple[str, str], KnownArtifact], present: dict[str, list[str]]
+    ) -> None:
+        """Add to ``present`` the untagged manifests a source that lists by tag could not have listed.
+
+        Such a source (the static adapter) finds manifests only through
+        their tags, so one with none -- a manifest put by digest through the
+        Hub (issue #180), or one whose tag has moved on -- is never in its
+        listing, and the removal would declare it gone though the registry
+        still serves it. So each present catalog row with no tags, in a
+        repository that was listed, is asked about directly: one ``HEAD``,
+        kept if the registry has it. Any answer but a clear "not there"
+        keeps it too, as do rows past :data:`MAX_UNTAGGED_CHECKS_PER_SOURCE`:
+        what was not seen cannot be declared gone.
+        """
+
+        listed = {(repository, digest) for repository, digests in present.items() for digest in digests}
+        candidates = [
+            row
+            for row in known.values()
+            if not row.removed
+            and not row.tags
+            and row.repository in present
+            and (row.repository, row.digest) not in listed
+        ]
+        if len(candidates) > MAX_UNTAGGED_CHECKS_PER_SOURCE:
+            logger.warning(
+                "cog_index_untagged_checks_capped",
+                extra={"source": source.id, "untagged": len(candidates), "checked": MAX_UNTAGGED_CHECKS_PER_SOURCE},
+            )
+        for index, row in enumerate(candidates):
+            keep = True
+            if index < MAX_UNTAGGED_CHECKS_PER_SOURCE:
+                try:
+                    keep = await source.oci().has_manifest(row.repository, row.digest)
+                except Exception as exc:
+                    logger.warning(
+                        "cog_index_untagged_check_failed",
+                        extra={"source": source.id, "repository": row.repository, "reason": _describe(exc)},
+                    )
+            if keep:
+                present[row.repository].append(row.digest)
 
     def _schedule(self, source_id: str, unseen: list, retries: list) -> tuple[list, int]:
         """Split this sweep's fetches into (fetch now, number deferred) so neither class starves.
@@ -512,6 +602,12 @@ class CogIndexer:
             result.complete = False
             result.errors.append(f"list_repositories: {_describe(exc)}")
             return result
+        published: set[str] = set()
+        if self._published_repositories is not None:
+            # A store read, outside the guard above on purpose: like every
+            # other store error, a database outage here aborts the sweep.
+            published = set(await self._on_thread(self._published_repositories, source.id)) - set(repositories)
+            repositories = sorted(set(repositories) | published)
         for repository in repositories:
             try:
                 artifacts = await source.list_artifacts(repository)
@@ -519,6 +615,15 @@ class CogIndexer:
                 # A configured repository that does not exist (yet) has no
                 # artifacts; that is an answer, not a failure, and its rows
                 # -- if it ever had any -- are correctly marked removed.
+                artifacts = []
+            except RegistryRepositoryNotFound as exc:
+                if repository not in published:
+                    result.failed_repositories.append(repository)
+                    result.errors.append(f"list_artifacts {repository}: {_describe(exc)}; removal skipped for it")
+                    continue
+                # Enumerated only because a publish through the Hub named
+                # it, and the registry has no such repository: the publish
+                # never landed. Empty, like the generic registry's 404.
                 artifacts = []
             except Exception as exc:
                 result.failed_repositories.append(repository)
@@ -617,6 +722,36 @@ class CogIndexer:
         ref = ArtifactRef(digest=digest, tags=tuple(sorted(set(tags))), pushed_at=pushed_at)
         row = await self._read_artifact(source, repository, ref)
         return await self._store_row(row, self._store, self._on_thread)
+
+    async def inspect(self, source: RegistrySource, repository: str, artifact: ArtifactRef) -> CogArtifact:
+        """Read one artifact into the row a sweep would store, **without storing it**.
+
+        The reader a publish is validated with before its manifest is
+        accepted (issue #180): the same code path as a sweep, so "would it
+        index" has one answer. Never raises except for cancellation.
+        """
+
+        return await self._read_artifact(source, repository, artifact)
+
+    async def record_published(self, row: CogArtifact, *, tag: str | None) -> CogArtifact:
+        """Store a row obtained from :meth:`inspect` for a manifest the registry has accepted; return what was stored.
+
+        The catalog's publish write (:meth:`.catalog.CogCatalogStore.record_published`:
+        the row and its tag assignment in one transaction), lock-less like
+        :meth:`reindex`, with the same second line as every other write: a
+        card the database refuses is stored as a ``failed`` row -- still
+        carrying the tag and the publisher -- and that row is what is
+        returned. The caller must look at its status.
+        """
+
+        write = partial(self._store.record_published, tag=tag)
+        try:
+            await self._on_thread(write, row)
+            return row
+        except CogCatalogDataError as exc:
+            fallback = _with(row, status=STATUS_FAILED, card=None, read_errors=_errors(f"store: {type(exc).__name__}"))
+            await self._on_thread(write, fallback)
+            return fallback
 
     async def mark_removed(self, source_id: str, repository: str, digest: str) -> bool:
         """Mark one artifact removed (a delete event). Returns whether a present row was marked."""

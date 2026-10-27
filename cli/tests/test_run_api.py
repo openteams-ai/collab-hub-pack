@@ -94,6 +94,50 @@ def test_run_watch_stops_at_a_gate_and_exits_4(stub, cli):
     assert result.exit_code == 4 and "gate_escalated" in result.stdout and "WAITING_AT_GATE" in result.stdout
 
 
+def test_run_watch_reads_past_an_escalation_that_was_decided_already(stub, cli):
+    cli("--hub", HUB, "cog", "launch", "echo")
+    stub.events["run-000000000001"] = [
+        ("step_started", {"step": "echo"}), ("gate_escalated", {"step": "echo", "escalation": "esc-0"}),
+        ("gate_decided", {"step": "echo", "escalation": "esc-0", "outcome": "approve", "actor": "alice"}),
+        ("step_completed", {"step": "echo"}), ("completed", {})]
+    stub.progress["run-000000000001"] = ["COMPLETED"]
+    result = cli("--hub", HUB, "run", "watch", "run-000000000001")
+    assert result.exit_code == 0, result.output
+    assert "gate_decided" in result.stdout and "status     COMPLETED" in result.stdout
+
+
+def test_run_decide_watch_follows_the_delivery_not_the_escalation_it_answered(stub, cli):
+    cli("--hub", HUB, "cog", "launch", "echo")
+    stub.events["run-000000000001"] = [
+        ("step_started", {"step": "echo"}), ("gate_escalated", {"step": "echo", "escalation": "esc-1"}),
+        ("gate_decided", {"step": "echo", "escalation": "esc-1", "outcome": "approve", "actor": "alice"}),
+        ("step_completed", {"step": "echo"}), ("completed", {})]
+    stub.progress["run-000000000001"] = ["WAITING_AT_GATE"]
+    cli("--hub", HUB, "run", "show", "run-000000000001")
+    stub.runs[0]["sequence"] = 2  # the escalation is the run's last event when the decision is asked
+    stub.stream_progress["run-000000000001"] = ["COMPLETED"]  # delivered while the client watches
+    result = cli("--hub", HUB, "run", "decide", "run-000000000001", "--approve", "--watch")
+    assert result.exit_code == 0, result.output
+    streams = [r for r in stub.requests if r.url.path.endswith("/events")]
+    assert [r.headers.get("Last-Event-ID") for r in streams] == ["2"]
+    assert "gate_escalated" not in result.stdout and "gate_decided" in result.stdout
+    assert "status     COMPLETED" in result.stdout
+
+
+def test_run_retry_watch_waits_for_a_controller_to_take_the_ask_then_follows_the_run(stub, cli):
+    cli("--hub", HUB, "cog", "launch", "echo")
+    stub.events["run-000000000001"] = [("step_started", {"step": "echo"}), ("failed", {"step": "echo"})]
+    stub.progress["run-000000000001"] = ["FAILED"]
+    cli("--hub", HUB, "run", "show", "run-000000000001")
+    stub.runs[0]["sequence"] = 2
+    stub.retry_taken_after = 2  # the stream ends twice before a controller writes `retry_requested`
+    result = cli("--hub", HUB, "run", "retry", "run-000000000001", "--watch")
+    assert result.exit_code == 0, result.output
+    assert "retry_requested" in result.stdout and "status     COMPLETED" in result.stdout
+    streams = [r for r in stub.requests if r.url.path.endswith("/events")]
+    assert len(streams) >= 3 and streams[0].headers.get("Last-Event-ID") == "2"
+
+
 def test_run_payload_prints_a_completed_steps_output_and_a_failed_steps_error(stub, cli):
     cli("--hub", HUB, "cog", "launch", "echo")
     stub.progress["run-000000000001"] = ["COMPLETED"]

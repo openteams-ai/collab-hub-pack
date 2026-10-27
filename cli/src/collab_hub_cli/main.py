@@ -602,8 +602,17 @@ def _event_line(sequence: int | None, kind: str, data: Any) -> str:
     return f"{sequence if sequence is not None else '':>6}  {when}  {kind:<22} {' '.join(said)}".rstrip()
 
 
+RETRY_TAKEN_POLL = 0.5
+"""Seconds `run retry --watch` waits between looks at an ended run, for a controller to take the retry asked for."""
+
+
 def _watch(hub: Hub, run_id: str, *, as_json: bool, after: int = 0) -> dict:
-    """Print the run's events as the hub streams them, until the run ends or waits at a Gate; the run after."""
+    """Print the run's events as the hub streams them, until the run ends or waits at a Gate; the run after.
+
+    A `gate_escalated` stops the watch only while that escalation is the run's
+    open one: an escalation already decided (replayed from before ``after``, or
+    answered while the stream was down) is history the run moved past.
+    """
     for sequence, kind, data in hub.events(f"/v1/runs/{run_id}/events", after=after):
         if kind == "end":
             break
@@ -613,7 +622,12 @@ def _watch(hub: Hub, run_id: str, *, as_json: bool, after: int = 0) -> dict:
         else:
             typer.echo(_event_line(sequence, kind, data))
         if kind == "gate_escalated":
-            break  # the run waits at its Gate for a decision: watching would wait with it
+            # The run waits at its Gate for a decision: watching would wait with it. Unless the decision landed
+            # already, in which case the run moved on and the stream will say how.
+            escalation = ((data or {}).get("payload") or {}).get("escalation") if isinstance(data, dict) else None
+            current = hub.get_json(f"/v1/runs/{run_id}")
+            if current.get("escalation") == escalation and current.get("decision") is None:
+                return current
     return hub.get_json(f"/v1/runs/{run_id}")
 
 
@@ -764,12 +778,13 @@ def run_decide(
         if waiting is None or not run.get("escalation"):
             _err(f"error: {run_id} is {run['status']}, and waits on no decision")
             raise typer.Exit(EXIT_HUB)
+        seen = run.get("sequence") or 0  # the events up to here are the escalation; the ones after, its delivery
         decision = {"escalation": escalation or run["escalation"], "outcome": outcome[0], "findings": parsed}
         run = hub.request_json("POST", f"/v1/runs/{run_id}/steps/{waiting['name']}/decision", json=decision)
         _err(f"{run_id}: {outcome[0].replace('_', ' ')} of {waiting['name']} recorded for escalation "
              f"{decision['escalation']}; the controller delivers it.")
         if watch:
-            run = _watch(hub, run_id, as_json=as_json, after=0)
+            run = _watch(hub, run_id, as_json=as_json, after=seen)
             _finish(run, as_json)
     if as_json:
         _print_json(run)
@@ -800,7 +815,16 @@ def run_retry(
                "FAILED": "the failed step runs again as a new attempt"}.get(was, "it runs again")
         _err(f"{run_id}: retry asked for; it ended {was}, so {how}.")
         if watch:
-            run = _watch(hub, run_id, as_json=as_json)
+            # The run ended, so its stream ends at once. Until a controller answers the ask, with
+            # `retry_requested` (the run runs on, and the stream with it) or `retry_refused`, the stream is
+            # reopened from the last event seen.
+            seen = run.get("sequence") or 0
+            while True:
+                run = _watch(hub, run_id, as_json=as_json, after=seen)
+                if not run.get("retry_asked_by"):
+                    break
+                seen = run.get("sequence") or seen
+                time.sleep(RETRY_TAKEN_POLL)
             _finish(run, as_json)
     if as_json:
         _print_json(run)

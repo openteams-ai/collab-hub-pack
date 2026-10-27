@@ -174,8 +174,12 @@ def main() -> int:
     if args.location:
         track_dir = DEV / ".local" if args.track.startswith(("postgresql://", "postgres://")) else \
             Path(args.track).parent
+        # Each worker gets the model the environment names (COLLAB_MODEL_*: `make fake-model` by default),
+        # the way `make controller` delivers one from the models block.
+        model = {name: value for name, value in os.environ.items() if name.startswith("COLLAB_MODEL_")}
         where = {"location": args.location, "location_settings": {
-            "packages": [DEV / "cogs"], "work_dir": track_dir / "runs"}}
+            "packages": [DEV / "cogs", DEV.parent / "cogs"], "work_dir": track_dir / "runs",
+            "deliver": lambda cog, run_id, instance: dict(model)}}
     else:
         where = {"executor": InMemoryCogExecutor(handlers)}
     runner = LifecycleRunner(track=track, budget=budget, backend=args.backend, controller=MAKE_OP, **where)

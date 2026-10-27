@@ -1,0 +1,84 @@
+name: Test Cog publish and pull through the Hub (E2E)
+
+# Real-registry end-to-end for the Hub's OCI endpoint (issues #179, #180): a
+# private backing registry, the Hub in front of it as its publish source (a
+# `static` source with no repository list), and `oras` publishing a Cog to
+# the Hub host and pulling it back, over TLS, with nothing but a Hub sign-in.
+#
+# A second job runs the OCI distribution-spec conformance suite's pull and
+# push workflows against the same surface.
+#
+# The matrix is the test: the same script, unchanged, against two different
+# registries. Swapping the registry behind the Hub must change nothing a
+# client sees. Fork-safe: no secrets, read-only checkout.
+#
+# Path-gated because it starts containers; the unit suite (`Test`) covers the
+# same surface against a fake registry on every PR.
+
+on:
+  pull_request:
+    paths:
+      - "api/src/collab_hub_api/cogs/**"
+      - "api/src/collab_hub_api/routers/cogs.py"
+      - "api/src/collab_hub_api/routers/registry.py"
+      - "api/src/collab_hub_api/config.py"
+      - "api/src/collab_hub_api/frames/collab_schema.py"
+      - "api/src/collab_hub_api/core.py"
+      - "api/src/collab_hub_api/path_protection.py"
+      - "api/pyproject.toml"
+      - "api/uv.lock"
+      - "scripts/cog-serve-e2e/**"
+      - ".github/workflows/test-cog-serve-e2e.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "api/src/collab_hub_api/cogs/**"
+      - "api/src/collab_hub_api/routers/cogs.py"
+      - "api/src/collab_hub_api/routers/registry.py"
+      - "scripts/cog-serve-e2e/**"
+      - ".github/workflows/test-cog-serve-e2e.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  cog-serve-e2e:
+    name: Publish and pull through the Hub (${{ matrix.backing }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backing: [distribution, zot]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync the API environment
+        working-directory: api
+        run: uv sync
+
+      - name: Publish through the Hub into ${{ matrix.backing }}, pull from the Hub
+        run: bash scripts/cog-serve-e2e/run.sh ${{ matrix.backing }}
+
+  oci-conformance:
+    # The distribution-spec conformance suite, pull and push workflows. Its
+    # fixtures are not Cog bundles, and the Hub refuses to commit a manifest
+    # its catalog could not index, so the Hub is started through a test-only
+    # launcher (scripts/cog-serve-e2e/conformance_hub.py) that replaces that
+    # one check in its own process. No chart value or setting does that.
+    name: OCI conformance (pull, push)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync the API environment
+        working-directory: api
+        run: uv sync
+
+      - name: Run the conformance suite against the Hub
+        run: bash scripts/cog-serve-e2e/conformance.sh

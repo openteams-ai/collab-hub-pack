@@ -156,7 +156,7 @@ def test_a_retry_the_runner_will_not_take_is_recorded_refused_and_the_run_is_rea
     intents.submit(track, OpDefinition("r", (OpStep("a", "flaky", "run"),)), by=BY)
     one = _controller(track, {"flaky": flaky})
     _settle(one, until=lambda: intents.describe(track, "r").state is RunState.FAILED)
-    monkeypatch.setattr(one.runner, "retry", lambda run_id: (_ for _ in ()).throw(ValueError("not today")))
+    monkeypatch.setattr(one.runner, "retry", lambda run_id, **_: (_ for _ in ()).throw(ValueError("not today")))
     intents.request_retry(track, "r", actor="alice")
     _settle(one, until=lambda: "retry_refused" in _types(track, "r"))
     view = intents.describe(track, "r")
@@ -182,3 +182,23 @@ def test_the_view_names_the_escalation_a_waiting_run_needs_decided_and_who_may_d
     intents.request_decision(track, "r", escalation=view.escalation, outcome="approve", actor="alice")
     _settle(one, until=lambda: intents.describe(track, "r").state is RunState.COMPLETED)
     assert intents.describe(track, "r").escalation is None
+
+
+def test_two_controllers_on_one_retry_ask_take_it_once_and_refuse_nothing():
+    """The ask is the condition of the retry: of two controllers that see it, one records `retry_requested`; the
+    other finds nothing left to take, and writes no `retry_refused` over a retry that is under way."""
+    track = InMemoryTrackStore()
+    flaky, _ = _failing_then_ok()
+    intents.submit(track, OpDefinition("r", (OpStep("a", "flaky", "run"),)), by=BY)
+    one = _controller(track, {"flaky": flaky}, name="one")
+    two = _controller(track, {"flaky": flaky}, name="two")
+    _settle(one, until=lambda: intents.describe(track, "r").state is RunState.FAILED)
+    intents.request_retry(track, "r", actor="alice")
+    for _ in range(3):
+        one.tick()
+        two.tick()
+    types = _types(track, "r")
+    assert types.count("retry_requested") == 1 and "retry_refused" not in types
+    _settle(one, until=lambda: intents.describe(track, "r").state is RunState.COMPLETED)
+    _settle(two, until=lambda: True)
+    assert "retry_refused" not in _types(track, "r")

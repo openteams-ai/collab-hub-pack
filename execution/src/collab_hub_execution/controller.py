@@ -52,7 +52,7 @@ from typing import Any
 from . import intents
 from .binding import BindingResolutionError, ModelsBlock
 from .locations import AGENT_LOCATIONS
-from .runner import LifecycleRunner, RunBusy, RunOwnedElsewhere
+from .runner import LifecycleRunner, RetryTaken, RunBusy, RunOwnedElsewhere
 from .states import InvalidTransition, RunState
 from .track import PostgresTrackStore, SqliteTrackStore, TrackStore
 
@@ -227,10 +227,14 @@ class RunController:
             _log.info("%s was picked up by %s, which no longer holds its id: it is %s", run_id, owner, state.name)
 
     def _retry(self, run_id: str, actor: str) -> None:
-        """Take a retry asked for: the runner records `retry_requested` and advances the run; or say why not."""
+        """Take a retry asked for: the runner records `retry_requested` and advances the run; or say why not.
+
+        Every controller on the Track may take an ask; the ask itself is the
+        condition, so one takes it and the others find nothing to refuse.
+        """
         try:
-            state = self.runner.retry(run_id)
-        except RunOwnedElsewhere:
+            state = self.runner.retry(run_id, asked=True)
+        except (RunOwnedElsewhere, RetryTaken):
             return
         except ValueError as exc:
             intents.refuse_retry(self.runner.track, run_id, error=str(exc))

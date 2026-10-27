@@ -174,8 +174,11 @@ issue #8.)
 
 **Harness adapter.** The part of the worker SDK that drives one kind of
 harness — an ACP agent over stdio, or a direct OpenAI-compatible model
-call — behind one interface (`start`, `interact`, `cancel`, `close`). The
-SDK turns what an adapter returns into a result envelope. (ADR-0002 D5.)
+call — behind one interface (`start`, `interact`, `cancel`, `close`,
+`alive`). The SDK turns what an adapter returns into a result envelope, hands
+it the step's Frames and the binding's limits, and fails an interaction with
+an envelope code when the adapter signals a failure. (ADR-0002 D5;
+[`worker/README.md`](../worker/README.md).)
 
 **Hosting environment.** The place a Cog is installed and run — the hub,
 or later a desktop. It owns the lifecycle entry points, offers the
@@ -336,8 +339,10 @@ attempt** under the keyed claim: `INVOKED`, `RESERVED`, `COMMITTED`,
 the run machine. Each state is described in
 [states](cog-execution/states.md). (ADR-0002 D11; ADR-0001 invariant 3.)
 
-**Worker SDK.** An optional library that implements the worker side of the
-seam once — `/invoke` returning an envelope, the health probe, the keyed
-claim, the binding, cancellation, usage — and hands each interaction to a
-harness adapter. A Cog may use it; the hub requires only the seam and never
-imports the SDK. (ADR-0002 D5.)
+**Worker SDK.** An optional library, `collab-hub-cog-worker` under
+[`worker/`](../worker/README.md), that implements the worker side of the seam
+once — `/invoke` returning an envelope, the health probe, sessions and turns,
+the binding with the model's limits, the step's Frames, cancellation, usage,
+and the `/invoke` authentication hook; the keyed claim's client joins it with
+the claim — and hands each interaction to a harness adapter. A Cog may use it;
+the hub requires only the seam and never imports the SDK. (ADR-0002 D5.)

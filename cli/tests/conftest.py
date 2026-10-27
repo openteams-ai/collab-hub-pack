@@ -52,6 +52,8 @@ class Stub:
     events: dict[str, list[tuple[str, dict]]] = field(default_factory=dict)  # run id -> (type, payload) streamed
     decisions: list[tuple[str, str, dict]] = field(default_factory=list)  # (run, step, decision) recorded
     drop_stream_after: int | None = None  # cut the event stream once, after this many events
+    retry_taken_after: int | None = None  # end the stream this many times before a controller takes a retry
+    stream_progress: dict[str, list[str]] = field(default_factory=dict)  # statuses reached while a client streams
     # What a run's status becomes on each later read: a list consumed one status per GET.
     progress: dict[str, list[str]] = field(default_factory=dict)
     counter: int = 0
@@ -205,7 +207,7 @@ class Stub:
                    "updated_at": "2026-10-02T08:00:00+00:00", "cancel_requested_by": None, "error": None,
                    "reason": None, "backend": "none", "location": "local", "_input": step["input"],
                    "name": submitted.get("name"), "escalation": None, "approvers": [], "decision": None,
-                   "retry_asked_by": None,
+                   "retry_asked_by": None, "sequence": 0,
                    "frames": {one["name"]: [{"id": f, "name": f, "digest": "d" * 64} for f in one["frames"]]
                               for one in submitted["steps"] if one.get("frames")},
                    "_gate": step.get("gate")}
@@ -244,6 +246,20 @@ class Stub:
                                 error="the worker answered HTTP 500" if failing else None)
                 return httpx.Response(200, json=turn)
             if action == "events":
+                if self.retry_taken_after is not None:
+                    if self.retry_taken_after > 0:
+                        self.retry_taken_after -= 1
+                        ended = f"event: end\ndata: {json.dumps({'status': run['status']})}\n\n"
+                        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                              content=ended.encode())
+                    self.retry_taken_after = None
+                    run["retry_asked_by"] = None
+                    self.events[run_id] = self.events.get(run_id, []) + [
+                        ("retry_requested", {"actor": "alice"}), ("step_started", {"step": "echo", "attempt": 1}),
+                        ("step_completed", {"step": "echo", "attempt": 1}), ("completed", {})]
+                    self.progress[run_id] = ["COMPLETED"]
+                if run_id in self.stream_progress:
+                    self.progress[run_id] = self.stream_progress.pop(run_id)
                 lines = []
                 for sequence, (kind, payload) in enumerate(self.events.get(run_id, []), 1):
                     if sequence <= int(request.headers.get("Last-Event-ID", "0")):
@@ -251,8 +267,8 @@ class Stub:
                     data = {"sequence": sequence, "type": kind, "occurred_at": "2026-10-02T08:00:01+00:00",
                             "payload": payload}
                     lines.append(f"id: {sequence}\nevent: {kind}\ndata: {json.dumps(data)}\n\n")
-                    if kind == "gate_escalated":
-                        break
+                    if kind == "gate_escalated" and sequence == len(self.events[run_id]):
+                        break  # the open escalation: the hub holds the stream here until a decision lands
                 if self.drop_stream_after is not None and len(lines) > self.drop_stream_after:
                     self.drop_stream_after = None  # once: the next connection carries the rest
                     return httpx.Response(200, headers={"content-type": "text/event-stream"},

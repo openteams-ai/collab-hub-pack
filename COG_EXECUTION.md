@@ -308,10 +308,10 @@ Each phase is one pull request from the branch it names, numbered in build order
 | 13 | #211 | Run the Cogs launched through a deployed hub, as processes in its pod | `feat/cog-hub-pod-runs` | 11, 12 | M | in review, #212 |
 | 14 | #107 | Add a Worker SDK with Harness adapters, ACP first | `feat/cog-worker-sdk` | 2, 9 | M | not started |
 | 15 | #108 | Publish a Hermes harness Cog, launched by the hub as a local process | `feat/hermes-acp-harness` | 9, 12, 14 | M | not started |
-| 16 | #126, first half | Launch, list and terminate Cogs from the `collab-hub` CLI | `feat/cli-launch` | 6, 10, 12 | S | not started |
+| 16 |#126, first half|Launch, list and terminate Cogs from the `collab-hub` CLI|`feat/cli-launch`|6, 10, 12|S| in review, one pull request with Phases 18 and 19 |
 | 17 | #102 | Never repeat a completed side effect when a step is invoked again | `feat/cog-keyed-claim` | 8, 11, 14 | M | not started |
-| 18 | #103, closes it | The hub run API: Frames, payloads, decisions and retry | `feat/cog-run-api` | 12, 15, 17 | M | not started |
-| 19 | #126, closes it | Decide, read and retry runs from the `collab-hub` CLI | `feat/cli-runs` | 16, 18 | S | not started |
+| 18 |#103, closes it|The hub run API: Frames, payloads, decisions and retry|`feat/cog-run-api`|12, 15, 17|M| in review, one pull request with Phases 16 and 19 |
+| 19 |#126, closes it|Decide, read and retry runs from the `collab-hub` CLI|`feat/cli-runs`|16, 18|S| in review, one pull request with Phases 16 and 18 |
 | 20 | apollo-desktop#825 | Launch and watch hub runs from the desktop | `feat/hub-run-client-690` | 12, 18 | M | not started |
 | 21 | apollo-desktop#719 | Let a human approve, reject, or send back a paused step from the desktop | `feat/run-view-gate-decisions-719` | 4, 20 | M | not started |
 | 22 | #6 | The remote location: Cog workers in pods, and least-privilege RBAC for the controller | `feat/cog-remote-location-6` | 9, 11 | M | not started |
@@ -718,7 +718,7 @@ Phase 10 built this Cog's first form: `cogs/hermes` with a worker of its own tha
 What the primary goal did not need: launching and terminating from the CLI — small, and parallel to M4 from the moment Phase 12 lands — then the keyed claim that makes invoking a step again safe, the rest of the run API over it, and the CLI's commands for that rest.
 
 #### Phase 16 — Launch, list and terminate Cogs from the `collab-hub` CLI
-**Issue** #126, first half · **Branch** `feat/cli-launch` · **Depends on** Phases 6, 10, 12 · **Size** S
+**Issue** #103 (which carries #126's half) · **Branch** `feat/cog-run-api-103` · **Depends on** Phases 6, 10, 12 · **Size** S · **Status** in review, one pull request with Phases 18 and 19
 
 The three things a user first asks of a Cog hub, from a terminal: list the Cogs, launch one, terminate what was launched. Phase 10 built `cog launch`, `run list`, `run show`, `run watch` and `run terminate` over polling; this phase moves watching to the event stream and completes what is listed below.
 
@@ -732,9 +732,9 @@ The three things a user first asks of a Cog hub, from a terminal: list the Cogs,
 *Dev and CI* — at level 1, `collab-hub cog launch echo --input '{}' --watch` runs a fake Cog end to end with no container, and `collab-hub cog launch hermes --entry ask --input - --gate never` reruns M4's demonstration from the terminal. CI: `level-1` launches `slow` by its package name, finds it in `run list`, terminates it and asserts the exit codes, all through the CLI. *Docs* — `cli/README.md` gains the launch, list and terminate commands with a worked example each and the exit-code table; `dev/README.md` shows the CLI beside `make op`.
 
 *Acceptance*
-- [ ] At level 1, `collab-hub cog launch` starts a fake Cog by its package name, `run list` shows it running and `run terminate` stops it, over the hub's endpoints only; a name the hub cannot launch is refused with the names it can.
-- [ ] `run watch` survives a dropped connection without losing or repeating an event.
-- [ ] Exit codes distinguish completed, failed, `interrupted`, waiting at a Gate and cancelled, and every command has `--json`.
+- [x] At level 1, `collab-hub cog launch` starts a fake Cog by its package name, `run list` shows it running and `run terminate` stops it, over the hub's endpoints only; a name the hub cannot launch is refused with the names it can.
+- [x] `run watch` survives a dropped connection without losing or repeating an event.
+- [x] Exit codes distinguish completed, failed, `interrupted`, waiting at a Gate and cancelled, and every command has `--json`.
 
 #### Phase 17 — No repeated side effects: the keyed claim
 **Issue** #102 · **Branch** `feat/cog-keyed-claim` · **Depends on** Phases 8, 11, 14 · **Size** M
@@ -758,7 +758,7 @@ A step can be invoked again after it already acted: a durable backend resuming a
 - [ ] The claim contract is documented and implemented by the reference worker and the Worker SDK.
 
 #### Phase 18 — The hub run API: Frames, payloads, decisions and retry
-**Issue** #103, closes it · **Branch** `feat/cog-run-api` · **Depends on** Phases 12, 15, 17 · **Size** M
+**Issue** #103, closes it · **Branch** `feat/cog-run-api-103` · **Depends on** Phases 12, 15, 17 · **Size** M · **Status** in review, one pull request with Phases 16 and 19; the claim's part of retry (the `outcome-unknown` step) lands with Phase 17 in #104
 
 The rest of the run API: a step grounded in Frames, its output read back, its Gate decided, and a run retried without repeating a side effect.
 
@@ -773,15 +773,15 @@ The rest of the run API: a step grounded in Frames, its output read back, its Ga
 *Dev and CI* — `make run-decide RUN= STEP= OUTCOME=` decides a Gate; at level 3 the approver roles come from `make seed-org`. CI: `level-1` asserts a Gate decision advances a run over HTTP, and restarts a worker's controller after the worker committed its claim and asserts `POST .../retry` answers from the claim; `levels-2-3` asserts a non-approver gets 403. *Docs* — `runs.md` gains the decision, payload and retry endpoints.
 
 *Acceptance*
-- [ ] At level 1 and against the kind stack, a client submits, streams events, reads a step's payload, decides a gate and sees completion using only the run API.
+- [x] At level 1, a client submits, streams events, reads a step's payload, decides a gate and sees completion using only the run API; against the kind stack with Phase 22, which puts the controller on it.
 - [ ] A real local worker commits its claim, the controller is killed before the Track records the step, and `POST .../retry` returns the original envelope with the work having run once — at level 1, with no Postgres, and against the kind stack.
-- [ ] Two conflicting decisions on one escalation: one wins, the other is a conflict; an approval naming an escalation closed by a send-back is refused as stale.
-- [ ] A member without an approver role gets 403, and a member of another organization cannot read a run's payload; every accepted decision is on the Track with its actor.
-- [ ] A step naming a Frame its submitter cannot read is refused at submit, and a retried step is given the snapshot taken at submit, not the Frame as edited since.
+- [x] Two conflicting decisions on one escalation: one wins, the other is a conflict; an approval naming an escalation closed by a send-back is refused as stale.
+- [x] A member without an approver role gets 403, and a member of another organization cannot read a run's payload; every accepted decision is on the Track with its actor.
+- [x] A step naming a Frame its submitter cannot read is refused at submit, and a retried step is given the snapshot taken at submit, not the Frame as edited since.
 - [ ] A Hermes step (Phase 15) given a Frame completes with the Frame in Hermes' prompt, and the Track names the Frame and its snapshot digest.
 
 #### Phase 19 — Decide, read and retry runs from the `collab-hub` CLI
-**Issue** #126, closes it · **Branch** `feat/cli-runs` · **Depends on** Phases 16, 18 · **Size** S
+**Issue** #103 (which carries #126's half) · **Branch** `feat/cog-run-api-103` · **Depends on** Phases 16, 18 · **Size** S · **Status** in review, one pull request with Phases 16 and 18
 
 The rest of the run API from a terminal: the same endpoints, the same authorization, the same Track.
 
@@ -794,9 +794,9 @@ The rest of the run API from a terminal: the same endpoints, the same authorizat
 *Dev and CI* — `collab-hub run submit --file dev/ops/needs-review.yaml`, then `run decide`, shows a Gate decided from the terminal, and `run payload` reads the result. CI: `level-1` submits a fake Op, watches it to completion and decides an escalated Gate, all through the CLI. *Docs* — `cli/README.md` gains these commands with a worked example each; `make op`, `make run-events` and `make run-decide` become thin wrappers over the CLI, so the dev environment has one client; `docs/cog-execution/runs.md` notes that every endpoint it documents has a CLI command.
 
 *Acceptance*
-- [ ] At level 1, an Op submitted with `collab-hub run submit` completes and `run payload` prints the step's payload.
-- [ ] A Gate escalation is decided from the CLI and recorded on the Track with its escalation id and actor; a stale decision is refused with a message naming the open escalation.
-- [ ] Every command has `--json`, and the schema is documented.
+- [x] At level 1, an Op submitted with `collab-hub run submit` completes and `run payload` prints the step's payload.
+- [x] A Gate escalation is decided from the CLI and recorded on the Track with its escalation id and actor; a stale decision is refused with a message naming the open escalation.
+- [x] Every command has `--json`, and the schema is documented.
 
 ---
 

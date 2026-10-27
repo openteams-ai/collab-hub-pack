@@ -346,7 +346,8 @@ class LifecycleRunner(WorkflowEngine):
         """A ``step_completed`` payload: what produced the result, and the result inline or by reference."""
         record: dict[str, Any] = {
             "step": step.name, "attempt": attempt, "cog": step.cog, "digest": step.digest, "usage": usage,
-            "frames": [], **_recorded(envelope), **result,
+            "frames": [{"id": frame.id, "digest": frame.digest} for frame in step.frames],
+            **_recorded(envelope), **result,
         }
         if escalation is not None:
             record["escalation"] = escalation
@@ -975,9 +976,27 @@ class LifecycleRunner(WorkflowEngine):
         attempt.cog_worker = now.record(attempt.cog_worker.invoke(entry_point=step.entry_point, step=step.name))
         signal_value = self._signal_for(now.history, step.name)
         feedback = {} if signal_value is _NO_SIGNAL else {"signal": signal_value}
+        if step.frames:
+            feedback["frames"] = self._frames(step)
         attempt.invoked = True
         attempt.result = attempt.worker.interact(step.entry_point, step.input, idempotency_key=attempt.key,
                                                  **feedback)
+
+    def _frames(self, step: OpStep) -> list[dict[str, Any]]:
+        """The step's Frame snapshots as the task bundle carries them, read from where submit kept them."""
+        frames = []
+        for frame in step.frames:
+            try:
+                kept = self.track.get_payload(frame.ref)
+            except KeyError:
+                raise RuntimeError(f"the snapshot of Frame {frame.id!r} for step {step.name!r} is not on the "
+                                   f"Track ({frame.ref})") from None
+            text = kept.get("text") if isinstance(kept, Mapping) else None
+            if not isinstance(text, str):
+                raise RuntimeError(f"the snapshot of Frame {frame.id!r} ({frame.ref}) holds no text")
+            frames.append({"id": frame.id, "title": frame.name, "uri": frame.uri or f"frame:{frame.id}",
+                           "digest": frame.digest, "text": text})
+        return frames
 
     @step_function
     def read_envelope(self, now: _Pass, attempt: Attempt) -> None:

@@ -745,6 +745,31 @@ COLLAB_SCHEMA_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             "CREATE INDEX IF NOT EXISTS collab_track_payloads_run ON collab_track_payloads (run_id)",
         ),
     ),
+    (
+        13,
+        (
+            # The Track's index of runs (issue #103): one row per run, derived
+            # from its events by `PostgresTrackStore` in the same transaction
+            # as each event that moves the run, so listing runs is one indexed
+            # query rather than a replay of every Track. Status still comes
+            # from the Track, through the run machine (ADR-0002 D3); the row is
+            # a projection the store keeps, and `reindex()` rebuilds it from the
+            # events for a Track written before this migration. Appended to
+            # that store's `_SCHEMA` too; test_track_ddl.py holds them equal.
+            """
+            CREATE TABLE IF NOT EXISTS collab_track_runs (
+                run_id       text PRIMARY KEY,
+                org_id       text,
+                status       text NOT NULL,
+                submitted_at timestamptz NOT NULL,
+                updated_at   timestamptz NOT NULL,
+                retry_asked  boolean NOT NULL DEFAULT false
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS collab_track_runs_org_submitted ON collab_track_runs (org_id, submitted_at)",
+            "CREATE INDEX IF NOT EXISTS collab_track_runs_status ON collab_track_runs (status)",
+        ),
+    ),
 )
 
 

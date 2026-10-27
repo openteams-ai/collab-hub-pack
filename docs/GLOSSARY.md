@@ -275,6 +275,13 @@ API for the run controller to act on: `op_submitted`, `cancel_requested`,
 The API writes intent and reads status; it never calls the controller.
 (ADR-0002 D4.)
 
+**Run index.** The Track's one-row-per-run projection, derived by the store
+from a run's events in the same transaction as any event that moves it:
+status, organization, when submitted and last moved, and whether a retry is
+asked for. A listing or a controller's pass reads it instead of every Track;
+status still comes from the Track, through the run machine. (ADR-0002 D3,
+`docs/cog-execution/track.md`.)
+
 **Run pickup.** How exactly one of several run controllers starts a
 submitted run, under every backend: `run_picked_up`, naming the controller,
 written only if nobody picked the run up first. Under `none` the run then

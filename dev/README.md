@@ -1199,6 +1199,15 @@ At level 2, `make api-pg` serves the run API on the hub's own Postgres, as a
 deployed hub does: its Track's tables come from the hub's migrations. Run the
 controller on the same database, `make controller TRACK=postgresql://collab:collab@127.0.0.1:5432/collab`.
 
+A run waiting at a Gate is decided through the API: `make run-decide RUN=run-...
+STEP=draft OUTCOME=approve` (or `reject`, or `send_back` with `FINDING=`), which
+reads the escalation the run waits on and answers it; `make run-retry RUN=`
+asks for an ended run to run again. The `collab-hub` CLI does the same from
+anywhere: `run submit --file ops/needs-review.yaml --watch`, then `run decide`,
+`run payload` and `run retry` ([`cli/README.md`](../cli/README.md)). Dev auth
+resolves no roles, so the run's submitter decides its Gates here; at level 3
+the approver roles come from `make seed-org`.
+
 | Variable | Default | What |
 |---|---|---|
 | `TRACK` | `.local/track.sqlite` | the controller's Track: the SQLite file `make api` uses, or `postgresql://...`, the database `make api-pg` uses (its migrations create the Track's tables) |

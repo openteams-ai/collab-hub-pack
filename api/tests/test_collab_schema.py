@@ -325,6 +325,9 @@ def test_migration_creates_the_track_schema():
     assert "schema integer NOT NULL DEFAULT 0" in events
     (payloads,) = server.ddl_for("collab_track_payloads")
     assert "ref text PRIMARY KEY" in payloads and "payload jsonb NOT NULL" in payloads
+    (runs,) = server.ddl_for("collab_track_runs")
+    assert "run_id text PRIMARY KEY" in runs and "status text NOT NULL" in runs
+    assert "retry_asked boolean NOT NULL DEFAULT false" in runs
 
     created = " ".join(server.statements)
     for statement in (
@@ -334,6 +337,9 @@ def test_migration_creates_the_track_schema():
         "CREATE UNIQUE INDEX IF NOT EXISTS collab_track_one_submission"
         " ON collab_track_events (run_id) WHERE event_type = 'op_submitted'",
         "CREATE INDEX IF NOT EXISTS collab_track_payloads_run ON collab_track_payloads (run_id)",
+        # The index of runs (migration 13): what a listing reads instead of every Track.
+        "CREATE INDEX IF NOT EXISTS collab_track_runs_org_submitted ON collab_track_runs (org_id, submitted_at)",
+        "CREATE INDEX IF NOT EXISTS collab_track_runs_status ON collab_track_runs (status)",
     ):
         assert statement in created, statement
     # Appended as version 12; nothing earlier mentions the Track.
@@ -341,7 +347,7 @@ def test_migration_creates_the_track_schema():
         statement for version, statements in COLLAB_SCHEMA_MIGRATIONS if version < 12 for statement in statements
     )
     assert "collab_track" not in earlier
-    assert LATEST_COLLAB_SCHEMA_VERSION == 12
+    assert LATEST_COLLAB_SCHEMA_VERSION == 13
 
 
 def test_rerunning_the_migration_applies_nothing():
@@ -386,6 +392,7 @@ PINNED_CHECKSUMS = {
     10: "cad0ef7844a3458f9aa0528f4edf5d418300cdd40b22a65fd4ecd1e6e0a29e6b",
     11: "4269a363932920da48b77be6cb6b02fe7ab933b4ab0478f0a722bb08244adbb1",
     12: "b4d98654df15a5f52a16273f77cae95daa5d597aa1f7ff1e78b830ce9cc2cabd",
+    13: "94c87d3dc97dfc138ea1ee78bdb067ba114163995f4ef27d44398a930690d84d",
 }
 
 

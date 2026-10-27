@@ -33,6 +33,7 @@ import hashlib
 import logging
 import os
 import time
+from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
 from httpx import ConnectError, ConnectTimeout
@@ -405,11 +406,13 @@ class _KubernetesWorker:
 
     def interact(
         self, entry_point: str, input: Any = None, idempotency_key: str | None = None,
-        *, signal: Any = _NO_SIGNAL,
+        *, signal: Any = _NO_SIGNAL, frames: Sequence[Mapping[str, Any]] | None = None,
     ) -> ResultEnvelope:
         payload = {"entry_point": entry_point, "input": input, "idempotency_key": idempotency_key}
         if signal is not _NO_SIGNAL:
             payload["signal"] = signal
+        if frames:
+            payload["frames"] = [dict(frame) for frame in frames]
         response = self._post_with_retry(f"{self.url}/invoke", payload)
         status = response.status_code
         body = self._decoded(response)

@@ -111,6 +111,15 @@ class RunController:
                 continue  # RunViews logged it once; it is read again only when its Track moves
             except Exception:  # noqa: BLE001 - one run's trouble never stops the pass
                 _log.exception("handling %s failed; the next pass tries again", run_id)
+        # An ended run is read no more, unless a retry was asked for it: the Track's index says which.
+        for row in self.runner.track.runs(retry_asked=True):
+            self._ended.discard(row.run_id)
+            try:
+                self._look_at(row.run_id)
+            except intents.RunUnreadable:
+                continue
+            except Exception:  # noqa: BLE001
+                _log.exception("handling %s failed; the next pass tries again", row.run_id)
 
     def _mine(self, view: intents.RunView) -> bool:
         """Whether this controller advances the run: it picked it up, or it is the only one on its Track."""
@@ -121,6 +130,10 @@ class RunController:
         if view is None:
             return
         if view.state.ended:
+            if view.retry_asked_by is not None:
+                if not self._alive(self._advancing, run_id):
+                    self._spawn(self._advancing, run_id, self._retry, run_id, view.retry_asked_by)
+                return
             self._ended.add(run_id)
             self.views.forget(run_id)  # never read again here: keep nothing of it
             return
@@ -171,6 +184,20 @@ class RunController:
             _log.exception("cancelling %s failed", run_id)
             return
         _log.info("cancel of %s by %s delivered", run_id, actor)
+
+    def _retry(self, run_id: str, actor: str) -> None:
+        """Take a retry asked for: the runner records `retry_requested` and advances the run; or say why not."""
+        try:
+            state = self.runner.retry(run_id)
+        except RunOwnedElsewhere:
+            return
+        except ValueError as exc:
+            intents.refuse_retry(self.runner.track, run_id, error=str(exc))
+            return
+        except Exception:  # noqa: BLE001 - one run's failure never stops the controller
+            _log.exception("retrying %s failed", run_id)
+            return
+        _log.info("retry of %s asked by %s taken: it is %s", run_id, actor, state.name)
 
     def _decide(self, run_id: str, decision: dict[str, Any]) -> None:
         """Deliver a decision on a Gate to the runner, which records it and advances the run; or say why not."""

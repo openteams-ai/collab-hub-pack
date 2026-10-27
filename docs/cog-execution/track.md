@@ -68,6 +68,27 @@ is pending only while the run waits on the escalation it names: one left
 undelivered when the run ends, or when a retry opens a new escalation, lapses
 with it, and is neither delivered nor refused.
 
+`retry_asked` (`actor`) is a client's request that an ended run run again,
+written with `append_if` only while the run has ended in a state the run
+machine retries from and holds no request yet. A controller takes it: the
+runner records `retry_requested` as the run moves, or the controller records
+`retry_refused` (`error`) when the runner would not. Neither moves the run.
+
+A step's Frames travel by reference: `op_submitted`'s Op carries each step's
+`frames`, with the Frame's `id`, `name`, the `digest` of the snapshot taken
+at submit and the `ref` it is kept under beside the Track, like a large
+payload; `step_completed` names the `id` and `digest` of each Frame the step
+was given. The text itself is never on an event.
+
+**The index of runs.** Each store keeps one row per run, derived from the
+run's events by the store itself in the same transaction as any event that
+moves the run: its status, the organization that submitted it, when it was
+submitted and last moved, and whether a retry is asked for. Status is still
+the Track's, replayed through the run machine; the row is a projection a
+listing or a controller's pass reads instead of every Track, and `reindex()`
+rebuilds it from the events. On Postgres it is `collab_track_runs`, from
+migration 13.
+
 A Track written before controllers named themselves has `run_picked_up` with
 no `controller`: such a run belongs to the first controller to start
 ([runs.md](runs.md#pickup-and-ownership)).

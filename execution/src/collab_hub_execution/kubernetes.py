@@ -24,7 +24,7 @@ the insecure default by omission:
 
 Blast radius is reduced regardless — workers carry no ServiceAccount token
 (``automountServiceAccountToken: false``). Egress restriction to hub-mediated
-paths, and request authentication on the endpoint, are tracked in #11.
+paths, and request authentication on the endpoint, are tracked in #8 (was #11).
 """
 
 from __future__ import annotations

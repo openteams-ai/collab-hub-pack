@@ -22,7 +22,7 @@ does.
 |---|---|---|---|
 | `none` | `backend="none"` (the default) | yes | is recorded `interrupted` when a host starts, and never resumes; a person retries it |
 | `dbos` | `backend="dbos"` | Phase 27 of the plan (#104) | resumes from its last completed step, on Postgres or SQLite |
-| `temporal` | `backend="temporal"` | Phase 33 (#110) | resumes, its steps run as Temporal activities |
+| `temporal` | `backend="temporal"` | Phase 33; #110 is closed as not for A4 | resumes, its steps run as Temporal activities |
 
 The setting is the only switch: nothing imports a backend, and a runner
 configured with a backend that is not built yet refuses to start

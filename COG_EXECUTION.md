@@ -42,7 +42,7 @@ The first thing that runs end to end is the primary goal: **the hub launches Her
 - **#133** — Phase 3: the four state machines on the state pattern, in `collab_hub_execution.states` — a Cog's install, a worker, a step attempt and a run. The engine moves the run and worker machines and writes the records they return; a run's status is its Track replayed through the run machine, and a Track the machine could not have written is refused. `CogLifecycle` and `RunStatus` are gone: a paused run reports `WAITING_AT_GATE`, a duration stop `BUDGET_EXCEEDED`, and a revise limit of N allows N revisions. [`docs/cog-execution/states.md`](docs/cog-execution/states.md) is the reference, held to the code by a test, and ADR-0002 gains D11.
 - **#134** — Phase 4: every Op step has a Gate, evaluated over the step's envelope, and a Cog can no longer pause a run — `PauseRequest` and `signal()` are gone. An escalation is recorded with its attempt, envelope and approvers under an id minted over both; `decide()` answers it as an actor, approve completing the step with the envelope its approver saw, reject ending the run `REJECTED`, send back re-running the step with the findings, and a decision on a closed escalation refused. The dev S3 frame store moved off MinIO on the way, whose images left quay.io as they had left Docker Hub (#114, #115), to SeaweedFS with the AWS CLI creating its bucket.
 - **#158** — Phase 5: Track event schema v1, versioned on every event. `step_completed` names the Cog, its digest, the binding, the problems, the usage and the Frames behind a result, inline or by reference above a threshold; `step_failed` carries the key, the worker, the code and a bounded message; `gate_escalated` and `gate_decided` carry the escalation id, the actor and the digest of the result decided on. A Track written before v1 reads through `track.upgrade`. A SQLite store joins the in-memory and Postgres ones under one conformance suite, and the hub's tables come from migration 12, which CI asserts. [`docs/cog-execution/track.md`](docs/cog-execution/track.md) is the reference.
-- **#159** — Phase 6: the `collab-hub` CLI under `cli/`, on Typer. `login` signs in the way the desktop does — the realm's `apollo-desktop` client, authorization code with PKCE and a `127.0.0.1` loopback redirect, with `--port` for an SSH forward and `--with-token` for scripts — and `logout` ends the realm session and revokes its refresh token. The session is stored `0600`, sent only to its own hub, renewed before it expires, kept through a realm outage, and ended at the realm when a new sign-in replaces it. `whoami` reads the new `GET /v1/me`; the public `GET /v1/auth/cli` names the issuer and client, so the hub's URL is all a user types. `cog list` and `cog show` read the catalog. CI signs in against the real dev realm at level 3. #125, which asked for a device flow, stays open.
+- **#159** — Phase 6: the `collab-hub` CLI under `cli/`, on Typer. `login` signs in the way the desktop does — the realm's `apollo-desktop` client, authorization code with PKCE and a `127.0.0.1` loopback redirect, with `--port` for an SSH forward and `--with-token` for scripts — and `logout` ends the realm session and revokes its refresh token. The session is stored `0600`, sent only to its own hub, renewed before it expires, kept through a realm outage, and ended at the realm when a new sign-in replaces it. `whoami` reads the new `GET /v1/me`; the public `GET /v1/auth/cli` names the issuer and client, so the hub's URL is all a user types. `cog list` and `cog show` read the catalog. CI signs in against the real dev realm at level 3. #125, which asked for a device flow, is closed: sign-in is what the desktop does.
 - **#162** — Phase 7: the lifecycle lives in `LifecycleRunner`, as step functions registered in `STEP_FUNCTIONS` — resolve, materialize, interact, read the envelope, teardown, evaluate the Gate, then complete, escalate or fail — and the one driver that sequences them. Every Track write the suite makes stayed identical, and no existing test changed. The Op and the seam's types moved to `ops.py`.
 - **#163** — Phase 8: the runner takes a `backend` setting, `none`, `dbos` or `temporal`, and hands every step function to that backend through one driver they all share; `none` is built, and the other two are refused when a runner starts. A run `none` had in flight when its host stopped is recorded `interrupted` when a host starts, and never resumed: `retry()` continues its attempt under the same key. `cancel(run_id, actor)` ends a run `cancelled` and tears its worker down, and every call that moves a run claims it first. `DurableWorkflowEngine` and its Track-based recovery are gone. The lifecycle and durability conformance suites hold every backend, and `make op OP=<name>` runs the fake Ops at level 1. [`docs/cog-execution/runs.md`](docs/cog-execution/runs.md) is the reference.
 - **#174** — Phase 9: the runner takes a `location` setting, `local` or `remote`, beside its backend. `local` is built: the local executor runs a Cog package's `serve` task in the package's own pixi environment, on a loopback port, through a launcher that kills the worker's process group when the controller lets go of it or dies, `SIGKILL` included. A package comes from a directory source, needs its lock, and is identified by the digest of its manifest and lock. Each worker has one run token, whose hash `worker_started` records and which expires at `worker_stopped`. The location conformance suite holds `local` and the in-memory executor, the fake Cogs are packages, and `make op LOCATION=local` runs them as real processes. ADR-0002 gains D12 and a sixth invariant.
@@ -183,7 +183,7 @@ Each step function moves one of the state machines of Phase 3 by an event; a mov
 
 No lifecycle logic lives inside a backend. That is ADR-0001 invariant 1 carried one level down — one lifecycle, never divergent code paths — and a test enforces that all three backends call the same step functions.
 
-| | `none` | `dbos` | `temporal` |
+|  | `none` | `dbos` | `temporal` |
 |---|---|---|---|
 | Durability engine | none | DBOS | Temporal |
 | Process restart mid-step | the run ends **`interrupted`** | resumes | resumes |
@@ -205,7 +205,7 @@ The second axis under the runner. Where the durability backend decides what surv
 - **`local`** — the worker is a child process of the run controller, on the same OS: the Cog package's `serve` task in its own pixi environment, bound to a loopback port, with a run token in its environment. Nothing to schedule, nothing to pull; it shares the controller's host and network identity.
 - **`remote`** — the worker is a Kubernetes pod materialized by `KubernetesCogExecutor`, with its own Service and NetworkPolicy and, from Phase 23, the Cog's artifact pulled into it.
 
-| | `local` | `remote` |
+|  | `local` | `remote` |
 |---|---|---|
 | The worker is | a child process of the controller | a pod in the controller's namespace |
 | Materialize | spawn `serve` in the package's pixi environment | Deployment + Service, plus an init container pulling the artifact (Phase 23) |
@@ -305,29 +305,29 @@ The open phases are tracked as workstream issues since 2026-10-26, one per piece
 | 8 | #101 | Run Ops without a durability engine (`none`), and mark interrupted runs honestly | `feat/cog-durability-none` | 7 | L | merged, #163 |
 | 9 | #109 | Agent location: run a Cog as a local process first, a pod behind the same switch | `feat/cog-agent-location` | 8 | M | merged, #174 |
 | 10 | #177 | Hermes as a Cog, launched from the `collab-hub` CLI on a local hub and talked to from Toad: an example | `feat/cog-local-example` | 6, 9 | M | merged, #178 |
-| 11 |#121|Run controller and run pickup|`feat/cog-run-controller`|8, 9, 10|M| merged, #186 |
-| 12 |#103, first half|The hub run API: launch, list and terminate runs|`feat/cog-run-launch`|10, 11|M| merged, #186 (#202 merged into it) |
-| 13 |#211|Run the Cogs launched through a deployed hub, as processes in its pod|`feat/cog-hub-pod-runs`|11, 12|M| merged, #212 |
-| 14 |#107|Add a Worker SDK with Harness adapters, ACP first|`feat/cog-worker-sdk`|2, 9|M| in review, #224, with Phase 15 |
-| 15 | #108 |Publish a Hermes harness Cog, launched by the hub as a local process| `feat/cog-worker-sdk` |9, 12, 14|M| in review, #224, with Phase 14 |
-| 16 | #103, with Phases 18 and 19 |Launch, list and terminate Cogs from the `collab-hub` CLI|`feat/cli-launch`|6, 10, 12|S|not started|
-| 17 | #104, with Phase 27 |Never repeat a completed side effect when a step is invoked again|`feat/cog-keyed-claim`|8, 11, 14|M|not started|
-| 18 | #103, with Phases 16 and 19 |The hub run API: Frames, payloads, decisions and retry|`feat/cog-run-api`|12, 15, 17|M|not started|
-| 19 | #103, with Phases 16 and 18 |Decide, read and retry runs from the `collab-hub` CLI|`feat/cli-runs`|16, 18|S|not started|
+| 11 | #121 | Run controller and run pickup | `feat/cog-run-controller` | 8, 9, 10 | M | merged, #186 |
+| 12 | #103, first half | The hub run API: launch, list and terminate runs | `feat/cog-run-launch` | 10, 11 | M | merged, #186 (#202 merged into it) |
+| 13 | #211 | Run the Cogs launched through a deployed hub, as processes in its pod | `feat/cog-hub-pod-runs` | 11, 12 | M | merged, #212 |
+| 14 | #107 | Add a Worker SDK with Harness adapters, ACP first | `feat/cog-worker-sdk` | 2, 9 | M | in review, #224, with Phase 15 |
+| 15 | #108 | Publish a Hermes harness Cog, launched by the hub as a local process | `feat/cog-worker-sdk` | 9, 12, 14 | M | in review, #224, with Phase 14 |
+| 16 | #103, with Phases 18 and 19 | Launch, list and terminate Cogs from the `collab-hub` CLI | `feat/cli-launch` | 6, 10, 12 | S | not started |
+| 17 | #104, with Phase 27 | Never repeat a completed side effect when a step is invoked again | `feat/cog-keyed-claim` | 8, 11, 14 | M | not started |
+| 18 | #103, with Phases 16 and 19 | The hub run API: Frames, payloads, decisions and retry | `feat/cog-run-api` | 12, 15, 17 | M | not started |
+| 19 | #103, with Phases 16 and 18 | Decide, read and retry runs from the `collab-hub` CLI | `feat/cli-runs` | 16, 18 | S | not started |
 | 20 | apollo-desktop#825 | Launch and watch hub runs from the desktop | `feat/hub-run-client-690` | 12, 18 | M | not started |
 | 21 | apollo-desktop#719 | Let a human approve, reject, or send back a paused step from the desktop | `feat/run-view-gate-decisions-719` | 4, 20 | M | not started |
-| 22 | #6, with #223, #165 and #214 folded in |The remote location: Cog workers in pods, and least-privilege RBAC for the controller|`feat/cog-remote-location-6`|9, 11|M|not started|
-| 23 | #105, with Phases 24 and 25 |Materialize a Cog worker from its published artifact, running its own `serve`|`feat/cog-materialize-serve`|15, 22|L|not started|
-| 24 | #105, with Phases 23 and 25 |Install and uninstall a Cog by digest|`feat/cog-install-by-digest`|12, 23|M|not started|
-| 25 | #105, with Phases 23 and 24 |Resolve a Cog's model binding into its worker's connection config|`feat/cog-model-binding-3`|24|M|not started|
+| 22 | #6, with #223, #165 and #214 folded in | The remote location: Cog workers in pods, and least-privilege RBAC for the controller | `feat/cog-remote-location-6` | 9, 11 | M | not started |
+| 23 | #105, with Phases 24 and 25 | Materialize a Cog worker from its published artifact, running its own `serve` | `feat/cog-materialize-serve` | 15, 22 | L | not started |
+| 24 | #105, with Phases 23 and 25 | Install and uninstall a Cog by digest | `feat/cog-install-by-digest` | 12, 23 | M | not started |
+| 25 | #105, with Phases 23 and 24 | Resolve a Cog's model binding into its worker's connection config | `feat/cog-model-binding-3` | 24 | M | not started |
 | 26 | #4 | Enforce time and cost limits on every Cog run, and clean up idle workers | `feat/cog-budgets-warm-workers-4` | 8, 25 | M | not started |
-| 27 | #104, with Phase 17 |Add a DBOS durability backend so a restart does not lose a run|`feat/cog-durability-dbos`|8, 11, 17|L|not started|
+| 27 | #104, with Phase 17 | Add a DBOS durability backend so a restart does not lose a run | `feat/cog-durability-dbos` | 8, 11, 17 | L | not started |
 | 28 | #9 | Check Cog outputs with Guards, not just schema | `feat/cog-guards-9` | 4, 5, 8 | M | not started |
-| 29 | #8, with Phase 30 |Restrict a Cog worker's network egress to hub-mediated paths|`feat/cog-worker-egress-11`|14, 23, 25|L|not started|
-| 30 | #8, with Phase 29 |Let a Cog act as the user for its connectors when it runs unattended on the hub|`feat/cog-connector-grants-8`|29|L|not started|
+| 29 | #8, with Phase 30 | Restrict a Cog worker's network egress to hub-mediated paths | `feat/cog-worker-egress-11` | 14, 23, 25 | L | not started |
+| 30 | #8, with Phase 29 | Let a Cog act as the user for its connectors when it runs unattended on the hub | `feat/cog-connector-grants-8` | 29 | L | not started |
 | 31 | apollo-desktop#826 | Grant and revoke unattended connector access from the desktop | `feat/connector-grants` | 20, 30 | S | not started |
 | 32 | apollo-desktop#827 | Run Ops locally from the desktop through an embedded run host | `feat/local-run-host` | 9, 20, 27 | M | not started |
-| 33 | #110, closed |Add a Temporal durability backend|`feat/cog-durability-temporal`|8, 11, 17|L| not for A4: two backends behind one interface prove it swappable; reopen on a need |
+| 33 | #110, closed | Add a Temporal durability backend | `feat/cog-durability-temporal` | 8, 11, 17 | L | not for A4: two backends behind one interface prove it swappable; reopen on a need |
 
 ### The desktop side (apollo-desktop, private)
 
@@ -464,7 +464,7 @@ Make the Track answer "what produced this, and who signed it".
 The hub's first client, built first: it needs nothing the phases after it build, and each of them adds its commands to it instead of waiting for a client to exist. Every Cog execution feature is reachable from a terminal over the same REST endpoints Collab uses, which is also how a script, a CI job or an operator drives the hub. It starts with what every other command needs, signing in, and with the one Cog surface the hub already serves, its catalog.
 
 #### Phase 6 — The `collab-hub` CLI: sign in, and list the Cogs the hub offers
-**Issue** #125, in part — the device flow and the `collab-hub` realm client it also asks for are not in this plan, and #125 stays open for them · **Branch** `feat/cli-auth` · **Depends on** nothing in this plan · **Size** M · **Status** merged as #159
+**Issue** #125, in part — the device flow and the `collab-hub` realm client it also asks for are not in this plan; #125 is closed, sign-in being what the desktop does · **Branch** `feat/cli-auth` · **Depends on** nothing in this plan · **Size** M · **Status** merged as #159
 
 A terminal client for the hub, and the thing every later command needs first: a way to sign in. It is a client, not a second implementation — every command is an HTTP call to the hub's REST API.
 
@@ -690,7 +690,7 @@ Implement the seam once, so wrapping a harness is an adapter rather than a serve
 - [ ] A worker built on the SDK runs as a `local` worker under Phase 9's executor; Phase 23's materialization later runs it unchanged.
 
 #### Phase 15 — The Hermes harness Cog, launched by the hub as a local process
-**Issue** #108 · **Branch** `feat/hermes-acp-harness` · **Depends on** Phases 9, 12, 14 · **Size** M
+**Issue** #108 · **Branch** `feat/cog-worker-sdk`, with Phase 14 · **Depends on** Phases 9, 12, 14 · **Size** M
 
 The primary goal: `POST /v1/runs` on a laptop starts Hermes as a separate process, and the Op step completes with a valid envelope. No cluster, no registry, no durability engine, no keyed claim and no CLI — those come after or alongside, and none of them changes this Cog.
 
@@ -720,7 +720,7 @@ Phase 10 built this Cog's first form: `cogs/hermes` with a worker of its own tha
 What the primary goal did not need: launching and terminating from the CLI — small, and parallel to M4 from the moment Phase 12 lands — then the keyed claim that makes invoking a step again safe, the rest of the run API over it, and the CLI's commands for that rest.
 
 #### Phase 16 — Launch, list and terminate Cogs from the `collab-hub` CLI
-**Issue** #126, first half · **Branch** `feat/cli-launch` · **Depends on** Phases 6, 10, 12 · **Size** S
+**Issue** #103, with Phases 18 and 19 (was #126, first half) · **Branch** `feat/cli-launch` · **Depends on** Phases 6, 10, 12 · **Size** S
 
 The three things a user first asks of a Cog hub, from a terminal: list the Cogs, launch one, terminate what was launched. Phase 10 built `cog launch`, `run list`, `run show`, `run watch` and `run terminate` over polling; this phase moves watching to the event stream and completes what is listed below.
 
@@ -739,7 +739,7 @@ The three things a user first asks of a Cog hub, from a terminal: list the Cogs,
 - [ ] Exit codes distinguish completed, failed, `interrupted`, waiting at a Gate and cancelled, and every command has `--json`.
 
 #### Phase 17 — No repeated side effects: the keyed claim
-**Issue** #102 · **Branch** `feat/cog-keyed-claim` · **Depends on** Phases 8, 11, 14 · **Size** M
+**Issue** #104, with Phase 27 (was #102) · **Branch** `feat/cog-keyed-claim` · **Depends on** Phases 8, 11, 14 · **Size** M
 
 A step can be invoked again after it already acted: a durable backend resuming after a crash, or someone retrying an interrupted `none` run. Neither may repeat a side effect.
 
@@ -783,7 +783,7 @@ The rest of the run API: a step grounded in Frames, its output read back, its Ga
 - [ ] A Hermes step (Phase 15) given a Frame completes with the Frame in Hermes' prompt, and the Track names the Frame and its snapshot digest.
 
 #### Phase 19 — Decide, read and retry runs from the `collab-hub` CLI
-**Issue** #126, closes it · **Branch** `feat/cli-runs` · **Depends on** Phases 16, 18 · **Size** S
+**Issue** #103, with Phases 16 and 18 (was #126) · **Branch** `feat/cli-runs` · **Depends on** Phases 16, 18 · **Size** S
 
 The rest of the run API from a terminal: the same endpoints, the same authorization, the same Track.
 
@@ -878,7 +878,7 @@ The materialize half of install-versus-materialize: a worker is the Cog package,
 *Risk* — solving a pixi environment at pod start is slow; the cache is what makes this usable.
 
 #### Phase 24 — Install and uninstall a Cog by digest
-**Issue** #106 · **Branch** `feat/cog-install-by-digest` · **Depends on** Phases 12, 23 · **Size** M
+**Issue** #105, with Phases 23 and 25 (was #106) · **Branch** `feat/cog-install-by-digest` · **Depends on** Phases 12, 23 · **Size** M
 
 Pinning a Cog and proving it works happens once, not on every run.
 
@@ -897,7 +897,7 @@ Pinning a Cog and proving it works happens once, not on every run.
 - [ ] Uninstall removes every runtime resource the install created.
 
 #### Phase 25 — Model binding: inventory, the Cog's `resolve`, delivery
-**Issue** #3 · **Branch** `feat/cog-model-binding-3` · **Depends on** Phase 24 · **Size** M
+**Issue** #105, with Phases 23 and 24 (was #3) · **Branch** `feat/cog-model-binding-3` · **Depends on** Phase 24 · **Size** M
 
 The hub offers, the Cog selects, the hub records and delivers — so the hub does not grow a parallel resolver (#3 thread). Since Phase 11 the controller has written the binding file from the hub's `models:` block, and Phase 14's SDK has read it; this phase retires that stopgap: the Cog's `resolve` becomes the producer, and the file the worker reads does not change.
 
@@ -986,7 +986,7 @@ The first durability engine behind the runner — what makes #2's "a restart doe
 - [ ] An Op declares the Guards it runs, and a Guard failure is never silently retried.
 
 #### Phase 29 — Worker egress restriction and authenticated `/invoke`
-**Issue** #11 · **Branch** `feat/cog-worker-egress-11` · **Depends on** Phases 14, 23, 25 · **Size** L
+**Issue** #8, with Phase 30 (was #11) · **Branch** `feat/cog-worker-egress-11` · **Depends on** Phases 14, 23, 25 · **Size** L
 
 Not in the original list, but #8 cannot be built safely without it, and it is what turns ADR-0001 invariant 7 from advice into enforcement. #35 already did ingress.
 
@@ -1063,7 +1063,7 @@ The desktop embeds what M3 built: `local` is its executor, and Phase 27's `dbos`
 ### M11 — The third durability backend
 
 #### Phase 33 — The `temporal` backend
-**Issue** #110 · **Branch** `feat/cog-durability-temporal` · **Depends on** Phases 8, 11, 17 · **Size** L
+**Issue** #110, closed as not for A4; the phase stays in the plan for after · **Branch** `feat/cog-durability-temporal` · **Depends on** Phases 8, 11, 17 · **Size** L
 
 *In scope* — one workflow per run; the runner's step functions — Cog interaction, executor calls and Track appends — as **activities**, so workflow code stays deterministic; signals for gate decisions and cancellation, raised by Phase 11's Track watcher; ownership across replicas from task queues, which Phase 11's pickup hands the run to as it does for `dbos`; Phase 17's keyed claim for activity re-execution; Temporal's persistence on the same Postgres instance as the Track; configurable TLS to the frontend.
 

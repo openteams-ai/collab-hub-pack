@@ -1,0 +1,22 @@
+# The run controller beside the API, as a development hub turns it on.
+frames:
+  postgres:
+    existingSecret: hub-db
+    databaseUrlKey: url
+runs:
+  controller:
+    enabled: true
+    models: |
+      [models.default]
+      provider = "anthropic"
+      model = "claude-opus-5-5"
+      auth_ref = "env:ANTHROPIC_API_KEY"
+
+      [cogs]
+      hermes = "default"
+    extraEnv:
+      - name: ANTHROPIC_API_KEY
+        valueFrom:
+          secretKeyRef:
+            name: claude
+            key: api-key

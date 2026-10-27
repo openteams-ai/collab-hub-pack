@@ -377,9 +377,12 @@ class _Controllers:
                     process.kill()
                     process.wait(5)
                 hung.append(process)
-            process.log.close()
+            log = getattr(process, "log", None)  # a controller a test started by hand captures no stderr
+            if log is not None:
+                log.close()
         if hung:
-            dumps = "\n".join(f"--- {p.log.name}\n{open(p.log.name).read()[-6000:]}" for p in hung)
+            dumps = "\n".join(f"--- {p.log.name}\n{open(p.log.name).read()[-6000:]}" if hasattr(p, "log")
+                              else f"--- {p.args[p.args.index('--id') + 1]}: stderr not captured" for p in hung)
             raise AssertionError(f"{len(hung)} controller(s) did not stop within 30s of SIGTERM:\n{dumps}")
 
 

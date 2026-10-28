@@ -87,7 +87,11 @@ submitted and last moved, and whether a retry is asked for. Status is still
 the Track's, replayed through the run machine; the row is a projection a
 listing or a controller's pass reads instead of every Track, and `reindex()`
 rebuilds it from the events. On Postgres it is `collab_track_runs`, from
-migration 15.
+migration 15. An API process checks once, at its first listing, whether a
+submitted run has no row, and reindexes if so: what a Track from before the
+index needs. On the upgrade that brings the index, a run an old API pod
+accepts after a new pod has checked stays unlisted until an API pod restarts,
+which heals it; `run show` reads the Track and is unaffected.
 
 A Track written before controllers named themselves has `run_picked_up` with
 no `controller`: such a run belongs to the first controller to start

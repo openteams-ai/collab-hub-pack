@@ -581,6 +581,9 @@ def request_retry(track: TrackStore, run_id: str, *, actor: str) -> RunView:
     return view
 
 
-def refuse_retry(track: TrackStore, run_id: str, *, error: str) -> None:
-    """The controller's record of a retry it did not take, and why."""
-    _append(track, run_id, RETRY_REFUSED, {"error": error[:1024]})
+def refuse_retry(track: TrackStore, run_id: str, *, error: str) -> bool:
+    """The controller's record of a retry it did not take, and why: written only while the ask still stands, so
+    a refusal never lands on a retry another controller took. Returns whether it was written."""
+    event = TrackEvent(run_id=run_id, event_type=RETRY_REFUSED, payload={"error": error[:1024]},
+                       schema=SCHEMA_VERSION)
+    return track.append_if(event, lambda events: retry_ask(events) is not None) is not None

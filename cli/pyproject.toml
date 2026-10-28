@@ -1,6 +1,6 @@
 [project]
 name = "collab-hub-cli"
-version = "0.0.0.dev0"
+version = "0.15.0"
 description = "collab-hub: a command-line client for the Collab Hub's REST API"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -853,6 +853,10 @@ class LifecycleRunner(WorkflowEngine):
         events = self._read(run_id)
         run = Run.replay(events)
         state = None if run is None else run.state
+        if asked and retry_ask(events) is None:
+            # Before any look at the state: a controller that saw the ask and arrives after another took it
+            # reads a running or finished run, which is nothing to refuse.
+            raise RetryTaken(f"run {run_id!r} has no retry asked for it: another controller took it, or it was refused")
         if run is None or not run.state.ended:
             raise ValueError(f"run {run_id!r} is not terminal (status={state}); nothing to retry")
         if state is RunState.BUDGET_EXCEEDED:
@@ -862,8 +866,6 @@ class LifecycleRunner(WorkflowEngine):
             done = "completed" if state is RunState.COMPLETED else f"was {state.value}"
             raise ValueError(f"run {run_id!r} {done}; nothing to retry (start a new run instead)")
         op = self._submitted_definition(run_id, events)
-        if asked and retry_ask(events) is None:
-            raise RetryTaken(f"run {run_id!r} has no retry asked for it: another controller took it, or it was refused")
         written: list[TrackEvent] = []
         still_asked = (lambda current: retry_ask(current) is not None) if asked else None
         if self._record_if_still(run_id, run.retry(controller=self.controller), run, written, also=still_asked) is None:

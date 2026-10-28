@@ -202,3 +202,8 @@ def test_two_controllers_on_one_retry_ask_take_it_once_and_refuse_nothing():
     _settle(one, until=lambda: intents.describe(track, "r").state is RunState.COMPLETED)
     _settle(two, until=lambda: True)
     assert "retry_refused" not in _types(track, "r")
+    # A controller that saw the ask and only gets to it after the run completed finds nothing to refuse,
+    # whichever check it reaches first; and a refusal written by any path lands only while the ask stands.
+    two._retry("r", "alice")
+    assert intents.refuse_retry(track, "r", error="late") is False
+    assert "retry_refused" not in _types(track, "r")

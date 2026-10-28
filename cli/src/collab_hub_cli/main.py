@@ -604,6 +604,8 @@ def _event_line(sequence: int | None, kind: str, data: Any) -> str:
 
 RETRY_TAKEN_POLL = 0.5
 """Seconds `run retry --watch` waits between looks at an ended run, for a controller to take the retry asked for."""
+RETRY_TAKEN_WAIT = 600.0
+"""Seconds `run retry --watch` waits in all for a controller to take or refuse the ask before giving up."""
 
 
 def _watch(hub: Hub, run_id: str, *, as_json: bool, after: int = 0) -> dict:
@@ -797,7 +799,8 @@ def run_decide(
 def run_retry(
     run_id: Annotated[str, typer.Argument(help="The run's id.")],
     watch: Annotated[bool, typer.Option(
-        "--watch", help="Follow the run's events after the retry until it ends or waits at a Gate.")] = False,
+        "--watch", help="Follow the run's events after the retry until it ends or waits at a Gate; waits up "
+                        "to ten minutes for a controller to take the ask.")] = False,
     as_json: JsonOption = False,
 ) -> None:
     """Ask for an ended run to run again, and say how it will: resuming its attempt, or as a new one.
@@ -819,11 +822,18 @@ def run_retry(
             # `retry_requested` (the run runs on, and the stream with it) or `retry_refused`, the stream is
             # reopened from the last event seen.
             seen = run.get("sequence") or 0
+            deadline = time.monotonic() + RETRY_TAKEN_WAIT
             while True:
                 run = _watch(hub, run_id, as_json=as_json, after=seen)
-                if not run.get("retry_asked_by"):
-                    break
                 seen = run.get("sequence") or seen
+                if not run.get("ended"):
+                    continue  # taken: the run is running again, and the stream ended on a Gate or a drop
+                if not run.get("retry_asked_by"):
+                    break  # refused, or ended again after the retry
+                if time.monotonic() >= deadline:
+                    _err(f"error: no controller took the retry of {run_id} within {RETRY_TAKEN_WAIT:.0f}s; "
+                         "it stays asked for, and `run watch` follows it once one does")
+                    raise typer.Exit(EXIT_HUB)
                 time.sleep(RETRY_TAKEN_POLL)
             _finish(run, as_json)
     if as_json:

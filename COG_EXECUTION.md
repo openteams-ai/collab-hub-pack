@@ -308,10 +308,10 @@ Each phase is one pull request from the branch it names, numbered in build order
 | 13 | #211 | Run the Cogs launched through a deployed hub, as processes in its pod | `feat/cog-hub-pod-runs` | 11, 12 | M | merged, #212 |
 | 14 | #107 | Add a Worker SDK with Harness adapters, ACP first | `feat/cog-worker-sdk` | 2, 9 | M | merged, #224 |
 | 15 | #108 | Publish a Hermes harness Cog, launched by the hub as a local process | `feat/cog-worker-sdk` | 9, 12, 14 | M | merged, #224 |
-| 16 |#126, first half|Launch, list and terminate Cogs from the `collab-hub` CLI|`feat/cli-launch`|6, 10, 12|S| in review, #251, with Phases 18 and 19 |
+| 16 |#126, first half|Launch, list and terminate Cogs from the `collab-hub` CLI|`feat/cli-launch`|6, 10, 12|S| merged, #251, with Phases 18 and 19 |
 | 17 | #102 | Never repeat a completed side effect when a step is invoked again | `feat/cog-keyed-claim` | 8, 11, 14 | M | not started |
-| 18 |#103, closes it|The hub run API: Frames, payloads, decisions and retry|`feat/cog-run-api`|12, 15, 17|M| in review, #251, with Phases 16 and 19 |
-| 19 |#126, closes it|Decide, read and retry runs from the `collab-hub` CLI|`feat/cli-runs`|16, 18|S| in review, #251, with Phases 16 and 18 |
+| 18 |#103, closes it|The hub run API: Frames, payloads, decisions and retry|`feat/cog-run-api`|12, 15, 17|M| merged, #251, with Phases 16 and 19 |
+| 19 |#126, closes it|Decide, read and retry runs from the `collab-hub` CLI|`feat/cli-runs`|16, 18|S| merged, #251, with Phases 16 and 18 |
 | 20 | apollo-desktop#825 | Launch and watch hub runs from the desktop | `feat/hub-run-client-690` | 12, 18 | M | not started |
 | 21 | apollo-desktop#719 | Let a human approve, reject, or send back a paused step from the desktop | `feat/run-view-gate-decisions-719` | 4, 20 | M | not started |
 | 22 | #6 | The remote location: Cog workers in pods, and least-privilege RBAC for the controller | `feat/cog-remote-location-6` | 9, 11 | M | in review, #252, with #223, #165 and #214 folded in |
@@ -718,7 +718,7 @@ Phase 10 built this Cog's first form: `cogs/hermes` with a worker of its own tha
 What the primary goal did not need: launching and terminating from the CLI — small, and parallel to M4 from the moment Phase 12 lands — then the keyed claim that makes invoking a step again safe, the rest of the run API over it, and the CLI's commands for that rest.
 
 #### Phase 16 — Launch, list and terminate Cogs from the `collab-hub` CLI
-**Issue** #103 (which carries #126's half) · **Branch** `feat/cog-run-api-103` · **Depends on** Phases 6, 10, 12 · **Size** S · **Status** in review, #251, with Phases 18 and 19
+**Issue** #103 (which carries #126's half) · **Branch** `feat/cog-run-api-103` · **Depends on** Phases 6, 10, 12 · **Size** S · **Status** merged, #251, with Phases 18 and 19
 
 The three things a user first asks of a Cog hub, from a terminal: list the Cogs, launch one, terminate what was launched. Phase 10 built `cog launch`, `run list`, `run show`, `run watch` and `run terminate` over polling; this phase moves watching to the event stream and completes what is listed below.
 
@@ -758,7 +758,7 @@ A step can be invoked again after it already acted: a durable backend resuming a
 - [ ] The claim contract is documented and implemented by the reference worker and the Worker SDK.
 
 #### Phase 18 — The hub run API: Frames, payloads, decisions and retry
-**Issue** #103, closes it · **Branch** `feat/cog-run-api-103` · **Depends on** Phases 12, 15, 17 · **Size** M · **Status** in review, #251, with Phases 16 and 19; the claim's part of retry (the `outcome-unknown` step) lands with Phase 17 in #104
+**Issue** #103, closes it · **Branch** `feat/cog-run-api-103` · **Depends on** Phases 12, 15, 17 · **Size** M · **Status** merged, #251, with Phases 16 and 19; the claim's part of retry (the `outcome-unknown` step) lands with Phase 17 in #104
 
 The rest of the run API: a step grounded in Frames, its output read back, its Gate decided, and a run retried without repeating a side effect.
 
@@ -781,7 +781,7 @@ The rest of the run API: a step grounded in Frames, its output read back, its Ga
 - [ ] A Hermes step (Phase 15) given a Frame completes with the Frame in Hermes' prompt, and the Track names the Frame and its snapshot digest.
 
 #### Phase 19 — Decide, read and retry runs from the `collab-hub` CLI
-**Issue** #103 (which carries #126's half) · **Branch** `feat/cog-run-api-103` · **Depends on** Phases 16, 18 · **Size** S · **Status** in review, #251, with Phases 16 and 18
+**Issue** #103 (which carries #126's half) · **Branch** `feat/cog-run-api-103` · **Depends on** Phases 16, 18 · **Size** S · **Status** merged, #251, with Phases 16 and 18
 
 The rest of the run API from a terminal: the same endpoints, the same authorization, the same Track.
 

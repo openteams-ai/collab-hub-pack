@@ -290,7 +290,7 @@ Each phase is one pull request from the branch it names, numbered in build order
 
 ### Index
 
-The open phases are tracked as workstream issues since 2026-10-26, one per piece of work that lands together rather than one per phase: #103 (Phases 16, 18, 19), #104 (17, 27), #6 (22, with #223, #165 and #214 folded in), #105 (23, 24, 25), #8 (29, 30), #4 (26) and #9 (28). #1, #2 and #7 are closed as delivered by the phases that built them; #110 is closed as not for A4; #125 is closed, sign-in being what the desktop does. The phases keep their numbers, since the plan, the docs and the code cite them.
+The open phases are tracked as workstream issues since 2026-10-26, one per piece of work that lands together rather than one per phase: #103 (Phases 16, 18, 19, merged in #251), #104 (17, 27), #6 (22, merged in #252, with #223 and #165 folded in; #214 tracks the suite on macOS), #105 (23, 24, 25), #8 (29, 30), #4 (26) and #9 (28). #1, #2 and #7 are closed as delivered by the phases that built them; #110 is closed as not for A4; #125 is closed, sign-in being what the desktop does. The phases keep their numbers, since the plan, the docs and the code cite them.
 
 | Phase | Issue | Title | Branch | Depends on | Size | Status |
 |---|---|---|---|---|---|---|

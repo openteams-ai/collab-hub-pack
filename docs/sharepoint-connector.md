@@ -168,8 +168,11 @@ carries `content_trust: "external_untrusted"`.
   the API's own `/proc/self` stays usable; the API writes no core dumps). Both
   are pinned by tests, the second by one that tries the read from a worker on
   Linux. **Not isolated by this:** the worker shares the pod's Linux user, so
-  it can still read whatever files that user can (including a mounted service
-  account token) and reach the network. Closing those means parsing outside
+  it can still read whatever files that user can, including a mounted service
+  account token and, on hubs using the local frame store (the default
+  `storage_backend`), the frames themselves: `/var/frames` is mounted
+  read-write for that user, so a taken-over worker could read or change every
+  frame. It can also reach the network. Closing those means parsing outside
   the API pod, which is a separate pattern decision.
 - **Document reads are admitted one at a time, before anything is downloaded.**
   One permit spans a PDF or Office read from before its download (or

@@ -1332,8 +1332,11 @@ async def test_the_worker_never_sees_the_api_environment(monkeypatch):
     assert not {name for name in seen if name.startswith("COLLAB_HUB_API__") or name.startswith("FRAMES_")}
     # Nothing beyond the fixed allowlist. Names starting with "__" are added by
     # the OS or the venv launcher, not inherited (macOS: __CF_USER_TEXT_ENCODING;
-    # Windows: __PYVENV_LAUNCHER__), so they are the one exception.
-    assert {name for name in seen if not name.startswith("__")} <= set(sharepoint_text.worker_environment())
+    # Windows: __PYVENV_LAUNCHER__), and LC_CTYPE is set by the child's own
+    # locale coercion where C.UTF-8 is not a locale (macOS). Those are the
+    # exceptions; the forbidden names above are checked without them.
+    added_by_the_child = {name for name in seen if name.startswith("__")} | {"LC_CTYPE"}
+    assert seen - added_by_the_child <= set(sharepoint_text.worker_environment())
 
 
 async def test_the_real_worker_parses_with_only_the_minimal_environment(monkeypatch):

@@ -35,7 +35,7 @@ from typing import Any
 import httpx
 
 from .. import run_tokens
-from ..kubernetes import _KubernetesWorker
+from ..kubernetes import TurnRefused, _KubernetesWorker
 from .packages import CogPackage, DirectoryPackageSource
 
 LOOPBACK = "127.0.0.1"
@@ -48,12 +48,7 @@ INHERITED = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TZ", "PIXI_HOME", "PIX
 ENVIRONMENTS = ("pixi", "host")
 
 
-class TurnRefused(RuntimeError):
-    """A turn the worker did not answer: it holds no session, refused it, or answered something else."""
-
-    def __init__(self, message: str, status: int | None = None) -> None:
-        super().__init__(message)
-        self.status = status
+__all__ = ["LocalProcessCogExecutor", "TurnRefused", "WorkerStartFailed"]
 
 
 class WorkerStartFailed(RuntimeError):

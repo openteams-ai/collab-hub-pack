@@ -819,14 +819,21 @@ features: {}
 # is what runs the Cogs launched through it.
 runs:
   controller:
-    # -- Run a run controller in the API's pod, so this hub runs the Cogs launched through /v1/runs: each Cog
-    # as a process of that pod (the `local` location), from the Cog packages the image ships under
-    # /opt/collab-hub/cogs. A first step, for a development hub: a Cog's worker shares the pod with the
-    # controller and the API, so it is not isolated from them; the `remote` location, a pod per worker,
-    # replaces it. Needs frames.postgres, the Track, and one API replica.
+    # -- Run a run controller, so this hub runs the Cogs launched through /v1/runs, from the Cog packages the
+    # image ships under /opt/collab-hub/cogs. Where each Cog's worker runs is `location`. Needs
+    # frames.postgres, the Track.
     enabled: false
+    # -- Where a Cog's worker runs. `remote`: the controller is a Deployment of its own, with a ServiceAccount
+    # and a namespace-scoped Role over the workloads it makes, and each worker is a pod of its own, reached
+    # only by the controller (a NetworkPolicy per worker); the API holds no workload permissions: how a hub is
+    # deployed. `local`: the controller is a second container of the API's pod and each worker a process of
+    # that pod, not isolated from the API, for a development hub only; needs one API replica. The default is
+    # `local`, what a hub that enabled the controller before this setting existed has: moving to `remote` is
+    # a change of values, never of the chart's version.
+    location: local
     # -- The controller's id, recorded on each run it picks up: the same across restarts and rollouts, so the
-    # controller of a new pod takes the runs of the one it replaces.
+    # controller of a new pod takes the runs of the one it replaces. A run picked up by a controller whose id
+    # never starts again is ended by a live one.
     id: hub
     # -- Seconds the controller waits at start for the Track's tables (the API's migrations create them) and
     # for its id (held by the controller of the pod a rollout replaces, until that pod stops).
@@ -844,12 +851,30 @@ runs:
     models: ""
     # -- Extra environment for the controller: the variables a models block's auth_ref names, from Secrets.
     extraEnv: []
-    # -- The size limit of the volume Cog environments and run output are kept on (an emptyDir). Past it, the
-    # kubelet evicts the whole pod, the API with it.
+    # -- At the local location, the size limit of the volume Cog environments and run output are kept on (an
+    # emptyDir). Past it, the kubelet evicts the whole pod, the API with it.
     cacheSizeLimit: 20Gi
-    # -- The size limit of the controller's /tmp, where Cogs write (HOME is /tmp). Past it, the pod is evicted.
+    # -- At the local location, the size limit of the controller's /tmp, where Cogs write (HOME is /tmp). Past
+    # it, the pod is evicted. At the remote location, each worker pod has volumes of its own.
     tmpSizeLimit: 5Gi
     # -- The port of the controller's /healthz, which its liveness probe reads.
     healthPort: 8771
-    # -- Resources for the controller container, which also runs the Cogs' workers.
+    # -- Resources for the controller container (at the local location, it also runs the Cogs' workers).
     resources: {}
+    # -- At the remote location, annotations on the controller's ServiceAccount (a cloud identity, say).
+    serviceAccountAnnotations: {}
+    # -- At the remote location, each worker pod: its resources, and the size limits of its two volumes, the
+    # cache pixi builds the Cog's environment on (Hermes's is several GiB) and its /tmp (its HOME). Past a
+    # limit the kubelet evicts the pod, which the controller records as the step's failure. The pod's
+    # securityContext is the executor's: runAsNonRoot, no privilege escalation, every capability dropped,
+    # the runtime's seccomp profile, which Pod Security `restricted` admits.
+    worker:
+      resources:
+        requests:
+          cpu: 100m
+          memory: 512Mi
+        limits:
+          cpu: "2"
+          memory: 4Gi
+      cacheSizeLimit: 10Gi
+      tmpSizeLimit: 2Gi

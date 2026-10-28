@@ -316,7 +316,7 @@ The open phases are tracked as workstream issues since 2026-10-26, one per piece
 | 19 | #103, with Phases 16 and 18 | Decide, read and retry runs from the `collab-hub` CLI | `feat/cli-runs` | 16, 18 | S | merged, #251, with Phases 16 and 18 |
 | 20 | apollo-desktop#825 | Launch and watch hub runs from the desktop | `feat/hub-run-client-690` | 12, 18 | M | not started |
 | 21 | apollo-desktop#719 | Let a human approve, reject, or send back a paused step from the desktop | `feat/run-view-gate-decisions-719` | 4, 20 | M | not started |
-| 22 | #6, with #223, #165 and #214 folded in | The remote location: Cog workers in pods, and least-privilege RBAC for the controller | `feat/cog-remote-location-6` | 9, 11 | M | not started |
+| 22 | #6, with #223 and #165 folded in | The remote location: Cog workers in pods, and least-privilege RBAC for the controller | `feat/cog-remote-location-6` | 9, 11 | M | merged, #252 |
 | 23 | #105, with Phases 24 and 25 | Materialize a Cog worker from its published artifact, running its own `serve` | `feat/cog-materialize-serve` | 15, 22 | L | not started |
 | 24 | #105, with Phases 23 and 25 | Install and uninstall a Cog by digest | `feat/cog-install-by-digest` | 12, 23 | M | not started |
 | 25 | #105, with Phases 23 and 24 | Resolve a Cog's model binding into its worker's connection config | `feat/cog-model-binding-3` | 24 | M | not started |
@@ -760,7 +760,7 @@ A step can be invoked again after it already acted: a durable backend resuming a
 - [ ] The claim contract is documented and implemented by the reference worker and the Worker SDK.
 
 #### Phase 18 — The hub run API: Frames, payloads, decisions and retry
-**Issue** #103, closes it · **Branch** `feat/cog-run-api-103` · **Depends on** Phases 12, 15, 17 · **Size** M · **Status** in review, #251, with Phases 16 and 19; the claim's part of retry (the `outcome-unknown` step) lands with Phase 17 in #104
+**Issue** #103, closes it · **Branch** `feat/cog-run-api-103` · **Depends on** Phases 12, 15, 17 · **Size** M · **Status** merged, #251, with Phases 16 and 19; the claim's part of retry (the `outcome-unknown` step) lands with Phase 17 in #104
 
 The rest of the run API: a step grounded in Frames, its output read back, its Gate decided, and a run retried without repeating a side effect.
 
@@ -835,14 +835,13 @@ Needs only the run API, Phases 12 and 18, so it lands before the worker becomes 
 The same runner, backend and Cog; the worker becomes a pod. Then the rest of the lifecycle a production hub needs: the artifact, install, the Cog's own `resolve`, budgets.
 
 #### Phase 22 — The `remote` location: workers in pods, and least-privilege RBAC
-**Issue** #6 · **Branch** `feat/cog-remote-location-6` · **Depends on** Phases 9, 11 · **Size** M
+**Issue** #6 · **Branch** `feat/cog-remote-location-6` · **Depends on** Phases 9, 11 · **Size** M · **Status** in review, #252, on Phase 18's #251
 
 Same runner, same `none`, same Hermes Cog — the worker becomes a pod. The only identity able to create workloads is the controller, never the public API.
 
 *In scope*
-- `location: remote` constructs #35's `KubernetesCogExecutor` (a per-run Deployment + Service + ingress-only NetworkPolicy). Until Phase 23 the pod runs the baked runner image, as #35's E2E does.
+- `location: remote` constructs #35's `KubernetesCogExecutor` (a per-run Deployment + Service + ingress-only NetworkPolicy). Until Phase 23 the pod runs the image the hub ships (Phase 13), which carries the Cog packages and pixi: the Cog's `serve` in the environment its lock pins, built on the pod's own volumes; the E2E's image runs a command of its own. The controller presents the run token on every request, turns included, and a worker carries no ServiceAccount token.
 - It passes Phase 9's location conformance suite, whose controller-death case is written per location rather than one rule for both — the way the durability suite already differs per backend. `local`: the worker dies with its controller, because Phase 9's launcher kills it when the controller's pipe closes. `remote`: the pod survives the controller, and the next controller start reaps it; the suite asserts the reap, and that no run advances and no claim is acted on in between. Neither location leaves a worker serving an orphaned run indefinitely, and orphan cleanup and claim reconciliation both precede any retry that could act again.
-- The controller's id in the chart is stable across its restarts, and a run whose owner's id never starts again is ended by a live controller (#223), so a replaced pod leaves no run waiting on an id that is gone.
 - The controller's id in the chart is stable across its restarts, and a run whose owner's id never starts again is ended by a live controller (#223), so a replaced pod leaves no run waiting on an id that is gone.
 - Chart: the controller moves out of the API's pod (Phase 13) into a Deployment of its own, with a ServiceAccount and a namespace-scoped Role and RoleBinding for the controller only, over the kinds actually materialized and the verbs used; `values.yaml` and `values.schema.json` change together; the API pod holds no workload permissions; `automountServiceAccountToken: false` on workers.
 - The run token and the binding reach the pod the way they reach a child process — environment and a mounted file — so the SDK does not know its location.
@@ -851,10 +850,10 @@ Same runner, same `none`, same Hermes Cog — the worker becomes a pod. The only
 *Dev and CI* — `make kind-up` deploys the controller from the chart with `location: remote`, and `make op` on kind materializes a worker pod. CI: `level-4-render` asserts the controller Deployment renders, the Role is limited to materialized kinds and the API ServiceAccount has no workload verbs; `test-execution-e2e.yaml` runs the location suite against kind. *Docs* — `runs.md`'s location table gains `remote`; `docs/standalone-deployment.md` *Namespace ownership* states the controller's Role; the chart values are described.
 
 *Acceptance*
-- [ ] On kind with default RBAC, the controller materializes a worker pod, and `kubectl auth can-i` shows the API ServiceAccount cannot create one.
-- [ ] The grant is namespace-scoped and limited to materialized kinds, and workers carry no ServiceAccount token.
-- [ ] The fake Cog runs in a pod through `location: remote` with no change to the Op that ran it as a child process.
-- [ ] `remote` passes the location conformance suite, including its own controller-death expectation: the pod is reaped on the next controller start, and nothing advances or acts on a claim in between.
+- [ ] On kind with default RBAC, the controller materializes a worker pod, and `kubectl auth can-i` shows the API ServiceAccount cannot create one. (The kind E2E materializes worker pods under the chart's Role; the chart's render test asserts the API holds no workload Role; the `can-i` check on kind waits on a kind run with Postgres.)
+- [x] The grant is namespace-scoped and limited to materialized kinds, and workers carry no ServiceAccount token.
+- [x] The fake Cog runs in a pod through `location: remote` with no change to the Op that ran it as a child process.
+- [x] `remote` passes the location conformance suite, including its own controller-death expectation: the pod is reaped on the next controller start, and nothing advances or acts on a claim in between.
 
 #### Phase 23 — Workers run the Cog's own `serve`, from its artifact
 **Issue** #105 · **Branch** `feat/cog-materialize-serve` · **Depends on** Phases 15, 22, and the catalog (#84, #85), which has landed · **Size** L

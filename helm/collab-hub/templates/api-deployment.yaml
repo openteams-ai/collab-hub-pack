@@ -1,12 +1,13 @@
 {{- if .Values.api.enabled }}
 {{- $component := "api" }}
 {{- $controller := .Values.runs.controller }}
+{{- $sidecar := and $controller.enabled (eq $controller.location "local") }}
 {{- if $controller.enabled }}
 {{- if not (or .Values.frames.postgres.url .Values.frames.postgres.existingSecret) }}
 {{- fail "runs.controller.enabled needs frames.postgres: the hub's database is the Track the API records runs in and the controller watches" }}
 {{- end }}
-{{- if or .Values.api.autoscaling.enabled (ne (int .Values.api.deployment.replicaCount) 1) }}
-{{- fail "runs.controller.enabled needs exactly one API pod (api.deployment.replicaCount: 1, api.autoscaling.enabled: false): each pod runs a controller, under one id" }}
+{{- if and $sidecar (or .Values.api.autoscaling.enabled (ne (int .Values.api.deployment.replicaCount) 1)) }}
+{{- fail "runs.controller.location: local needs exactly one API pod (api.deployment.replicaCount: 1, api.autoscaling.enabled: false): each pod would run a controller, under one id" }}
 {{- end }}
 {{- end }}
 apiVersion: apps/v1
@@ -27,7 +28,7 @@ spec:
     metadata:
       labels:
         {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 8 }}
-      {{- if $controller.enabled }}
+      {{- if $sidecar }}
       annotations:
         # EKS projects the pod's AWS web identity (IRSA) into every container; a Cog's worker runs in this
         # one, so it gets none.
@@ -54,9 +55,12 @@ spec:
           env:
             {{- include "collab-hub.api-container-env" (dict "top" . "indexer" false) | nindent 12 }}
             {{- if $controller.enabled }}
-            # The Cogs the run API may launch: the packages the image ships, which the controller runs.
+            # The Cogs the run API may launch: the packages the image ships, which the controller runs; and
+            # where their workers run, which every answer about a run names.
             - name: COLLAB_HUB_API__RUNS__PACKAGES
               value: "/opt/collab-hub/cogs"
+            - name: COLLAB_HUB_API__RUNS__LOCATION
+              value: {{ $controller.location | quote }}
             {{- end }}
           resources:
             {{- toYaml .Values.api.deployment.resources | nindent 12 }}
@@ -84,9 +88,9 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 1
             failureThreshold: 3
-        {{- if $controller.enabled }}
-        # The run controller: it runs the Cogs launched through /v1/runs, each as a process of this pod (the
-        # `local` location). The API process constructs no executor; this one does, and nothing else.
+        {{- if $sidecar }}
+        # The run controller at the local location: it runs the Cogs launched through /v1/runs, each as a
+        # process of this pod. The API process constructs no executor; this one does, and nothing else.
         - name: run-controller
           image: "{{ .Values.api.deployment.image.repository }}:{{ .Values.api.deployment.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.api.deployment.image.pullPolicy }}
@@ -173,7 +177,7 @@ spec:
               - key: {{ .Values.cogs.caBundle.key | quote }}
                 path: {{ .Values.cogs.caBundle.key | quote }}
         {{- end }}
-        {{- if $controller.enabled }}
+        {{- if $sidecar }}
         # Cog environments (pixi builds one the first time a Cog is launched) and each run's worker output.
         - name: run-cache
           emptyDir:

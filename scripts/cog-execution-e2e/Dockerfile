@@ -14,4 +14,7 @@ RUN python -m pip install --no-cache-dir "httpx>=0.28.0" "certifi>=2026.10.19"
 COPY execution/src/collab_hub_execution /app/collab_hub_execution
 COPY scripts/cog-execution-e2e/runner.py scripts/cog-execution-e2e/driver.py /app/e2e/
 ENV PYTHONPATH=/app
+# Worker pods run with the executor's default securityContext (runAsNonRoot), as the hub's image does.
+RUN useradd --uid 65532 --user-group --no-create-home nonroot
+USER 65532
 CMD ["python", "-m", "e2e.runner"]

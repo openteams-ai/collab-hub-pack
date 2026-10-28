@@ -1026,7 +1026,11 @@
               "uniqueItems": true,
               "items": {
                 "type": "string",
-                "enum": ["operator", "owner", "member"]
+                "enum": [
+                  "operator",
+                  "owner",
+                  "member"
+                ]
               }
             },
             "allowedUsers": {
@@ -1111,7 +1115,7 @@
           "properties": {
             "enabled": {
               "type": "boolean",
-              "description": "Run a run controller in the API's pod: Cogs run as processes of that pod."
+              "description": "Run a run controller, so this hub runs the Cogs launched through /v1/runs."
             },
             "id": {
               "type": "string",
@@ -1170,6 +1174,37 @@
             "tmpSizeLimit": {
               "type": "string",
               "description": "The size limit of the controller's /tmp, where Cogs write."
+            },
+            "location": {
+              "type": "string",
+              "enum": [
+                "local",
+                "remote"
+              ],
+              "description": "Where a Cog's worker runs: a pod of its own (remote), or a process of the API's pod (local, the default)."
+            },
+            "serviceAccountAnnotations": {
+              "type": "object",
+              "description": "Annotations on the controller's ServiceAccount, at the remote location."
+            },
+            "worker": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "At the remote location, each worker pod: its resources and the size limits of its cache and /tmp volumes.",
+              "properties": {
+                "resources": {
+                  "type": "object",
+                  "description": "Resources for a worker pod's container."
+                },
+                "cacheSizeLimit": {
+                  "type": "string",
+                  "description": "The size limit of a worker's cache volume, where pixi builds the Cog's environment."
+                },
+                "tmpSizeLimit": {
+                  "type": "string",
+                  "description": "The size limit of a worker's /tmp, its HOME."
+                }
+              }
             }
           },
           "additionalProperties": false

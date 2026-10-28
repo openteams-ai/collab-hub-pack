@@ -519,6 +519,13 @@ Other level-3 targets:
 
 ## Level 4 — the chart on kind
 
+With a database (`frames.postgres`), the chart runs the run controller as a
+Deployment of its own and each Cog's worker as a pod: `runs.controller.enabled`
+with `location: remote`, the default ([standalone-deployment.md](../docs/standalone-deployment.md#running-cogs-in-pods)).
+`values/kind.yaml` keeps frames on the local filesystem and no database, so it
+runs no controller; the kind E2E (`scripts/cog-execution-e2e/run.sh`)
+materializes worker pods through the same location on a cluster of its own.
+
 Levels 1–3 run the API as a process. Level 4 runs the **published artifact**:
 the image built from `api/Dockerfile`, installed through `helm/collab-hub`. Use
 it when your change touches the chart, the container, or anything that only

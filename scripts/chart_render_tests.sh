@@ -81,13 +81,17 @@ if [ "$(checksum)" != "$(checksum --set-string runs.controller.models='[models.o
 else
   fail "run controller: a new models block changes the pod template" "the checksum did not change"
 fi
+check "run controller remote: a Deployment of its own with the only workload Role, the API with none" \
+  run-controller-remote -f "$TESTDATA/run-controller-remote.yaml"
 refused "run controller: refused without the hub's database" "needs frames.postgres" --set runs.controller.enabled=true
 # Frames on S3, so the chart's own storage rules allow more than one API pod and it is this rule that refuses.
 SHARED_FRAMES='--set frames.storage.backend=s3 --set frames.s3.bucket=frames --set frames.activeState.backend=postgres'
-refused "run controller: refused with two API pods" "needs exactly one API pod" -f "$TESTDATA/run-controller.yaml" \
+refused "run controller local: refused with two API pods" "needs exactly one API pod" -f "$TESTDATA/run-controller.yaml" \
   $SHARED_FRAMES --set api.deployment.replicaCount=2
-refused "run controller: refused with autoscaling" "needs exactly one API pod" -f "$TESTDATA/run-controller.yaml" \
+refused "run controller local: refused with autoscaling" "needs exactly one API pod" -f "$TESTDATA/run-controller.yaml" \
   $SHARED_FRAMES --set api.autoscaling.enabled=true
+refused "run controller: a location it cannot run is refused" "location" \
+  -f "$TESTDATA/run-controller.yaml" --set runs.controller.location=edge
 refused "run controller: an environment it cannot run is refused" "environment" \
   -f "$TESTDATA/run-controller.yaml" --set runs.controller.environment=docker
 refused "feature flags: a dashed name is refused" "cogs-ui" --set features.cogs-ui=true

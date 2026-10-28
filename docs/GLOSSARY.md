@@ -174,8 +174,11 @@ issue #8.)
 
 **Harness adapter.** The part of the worker SDK that drives one kind of
 harness — an ACP agent over stdio, or a direct OpenAI-compatible model
-call — behind one interface (`start`, `interact`, `cancel`, `close`). The
-SDK turns what an adapter returns into a result envelope. (ADR-0002 D5.)
+call — behind one interface (`start`, `interact`, `cancel`, `close`,
+`alive`). The SDK turns what an adapter returns into a result envelope, hands
+it the step's Frames and the binding's limits, and fails an interaction with
+an envelope code when the adapter signals a failure. (ADR-0002 D5;
+[`worker/README.md`](../worker/README.md).)
 
 **Hosting environment.** The place a Cog is installed and run — the hub,
 or later a desktop. It owns the lifecycle entry points, offers the
@@ -247,9 +250,13 @@ cog-execution README.)
 files, `nebi run` executes one of its entry points, and publishing goes
 through Nebi to an OCI registry the hub indexes. (ADR-0001 D6.)
 
-**Remote worker.** A Cog worker at the `remote` agent location: a workload
-on a cluster, reached over the cluster's network through the same seam as a
-local worker. What a Kubernetes hub always runs. (ADR-0002 D12.)
+**Remote worker.** A Cog worker at the `remote` agent location: a Deployment
+and a Service the run controller makes on its own cluster, of the hub's image
+running the Cog package's `serve` task, reached over service DNS through the
+same seam as a local worker, with no ServiceAccount token and a NetworkPolicy
+admitting only the controller. It outlives a controller that dies, and is
+reaped by name by the next controller to find its run. What a Kubernetes hub
+always runs. (ADR-0002 D12.)
 
 **Result envelope.** The structured return of a usage entry point: `ok`,
 `payload`, `problems`, `binding`, plus usage and timing — exactly what
@@ -274,6 +281,13 @@ API for the run controller to act on: `op_submitted`, `cancel_requested`,
 `turn_requested` and `decision_requested`.
 The API writes intent and reads status; it never calls the controller.
 (ADR-0002 D4.)
+
+**Run index.** The Track's one-row-per-run projection, derived by the store
+from a run's events in the same transaction as any event that moves it:
+status, organization, when submitted and last moved, and whether a retry is
+asked for. A listing or a controller's pass reads it instead of every Track;
+status still comes from the Track, through the run machine. (ADR-0002 D3,
+`docs/cog-execution/track.md`.)
 
 **Run pickup.** How exactly one of several run controllers starts a
 submitted run, under every backend: `run_picked_up`, naming the controller,
@@ -325,8 +339,10 @@ attempt** under the keyed claim: `INVOKED`, `RESERVED`, `COMMITTED`,
 the run machine. Each state is described in
 [states](cog-execution/states.md). (ADR-0002 D11; ADR-0001 invariant 3.)
 
-**Worker SDK.** An optional library that implements the worker side of the
-seam once — `/invoke` returning an envelope, the health probe, the keyed
-claim, the binding, cancellation, usage — and hands each interaction to a
-harness adapter. A Cog may use it; the hub requires only the seam and never
-imports the SDK. (ADR-0002 D5.)
+**Worker SDK.** An optional library, `collab-hub-cog-worker` under
+[`worker/`](../worker/README.md), that implements the worker side of the seam
+once — `/invoke` returning an envelope, the health probe, sessions and turns,
+the binding with the model's limits, the step's Frames, cancellation, usage,
+and the `/invoke` authentication hook; the keyed claim's client joins it with
+the claim — and hands each interaction to a harness adapter. A Cog may use it;
+the hub requires only the seam and never imports the SDK. (ADR-0002 D5.)

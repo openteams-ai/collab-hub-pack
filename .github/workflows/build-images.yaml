@@ -19,11 +19,18 @@ on:
     paths:
       - "api/**"
       - "execution/**"
+      # The Cogs the image ships (runs.controller in the chart).
+      - "cogs/hermes/**"
+      - "worker/**"
+      - "examples/cog-local/cogs/hello/**"
       - ".github/workflows/build-images.yaml"
   pull_request:
     paths:
       - "api/**"
       - "execution/**"
+      - "cogs/hermes/**"
+      - "worker/**"
+      - "examples/cog-local/cogs/hello/**"
   workflow_dispatch:
 
 jobs:
@@ -64,10 +71,6 @@ jobs:
           # so no Dockerfile change is needed for a GHCR-only custom build.
           build-contexts: |
             projectroot=.
-          # Always re-resolve the base images, so a rebuild picks up a base
-          # image republished under the same tag (a ca-certificates fix, say)
-          # rather than a stale local layer.
-          pull: true
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
 

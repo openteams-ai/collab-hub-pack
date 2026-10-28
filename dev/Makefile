@@ -290,6 +290,25 @@ run-events: ## Stream a run's events until it ends (RUN=run-...)
 	curl -sSN -H 'Accept: text/event-stream' $(if $(TOKEN),-H "Authorization: Bearer $(TOKEN)") \
 		$(API_URL)/v1/runs/$(RUN)/events
 
+# A decision on the Gate a run waits at, through the run API: the escalation it answers is read from
+# the run, so a decision on a revision nobody saw is refused as stale. OUTCOME=approve|reject|send_back,
+# FINDING= what to send the step back with.
+STEP    ?=
+OUTCOME ?= approve
+FINDING ?=
+run-decide: ## Decide the Gate a run waits at (RUN= STEP= OUTCOME=approve|reject|send_back FINDING=)
+	@[ -n "$(RUN)" ] && [ -n "$(STEP)" ] || { echo "RUN=run-... and STEP=<name> name the run and its waiting step"; exit 1; }
+	@esc=$$(curl -sS $(if $(TOKEN),-H "Authorization: Bearer $(TOKEN)") $(API_URL)/v1/runs/$(RUN) \
+		| python3 -c 'import json,sys; print(json.load(sys.stdin).get("escalation") or "")'); \
+	[ -n "$$esc" ] || { echo "$(RUN) waits on no decision"; exit 1; }; \
+	curl -sS -X POST -H 'Content-Type: application/json' $(if $(TOKEN),-H "Authorization: Bearer $(TOKEN)") \
+		-d "$$(python3 -c 'import json; print(json.dumps({"escalation": "'$$esc'", "outcome": "$(OUTCOME)", "findings": [f for f in ["$(FINDING)"] if f]}))')" \
+		$(API_URL)/v1/runs/$(RUN)/steps/$(STEP)/decision | python3 -m json.tool
+
+run-retry: ## Ask for an ended run to run again (RUN=run-...)
+	@[ -n "$(RUN)" ] || { echo "RUN=run-... names the run"; exit 1; }
+	curl -sS -X POST $(if $(TOKEN),-H "Authorization: Bearer $(TOKEN)") $(API_URL)/v1/runs/$(RUN)/retry | python3 -m json.tool
+
 # The process that advances the runs `make api` (or `make api-oidc`) accepts, and `make submit`
 # records: it watches the Track (TRACK), picks up each submitted run, starts its worker as a local
 # process (the Cog package's `serve` task in its own pixi environment, or directly with

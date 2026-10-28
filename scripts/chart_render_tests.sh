@@ -46,6 +46,16 @@ check "ci fixture: harbor + static, Secrets attached, CA mounted read-only" fixt
 check "sources with the indexer off: JSON renders, tuning vars do not" static-only $STATIC
 check "three sources: each credential attached to its own source" three-sources -f "$TESTDATA/cogs-three-sources.yaml"
 check "middle source removed and order reversed: attachments follow the id" reordered -f "$TESTDATA/cogs-reordered.yaml"
+NEBARIAPP='--set api.nebariapp.enabled=true --set api.nebariapp.hostname=hub.example.com'
+HTTPROUTE='--set api.ingress.enabled=true --set api.ingress.kind=HTTPRoute --set api.ingress.host=hub.example.com --set api.ingress.parentRefs[0].name=gateway --set server.forwardedAllowIps[0]=10.0.0.0/8'
+check "serving off: no serve variables, the gateway's public routes untouched" serve-off $STATIC $NEBARIAPP
+ENVOY_CRDS='--api-versions gateway.envoyproxy.io/v1alpha1/BackendTrafficPolicy'
+check "serving on behind the Nebari gateway: URL derived, /v2 made a public route with a timeout policy" serve-nebariapp $STATIC $NEBARIAPP $ENVOY_CRDS --set cogs.serve.enabled=true
+check "serving on behind the Nebari gateway with routeTimeout off: no policy" serve-nebariapp-no-timeout $STATIC $NEBARIAPP --set cogs.serve.enabled=true --set cogs.serve.routeTimeout=false
+check "publishing and sweeping on: who may publish reaches the API replicas, not the indexer" publish-with-indexer $STATIC --set cogs.index.enabled=true --set cogs.publish.allowedRoles[0]=owner --set cogs.publish.maxPendingRepositories=5
+check "serving and sweeping on: the indexer carries the same serve settings as the API replicas" serve-with-indexer $STATIC $HTTPROUTE --set cogs.serve.enabled=true --set cogs.index.enabled=true
+check "serving on behind an HTTPRoute: explicit URL, integer limits, /v2 rule with a timeout" serve-httproute $STATIC $HTTPROUTE --set cogs.serve.enabled=true --set cogs.serve.publicUrl=https://hub.example.com:8443 --set cogs.serve.maxBlobBytes=5368709120 --set cogs.serve.maxBlobSeconds=1800 --set cogs.serve.credentialTtlSeconds=600
+check "serving on with routeTimeout off: no /v2 rule, no timeout" serve-httproute-no-timeout $STATIC $HTTPROUTE --set cogs.serve.enabled=true --set cogs.serve.routeTimeout=false
 check "indexer on with its own resources: one Recreate replica, the API's env, the API does not sweep" indexer-resources $STATIC --set cogs.index.enabled=true --set cogs.indexer.resources.requests.memory=1Gi --set cogs.indexer.resources.limits.memory=2Gi
 check "feature flags: each entry renders as its variable" features --set features.cogs_ui=true --set features.new_thing=false
 refused() { # <label> <needle> <helm args...>: the chart must refuse to render, naming <needle>
@@ -60,6 +70,31 @@ refused() { # <label> <needle> <helm args...>: the chart must refuse to render, 
   fi
 }
 refused "feature flags: a non-boolean value is refused" "/features/cogs_ui" --set-string features.cogs_ui=maybe
+
+# The run controller beside the API (runs.controller): off by default, a second container when on.
+check "run controller off: one container, no Cog packages for the API" no-run-controller
+check "run controller on: a sidecar on the hub's database, liveness only, its models from a ConfigMap" run-controller \
+  -f "$TESTDATA/run-controller.yaml"
+# A changed models block rolls the pod: the controller reads it once, at start.
+checksum() { $HELM template t "$CHART" -f "$TESTDATA/run-controller.yaml" "$@" | grep 'checksum/run-models' ; }
+if [ "$(checksum)" != "$(checksum --set-string runs.controller.models='[models.other]')" ] && [ -n "$(checksum)" ]; then
+  pass "run controller: a new models block changes the pod template"
+else
+  fail "run controller: a new models block changes the pod template" "the checksum did not change"
+fi
+check "run controller remote: a Deployment of its own with the only workload Role, the API with none" \
+  run-controller-remote -f "$TESTDATA/run-controller-remote.yaml"
+refused "run controller: refused without the hub's database" "needs frames.postgres" --set runs.controller.enabled=true
+# Frames on S3, so the chart's own storage rules allow more than one API pod and it is this rule that refuses.
+SHARED_FRAMES='--set frames.storage.backend=s3 --set frames.s3.bucket=frames --set frames.activeState.backend=postgres'
+refused "run controller local: refused with two API pods" "needs exactly one API pod" -f "$TESTDATA/run-controller.yaml" \
+  $SHARED_FRAMES --set api.deployment.replicaCount=2
+refused "run controller local: refused with autoscaling" "needs exactly one API pod" -f "$TESTDATA/run-controller.yaml" \
+  $SHARED_FRAMES --set api.autoscaling.enabled=true
+refused "run controller: a location it cannot run is refused" "location" \
+  -f "$TESTDATA/run-controller.yaml" --set runs.controller.location=edge
+refused "run controller: an environment it cannot run is refused" "environment" \
+  -f "$TESTDATA/run-controller.yaml" --set runs.controller.environment=docker
 refused "feature flags: a dashed name is refused" "cogs-ui" --set features.cogs-ui=true
 refused "feature flags: a name with a double underscore is refused" "cogs__ui" --set features.cogs__ui=true
 refused "feature flags: an uppercase name is refused" "Cogs_ui" --set features.Cogs_ui=true
@@ -73,6 +108,10 @@ refused "indexer: a replica count is not a value" "replicas" $STATIC --set cogs.
 refused "root path: a trailing slash is refused" "/server/rootPath" --set server.rootPath=/hub/
 refused "root path: a bare slash is refused" "/server/rootPath" --set server.rootPath=/
 refused "root path: a missing leading slash is refused" "/server/rootPath" --set server.rootPath=hub
+
+# Without Envoy Gateway the /v2 timeout policy cannot exist; the render says so
+# rather than leaving large pulls on the gateway's 15 s default.
+refused "serving on behind the Nebari gateway without Envoy Gateway's CRDs is refused, not left on the default timeout" "cogs.serve.routeTimeout" $STATIC $NEBARIAPP --set cogs.serve.enabled=true
 
 # --- negative: every refused configuration, from one fixture ------------------
 # scripts/testdata/chart/cogs-negative-cases.yaml holds each refusal once, in

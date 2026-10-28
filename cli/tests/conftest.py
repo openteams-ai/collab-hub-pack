@@ -48,6 +48,12 @@ class Stub:
     launchable: tuple[str, ...] = ("echo", "slow")
     turns: list[dict] = field(default_factory=list)
     hold_turns: bool = False  # leave every turn pending, as a worker that has not answered yet
+    frames: set[str] = field(default_factory=set)  # the Frame ids a step may name
+    events: dict[str, list[tuple[str, dict]]] = field(default_factory=dict)  # run id -> (type, payload) streamed
+    decisions: list[tuple[str, str, dict]] = field(default_factory=list)  # (run, step, decision) recorded
+    drop_stream_after: int | None = None  # cut the event stream once, after this many events
+    retry_taken_after: int | None = None  # end the stream this many times before a controller takes a retry
+    stream_progress: dict[str, list[str]] = field(default_factory=dict)  # statuses reached while a client streams
     # What a run's status becomes on each later read: a list consumed one status per GET.
     progress: dict[str, list[str]] = field(default_factory=dict)
     counter: int = 0
@@ -182,20 +188,29 @@ class Stub:
             return httpx.Response(404, json={"error": {"code": "cog_not_found", "message": f"No Cog {cog_id}"}})
         if path == "/v1/runs" and request.method == "POST":
             submitted = json.loads(request.content)
-            [step] = submitted["steps"]
-            if step["cog"] not in self.launchable:
-                return httpx.Response(422, json={"error": {
-                    "code": "cog_not_launchable",
-                    "message": f"Cannot launch {step['cog']}; the Cogs this hub launches are: "
-                               f"{', '.join(self.launchable)}"}})
+            step = submitted["steps"][0]
+            for one in submitted["steps"]:
+                if one["cog"] not in self.launchable:
+                    return httpx.Response(422, json={"error": {
+                        "code": "cog_not_launchable",
+                        "message": f"Cannot launch {one['cog']}; the Cogs this hub launches are: "
+                                   f"{', '.join(self.launchable)}"}})
+                for frame in one.get("frames", ()):
+                    if frame not in self.frames:
+                        return httpx.Response(404, json={"error": {
+                            "code": "frame_not_found", "message": f"No Frame {frame}, named by step {one['name']}",
+                            "details": {"frame": frame, "step": one["name"]}}})
             run = {"id": f"run-{len(self.runs) + 1:012d}", "status": "SUBMITTED", "ended": False,
-                   "steps": [{"name": step["name"], "cog": step["cog"], "entry_point": step["entry_point"],
-                              "state": "pending", "attempt": None, "error": None}],
+                   "steps": [{"name": one["name"], "cog": one["cog"], "entry_point": one["entry_point"],
+                              "state": "pending", "attempt": None, "error": None} for one in submitted["steps"]],
                    "submitted_by": user, "submitted_at": "2026-10-02T08:00:00+00:00",
                    "updated_at": "2026-10-02T08:00:00+00:00", "cancel_requested_by": None, "error": None,
                    "reason": None, "backend": "none", "location": "local", "_input": step["input"],
-                   "name": submitted.get("name"),
-                   "_gate": step["gate"]}
+                   "name": submitted.get("name"), "escalation": None, "approvers": [], "decision": None,
+                   "retry_asked_by": None, "sequence": 0,
+                   "frames": {one["name"]: [{"id": f, "name": f, "digest": "d" * 64} for f in one["frames"]]
+                              for one in submitted["steps"] if one.get("frames")},
+                   "_gate": step.get("gate")}
             self.runs.insert(0, run)
             return httpx.Response(201, json=run)
         if path == "/v1/runs":
@@ -230,6 +245,69 @@ class Stub:
                                 answer=None if failing else f"you said: {turn['text']}",
                                 error="the worker answered HTTP 500" if failing else None)
                 return httpx.Response(200, json=turn)
+            if action == "events":
+                if self.retry_taken_after is not None:
+                    if self.retry_taken_after > 0:
+                        self.retry_taken_after -= 1
+                        ended = f"event: end\ndata: {json.dumps({'status': run['status']})}\n\n"
+                        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                              content=ended.encode())
+                    self.retry_taken_after = None
+                    run["retry_asked_by"] = None
+                    self.events[run_id] = self.events.get(run_id, []) + [
+                        ("retry_requested", {"actor": "alice"}), ("step_started", {"step": "echo", "attempt": 1}),
+                        ("step_completed", {"step": "echo", "attempt": 1}), ("completed", {})]
+                    self.progress[run_id] = ["COMPLETED"]
+                if run_id in self.stream_progress:
+                    self.progress[run_id] = self.stream_progress.pop(run_id)
+                lines = []
+                for sequence, (kind, payload) in enumerate(self.events.get(run_id, []), 1):
+                    if sequence <= int(request.headers.get("Last-Event-ID", "0")):
+                        continue
+                    data = {"sequence": sequence, "type": kind, "occurred_at": "2026-10-02T08:00:01+00:00",
+                            "payload": payload}
+                    lines.append(f"id: {sequence}\nevent: {kind}\ndata: {json.dumps(data)}\n\n")
+                    if kind == "gate_escalated" and sequence == len(self.events[run_id]):
+                        break  # the open escalation: the hub holds the stream here until a decision lands
+                if self.drop_stream_after is not None and len(lines) > self.drop_stream_after:
+                    self.drop_stream_after = None  # once: the next connection carries the rest
+                    return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                          content="".join(lines[:1]).encode() + b"id: 1\nevent: step_st")
+                self._apply_progress(run)
+                if not (lines and lines[-1].startswith("id") and "gate_escalated" in lines[-1]):
+                    lines.append(f"event: end\ndata: {json.dumps({'status': run['status']})}\n\n")
+                return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                      content="".join(lines).encode())
+            if action.startswith("steps/") and action.endswith("/payload"):
+                step = action.removeprefix("steps/").removesuffix("/payload")
+                found = next((s for s in run["steps"] if s["name"] == step), None)
+                if found is None:
+                    return httpx.Response(404, json={"error": {"code": "step_not_found", "message": "no step"}})
+                if found["state"] == "completed":
+                    return httpx.Response(200, json={"step": step, "state": "completed",
+                                                     "payload": found.get("output"), "error": None})
+                if found["state"] == "failed":
+                    return httpx.Response(200, json={"step": step, "state": "failed", "payload": None,
+                                                     "error": {"code": "model-unavailable", "message": "no model"}})
+                return httpx.Response(409, json={"error": {"code": "step_not_finished",
+                                                           "message": f"Step {step} is {found['state']}"}})
+            if action.startswith("steps/") and action.endswith("/decision"):
+                body = json.loads(request.content)
+                self.decisions.append((run_id, action.removeprefix("steps/").removesuffix("/decision"), body))
+                if body["escalation"] != run.get("escalation"):
+                    return httpx.Response(409, json={"error": {
+                        "code": "stale_decision", "message": f"Escalation {body['escalation']} is not the one "
+                        f"run {run_id} waits on; {run.get('escalation')} is",
+                        "details": {"escalation": run.get("escalation")}}})
+                run["decision"] = {"escalation": body["escalation"], "outcome": body["outcome"], "actor": user}
+                return httpx.Response(202, json=run)
+            if action == "retry":
+                if not run["ended"] or run["status"] in ("COMPLETED", "REJECTED", "CANCELLED"):
+                    return httpx.Response(409, json={"error": {
+                        "code": "run_not_retryable", "message": f"Run {run_id} cannot be retried: the run "
+                        f"{run['status'].lower()}; there is nothing to retry", "details": {"status": run["status"]}}})
+                run["retry_asked_by"] = user
+                return httpx.Response(202, json=run)
             if action == "cancel":
                 if run["ended"]:
                     return httpx.Response(409, json={"error": {
@@ -237,13 +315,22 @@ class Stub:
                         "message": f"Run {run_id} cannot be cancelled: the run has ended {run['status']}"}})
                 run["cancel_requested_by"] = user
                 return httpx.Response(202, json=run)
-            if self.progress.get(run_id):
-                run["status"] = self.progress[run_id].pop(0)
-                run["ended"] = run["status"] not in ("SUBMITTED", "RUNNING", "WAITING_AT_GATE")
-                if run["status"] == "COMPLETED":
-                    run["steps"][0].update(state="completed", output={"greeting": "hi"})
+            self._apply_progress(run)
             return httpx.Response(200, json=run)
         return httpx.Response(404)
+
+    def _apply_progress(self, run: dict) -> None:
+        """Move the run to the next status `progress` scripts for it, as a controller would have."""
+        if self.progress.get(run["id"]):
+            run["status"] = self.progress[run["id"]].pop(0)
+            run["ended"] = run["status"] not in ("SUBMITTED", "RUNNING", "WAITING_AT_GATE")
+            if run["status"] == "COMPLETED":
+                run["steps"][0].update(state="completed", output={"greeting": "hi"})
+            if run["status"] == "WAITING_AT_GATE":
+                run["steps"][0].update(state="waiting_at_gate")
+                run["escalation"], run["approvers"] = "esc-1", ["owner", "operator"]
+            if run["status"] == "FAILED":
+                run["steps"][0].update(state="failed", error="model-unavailable")
 
     def browser(self, approve: bool = True):
         """What a browser does with the sign-in URL: the realm signs the user in and redirects back."""

@@ -21,8 +21,8 @@ does.
 | Backend | Setting | Built | A run in flight when its host stops |
 |---|---|---|---|
 | `none` | `backend="none"` (the default) | yes | is recorded `interrupted` when a host starts, and never resumes; a person retries it |
-| `dbos` | `backend="dbos"` | Phase 26 of the plan (#104) | resumes from its last completed step, on Postgres or SQLite |
-| `temporal` | `backend="temporal"` | Phase 32 (#110) | resumes, its steps run as Temporal activities |
+| `dbos` | `backend="dbos"` | Phase 27 of the plan (#104) | resumes from its last completed step, on Postgres or SQLite |
+| `temporal` | `backend="temporal"` | Phase 33; #110 is closed as not for A4 | resumes, its steps run as Temporal activities |
 
 The setting is the only switch: nothing imports a backend, and a runner
 configured with a backend that is not built yet refuses to start
@@ -39,13 +39,44 @@ and asks the executor to tear it down. An executor holds no lifecycle logic.
 | Location | Setting | Built | A worker is | For |
 |---|---|---|---|---|
 | `local` | `location="local"` | yes | a process on the controller's host: the Cog package's `serve` task, in the package's own pixi environment, on a loopback port | development and the desktop |
-| `remote` | `location="remote"` | Phase 21 of the plan (#6) | a workload on a cluster, reached over the cluster's network | a Kubernetes hub, always |
+| `remote` | `location="remote"` | yes | a Deployment and a Service on the cluster the controller runs in: the hub's own image running the Cog package's `serve` task, reached over service DNS | a Kubernetes hub, always |
 
-The setting is the only switch: nothing imports an executor, and a runner
-configured with a location that is not built yet refuses to start
-(`LocationNotImplemented`). The Kubernetes executor that exists today is what
-`remote` will select; until Phase 21 it is handed to a runner directly, as the
-in-memory executor of the tests is.
+The setting is the only switch: nothing imports an executor.
+
+**What a remote worker is.** A pod the run controller makes, of the hub's
+image, which ships the Cog packages under `/opt/collab-hub/cogs` and pixi:
+the package's `serve` task in the environment its lock pins, built on the
+pod's own volumes (materialization from a published artifact, with a cache,
+is #105). It is given what a local worker is given, in its environment:
+`COLLAB_COG_HOST` (`0.0.0.0`) and `COLLAB_COG_PORT`, `COLLAB_COG_ID` and
+`COLLAB_RUN_ID` as literals on the pod template; `COLLAB_RUN_TOKEN` and what
+the binding delivers (a model key) through a Secret of the worker's own,
+owned by its Deployment (made just after it; the pod waits for it) and read
+by `envFrom`, so neither is on a Deployment or ReplicaSet that `get` reads,
+and garbage collection removes the Secret with the Deployment. It carries no ServiceAccount
+token, and a NetworkPolicy per worker admits only the controller's pods to
+its `/invoke`; the controller presents the run token on every request,
+turns included. The pod runs under the executor's securityContext unless
+given another: `runAsNonRoot`, no privilege escalation, every capability
+dropped, the runtime's seccomp profile, which Pod Security `restricted`
+admits; its two emptyDirs, the cache pixi builds on and its `/tmp`, have
+size limits (`cache_size_limit`, `tmp_size_limit`), and `resources` are the
+pod's. `worker_started` records the workloads' `name` and `namespace` and
+the token's sha256. Teardown deletes the Deployment, the Service and the policy
+by name, and the Secret goes with its Deployment. A pod outlives a controller that dies, so the next
+controller to find the run, its own on restart or another taking the run
+over, reaps the pod by the name the Track recorded, and `worker_stopped`
+says so. A worker whose controller died while it was starting, before
+`worker_started` named it, is reached another way: every workload carries
+`collab-hub/controller` and `collab-hub/run` labels (a run id that is no
+label value gets its normalized form with a digest of the exact id, so no two
+runs share one), and a controller sweeps its own id's workloads at start,
+when none can be live, and a run's when it takes the run over. The only identity that may create these workloads is
+the controller's; the API never does (ADR-0002 invariant 3). The controller
+takes `--image`, `--namespace` and `--allow-ingress-from` (the labels of its
+own pods, as JSON), or `--insecure-skip-network-policy` for a trusted
+namespace, and `--worker-resources`, `--worker-cache-size-limit` and
+`--worker-tmp-size-limit` for the pods.
 
 **What a local worker is given.** Its environment, and nothing else of its
 controller: `PATH`, `HOME` and the few variables a process needs to run at all;
@@ -74,7 +105,7 @@ that declares a `serve` task and the `pixi.lock` that pins its environment,
 both files of the package itself: a package without its lock, or with a
 symbolic link in place of either, is refused, and pixi runs it `--locked`. It
 is identified on the Track by its name and the sha256 of its manifest and lock, so a development run is never mistaken for a
-published Cog. Resolving a published reference is Phase 22.
+published Cog. Resolving a published reference is Phase 23.
 
 **The run token.** One per worker, minted when it is materialized. The
 controller presents it as a bearer token on `/invoke`; the worker will present
@@ -108,9 +139,12 @@ The process that accepts runs is not the one that advances them (ADR-0002 D4).
 
 | Route | What it does |
 |---|---|
-| `POST /v1/runs` | Submit an Op: `steps`, each with `name`, `cog`, `entry_point`, `input` and `gate`, and optionally the run's own `name`, a label for listings. Records `op_submitted` with who submitted it, and answers 201 with the run, `SUBMITTED`. A `cog` that is not a package the controller can launch is a 422 naming the packages it can |
-| `GET /v1/runs` | The caller's organization's runs, newest first; `status`, `limit` and `offset` |
-| `GET /v1/runs/{id}` | One run: its status, each step's state, each completed step's `output`, and `picked_up_by`, the controller that advances it |
+| `POST /v1/runs` | Submit an Op: `steps`, each with `name`, `cog`, `entry_point`, `input`, `gate` and `frames` (Frame ids, up to 16), and optionally the run's own `name`, a label for listings. Each Frame is checked to exist and be readable by the caller (a 404 naming it otherwise, as the Frames API answers) and its body snapshotted by reference on the Track, so the step, retried or not, is given the Frame as it was at submit; `op_submitted` records each Frame's id and snapshot digest. Answers 201 with the run, `SUBMITTED`. A `cog` that is not a package the controller can launch is a 422 naming the packages it can |
+| `GET /v1/runs` | The caller's organization's runs, newest first; `status`, `limit` and `offset`. One query on the Track's index of runs, however many runs the Track holds |
+| `GET /v1/runs/{id}` | One run: its status, each step's state, each completed step's `output`, `picked_up_by`, the controller that advances it, the `frames` each step was given (their ids, names and snapshot digests, which every member of the submitting organization sees on the run whether or not the Frame itself is shared with them; a Frame's name is not a secret), `sequence`, the run's last event, and, while it waits at a Gate, the `escalation` a decision must name, its `approvers`, and the `decision` asked for and not yet delivered; `retry_asked_by` once a retry was asked |
+| `GET /v1/runs/{id}/steps/{step}/payload` | A completed step's output, read back whole even when the Track keeps it by reference, or a failed step's `error` (`code`, `message`); a step still running is a 409 |
+| `POST /v1/runs/{id}/steps/{step}/decision` | Decide the Gate the run waits at: `escalation`, `outcome` (`approve`, `reject`, `send_back`) and `findings`. Records `decision_requested` and answers 202; the controller delivers it. Who may decide is the Gate's `approvers`, matched against the caller's organization and platform roles; on a hub that resolves no roles (claims-sourced auth), the run's submitter decides. An escalation that is not the open one is a 409 `stale_decision` naming the open one; a second, different decision while one waits is a 409 `decision_pending`; the same decision asked again is the one recorded |
+| `POST /v1/runs/{id}/retry` | Ask for an ended run to run again: records `retry_asked` and answers 202; a controller takes it. After an interruption the step in flight resumes under its attempt and key; after a failure it runs again as a new attempt. A completed, rejected or cancelled run, or one that exhausted its budget, is a 409 `run_not_retryable` |
 | `GET /v1/runs/{id}/events` | The run's Track: the events after `after` (a sequence), `limit` at a time, with `next_after` when there are more. Asked for `text/event-stream`, a live stream instead: each event as it lands, named by its sequence, then an `end` event with the run's status once it has ended; a client that lost the connection reconnects with `Last-Event-ID` and misses nothing and repeats nothing. Each event's payload carries only the fields named for its type (an allowlist, so a field recorded later is not served until it is named); where a local worker is on the controller's host (`pid`, `pgid`, `logs`) is never among them |
 | `GET /v1/runs/launchable` | The Cog packages a step's `cog` may name |
 | `POST /v1/runs/{id}/turns` | Ask a Cog whose step holds a session something: records `turn_requested` with the caller and answers 202 with the turn, `pending`. A run that has ended is a 409 |
@@ -142,7 +176,7 @@ under the same id refuses to start, and one that loses its hold stops.
   another refuses to (`RunOwnedElsewhere`). A run nobody has picked up is
   cancelled by whichever controller gets there first, with the same
   conditional write. Under `dbos` and `temporal` the engine takes ownership
-  after pickup, and decides which replica resumes a run (Phases 26 and 32).
+  after pickup, and decides which replica resumes a run (Phases 27 and 33).
 - **A retry hands the run to the controller that retries it**, named on
   `retry_requested`.
 - **When a controller starts**, it records `interrupted` for every run it
@@ -157,8 +191,21 @@ under the same id refuses to start, and one that loses its hold stops.
   the controller dies, and the stop is recorded `reaped: false`.
 
 An id is what lets a restarted controller take its runs back, so it is the
-same across restarts and different between replicas: a StatefulSet's pod
-names, or `CONTROLLER_ID=` in `dev/`. On Postgres the id is held as a
+same across restarts and different between replicas: the chart's
+`runs.controller.id`, or `CONTROLLER_ID=` in `dev/`.
+
+- **An owner that never returns.** A run picked up by a controller whose id
+  is no longer held, a replaced pod's say, is ended by a live controller:
+  it probes the owner's id (the lock beside a SQLite Track, the advisory
+  lock on Postgres, tried and let go at once, at most every thirty seconds
+  per owner) and, finding it free, records `interrupted` naming itself as
+  `taken_over_by` and the owner as `from_controller`, or `cancelled` when a
+  cancel was asked, and reaps the workers it can reach. A controller that is
+  alive keeps its runs: a held id is never taken. A controller given no
+  `--track` to probe through leaves other owners' runs alone.
+- **Starting costs what is unfinished.** A controller's start reads the
+  Track's index for the runs left running or waiting at a Gate, not every
+  run's events. On Postgres the id is held as a
 session-level advisory lock, so `--track` must reach Postgres on a direct
 connection: through a transaction-pooling PgBouncer the lock would not outlive
 the transaction that took it, and two controllers could hold one id.
@@ -185,7 +232,8 @@ run API's later phase.
 | `--track` | A SQLite file, or a `postgresql://` URL (`collab-hub-execution[postgres]`). On Postgres the Track's tables come from the hub's migrations; the controller refuses a database without them |
 | `--id` | The controller's name, held while it runs, recorded on each run it picks up |
 | `--packages`, `--allow`, `--work-dir`, `--environment` | The `local` location's directory package source, and where workers write their output |
-| `--backend`, `--location` | The two axes, `none` and `local` built |
+| `--image`, `--namespace`, `--allow-ingress-from`, `--insecure-skip-network-policy`, `--worker-resources`, `--worker-cache-size-limit`, `--worker-tmp-size-limit` | The `remote` location: the image a worker pod runs, where, which pods may reach it, and the pod's resources and volume limits |
+| `--backend`, `--location` | The two axes: `none` built; `local` and `remote` built |
 | `--models FILE` | The hub's `models:` block, below |
 | `--health-port`, `--health-host` | `GET /healthz`, 200 while the controller passes over the Track, and `GET /readyz`, 200 once it has started and its last pass read the Track; 503 otherwise, with the reason |
 
@@ -196,7 +244,7 @@ container: `COLLAB_CONTROLLER_TRACK`, `COLLAB_CONTROLLER_ID`,
 `COLLAB_CONTROLLER_ALLOW` a comma-separated one. The command line wins.
 
 The **`models:` block** is the models the hub offers and which Cog talks to
-which, in TOML, until a Cog's own binding resolves it (Phase 24, whose
+which, in TOML, until a Cog's own binding resolves it (Phase 25, whose
 inventory is generated from it):
 
 ```toml

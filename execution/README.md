@@ -259,7 +259,7 @@ independent metering or hard per-request caps.
 
 Where a worker runs is the runner's `location` setting, `local` or `remote`
 (ADR-0002 D12); only `local` is built behind the switch, and `remote` is
-refused until Phase 21:
+refused until Phase 22:
 
 ```python
 LifecycleRunner(track=track, location="local", location_settings={

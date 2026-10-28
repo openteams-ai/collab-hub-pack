@@ -1,9 +1,14 @@
 """The Cog catalog read API (issue #85): discover, inspect and pin indexed Cogs.
 
-Read-only over the catalog the indexer fills (:mod:`..cogs.catalog`). The
-hub never proxies blobs and never contacts a registry here: every answer
-comes from what was captured at index time, and an install goes client ->
-registry with the pinned reference this API hands out.
+Read-only over the catalog the indexer fills (:mod:`..cogs.catalog`). No
+route here contacts a registry: every answer comes from what was captured at
+index time, and an install goes to the host the pinned reference names --
+the backing registry, or the Hub's own ``/v2/`` surface
+(:mod:`.registry`) when ``cogs.serve.enabled`` (issue #179).
+
+Also here, because they are Hub API routes with Hub authentication:
+``POST|DELETE /v1/cogs/registry-credentials``, the exchange of a Hub session
+for a credential valid only on that ``/v2/`` surface.
 
 - ``GET /v1/cogs`` -- current Cogs, one per ``cog_id`` (its newest present
   version), filtered and paged with ``limit`` + ``offset``. Items carry a
@@ -50,8 +55,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Query, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, PlainTextResponse
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.routing import APIRoute
+from pydantic import BaseModel, ValidationError
 
 from ..cogs.catalog import (
     STATUS_INDEXED,
@@ -60,6 +66,7 @@ from ..cogs.catalog import (
     CogCatalogStore,
     CogCatalogUnavailableError,
 )
+from ..cogs.deadline import BudgetExhausted
 from ..cogs.models import (
     CatalogV1,
     CatalogV1Repository,
@@ -71,9 +78,24 @@ from ..cogs.models import (
     CogLocation,
     CogReference,
     CogVersion,
+    PullOnlyRegistryCredentialRequest,
+    RegistryCredentialRequest,
+    RegistryCredentialResponse,
+    client_reference,
 )
-from ..dependencies import get_cog_catalog_store
-from ..frames.auth import AuthContext, NoOrganizationError, get_auth_context
+from ..cogs.registry_credentials import (
+    CREDENTIAL_ID_PATTERN,
+    SCOPE_PUBLISH,
+    RegistryCredentialsUnavailableError,
+    new_credential_id,
+    new_credential_secret,
+    secret_digest,
+)
+from ..cogs.serving import CogRegistryServing
+from ..dependencies import get_cog_catalog_store, get_cog_registry_serving
+from ..frames import error_codes
+from ..frames.auth import AuthContext, NoOrganizationError, get_auth_context, session_id_of
+from ..frames.orgs import PLATFORM_ROLE_OPERATOR
 from ..path_protection import request_path, winning_rule
 from .frames import error_response
 
@@ -169,26 +191,79 @@ def get_listing_caller(request: Request) -> AuthContext | None:
     return caller
 
 
+def _merged_exclude(first: dict | None, second: dict | None) -> dict | None:
+    """Two ``model_dump(exclude=...)`` specs as one."""
+
+    if not first or not second:
+        return first or second
+    merged = dict(first)
+    for key, value in second.items():
+        mine = merged.get(key)
+        if isinstance(mine, dict) and isinstance(value, dict):
+            merged[key] = _merged_exclude(mine, value)
+        elif mine is not True:
+            merged[key] = value
+    return merged
+
+
 @dataclass(frozen=True)
 class Redaction:
     """What the caller may see; the one place a response is cut down for it.
 
     Each response model declares its anonymous cut as ``ANONYMOUS_EXCLUDE``
-    (see :mod:`..cogs.models`); an authenticated caller gets the model whole.
+    (see :mod:`..cogs.models`); an authenticated caller gets the model whole
+    -- except for who published a version through the Hub
+    (``PUBLICATION_EXCLUDE``), which is shown only on a Hub that accepts
+    publishes, and never to an anonymous caller. On a Hub that does not, the
+    keys are absent, so its answers are what they were before they existed.
     """
 
     anonymous: bool
+    publication: bool = False
 
     @classmethod
-    def for_caller(cls, caller: AuthContext | None) -> Redaction:
-        return cls(anonymous=caller is None)
+    def for_caller(cls, caller: AuthContext | None, request: Request | None = None) -> Redaction:
+        serving = get_cog_registry_serving(request) if request is not None else None
+        publishing = serving is not None and serving.publisher is not None
+        return cls(anonymous=caller is None, publication=publishing and caller is not None)
 
-    def respond(self, model: BaseModel) -> JSONResponse:
-        exclude = type(model).ANONYMOUS_EXCLUDE if self.anonymous else None
+    def respond(self, model: BaseModel, *, omit: dict | None = None) -> JSONResponse:
+        """Apply anonymous, publication and route-specific exclusions together."""
+
+        kind = type(model)
+        exclude = kind.ANONYMOUS_EXCLUDE if self.anonymous else None
+        if not self.publication:
+            exclude = _merged_exclude(exclude, getattr(kind, "PUBLICATION_EXCLUDE", None))
+        exclude = _merged_exclude(exclude, omit)
         return JSONResponse(model.model_dump(mode="json", exclude=exclude))
 
 
+def get_registry_host(request: Request) -> str | None:
+    """The Hub's own registry host when it serves pulls (issue #179), else ``None``.
+
+    What decides the host of every ``reference`` this API hands out: the Hub
+    when ``cogs.serve.enabled``, the backing registry otherwise.
+    """
+
+    serving = get_cog_registry_serving(request)
+    return serving.host if serving is not None else None
+
+
+class CogRegistryNotServedError(LookupError):
+    """This Hub does not serve pulls (``cogs.serve.enabled`` is off)."""
+
+
+def require_registry_serving(request: Request) -> CogRegistryServing:
+    serving = get_cog_registry_serving(request)
+    if serving is None:
+        raise CogRegistryNotServedError()
+    return serving
+
+
 AuthDep = Annotated[AuthContext | None, Depends(get_catalog_caller)]
+RegistryHostDep = Annotated[str | None, Depends(get_registry_host)]
+ServingDep = Annotated[CogRegistryServing, Depends(require_registry_serving)]
+HubAuthDep = Annotated[AuthContext, Depends(get_auth_context)]
 ListingAuthDep = Annotated[AuthContext | None, Depends(get_listing_caller)]
 CatalogDep = Annotated[CogCatalogStore, Depends(get_cog_catalog_store)]
 
@@ -219,6 +294,14 @@ class CogVersionNotFoundError(LookupError):
     """This digest is not indexed as a version of this Cog."""
 
 
+class CogPublishForbiddenError(PermissionError):
+    """The caller does not hold the publish permission."""
+
+
+class CogRegistryCredentialNotFoundError(LookupError):
+    """No live registry credential with this id belongs to the caller."""
+
+
 def _location_key(row: CogArtifact) -> tuple:
     # Present before removed, then newest pushed (unknown last), then most
     # recently indexed, then a stable tiebreak -- the catalog's own order.
@@ -243,8 +326,10 @@ def _version_locations(store: CogCatalogStore, cog_id: str, digest: str) -> list
     summary="List current Cogs",
 )
 def list_cogs(
+    request: Request,
     _auth: ListingAuthDep,
     store: CatalogDep,
+    registry_host: RegistryHostDep,
     kind: Annotated[str | None, _filter("The card's `kind` (e.g. `complete`, `model`, `context`).")] = None,
     publisher: Annotated[str | None, _filter("The card's `publisher`, exactly.")] = None,
     provides: Annotated[str | None, _filter("An entry of the card's `provides`.")] = None,
@@ -291,12 +376,12 @@ def list_cogs(
     # count query and without an empty trailing request.
     rows = store.list_current(filters, limit=limit + 1, offset=offset)
     page = CogListPage(
-        items=[CogListEntry.of(row) for row in rows[:limit]],
+        items=[CogListEntry.of(row, registry_host) for row in rows[:limit]],
         limit=limit,
         offset=offset,
         next_offset=offset + limit if len(rows) > limit else None,
     )
-    return Redaction.for_caller(_auth).respond(page)
+    return Redaction.for_caller(_auth, request).respond(page)
 
 
 @router.get(
@@ -332,6 +417,148 @@ def catalog_v1(_auth: AuthDep, store: CatalogDep) -> CatalogV1:
     return CatalogV1(repositories=repositories)
 
 
+NOT_SERVED = {404: {"model": CogErrorResponse, "description": "This Hub does not serve pulls itself."}}
+
+
+def _pull_only_refusal(body: object) -> RequestValidationError | None:
+    """How the pull-only contract refuses this body, or ``None`` if it accepts it."""
+
+    try:
+        PullOnlyRegistryCredentialRequest.model_validate(body)
+    except ValidationError as exc:
+        return RequestValidationError(
+            [{**error, "loc": ("body", *error["loc"])} for error in exc.errors(include_url=False)], body=body
+        )
+    return None
+
+
+class _ExchangeRoute(APIRoute):
+    """The exchange route, validating as a Hub that accepts no publishes always has, when it accepts none.
+
+    The request model names ``publish`` as a scope because some Hubs accept
+    it. One with no publish source must answer every malformed request with
+    the pull-only contract's own validation errors -- the scope it
+    advertises, the errors it lists and their order -- so a body the
+    request model refused is validated again against that contract, and its
+    errors are the answer.
+    """
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def exchange(request: Request) -> Response:
+            try:
+                return await handler(request)
+            except RequestValidationError as exc:
+                serving = getattr(request.app.state, "cog_registry_serving", None)
+                if serving is None or serving.publisher is not None or not isinstance(exc.body, dict):
+                    raise
+                raise (_pull_only_refusal(exc.body) or exc) from None
+
+        return exchange
+
+
+def create_registry_credential(
+    request: Request, auth: HubAuthDep, serving: ServingDep, body: RegistryCredentialRequest | None = None
+) -> RegistryCredentialResponse:
+    """A username and secret for the Hub's own registry (`/v2/`), valid nowhere else.
+
+    What a client hands to `nebi registry add` / `docker login` / `oras
+    login` in place of its Hub token: pull-only, short-lived, revocable, and
+    refused by every Hub API. The secret is returned once and stored only as
+    a digest. Exchange a fresh one before each install and delete the
+    caller's credentials at sign-out.
+
+    404 `cog_registry_not_served` when this Hub does not serve pulls
+    (`cogs.serve.enabled` is off): pull from the `reference` the catalog
+    gives, with whatever credential that registry takes.
+
+    `{"scope": "publish"}` asks for a credential that may also push
+    (`nebi publish`, `oras push`). On a Hub that accepts no publishes
+    `publish` is not a scope at all: 422, exactly as any unknown scope. 403
+    `cog_publish_forbidden` when the caller does not hold the publish
+    permission. Holding the credential is
+    not the permission: it is checked again, with the repository's
+    ownership, on every push.
+    """
+
+    scope = (body or RegistryCredentialRequest()).scope
+    if scope == SCOPE_PUBLISH:
+        if serving.publisher is None:
+            # No publish source: this Hub's contract is the pull-only one,
+            # and the refusal is that contract's own validation error.
+            raise _pull_only_refusal({"scope": scope})
+        if not serving.publisher.policy.permits(auth.user, auth.org_role, auth.platform_role):
+            raise CogPublishForbiddenError()
+    secret = new_credential_secret()
+    credential = serving.credentials.create_credential(
+        credential_id=new_credential_id(),
+        user_id=auth.user,
+        secret_hash=secret_digest(secret),
+        scope=scope,
+        session_id=session_id_of(request),
+        ttl_seconds=serving.credential_ttl_seconds,
+        # The organization a publish is attributed to where there is no
+        # membership table to re-read; None for an operator with none.
+        org_id=auth.home_org_id,
+    )
+    return RegistryCredentialResponse(
+        id=credential.id,
+        registry=serving.host,
+        username=credential.id,
+        secret=secret,
+        scope=scope,
+        expires_at=credential.expires_at,
+    )
+
+
+router.add_api_route(
+    "/registry-credentials",
+    create_registry_credential,
+    methods=["POST"],
+    response_model=RegistryCredentialResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={**NOT_SERVED, **UNAVAILABLE},
+    summary="Exchange the Hub session for a registry credential",
+    route_class_override=_ExchangeRoute,
+)
+
+
+@router.delete(
+    "/registry-credentials/{credential_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={**NOT_FOUND, **UNAVAILABLE},
+    summary="Revoke one registry credential",
+)
+def revoke_registry_credential(
+    auth: HubAuthDep,
+    serving: ServingDep,
+    credential_id: Annotated[str, Path(pattern=CREDENTIAL_ID_PATTERN)],
+) -> Response:
+    """Revoke one of the caller's credentials; the pull tokens minted from it stop working at once.
+
+    404 `cog_registry_credential_not_found` for an id that does not exist,
+    has expired, or belongs to someone else -- the three are not told apart.
+    """
+
+    if not serving.credentials.revoke_credential(credential_id, auth.user):
+        raise CogRegistryCredentialNotFoundError(credential_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete(
+    "/registry-credentials",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={**NOT_SERVED, **UNAVAILABLE},
+    summary="Revoke every registry credential of the caller",
+)
+def revoke_registry_credentials(auth: HubAuthDep, serving: ServingDep) -> Response:
+    """Revoke all of the caller's credentials and pull tokens. What a client calls at sign-out; idempotent."""
+
+    serving.credentials.revoke_all(auth.user)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get(
     "/{cog_id:path}/versions/{digest}/cog.md",
     response_class=PlainTextResponse,
@@ -360,7 +587,9 @@ def get_cog_md(_auth: AuthDep, store: CatalogDep, cog_id: CogIdPath, digest: Dig
     responses={**NOT_FOUND, **UNAVAILABLE},
     summary="Pinned install reference of one version",
 )
-def get_cog_reference(_auth: AuthDep, store: CatalogDep, cog_id: CogIdPath, digest: DigestPath) -> JSONResponse:
+def get_cog_reference(
+    _auth: AuthDep, store: CatalogDep, registry_host: RegistryHostDep, cog_id: CogIdPath, digest: DigestPath
+) -> JSONResponse:
     """`<host>/<repository>@<digest>`, ready for `nebi import`.
 
     When the digest was indexed in several sources or repositories, the
@@ -368,18 +597,29 @@ def get_cog_reference(_auth: AuthDep, store: CatalogDep, cog_id: CogIdPath, dige
     listed under `locations`. A digest whose every location was removed is
     still answered (`present: false`): the artifact may already be gone from
     its registry.
+
+    When the Hub serves pulls itself, every `reference` names the Hub's
+    registry host, and a platform operator additionally gets
+    `backing_reference` -- where the artifact is stored -- on the answer and
+    on each location. Nobody else is told the backing registry's host.
     """
 
     preferred, *others = _version_locations(store, cog_id, digest)
+    # The backing location is an operator's business only, and only worth
+    # saying when `reference` no longer says it.
+    backing = registry_host is not None and _auth is not None and _auth.platform_role == PLATFORM_ROLE_OPERATOR
     answer = CogReference(
-        reference=preferred.reference,
+        reference=client_reference(preferred, registry_host),
+        backing_reference=preferred.reference if backing else None,
         source_id=preferred.source_id,
         repository=preferred.repository,
         digest=preferred.digest,
         present=preferred.present,
-        locations=[CogLocation.of(row) for row in others],
+        locations=[CogLocation.of(row, registry_host, backing=backing) for row in others],
     )
-    return Redaction.for_caller(_auth).respond(answer)
+    # Absent rather than null, so the answer of a Hub that does not serve
+    # pulls is byte-for-byte what it was before the field existed.
+    return Redaction.for_caller(_auth).respond(answer, omit=None if backing else CogReference.BACKING_EXCLUDE)
 
 
 @router.get(
@@ -388,14 +628,17 @@ def get_cog_reference(_auth: AuthDep, store: CatalogDep, cog_id: CogIdPath, dige
     responses={**NOT_FOUND, **UNAVAILABLE},
     summary="Card of one version",
 )
-def get_cog_version(_auth: AuthDep, store: CatalogDep, cog_id: CogIdPath, digest: DigestPath) -> JSONResponse:
+def get_cog_version(
+    request: Request,
+    _auth: AuthDep, store: CatalogDep, registry_host: RegistryHostDep, cog_id: CogIdPath, digest: DigestPath
+) -> JSONResponse:
     """The exact card indexed for this digest -- what an install pins -- in full.
 
     Removed versions are served too, with `removed_at` set.
     """
 
-    entry = CogEntry.of(_version_locations(store, cog_id, digest)[0])
-    return Redaction.for_caller(_auth).respond(entry)
+    entry = CogEntry.of(_version_locations(store, cog_id, digest)[0], registry_host)
+    return Redaction.for_caller(_auth, request).respond(entry)
 
 
 @router.get(
@@ -404,7 +647,9 @@ def get_cog_version(_auth: AuthDep, store: CatalogDep, cog_id: CogIdPath, digest
     responses={**NOT_FOUND, **UNAVAILABLE},
     summary="A Cog and its versions",
 )
-def get_cog(_auth: AuthDep, store: CatalogDep, cog_id: CogIdPath) -> JSONResponse:
+def get_cog(
+    request: Request, _auth: AuthDep, store: CatalogDep, registry_host: RegistryHostDep, cog_id: CogIdPath
+) -> JSONResponse:
     """The Cog's current full card (its newest present version) and every indexed version, newest first.
 
     404 when no version is present, even if removed ones are indexed: those
@@ -415,8 +660,11 @@ def get_cog(_auth: AuthDep, store: CatalogDep, cog_id: CogIdPath) -> JSONRespons
     current = next((row for row in versions if row.present), None)
     if current is None:
         raise CogNotFoundError(cog_id)
-    detail = CogDetail(**CogEntry.of(current).model_dump(), versions=[CogVersion.of(row) for row in versions])
-    return Redaction.for_caller(_auth).respond(detail)
+    detail = CogDetail(
+        **CogEntry.of(current, registry_host).model_dump(),
+        versions=[CogVersion.of(row, registry_host) for row in versions],
+    )
+    return Redaction.for_caller(_auth, request).respond(detail)
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -427,6 +675,41 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(CogVersionNotFoundError)
     async def cog_version_not_found_handler(_request: Request, _exc: CogVersionNotFoundError):
         return error_response(status.HTTP_404_NOT_FOUND, "cog_version_not_found", "Cog version not found")
+
+    @app.exception_handler(CogRegistryNotServedError)
+    async def cog_registry_not_served_handler(_request: Request, _exc: CogRegistryNotServedError):
+        return error_response(
+            status.HTTP_404_NOT_FOUND, "cog_registry_not_served", "This Hub does not serve Cog pulls itself"
+        )
+
+    @app.exception_handler(CogPublishForbiddenError)
+    async def cog_publish_forbidden_handler(_request: Request, _exc: CogPublishForbiddenError):
+        return error_response(
+            status.HTTP_403_FORBIDDEN, "cog_publish_forbidden", "This account may not publish Cogs"
+        )
+
+    @app.exception_handler(CogRegistryCredentialNotFoundError)
+    async def cog_registry_credential_not_found_handler(_request: Request, _exc: CogRegistryCredentialNotFoundError):
+        return error_response(
+            status.HTTP_404_NOT_FOUND, "cog_registry_credential_not_found", "Registry credential not found"
+        )
+
+    @app.exception_handler(BudgetExhausted)
+    async def cog_budget_exhausted_handler(_request: Request, _exc: BudgetExhausted):
+        # A store call that ran out of time before it could reach the
+        # database: a TimeoutError of this module's, not a psycopg error, so
+        # the app's database handlers do not match it. The same answer as a
+        # pool timeout, which is what it is. ``/v2`` maps it itself, into the
+        # registry's error format, before it gets here.
+        return error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            error_codes.DATABASE_UNAVAILABLE,
+            "The frames database is currently unavailable",
+        )
+
+    @app.exception_handler(RegistryCredentialsUnavailableError)
+    async def cog_registry_credentials_unavailable_handler(_request: Request, exc: RegistryCredentialsUnavailableError):
+        return error_response(status.HTTP_503_SERVICE_UNAVAILABLE, "cog_catalog_unavailable", str(exc))
 
     @app.exception_handler(CogCatalogUnavailableError)
     async def cog_catalog_unavailable_handler(_request: Request, exc: CogCatalogUnavailableError):

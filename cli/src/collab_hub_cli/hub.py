@@ -8,6 +8,7 @@ expires. A request the hub refuses as unauthenticated is an :class:`AuthError`
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -22,6 +23,12 @@ transport: httpx.BaseTransport | None = None
 
 RENEW_BEFORE_SECONDS = 30
 TIMEOUT_SECONDS = 30
+
+
+STREAM_RETRIES = 5
+"""How many times in a row a run's event stream may end without the run ending before `events` gives up."""
+STREAM_BACKOFF = 0.2
+"""Seconds before an ended stream is reopened; doubled each time in a row, up to five seconds."""
 
 
 class HubError(Exception):
@@ -161,6 +168,49 @@ class Hub:
     def get_json(self, path: str, **kwargs: Any) -> Any:
         return self.request_json("GET", path, **kwargs)
 
+    def events(self, path: str, *, after: int = 0) -> Iterator[tuple[int | None, str, Any]]:
+        """A run's events as the hub streams them (``text/event-stream``): ``(sequence, type, data)`` each.
+
+        Ends when the hub sends its ``end`` event. A connection that drops is
+        reopened from the last event seen, so nothing is missed or repeated.
+        """
+        last = after
+        drops = 0
+        while True:
+            headers = {"Accept": "text/event-stream"}
+            if last:
+                headers["Last-Event-ID"] = str(last)
+            self._renew_if_due()
+            if self.session is not None:
+                headers["Authorization"] = f"Bearer {self.session.access_token}"
+            delivered = False
+            try:
+                with self.http.stream("GET", f"{self.url}{path}", headers=headers, timeout=None) as response:
+                    if response.status_code >= 400:
+                        response.read()
+                        if response.status_code == 401:
+                            raise AuthError(f"not signed in to {self.url}; run `collab-hub --hub {self.url} login`")
+                        raise HubError(error_message(response))
+                    for event_id, kind, data in _sse(response.iter_lines()):
+                        if kind == "end":
+                            yield None, "end", data
+                            return
+                        delivered = True
+                        if event_id is not None:
+                            last = event_id
+                        yield event_id, kind, data
+            except httpx.HTTPError as exc:
+                if not delivered and last == after and drops == 0:
+                    raise HubError(f"cannot reach the hub at {self.url}: {exc}") from exc
+                delivered = False
+            # The stream ended before the run did, with or without an error: reopen it from the last event seen,
+            # after a pause that grows while the hub keeps dropping it. One that ends having delivered nothing
+            # several times in a row is a hub that is not streaming this run.
+            drops = 0 if delivered else drops + 1
+            if drops > STREAM_RETRIES:
+                raise HubError(f"the hub ended the event stream of {path} {drops} times before the run ended")
+            time.sleep(min(STREAM_BACKOFF * 2 ** (drops - 1), 5.0) if drops else 0)
+
     def pages(self, path: str, params: dict[str, Any], limit: int = 200) -> Iterator[dict]:
         """Every item of a paged listing (``items`` + ``next_offset``), following pages to the end."""
 
@@ -171,3 +221,31 @@ class Hub:
             if page.get("next_offset") is None:
                 return
             offset = page["next_offset"]
+
+
+def _sse(lines: Iterator[str]) -> Iterator[tuple[int | None, str, Any]]:
+    """Server-sent events, one ``(id, event, data)`` per message; a comment line is a keep-alive and skipped."""
+    import json
+
+    event_id: int | None = None
+    kind = "message"
+    data: list[str] = []
+    for line in lines:
+        if line == "":
+            if data or kind != "message":
+                text = "\n".join(data)
+                try:
+                    parsed = json.loads(text) if text else None
+                except ValueError:
+                    parsed = text
+                yield event_id, kind, parsed
+            event_id, kind, data = None, "message", []
+        elif line.startswith(":"):
+            continue
+        elif line.startswith("id:"):
+            value = line[3:].strip()
+            event_id = int(value) if value.isdigit() else None
+        elif line.startswith("event:"):
+            kind = line[6:].strip()
+        elif line.startswith("data:"):
+            data.append(line[5:].lstrip())

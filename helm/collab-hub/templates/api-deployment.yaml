@@ -1,5 +1,15 @@
 {{- if .Values.api.enabled }}
 {{- $component := "api" }}
+{{- $controller := .Values.runs.controller }}
+{{- $sidecar := and $controller.enabled (eq $controller.location "local") }}
+{{- if $controller.enabled }}
+{{- if not (or .Values.frames.postgres.url .Values.frames.postgres.existingSecret) }}
+{{- fail "runs.controller.enabled needs frames.postgres: the hub's database is the Track the API records runs in and the controller watches" }}
+{{- end }}
+{{- if and $sidecar (or .Values.api.autoscaling.enabled (ne (int .Values.api.deployment.replicaCount) 1)) }}
+{{- fail "runs.controller.location: local needs exactly one API pod (api.deployment.replicaCount: 1, api.autoscaling.enabled: false): each pod would run a controller, under one id" }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,6 +28,16 @@ spec:
     metadata:
       labels:
         {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 8 }}
+      {{- if $sidecar }}
+      annotations:
+        # EKS projects the pod's AWS web identity (IRSA) into every container; a Cog's worker runs in this
+        # one, so it gets none.
+        eks.amazonaws.com/skip-containers: run-controller
+        {{- if $controller.models }}
+        # The controller reads its models block once, at start: a new block rolls the pod.
+        checksum/run-models: {{ $controller.models | sha256sum }}
+        {{- end }}
+      {{- end }}
     spec:
       serviceAccountName: {{ include "collab-hub.api-service-account-name" . }}
       {{- with .Values.api.deployment.securityContext.pod }}
@@ -34,6 +54,14 @@ spec:
           {{- end }}
           env:
             {{- include "collab-hub.api-container-env" (dict "top" . "indexer" false) | nindent 12 }}
+            {{- if $controller.enabled }}
+            # The Cogs the run API may launch: the packages the image ships, which the controller runs; and
+            # where their workers run, which every answer about a run names.
+            - name: COLLAB_HUB_API__RUNS__PACKAGES
+              value: "/opt/collab-hub/cogs"
+            - name: COLLAB_HUB_API__RUNS__LOCATION
+              value: {{ $controller.location | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.api.deployment.resources | nindent 12 }}
           ports:
@@ -60,6 +88,79 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 1
             failureThreshold: 3
+        {{- if $sidecar }}
+        # The run controller at the local location: it runs the Cogs launched through /v1/runs, each as a
+        # process of this pod. The API process constructs no executor; this one does, and nothing else.
+        - name: run-controller
+          image: "{{ .Values.api.deployment.image.repository }}:{{ .Values.api.deployment.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.api.deployment.image.pullPolicy }}
+          {{- with .Values.api.deployment.securityContext.container }}
+          securityContext:
+            {{- . | toYaml | nindent 12 }}
+          {{- end }}
+          command: ["collab-hub-run-controller"]
+          env:
+            - name: COLLAB_CONTROLLER_TRACK
+              {{- if .Values.frames.postgres.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.frames.postgres.existingSecret | quote }}
+                  key: {{ .Values.frames.postgres.databaseUrlKey | quote }}
+              {{- else }}
+              value: {{ .Values.frames.postgres.url | quote }}
+              {{- end }}
+            - name: COLLAB_CONTROLLER_ID
+              value: {{ $controller.id | quote }}
+            - name: COLLAB_CONTROLLER_PACKAGES
+              value: "/opt/collab-hub/cogs"
+            - name: COLLAB_CONTROLLER_WORK_DIR
+              value: "/var/cache/collab-hub/runs"
+            - name: COLLAB_CONTROLLER_ENVIRONMENT
+              value: {{ $controller.environment | quote }}
+            - name: COLLAB_CONTROLLER_INTERACTION_TIMEOUT
+              value: {{ $controller.interactionTimeoutSeconds | quote }}
+            - name: COLLAB_CONTROLLER_WAIT
+              value: {{ $controller.waitSeconds | quote }}
+            - name: COLLAB_CONTROLLER_WORKER_START_TIMEOUT
+              value: {{ $controller.workerStartSeconds | quote }}
+            - name: COLLAB_CONTROLLER_HEALTH_HOST
+              value: "0.0.0.0"
+            - name: COLLAB_CONTROLLER_HEALTH_PORT
+              value: {{ $controller.healthPort | quote }}
+            {{- if $controller.models }}
+            - name: COLLAB_CONTROLLER_MODELS
+              value: "/etc/collab-hub/runs/models.toml"
+            {{- end }}
+            # The root filesystem is read only: a Cog's worker, and Hermes in it, write under HOME and /tmp.
+            - name: HOME
+              value: "/tmp"
+            {{- with $controller.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with $controller.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: run-cache
+              mountPath: /var/cache/collab-hub
+            - name: run-tmp
+              mountPath: /tmp
+            {{- if $controller.models }}
+            - name: run-models
+              mountPath: /etc/collab-hub/runs
+              readOnly: true
+            {{- end }}
+          # Liveness only: a controller waiting for the Track's tables or for its id is alive, and a
+          # readiness probe on it would hold the pod, and the API with it, out of service.
+          livenessProbe:
+            httpGet:
+              port: {{ $controller.healthPort }}
+              path: /healthz
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+        {{- end }}
       volumes:
         - name: frames-storage
           {{- if or .Values.frames.storage.persistence.enabled .Values.frames.storage.persistence.existingClaim }}
@@ -75,5 +176,19 @@ spec:
             items:
               - key: {{ .Values.cogs.caBundle.key | quote }}
                 path: {{ .Values.cogs.caBundle.key | quote }}
+        {{- end }}
+        {{- if $sidecar }}
+        # Cog environments (pixi builds one the first time a Cog is launched) and each run's worker output.
+        - name: run-cache
+          emptyDir:
+            sizeLimit: {{ $controller.cacheSizeLimit | quote }}
+        - name: run-tmp
+          emptyDir:
+            sizeLimit: {{ $controller.tmpSizeLimit | quote }}
+        {{- if $controller.models }}
+        - name: run-models
+          configMap:
+            name: {{ include "collab-hub.component-name" (dict "top" . "component" "run-models") }}
+        {{- end }}
         {{- end }}
 {{- end }}

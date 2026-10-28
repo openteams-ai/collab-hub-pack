@@ -242,6 +242,22 @@ ca_bundle_path, and nothing outside the pod needs to know it.
 {{- end -}}
 
 {{/*
+The origin clients reach the Hub's own registry (`/v2/`) at (issue #179):
+cogs.serve.publicUrl when set, else https://<host> of whichever routing object
+the chart creates. Empty when none can be derived, which cogs-validations.yaml
+refuses while cogs.serve.enabled.
+*/}}
+{{- define "collab-hub.cogs-serve-public-url" -}}
+{{- if .Values.cogs.serve.publicUrl -}}
+{{- .Values.cogs.serve.publicUrl -}}
+{{- else if and .Values.api.nebariapp.enabled .Values.api.nebariapp.hostname -}}
+{{- printf "https://%s" .Values.api.nebariapp.hostname -}}
+{{- else if and .Values.api.ingress.enabled .Values.api.ingress.host -}}
+{{- printf "https://%s" .Values.api.ingress.host -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 The environment variable a source's Secret key is mounted under. Takes
 (dict "id" <source id> "suffix" <USERNAME|PASSWORD|WEBHOOK_SECRET>). The id is
 upper-cased and every character outside [A-Z0-9] becomes "_", so the name is
@@ -273,6 +289,8 @@ toJson sorts keys, so the rendering is deterministic.
 {{- with .repositories }}{{ $_ := set $source "repositories" . }}{{ end -}}
 {{- with .indexUrl }}{{ $_ := set $source "index_url" . }}{{ end -}}
 {{- with (default $caBundlePath .caBundlePath) }}{{ $_ := set $source "ca_bundle_path" . }}{{ end -}}
+{{- if .publish }}{{ $_ := set $source "publish" true }}{{ end -}}
+{{- with .blobRedirectHosts }}{{ $_ := set $source "blob_redirect_hosts" . }}{{ end -}}
 {{- if hasKey . "requestTimeoutSeconds" }}{{ $_ := set $source "request_timeout_seconds" .requestTimeoutSeconds }}{{ end -}}
 {{- $credentials := .credentials | default dict -}}
 {{- if $credentials.existingSecret -}}
@@ -677,6 +695,44 @@ include with nindent.
   value: {{ .Values.cogs.index.intervalSeconds | quote }}
 - name: COLLAB_HUB_API__COGS__INDEX__RUN_ON_STARTUP
   value: {{ .Values.cogs.index.runOnStartup | quote }}
+{{- end }}
+{{- /* Pulls through the Hub (issue #179). Nothing renders unless it is on,
+so a deployment that does not serve pulls carries no trace of it. On the
+indexer too, though /v2 never routes there: serving is a property of the
+deployment, and a sweep reads it -- with serving on, the indexer's registry
+clients are held to the same redirect policy as the ones that serve pulls. */}}
+{{- if .Values.cogs.serve.enabled }}
+- name: COLLAB_HUB_API__COGS__SERVE__ENABLED
+  value: "true"
+- name: COLLAB_HUB_API__COGS__SERVE__PUBLIC_URL
+  value: {{ include "collab-hub.cogs-serve-public-url" . | quote }}
+- name: COLLAB_HUB_API__COGS__SERVE__CREDENTIAL_TTL_SECONDS
+  value: {{ .Values.cogs.serve.credentialTtlSeconds | int64 | quote }}
+- name: COLLAB_HUB_API__COGS__SERVE__TOKEN_TTL_SECONDS
+  value: {{ .Values.cogs.serve.tokenTtlSeconds | int64 | quote }}
+- name: COLLAB_HUB_API__COGS__SERVE__MAX_BLOB_BYTES
+  value: {{ .Values.cogs.serve.maxBlobBytes | int64 | quote }}
+- name: COLLAB_HUB_API__COGS__SERVE__MAX_BLOB_SECONDS
+  value: {{ .Values.cogs.serve.maxBlobSeconds | int64 | quote }}
+{{- end }}
+{{- /* Who may publish through the Hub (issue #180). Rendered only when
+someone is named: the default, nobody, needs no variable. API replicas only:
+pushes are requests, and the indexer takes none. (Unlike serving, which the
+indexer carries too: a publish source needs it, and a sweep reads it.) */}}
+{{- if not $indexer }}
+{{- with .Values.cogs.publish.allowedRoles }}
+- name: COLLAB_HUB_API__COGS__PUBLISH__ALLOWED_ROLES
+  value: {{ toJson . | quote }}
+{{- end }}
+{{- with .Values.cogs.publish.allowedUsers }}
+- name: COLLAB_HUB_API__COGS__PUBLISH__ALLOWED_USERS
+  value: {{ toJson . | quote }}
+{{- end }}
+{{- /* Rendered only when it is not the API's own default. */}}
+{{- if ne (.Values.cogs.publish.maxPendingRepositories | int64) 20 }}
+- name: COLLAB_HUB_API__COGS__PUBLISH__MAX_PENDING_REPOSITORIES
+  value: {{ .Values.cogs.publish.maxPendingRepositories | int64 | quote }}
+{{- end }}
 {{- end }}
 {{- if .Values.cogs.registry.sources }}
 - name: COLLAB_HUB_API__COGS__REGISTRY_SOURCES

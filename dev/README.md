@@ -519,6 +519,13 @@ Other level-3 targets:
 
 ## Level 4 — the chart on kind
 
+With a database (`frames.postgres`), the chart runs the run controller as a
+Deployment of its own and each Cog's worker as a pod: `runs.controller.enabled`
+with `location: remote`, the default ([standalone-deployment.md](../docs/standalone-deployment.md#running-cogs-in-pods)).
+`values/kind.yaml` keeps frames on the local filesystem and no database, so it
+runs no controller; the kind E2E (`scripts/cog-execution-e2e/run.sh`)
+materializes worker pods through the same location on a cluster of its own.
+
 Levels 1–3 run the API as a process. Level 4 runs the **published artifact**:
 the image built from `api/Dockerfile`, installed through `helm/collab-hub`. Use
 it when your change touches the chart, the container, or anything that only
@@ -1178,6 +1185,30 @@ output is under `.local/runs/`.
 nothing else: stop it mid-run, `kill -9` included, and its next start records
 that run `interrupted`.
 
+### Running Hermes — `make op OP=hermes LOCATION=local`, `make fake-model`
+
+Level 1, no container, no hub: the Hermes harness Cog's `ask`, as one Op step,
+against the fake model. Hermes's environment (about 400 MB) is installed by
+pixi on the first run, or ahead of time with `make -C ../examples/cog-local env`:
+
+```sh
+make fake-model                          # terminal 1: an OpenAI-compatible model that answers without one
+make op OP=hermes LOCATION=local         # terminal 2: Hermes answers, through the fake model; the Track prints
+```
+
+`ops/hermes.yaml` declares `gate: {escalate: never}`, since deciding a Gate
+from a client arrives later in the plan. With `LOCATION=local`, `make op`
+delivers the `COLLAB_MODEL_*` variables in its environment to every worker,
+so the same run reaches a real endpoint, or Claude with
+`COLLAB_MODEL_PROVIDER=anthropic`, the way `make controller` does.
+
+The Cog's worker runs on the [worker SDK](../worker/README.md), and so does
+anything that drives an ACP agent or calls a model: its adapters are tested
+against two stand-ins here that need nothing installed,
+[`fake-agent/fake_acp_agent.py`](fake-agent/fake_acp_agent.py), an ACP agent
+on stdio that echoes and misbehaves on request, and the fake model. `cd
+../worker && uv run --group test pytest` runs that suite.
+
 ### The run API and run pickup — `make api`, `make controller`, `make submit`
 
 Level 1, no container; level 2 for Postgres. `make submit OP=<name>` launches an
@@ -1198,6 +1229,15 @@ curl -s localhost:8770/readyz                       # {"controller": "dev", "liv
 At level 2, `make api-pg` serves the run API on the hub's own Postgres, as a
 deployed hub does: its Track's tables come from the hub's migrations. Run the
 controller on the same database, `make controller TRACK=postgresql://collab:collab@127.0.0.1:5432/collab`.
+
+A run waiting at a Gate is decided through the API: `make run-decide RUN=run-...
+STEP=draft OUTCOME=approve` (or `reject`, or `send_back` with `FINDING=`), which
+reads the escalation the run waits on and answers it; `make run-retry RUN=`
+asks for an ended run to run again. The `collab-hub` CLI does the same from
+anywhere: `run submit --file ops/needs-review.yaml --watch`, then `run decide`,
+`run payload` and `run retry` ([`cli/README.md`](../cli/README.md)). Dev auth
+resolves no roles, so the run's submitter decides its Gates here; at level 3
+the approver roles come from `make seed-org`.
 
 | Variable | Default | What |
 |---|---|---|
@@ -1279,7 +1319,7 @@ name while it runs, so a second one refuses to start while the first runs. Run
 it could pick up the run `make op` just recorded; `make submit` is the way to
 hand a controller an Op. `BACKEND=dbos` and
 `BACKEND=temporal` are refused until those backends are built, and so is
-`LOCATION=remote` until Phase 21 puts the cluster executor behind the switch.
+`LOCATION=remote` until Phase 22 puts the cluster executor behind the switch.
 The fake Cogs' pixi environments, `cogs/<name>/.pixi/`, are git-ignored and
 survive `make clean`; delete them to install afresh.
 
@@ -1311,6 +1351,7 @@ list against Postgres.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Every route answers 401 on level 1 | Only `DEV_AUTH_USER` is set | All three switches are required — use `make api` |
+| `make op OP=hermes LOCATION=local` fails `model-unavailable`, naming `COLLAB_MODEL_BASE_URL` | No model reached the worker: `make op` was run outside `dev/`, or the variables were cleared | Run it from `dev/` (the Makefile exports the fake model's defaults), with `make fake-model` up, or set `COLLAB_MODEL_*` to a real endpoint |
 | 401 with a token that looks fine | Issuer mismatch, or the token has no `sub` claim | Check `iss` matches `FRAMES_BEARER_ISSUER` exactly; check the client kept the `basic` client scope |
 | `403 no_organization` | Membership mode with no row for that subject | `make seed-org SUB=$(make -s sub)` |
 | `503` from history / groups / invitations | No Postgres — `make api` starts none | Use `make api-pg` or above |
@@ -1385,7 +1426,11 @@ pull requests that touch what they use: `examples/cog-local`'s `make demo`
 starts Postgres and Keycloak, signs in with the CLI, launches the Hermes Cog
 against the fake model, talks to it over ACP and with `run say`, and
 terminates it with no worker left. It is apart from this one because Hermes's
-environment is about 400 MB.
+environment is about 400 MB; it is also where Hermes itself, on the worker
+SDK, is run in CI. The SDK's own suite, both adapters against the fake agent
+and the fake model and the seam over HTTP, runs in
+[`.github/workflows/test-worker.yaml`](../.github/workflows/test-worker.yaml)
+on Python 3.11 and 3.14, with no container and nothing installed.
 
 **Coverage relaxes as the levels get more expensive**, which is how the levels
 are meant to be used in the first place.

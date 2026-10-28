@@ -1,0 +1,14 @@
+{{- if and .Values.api.enabled .Values.runs.controller.enabled .Values.runs.controller.models }}
+# The run controller's models block: the models it hands Cogs, and which Cog talks to which. It names
+# each key by the variable it is in (auth_ref = "env:NAME"); the key itself comes from a Secret.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "collab-hub.component-name" (dict "top" . "component" "run-models") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" "run-models") | nindent 4 }}
+data:
+  models.toml: |
+    {{- .Values.runs.controller.models | nindent 4 }}
+{{- end }}

@@ -446,8 +446,9 @@ runs:
 - **The controller is a Deployment of its own**, one replica of the API's
   image running `collab-hub-run-controller`, with a ServiceAccount and a
   namespace-scoped Role over exactly the kinds it makes (Deployments,
-  Services, NetworkPolicies, and a Secret per worker, which it writes and
-  deletes and never reads) and the verbs it uses. The API pod holds no
+  Services, NetworkPolicies, and a Secret per worker, which it creates,
+  owned by the worker's Deployment so garbage collection removes it, and
+  never reads, lists or sweeps) and the verbs it uses. The API pod holds no
   workload permissions, and may have as many replicas as its frame store
   allows. The Role is in the release namespace, so the controller's identity
   can start a pod under any ServiceAccount there and mount any Secret there,

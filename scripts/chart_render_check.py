@@ -429,7 +429,7 @@ def case_run_controller_remote(r: Rendered) -> None:
         ("apps", "deployments"): ["create", "delete", "deletecollection", "get", "list", "patch", "watch"],
         ("", "services"): ["create", "delete", "deletecollection", "get", "list"],
         ("networking.k8s.io", "networkpolicies"): ["create", "delete", "deletecollection", "get", "list", "patch"],
-        ("", "secrets"): ["create", "delete", "deletecollection", "patch"],  # written, never read
+        ("", "secrets"): ["create", "delete"],  # made, owned by the worker's Deployment; never read or swept
     }, rules
     # A worker pod's resources and volume limits reach the controller from the chart.
     assert json.loads(controller.value("COLLAB_CONTROLLER_WORKER_RESOURCES")) == {

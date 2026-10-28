@@ -51,26 +51,29 @@ def test_a_run_at_the_remote_location_materializes_a_pod_of_the_hubs_image_runni
     assert {v["name"] for v in pod["volumes"]} == {"cache", "tmp"}
     assert {m["mountPath"] for m in container["volumeMounts"]} == {"/var/cache/collab-hub", "/tmp"}
     assert deployment["metadata"]["labels"]["collab-hub/controller"] == "hub"
-    # What the binding delivers and the run token reach the pod through a Secret of its own, made before the
-    # Deployment, and are nowhere on the pod template.
+    # What the binding delivers and the run token reach the pod through a Secret of its own, owned by the
+    # Deployment made just before it (so garbage collection removes it with the Deployment), and are nowhere on
+    # the pod template.
     [(_, secret)] = [(p, b) for p, b in api.bodies if p.endswith("/secrets")]
     name = deployment["metadata"]["name"]
     assert secret["metadata"]["name"] == name and container["envFrom"] == [{"secretRef": {"name": name}}]
+    assert secret["metadata"]["ownerReferences"] == [{"apiVersion": "apps/v1", "kind": "Deployment", "name": name,
+                                                       "uid": f"uid-{name}", "controller": True}]
     assert secret["stringData"]["COLLAB_MODEL_BASE_URL"] == "http://model/v1"
     token = secret["stringData"]["COLLAB_RUN_TOKEN"]
     assert "http://model/v1" not in json.dumps(deployment) and token not in json.dumps(deployment)
     posted = [p for p, _ in api.bodies]
-    assert posted.index("/api/v1/namespaces/hub/secrets") < posted.index("/apis/apps/v1/namespaces/hub/deployments")
+    assert posted.index("/apis/apps/v1/namespaces/hub/deployments") < posted.index("/api/v1/namespaces/hub/secrets")
     # The controller presented the worker's run token; the Track names it only by its hash, with the pod.
     [started] = [e.payload for e in track.replay("r") if e.event_type == "worker_started"]
     assert started["location"] == "remote" and started["name"] == name
     assert started["namespace"] == "hub" and "run_token" not in started
     assert http.headers[-1]["Authorization"] == f"Bearer {token}"
     assert started["run_token_sha256"] == digest(token)
-    # Torn down after the step: the Deployment, the Service and the Secret, by name.
+    # Torn down after the step: the Deployment and the Service, by name; the Secret goes with its owner.
     assert ("DELETE", f"/apis/apps/v1/namespaces/hub/deployments/{name}") in api.calls
     assert ("DELETE", f"/api/v1/namespaces/hub/services/{name}") in api.calls
-    assert ("DELETE", f"/api/v1/namespaces/hub/secrets/{name}") in api.calls
+    assert not [c for c in api.calls if c[0] == "DELETE" and "/secrets" in c[1]]
 
 
 def test_a_worker_pod_runs_restricted_with_bounded_volumes_unless_told_otherwise():
@@ -105,8 +108,8 @@ def test_a_start_sweeps_the_controllers_workloads_by_label_and_a_takeover_the_ru
     runner.start()
     swept = [p for m, p in api.calls if m == "DELETE" and "labelSelector" in p]
     assert swept == [f"{c}?labelSelector=collab-hub/controller=hub" for c in (
-        "/apis/apps/v1/namespaces/hub/deployments", "/api/v1/namespaces/hub/services",
-        "/api/v1/namespaces/hub/secrets")]  # and the NetworkPolicies, on an executor that makes them
+        "/apis/apps/v1/namespaces/hub/deployments", "/api/v1/namespaces/hub/services")]
+    # and the NetworkPolicies, on an executor that makes them; never Secrets, which their Deployments own
     # Another controller's run, picked up and left: taking it over sweeps that run's workloads, whoever made them.
     intents.submit(track, OpDefinition("left", (OpStep("a", "x", "run"),)), by={"user": "u", "org_id": "o"})
     track.append(TrackEvent(run_id="left", event_type="run_picked_up", payload={"controller": "old"},
@@ -115,6 +118,23 @@ def test_a_start_sweeps_the_controllers_workloads_by_label_and_a_takeover_the_ru
     assert runner.take_over("left", from_controller="old") is RunState.INTERRUPTED
     swept = [p for m, p in api.calls if m == "DELETE" and "labelSelector" in p]
     assert swept and all(p.endswith("?labelSelector=collab-hub/run=left") for p in swept)
+
+
+def test_a_run_id_that_is_no_label_value_gets_a_label_of_its_own_for_the_sweep():
+    from collab_hub_execution.kubernetes import run_label
+    assert run_label("run-3eb7ab0eaf43") == "run-3eb7ab0eaf43"
+    one, two = run_label("org/ws/run 42"), run_label("org/ws/run-42")  # normalize alike; never share a label
+    assert one != two and one.startswith("org-ws-run-42-") and len(one) <= 63
+    assert run_label("x" * 80) != run_label("x" * 81) and len(run_label("x" * 80)) <= 63
+
+
+def test_a_secret_left_by_a_patched_deployment_is_replaced_not_kept():
+    api, http = FakeK8sApi(), FakeWorkerHttp()
+    api.conflict_on_secret = True
+    runner, _ = _runner(InMemoryTrackStore(), api, http)
+    assert runner.submit(OpDefinition("r", (OpStep("a", "x", "run"),))) is RunState.COMPLETED
+    secret_calls = [c for c in api.calls if "/secrets" in c[1]]
+    assert [m for m, _ in secret_calls] == ["POST", "DELETE", "POST"]
 
 
 def test_an_image_of_another_shape_runs_the_command_it_is_given():
@@ -159,8 +179,7 @@ def test_a_pod_that_outlived_its_controller_is_reaped_by_name_on_the_next_start(
     assert stopped["reaped"] is True and intents.describe(track, "r").state is RunState.INTERRUPTED
     # Nothing to reap the second time: the pod is gone, and the Track says so.
     api.deleted_missing = {f"/apis/apps/v1/namespaces/hub/deployments/{worker.name}",
-                           f"/api/v1/namespaces/hub/services/{worker.name}",
-                           f"/api/v1/namespaces/hub/secrets/{worker.name}"}
+                           f"/api/v1/namespaces/hub/services/{worker.name}"}
     assert executor.reap(worker.details, "r") is False
 
 

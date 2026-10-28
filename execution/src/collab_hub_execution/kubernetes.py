@@ -113,6 +113,17 @@ def label_value(value: str) -> str:
     return cleaned or "unknown"
 
 
+def run_label(run_id: str) -> str:
+    """The ``collab-hub/run`` label value: the run id itself when it is a valid label value, else its normalized
+    form with a digest of the exact id, so two ids that normalize alike never share a label. A sweep by run
+    deletes by this label, and must reach one run's workloads only."""
+    cleaned = label_value(run_id)
+    if cleaned == run_id:
+        return run_id
+    digest = hashlib.sha1(run_id.encode()).hexdigest()[:DIGEST_HEX]  # noqa: S324 - distinctness, not security
+    return f"{cleaned[:MAX_DNS_LABEL - DIGEST_HEX - 1].rstrip('-_.')}-{digest}"
+
+
 def _require_label_selector(selector: dict[str, str], what: str) -> None:
     """Validate a non-empty, well-formed label selector.
 
@@ -176,9 +187,11 @@ class KubernetesCogExecutor:
     the seam's variables in its environment, and the run token and what the
     binding delivers (``deliver``) beside them through a Secret of its own.
     ``worker_command`` replaces that command for an image of another shape, as
-    the kind E2E's is. The executor holds no lifecycle logic: it brings a
-    worker up, says where it is, and tears it down; ``controller`` labels the
-    workloads with who made them, which is what ``sweep`` deletes by.
+    the kind E2E's is. That Secret is owned by the worker's Deployment and
+    collected with it, so the executor never deletes one. The executor holds no
+    lifecycle logic: it brings a worker up, says where it is, and tears it
+    down; ``controller`` labels the workloads with who made them, which is
+    what ``sweep`` deletes by.
     """
 
     name = "kubernetes"
@@ -267,7 +280,7 @@ class KubernetesCogExecutor:
         labels = {
             "app": name,
             "collab-hub/cog": cog_slug(cog),
-            "collab-hub/run": label_value(run_id),
+            "collab-hub/run": run_label(run_id),
             "app.kubernetes.io/managed-by": "collab-hub-executor",
         }
         if self.controller:
@@ -298,13 +311,18 @@ class KubernetesCogExecutor:
         delivered[run_tokens.RUN_TOKEN_ENV] = token
         return delivered
 
-    def _secret(self, cog: str, run_id: str, name: str, data: Mapping[str, str]) -> dict:
+    def _secret(self, cog: str, run_id: str, name: str, data: Mapping[str, str], owner_uid: str) -> dict:
+        """The worker's Secret, owned by its Deployment: garbage collection removes it with the Deployment, so
+        nothing here deletes a Secret, and the controller's Role needs only ``create`` (and ``delete`` by name,
+        for one left by a Deployment that was patched rather than made) on Secrets."""
         return {
             "apiVersion": "v1",
             "kind": "Secret",
             "type": "Opaque",
             "metadata": {"name": name, "namespace": self.namespace, "labels": self._labels(cog, run_id, name),
-                         "annotations": {"collab-hub/run-id": run_id}},
+                         "annotations": {"collab-hub/run-id": run_id},
+                         "ownerReferences": [{"apiVersion": "apps/v1", "kind": "Deployment", "name": name,
+                                              "uid": owner_uid, "controller": True}]},
             "stringData": dict(data),
         }
 
@@ -402,11 +420,12 @@ class KubernetesCogExecutor:
             },
         }
 
-    def _apply(self, collection_path: str, name: str, body: dict, *, replaceable: bool) -> None:
+    def _apply(self, collection_path: str, name: str, body: dict, *, replaceable: bool) -> dict:
+        """Create the object, or on 409 patch it (``replaceable``) or leave it; the object as the API answers."""
         response = self.api.post(collection_path, json=body)
         if response.status_code == 409:  # already exists
             if not replaceable:
-                return
+                return {}
             # merge-patch updates the existing object's spec; RBAC grants `patch`
             # (not `update`), so this stays within least privilege.
             response = self.api.patch(
@@ -415,6 +434,30 @@ class KubernetesCogExecutor:
                 headers={"Content-Type": "application/merge-patch+json"},
             )
         response.raise_for_status()
+        try:
+            answered = response.json()
+        except ValueError:
+            return {}
+        return answered if isinstance(answered, dict) else {}
+
+    def _replace_secret(self, name: str, body: dict) -> None:
+        """Create the worker's Secret; one of the name left by an earlier Deployment of it (patched, not made,
+        so never collected) is deleted first, since it carries another run token."""
+        response = self.api.post(f"/api/v1/namespaces/{self.namespace}/secrets", json=body)
+        if response.status_code == 409:
+            self.api.delete(f"/api/v1/namespaces/{self.namespace}/secrets/{name}").raise_for_status()
+            response = self.api.post(f"/api/v1/namespaces/{self.namespace}/secrets", json=body)
+        response.raise_for_status()
+
+    def _deployment_uid(self, name: str, answered: dict) -> str:
+        uid = ((answered.get("metadata") or {}).get("uid")) if answered else None
+        if not uid:
+            response = self.api.get(f"/apis/apps/v1/namespaces/{self.namespace}/deployments/{name}")
+            response.raise_for_status()
+            uid = ((response.json().get("metadata") or {}).get("uid"))
+        if not uid:
+            raise RuntimeError(f"deployment {name} has no uid to own the worker's Secret")
+        return str(uid)
 
     def _wait_ready(self, name: str) -> None:
         path = f"/apis/apps/v1/namespaces/{self.namespace}/deployments/{name}"
@@ -433,15 +476,14 @@ class KubernetesCogExecutor:
         return f"/apis/networking.k8s.io/v1/namespaces/{self.namespace}/networkpolicies"
 
     def _collections(self) -> tuple[str, ...]:
-        """Where each kind the executor makes lives, in the order a worker's are deleted: its Deployment (and
-        with it the pod), its Service, its NetworkPolicy, and last the Secret the pod reads at start."""
+        """Where each kind the executor deletes lives, in the order a worker's are deleted: its Deployment (and
+        with it the pod, and the Secret the Deployment owns), its Service, its NetworkPolicy."""
         collections = [
             f"/apis/apps/v1/namespaces/{self.namespace}/deployments",
             f"/api/v1/namespaces/{self.namespace}/services",
         ]
         if self.allow_ingress_from is not None:
             collections.append(self._network_policy_collection())
-        collections.append(f"/api/v1/namespaces/{self.namespace}/secrets")
         return tuple(collections)
 
     def _resource_paths(self, name: str) -> tuple[str, ...]:
@@ -461,7 +503,7 @@ class KubernetesCogExecutor:
         if controller is not None:
             selector.append(f"collab-hub/controller={label_value(controller)}")
         if run_id is not None:
-            selector.append(f"collab-hub/run={label_value(run_id)}")
+            selector.append(f"collab-hub/run={run_label(run_id)}")
         if not selector:
             raise ValueError("sweep by a controller, a run, or both")
         swept = 0
@@ -477,18 +519,19 @@ class KubernetesCogExecutor:
         name = resource_name(cog, run_id, instance)
         token = run_tokens.mint()
         deployment, service = self._manifests(cog, run_id, name)
-        secret = self._secret(cog, run_id, name, self._delivered(cog, run_id, instance, token))
         try:
-            # The Secret first: the pod reads it as it starts.
-            self._apply(f"/api/v1/namespaces/{self.namespace}/secrets", name, secret, replaceable=True)
             if self.allow_ingress_from is not None:
                 # Put the ingress restriction in place before the pod can serve.
                 self._apply(
                     self._network_policy_collection(), name, self._network_policy(cog, run_id, name), replaceable=True
                 )
-            self._apply(
+            answered = self._apply(
                 f"/apis/apps/v1/namespaces/{self.namespace}/deployments", name, deployment, replaceable=True
             )
+            # The Secret after the Deployment that owns it; the pod waits for it (CreateContainerConfigError,
+            # retried by the kubelet) rather than starting without it.
+            self._replace_secret(name, self._secret(cog, run_id, name, self._delivered(cog, run_id, instance, token),
+                                                    self._deployment_uid(name, answered)))
             self._apply(
                 f"/api/v1/namespaces/{self.namespace}/services", name, service, replaceable=False
             )

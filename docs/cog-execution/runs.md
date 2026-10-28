@@ -51,8 +51,9 @@ is #105). It is given what a local worker is given, in its environment:
 `COLLAB_COG_HOST` (`0.0.0.0`) and `COLLAB_COG_PORT`, `COLLAB_COG_ID` and
 `COLLAB_RUN_ID` as literals on the pod template; `COLLAB_RUN_TOKEN` and what
 the binding delivers (a model key) through a Secret of the worker's own,
-made before the Deployment and read by `envFrom`, so neither is on a
-Deployment or ReplicaSet that `get` reads. It carries no ServiceAccount
+owned by its Deployment (made just after it; the pod waits for it) and read
+by `envFrom`, so neither is on a Deployment or ReplicaSet that `get` reads,
+and garbage collection removes the Secret with the Deployment. It carries no ServiceAccount
 token, and a NetworkPolicy per worker admits only the controller's pods to
 its `/invoke`; the controller presents the run token on every request,
 turns included. The pod runs under the executor's securityContext unless
@@ -61,15 +62,16 @@ dropped, the runtime's seccomp profile, which Pod Security `restricted`
 admits; its two emptyDirs, the cache pixi builds on and its `/tmp`, have
 size limits (`cache_size_limit`, `tmp_size_limit`), and `resources` are the
 pod's. `worker_started` records the workloads' `name` and `namespace` and
-the token's sha256. Teardown deletes the Deployment, the Service, the policy
-and the Secret by name. A pod outlives a controller that dies, so the next
+the token's sha256. Teardown deletes the Deployment, the Service and the policy
+by name, and the Secret goes with its Deployment. A pod outlives a controller that dies, so the next
 controller to find the run, its own on restart or another taking the run
 over, reaps the pod by the name the Track recorded, and `worker_stopped`
 says so. A worker whose controller died while it was starting, before
 `worker_started` named it, is reached another way: every workload carries
-`collab-hub/controller` and `collab-hub/run` labels, and a controller sweeps
-its own id's workloads at start, when none can be live, and a run's when it
-takes the run over. The only identity that may create these workloads is
+`collab-hub/controller` and `collab-hub/run` labels (a run id that is no
+label value gets its normalized form with a digest of the exact id, so no two
+runs share one), and a controller sweeps its own id's workloads at start,
+when none can be live, and a run's when it takes the run over. The only identity that may create these workloads is
 the controller's; the API never does (ADR-0002 invariant 3). The controller
 takes `--image`, `--namespace` and `--allow-ingress-from` (the labels of its
 own pods, as JSON), or `--insecure-skip-network-policy` for a trusted

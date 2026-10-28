@@ -96,6 +96,7 @@ class FakeK8sApi:
         self.bodies: list[tuple[str, dict]] = []  # what was POSTed, path and manifest
         self.deleted_missing: set[str] = set()  # paths whose delete answers 404
         self.conflict_on_deployment = conflict_on_deployment
+        self.conflict_on_secret = False  # the first Secret POST of a name answers 409, as one left behind would
         self._gets = 0
         self._ready_after = ready_after
         self.fail_delete = fail_delete
@@ -104,6 +105,12 @@ class FakeK8sApi:
         self.calls.append(("POST", path))
         self.bodies.append((path, json))
         if self.conflict_on_deployment and "deployments" in path:
+            return FakeResponse(409)
+        if path.endswith("/deployments"):
+            name = json["metadata"]["name"]
+            return FakeResponse(201, {"metadata": {"name": name, "uid": f"uid-{name}"}})
+        if path.endswith("/secrets") and self.conflict_on_secret:
+            self.conflict_on_secret = False
             return FakeResponse(409)
         return FakeResponse(201)
 
@@ -123,7 +130,8 @@ class FakeK8sApi:
         self.calls.append(("GET", path))
         ready = 1 if self._gets >= self._ready_after else 0
         self._gets += 1
-        return FakeResponse(200, {"status": {"readyReplicas": ready}})
+        return FakeResponse(200, {"metadata": {"uid": f"uid-{path.rsplit('/', 1)[-1]}"},
+                                  "status": {"readyReplicas": ready}})
 
 
 class FakeWorkerHttp:
@@ -312,7 +320,8 @@ def test_label_value_is_a_safe_kubernetes_label(monkeypatch):
 def test_manifests_keep_the_exact_run_id_in_an_annotation():
     ex = _executor(FakeK8sApi(), FakeWorkerHttp())
     _deployment, service = ex._manifests("openteams/reviewer", "org/ws/run 42", "cog-reviewer-abcd1234")
-    assert service["metadata"]["labels"]["collab-hub/run"] == "org-ws-run-42"  # sanitized label
+    label = service["metadata"]["labels"]["collab-hub/run"]  # sanitized, with a digest of the exact id
+    assert label.startswith("org-ws-run-42-") and len(label) == len("org-ws-run-42-") + 16
     assert service["metadata"]["annotations"]["collab-hub/run-id"] == "org/ws/run 42"  # exact id preserved
 
 

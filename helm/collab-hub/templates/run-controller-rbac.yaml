@@ -35,11 +35,14 @@ rules:
     resources: ["networkpolicies"]
     verbs: ["create", "get", "list", "patch", "delete", "deletecollection"]
   {{- /* One Secret per worker carries its run token and what the models block delivers (a model key), so
-  neither is a literal on a pod template that `get deployments` reads. No `get` or `list`: the controller
-  writes Secrets and deletes them, by name or by its labels, and never reads one. */}}
+  neither is a literal on a pod template that `get deployments` reads. The Secret is owned by the worker's
+  Deployment and collected with it: the controller creates Secrets, deletes one by name only when a
+  Deployment it patched left one behind, and never reads, lists or sweeps them, so `patch`,
+  `deletecollection`, `get` and `list` stay out, and the hub's own Secrets and Helm's release records out
+  of reach. A namespace of the workers' own (#253) narrows the rest. */}}
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["create", "patch", "delete", "deletecollection"]
+    verbs: ["create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

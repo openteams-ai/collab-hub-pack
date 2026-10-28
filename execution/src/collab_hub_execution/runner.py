@@ -40,6 +40,7 @@ from typing import Any
 from .backends import DurabilityBackend, select_backend
 from .envelope import EnvelopeInvalid, ResultEnvelope
 from .gates import DEFAULT_APPROVERS, Gate, GateOutcome, envelope_digest, escalation_id
+from .intents import retry_ask
 from .lifecycle import BudgetExceeded, BudgetTracker, RunBudget
 from .locations import select_executor
 from .ops import (
@@ -242,6 +243,10 @@ class _Cancelled(Exception):
     """An attempt stopped because its run was cancelled; the driver ends the run ``cancelled``."""
 
 
+class RetryTaken(ValueError):
+    """A retry asked for that this runner did not take: another controller did, or the ask was refused."""
+
+
 class RunBusy(RuntimeError):
     """The run is claimed by another call in this host."""
 
@@ -346,7 +351,8 @@ class LifecycleRunner(WorkflowEngine):
         """A ``step_completed`` payload: what produced the result, and the result inline or by reference."""
         record: dict[str, Any] = {
             "step": step.name, "attempt": attempt, "cog": step.cog, "digest": step.digest, "usage": usage,
-            "frames": [], **_recorded(envelope), **result,
+            "frames": [{"id": frame.id, "digest": frame.digest} for frame in step.frames],
+            **_recorded(envelope), **result,
         }
         if escalation is not None:
             record["escalation"] = escalation
@@ -374,7 +380,8 @@ class LifecycleRunner(WorkflowEngine):
         return transition.after
 
     def _record_if_still(self, run_id: str, transition: Transition[Run], seen: Run,
-                         into: list[TrackEvent] | None = None) -> Run | None:
+                         into: list[TrackEvent] | None = None,
+                         also: Callable[[tuple[TrackEvent, ...]], bool] | None = None) -> Run | None:
         """Write a run's one-record transition only if, as it lands, the run is where ``seen`` was.
 
         Where is its state and the controller that has it. The check and the
@@ -386,8 +393,10 @@ class LifecycleRunner(WorkflowEngine):
                            schema=SCHEMA_VERSION)
 
         def still(events: tuple[TrackEvent, ...]) -> bool:
-            run = Run.replay(tuple(upgrade(e) for e in events))
-            return run is not None and (run.state, run.controller) == (seen.state, seen.controller)
+            events = tuple(upgrade(e) for e in events)
+            run = Run.replay(events)
+            return (run is not None and (run.state, run.controller) == (seen.state, seen.controller)
+                    and (also is None or also(events)))
 
         stored = self.track.append_if(event, still)
         if stored is None:
@@ -771,8 +780,13 @@ class LifecycleRunner(WorkflowEngine):
             raise ValueError(f"run {op.run_id!r} was submitted with a different Op")
         return Run.replay(existing).state
 
-    def retry(self, run_id: str) -> RunState:
+    def retry(self, run_id: str, *, asked: bool = False) -> RunState:
         """Re-drive an unsuccessfully-ended run from its first incomplete step.
+
+        ``asked`` makes a client's ``retry_asked`` the condition: the retry is
+        recorded only while that ask still stands, so of several controllers
+        taking one ask, one does, and ``RetryTaken`` tells the others nothing
+        is theirs to refuse.
 
         Retry is for failed runs. Exhausted duration/token/cost budgets are not
         reset — the run machine allows it as a new budget epoch, which #4 builds —
@@ -785,12 +799,16 @@ class LifecycleRunner(WorkflowEngine):
         the caller is asking for the work to run again.
         """
         with self._claim_or_refuse(run_id) as advancing:
-            return self._retry(run_id, advancing)
+            return self._retry(run_id, advancing, asked=asked)
 
-    def _retry(self, run_id: str, advancing: _Advancing) -> RunState:
+    def _retry(self, run_id: str, advancing: _Advancing, *, asked: bool = False) -> RunState:
         events = self._read(run_id)
         run = Run.replay(events)
         state = None if run is None else run.state
+        if asked and retry_ask(events) is None:
+            # Before any look at the state: a controller that saw the ask and arrives after another took it
+            # reads a running or finished run, which is nothing to refuse.
+            raise RetryTaken(f"run {run_id!r} has no retry asked for it: another controller took it, or it was refused")
         if run is None or not run.state.ended:
             raise ValueError(f"run {run_id!r} is not terminal (status={state}); nothing to retry")
         if state is RunState.BUDGET_EXCEEDED:
@@ -801,7 +819,10 @@ class LifecycleRunner(WorkflowEngine):
             raise ValueError(f"run {run_id!r} {done}; nothing to retry (start a new run instead)")
         op = self._submitted_definition(run_id, events)
         written: list[TrackEvent] = []
-        if self._record_if_still(run_id, run.retry(controller=self.controller), run, written) is None:
+        still_asked = (lambda current: retry_ask(current) is not None) if asked else None
+        if self._record_if_still(run_id, run.retry(controller=self.controller), run, written, also=still_asked) is None:
+            if asked:
+                raise RetryTaken(f"run {run_id!r} moved while its retry was taken: another controller took it")
             raise ValueError(f"run {run_id!r} moved while it was being retried; look at it again")
         return self._advance(_Pass(self, run_id, (*events, *written), advancing), op)
 
@@ -975,9 +996,27 @@ class LifecycleRunner(WorkflowEngine):
         attempt.cog_worker = now.record(attempt.cog_worker.invoke(entry_point=step.entry_point, step=step.name))
         signal_value = self._signal_for(now.history, step.name)
         feedback = {} if signal_value is _NO_SIGNAL else {"signal": signal_value}
+        if step.frames:
+            feedback["frames"] = self._frames(step)
         attempt.invoked = True
         attempt.result = attempt.worker.interact(step.entry_point, step.input, idempotency_key=attempt.key,
                                                  **feedback)
+
+    def _frames(self, step: OpStep) -> list[dict[str, Any]]:
+        """The step's Frame snapshots as the task bundle carries them, read from where submit kept them."""
+        frames = []
+        for frame in step.frames:
+            try:
+                kept = self.track.get_payload(frame.ref)
+            except KeyError:
+                raise RuntimeError(f"the snapshot of Frame {frame.id!r} for step {step.name!r} is not on the "
+                                   f"Track ({frame.ref})") from None
+            text = kept.get("text") if isinstance(kept, Mapping) else None
+            if not isinstance(text, str):
+                raise RuntimeError(f"the snapshot of Frame {frame.id!r} ({frame.ref}) holds no text")
+            frames.append({"id": frame.id, "title": frame.name, "uri": frame.uri or f"frame:{frame.id}",
+                           "digest": frame.digest, "text": text})
+        return frames
 
     @step_function
     def read_envelope(self, now: _Pass, attempt: Attempt) -> None:

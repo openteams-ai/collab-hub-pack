@@ -25,9 +25,14 @@ from threading import RLock
 from typing import Any, Protocol
 from uuid import uuid4
 
-from .states.run import Run, RunState
+from .states import InvalidTransition
+from .states.run import MOVES, Run, RunState
 
 SCHEMA_VERSION = 1
+
+RETRY_ASKED, RETRY_REQUESTED, RETRY_REFUSED = "retry_asked", "retry_requested", "retry_refused"
+# The events on which a run's index row is recomputed: what moves the run, and a retry asked or settled.
+_INDEXED = MOVES | {RETRY_ASKED, RETRY_REFUSED}
 
 # A step's payload above this many bytes of JSON is stored by reference (#5).
 PAYLOAD_INLINE_MAX_BYTES = 64 * 1024
@@ -48,6 +53,60 @@ class TrackEvent:
     # export stays readable instead of being taken for a v1 event it is not. A
     # v1 event through `upgrade` is unchanged either way. The engine writes v1.
     schema: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class RunIndex:
+    """One run as the Track's index of runs lists it: derived from its events, never written by a caller.
+
+    ``status`` is the run machine's, recomputed by the store in the same
+    transaction as each event that moves the run (ADR-0002 D3: status comes
+    from the Track, through one derivation). ``retry_asked`` is whether a retry
+    was asked for since the run last ended and not yet taken or refused.
+    """
+
+    run_id: str
+    org_id: str | None
+    status: str
+    submitted_at: datetime
+    updated_at: datetime
+    retry_asked: bool = False
+
+
+def index_of(run_id: str, events: Iterable[TrackEvent]) -> RunIndex | None:
+    """The index row a run's events derive to; ``None`` for a run never submitted, or one that cannot be read.
+
+    A Track the run machine cannot replay has no row: the store still keeps its
+    events, and a reader of the index passes the run over, as ``RunViews`` does.
+    """
+    events = tuple(upgrade(event) for event in events)
+    try:
+        run = Run.replay(events)
+        submission = next(event for event in events if event.event_type == "op_submitted") if run else None
+    except (InvalidTransition, KeyError, TypeError, ValueError, StopIteration):
+        return None
+    if run is None or submission is None:
+        return None
+    asked = False
+    for event in events:
+        if event.event_type == RETRY_ASKED:
+            asked = True
+        elif event.event_type in (RETRY_REQUESTED, RETRY_REFUSED):
+            asked = False
+    return RunIndex(run_id=run_id, org_id=(submission.payload.get("submitted_by") or {}).get("org_id"),
+                    status=run.state.name, submitted_at=submission.occurred_at, updated_at=events[-1].occurred_at,
+                    retry_asked=asked)
+
+
+def _select_index(rows: Iterable[RunIndex], *, org_id: str | None, status: str | None, retry_asked: bool | None,
+                  limit: int | None, offset: int) -> tuple[RunIndex, ...]:
+    """The index rows a query asks for, newest submission first: how the in-memory store answers it."""
+    found = [row for row in rows
+             if (org_id is None or row.org_id == org_id) and (status is None or row.status == status)
+             and (retry_asked is None or row.retry_asked == retry_asked)]
+    found.sort(key=lambda row: (row.submitted_at, row.run_id), reverse=True)
+    found = found[offset:]
+    return tuple(found if limit is None else found[:limit])
 
 
 class TrackStore(Protocol):
@@ -89,6 +148,26 @@ class TrackStore(Protocol):
 
         What a host reads when it starts, to find the runs it left unfinished. A run
         submitted before schema v1 is recorded as ``submitted``, and is listed too.
+        """
+
+    def runs(self, *, org_id: str | None = None, status: str | None = None, retry_asked: bool | None = None,
+             limit: int | None = None, offset: int = 0) -> tuple[RunIndex, ...]:
+        """The Track's index of runs, newest submission first, narrowed by what is given.
+
+        One indexed query, however many runs the Track holds: what a listing
+        and a controller's pass read instead of every run's events. A row is
+        kept current by the store itself, in the same transaction as each event
+        that moves its run, so it never disagrees with the Track.
+        """
+
+    def has_unindexed(self) -> bool:
+        """Whether a run was submitted that has no index row: a Track written before the index existed."""
+
+    def reindex(self) -> int:
+        """Derive the index from every run's events again, and return how many runs it holds.
+
+        What a Track written before the index existed needs once; a store keeps
+        its index current from then on.
         """
 
 
@@ -250,6 +329,57 @@ class InMemoryTrackStore:
             ]
         return _once(run_id for _, run_id in sorted(submitted))
 
+    def runs(self, *, org_id: str | None = None, status: str | None = None, retry_asked: bool | None = None,
+             limit: int | None = None, offset: int = 0) -> tuple[RunIndex, ...]:
+        # Derived on each read: the in-memory Track is small, and never read by two processes.
+        with self._lock:
+            rows = [row for run_id, events in self._events.items() if (row := index_of(run_id, events)) is not None]
+        return _select_index(rows, org_id=org_id, status=status, retry_asked=retry_asked, limit=limit, offset=offset)
+
+    def has_unindexed(self) -> bool:
+        return False  # derived on each read
+
+    def reindex(self) -> int:
+        return len(self.runs())
+
+
+_UNINDEXED = ("SELECT 1 FROM collab_track_events e WHERE e.event_type IN ('op_submitted', 'submitted') "
+              "AND NOT EXISTS (SELECT 1 FROM collab_track_runs r WHERE r.run_id = e.run_id) LIMIT 1")
+
+
+_INDEX_COLUMNS = "run_id, org_id, status, submitted_at, updated_at, retry_asked"
+
+
+def _index_row(row: Any) -> RunIndex:
+    submitted_at, updated_at = _column(row, 3, "submitted_at"), _column(row, 4, "updated_at")
+    return RunIndex(
+        run_id=_column(row, 0, "run_id"), org_id=_column(row, 1, "org_id"), status=_column(row, 2, "status"),
+        submitted_at=submitted_at if isinstance(submitted_at, datetime) else datetime.fromisoformat(submitted_at),
+        updated_at=updated_at if isinstance(updated_at, datetime) else datetime.fromisoformat(updated_at),
+        retry_asked=bool(_column(row, 5, "retry_asked")),
+    )
+
+
+def _index_query(org_id: str | None, status: str | None, retry_asked: bool | None, limit: int | None, offset: int,
+                 placeholder: str) -> tuple[str, list[Any]]:
+    """The index query and its parameters, for either SQL dialect."""
+    where, params = [], []
+    for column, value in (("org_id", org_id), ("status", status)):
+        if value is not None:
+            where.append(f"{column} = {placeholder}")
+            params.append(value)
+    if retry_asked is not None:
+        where.append(f"retry_asked = {placeholder}")
+        params.append(retry_asked)
+    sql = f"SELECT {_INDEX_COLUMNS} FROM collab_track_runs"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY submitted_at DESC, run_id DESC"
+    if limit is not None or offset:
+        sql += f" LIMIT {placeholder} OFFSET {placeholder}"
+        params.extend([-1 if limit is None else limit, offset])
+    return sql, params
+
 
 class SqliteTrackStore:
     """TrackStore on one SQLite file, shared by the processes of one host.
@@ -283,6 +413,20 @@ class SqliteTrackStore:
             stored_at  TEXT NOT NULL
         )
         """,
+        # The index of runs: one row per run, derived from its events by the store in the same
+        # transaction as each event that moves the run; what a listing reads instead of every Track.
+        """
+        CREATE TABLE IF NOT EXISTS collab_track_runs (
+            run_id       TEXT PRIMARY KEY,
+            org_id       TEXT,
+            status       TEXT NOT NULL,
+            submitted_at TEXT NOT NULL,
+            updated_at   TEXT NOT NULL,
+            retry_asked  INTEGER NOT NULL DEFAULT 0
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS collab_track_runs_org_submitted ON collab_track_runs (org_id, submitted_at)",
+        "CREATE INDEX IF NOT EXISTS collab_track_runs_status ON collab_track_runs (status)",
     )
 
     def __init__(self, path: str | Path) -> None:
@@ -328,7 +472,27 @@ class SqliteTrackStore:
             if event.event_type == "op_submitted" and "collab_track_events.run_id" in str(exc):
                 raise OneSubmissionPerRun(f"run {event.run_id!r} was already submitted") from exc
             raise
-        return replace(event, sequence=cursor.lastrowid)
+        stored = replace(event, sequence=cursor.lastrowid)
+        SqliteTrackStore._index(connection, stored)
+        return stored
+
+    @staticmethod
+    def _index(connection: sqlite3.Connection, event: TrackEvent) -> None:
+        """Keep the run's index row current, in the transaction that appended ``event``."""
+        if event.event_type in _INDEXED:
+            row = index_of(event.run_id, SqliteTrackStore._select(connection, event.run_id, 0))
+            if row is not None:
+                SqliteTrackStore._upsert(connection, row)
+        else:
+            connection.execute("UPDATE collab_track_runs SET updated_at = ? WHERE run_id = ?",
+                               (event.occurred_at.isoformat(), event.run_id))
+
+    @staticmethod
+    def _upsert(connection: sqlite3.Connection, row: RunIndex) -> None:
+        connection.execute(
+            f"INSERT OR REPLACE INTO collab_track_runs ({_INDEX_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?)",
+            (row.run_id, row.org_id, row.status, row.submitted_at.isoformat(), row.updated_at.isoformat(),
+             int(row.retry_asked)))
 
     def append_if(self, event: TrackEvent, condition: Callable[[tuple[TrackEvent, ...]], bool]) -> TrackEvent | None:
         if event.sequence is not None:
@@ -391,6 +555,30 @@ class SqliteTrackStore:
                 "ORDER BY sequence"
             ).fetchall()
         return _once(row[0] for row in rows)
+
+    def runs(self, *, org_id: str | None = None, status: str | None = None, retry_asked: bool | None = None,
+             limit: int | None = None, offset: int = 0) -> tuple[RunIndex, ...]:
+        sql, params = _index_query(org_id, status, retry_asked, limit, offset, "?")
+        params = [int(p) if isinstance(p, bool) else p for p in params]
+        with self._connect() as connection:
+            return tuple(_index_row(row) for row in connection.execute(sql, params).fetchall())
+
+    def has_unindexed(self) -> bool:
+        with self._connect() as connection:
+            return connection.execute(_UNINDEXED).fetchone() is not None
+
+    def reindex(self) -> int:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            count = 0
+            for run_id in _once(row[0] for row in connection.execute(
+                    "SELECT run_id FROM collab_track_events WHERE event_type IN ('op_submitted', 'submitted') "
+                    "ORDER BY sequence").fetchall()):
+                row = index_of(run_id, self._select(connection, run_id, 0))
+                if row is not None:
+                    self._upsert(connection, row)
+                    count += 1
+            return count
 
 
 class PostgresTrackStore:
@@ -456,6 +644,20 @@ class PostgresTrackStore:
         )
         """,
         "CREATE INDEX IF NOT EXISTS collab_track_payloads_run ON collab_track_payloads (run_id)",
+        # The index of runs (migration 15): one row per run, derived from its events by the store in
+        # the same transaction as each event that moves the run, so a listing is one indexed query.
+        """
+        CREATE TABLE IF NOT EXISTS collab_track_runs (
+            run_id       text PRIMARY KEY,
+            org_id       text,
+            status       text NOT NULL,
+            submitted_at timestamptz NOT NULL,
+            updated_at   timestamptz NOT NULL,
+            retry_asked  boolean NOT NULL DEFAULT false
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS collab_track_runs_org_submitted ON collab_track_runs (org_id, submitted_at)",
+        "CREATE INDEX IF NOT EXISTS collab_track_runs_status ON collab_track_runs (status)",
     )
 
     @staticmethod
@@ -495,7 +697,31 @@ class PostgresTrackStore:
             if "collab_track_one_submission" in str(exc):
                 raise OneSubmissionPerRun(f"run {event.run_id!r} was already submitted") from exc
             raise
-        return replace(event, sequence=_column(row, 0, "sequence"))
+        stored = replace(event, sequence=_column(row, 0, "sequence"))
+        PostgresTrackStore._index(connection, stored)
+        return stored
+
+    @staticmethod
+    def _index(connection: Any, event: TrackEvent) -> None:
+        """Keep the run's index row current, in the transaction that appended ``event``, under its lock."""
+        if event.event_type in _INDEXED:
+            row = index_of(event.run_id, PostgresTrackStore._select(connection, event.run_id, 0))
+            if row is not None:
+                PostgresTrackStore._upsert(connection, row)
+        else:
+            connection.execute("UPDATE collab_track_runs SET updated_at = %s WHERE run_id = %s",
+                               (event.occurred_at, event.run_id))
+
+    @staticmethod
+    def _upsert(connection: Any, row: RunIndex) -> None:
+        connection.execute(
+            f"""
+            INSERT INTO collab_track_runs ({_INDEX_COLUMNS}) VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (run_id) DO UPDATE SET org_id = EXCLUDED.org_id, status = EXCLUDED.status,
+                submitted_at = EXCLUDED.submitted_at, updated_at = EXCLUDED.updated_at,
+                retry_asked = EXCLUDED.retry_asked
+            """,
+            (row.run_id, row.org_id, row.status, row.submitted_at, row.updated_at, row.retry_asked))
 
     def append_if(self, event: TrackEvent, condition: Callable[[tuple[TrackEvent, ...]], bool]) -> TrackEvent | None:
         if event.sequence is not None:
@@ -571,3 +797,25 @@ class PostgresTrackStore:
                 "ORDER BY sequence"
             ).fetchall()
         return _once(_column(row, 0, "run_id") for row in rows)
+
+    def runs(self, *, org_id: str | None = None, status: str | None = None, retry_asked: bool | None = None,
+             limit: int | None = None, offset: int = 0) -> tuple[RunIndex, ...]:
+        sql, params = _index_query(org_id, status, retry_asked, limit, offset, "%s")
+        params = [None if p == -1 and isinstance(p, int) and not isinstance(p, bool) else p for p in params]
+        with self.pool.connection() as connection:
+            return tuple(_index_row(row) for row in connection.execute(sql, params).fetchall())
+
+    def has_unindexed(self) -> bool:
+        with self.pool.connection() as connection:
+            return connection.execute(_UNINDEXED).fetchone() is not None
+
+    def reindex(self) -> int:
+        count = 0
+        for run_id in self.run_ids():
+            with self.pool.connection() as connection:
+                connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (_run_lock(run_id),))
+                row = index_of(run_id, self._select(connection, run_id, 0))
+                if row is not None:
+                    self._upsert(connection, row)
+                    count += 1
+        return count

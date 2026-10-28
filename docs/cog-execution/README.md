@@ -29,6 +29,10 @@ Contents:
   talking to and stopping a Cog.
 - [Sensitivity](sensitivity.md) — how data-sensitivity labels are born,
   propagated, and enforced (the basis of ADR-0001 D10).
+- [The Worker SDK](../../worker/README.md) — writing a Cog worker on the SDK:
+  entry points, sessions, the harness adapter protocol, and what the SDK hands
+  a harness; [`cogs/hermes`](../../cogs/README.md) is the reference harness
+  Cog built on it.
 
 ## Vocabulary
 
@@ -127,14 +131,14 @@ Bare decision and invariant numbers are ADR-0001's.
 | #100 extract the lifecycle runner | ADR-0002 D1 | A refactor with no behaviour change. |
 | #101 the `none` backend | ADR-0002 D1–D3, invariants 1–2 | In-flight runs end `interrupted` after a restart and are never resumed. |
 | #102 keyed claim | ADR-0002 D1 | Folded into #104. One attempt acts once; a recorded failure retries under a new key. |
-| #103 run API | ADR-0002 D4, D7, invariant 3 | Launch, list, stream and cancel are merged (#186); the rest, Frames, payloads, decisions and retry, with the CLI over them (#126 folded in). The API records intent and reads the Track; it never calls the executor. |
+| #103 run API | ADR-0002 D4, D7, invariant 3 | Launch, list, stream and cancel are merged (#186); Frames at submit, the run index, payloads, decisions, retry and the CLI over them are merged, #251 (#126 folded in). The API records intent and reads the Track; it never calls the executor. |
 | #177 a Cog launched from the CLI on a local dev hub | ADR-0002 D4, D9, invariant 3 | Merged (#178). `examples/cog-local`, on the first form of the run controller, the run API (then behind a feature flag) and the CLI's launch and run commands; #121, #103 and #126 build each out. |
-| #121 run controller and run pickup | ADR-0002 D4, invariant 3 | Merged (#186). Runs advance in the controller, which alone constructs an executor; pickup under `none`. |
+| #121 run controller and run pickup | ADR-0002 D4, invariant 3 | Runs advance in the controller, which alone constructs an executor. Pickup is atomic under every backend and names the controller, which owns the run under `none` and records it `interrupted` on its next start, reaping its workers; cancels, turns and Gate decisions reach it through the Track. The `models:` block, health endpoints, a SQLite or Postgres Track. |
 | #104 DBOS backend | ADR-0002 D1, D3 | With the keyed claim (#102 folded in). Resumes after a restart; status still comes from the Track. |
 | #105 materialize from the artifact | D5, invariant 2 | With install by digest (#106) and resolution by the Cog (#3) folded in. The worker runs the Cog's own `serve`. |
 | #106 install by digest | D5 | Folded into #105. Install runs `check` once; materialize happens per run. |
-| #107 worker SDK | ADR-0002 D5, invariant 4 | Optional for Cogs; the hub never imports it. |
-| #108 Hermes harness Cog | ADR-0002 D5 | The first harness Cog, built on the worker SDK. |
+| #107 worker SDK | ADR-0002 D5, invariant 4 | `worker/`, `collab-hub-cog-worker`: the seam server, the binding, Frames and limits, and the ACP and OpenAI-compatible adapters; optional for Cogs; the hub never imports it, and a test proves it. |
+| #108 Hermes harness Cog | ADR-0002 D5 | `cogs/hermes`, the first harness Cog, on the worker SDK: Hermes over ACP with no tools, configured from the binding. |
 | #109 agent location | ADR-0002 D12, invariant 6 | `location`, `local` or `remote`, beside `backend`: a process on the controller's host first, built; a pod (#6) behind the same switch. A worker's run token is minted here. |
 | #110 Temporal backend | ADR-0002 D1, D3 | Closed, not for A4: `none` and `dbos` behind one interface prove the backend swappable. The same conformance suites would apply. |
 | #125 the `collab-hub` CLI | ADR-0002 D4, D7 | Closed: sign-in and the Cog list are merged (#159); the device flow is not needed. A client over the REST API; it imports no hub package. |

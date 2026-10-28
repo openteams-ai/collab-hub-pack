@@ -416,6 +416,9 @@ _FACTS = frozenset({
     # A decision on a Gate, asked by a client for the controller to deliver; `gate_decided` records it
     # when the run's runner takes it, and `decision_refused` when it does not.
     "decision_requested", "decision_refused",
+    # A retry of an ended run, asked by a client for a controller to take; `retry_requested` records it
+    # when a runner takes it, and `retry_refused` when it does not.
+    "retry_asked", "retry_refused",
 })
 
 # The payload fields that decide where a replayed event leads; a record and its replay must agree on them.
@@ -443,3 +446,6 @@ _REPLAY: dict[str, Callable[[Run, Mapping[str, Any]], Transition[Run]]] = {
     "interrupted": lambda run, payload: run.host_stopped(backend=payload.get("backend", "none")),
     "retry_requested": lambda run, payload: run.retry(controller=payload.get("controller")),
 }
+
+MOVES = frozenset(_REPLAY) | _SUBMISSIONS
+"""The event types that move a run: what a Track's index of runs is recomputed on."""

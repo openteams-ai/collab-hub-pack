@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field, WithJsonSchema
 
 from .bundle import CogCard
 from .catalog import CogArtifact
+from .registry import reference as build_reference
 
 _CARD_KEY_NOTES = {
     "card": "Card format version (1).",
@@ -69,6 +70,17 @@ ANONYMOUS_CARD_OMITTED_KEYS: tuple[str, ...] = ("errors", "warnings")
 """Card keys an anonymous caller never sees: the reader's diagnostics."""
 
 SOURCE_ID_DESCRIPTION = "The registry source this location was indexed from. Omitted for anonymous callers."
+
+BACKING_REFERENCE_DESCRIPTION = (
+    "Where the artifact is stored: `<backing registry host>/<repository>@<digest>`. Present only when the Hub "
+    "serves pulls itself, and only for platform operators; absent (not null) otherwise."
+)
+
+PUBLISHED_BY_DESCRIPTION = (
+    "The Hub user who published this version through the Hub: authenticated, unlike the card's self-declared "
+    "`publisher`. Null for a version pushed to the registry directly. Present only on a Hub that accepts "
+    "publishes, and omitted for anonymous callers."
+)
 
 _ANONYMOUS_CARD_EXCLUDE = dict.fromkeys(ANONYMOUS_CARD_OMITTED_KEYS, True)
 _DIAGNOSTICS = ", ".join(f"`{key}`" for key in ANONYMOUS_CARD_OMITTED_KEYS)
@@ -109,6 +121,19 @@ CardDocument = Annotated[dict[str, Any], WithJsonSchema(CARD_SCHEMA)]
 ListCardDocument = Annotated[dict[str, Any], WithJsonSchema(LIST_CARD_SCHEMA)]
 
 
+def client_reference(row: CogArtifact, registry_host: str | None) -> str:
+    """The reference a client pulls: through the Hub when it serves pulls, else the backing registry.
+
+    ``registry_host`` is the Hub's own registry host when ``cogs.serve.enabled``
+    (issue #179) and ``None`` otherwise. The repository path and the digest
+    are the same either way; only the host a client talks to changes.
+    """
+
+    if registry_host is None:
+        return row.reference
+    return build_reference(registry_host, row.repository, row.digest)
+
+
 def list_card(card: dict[str, Any] | None) -> dict[str, Any]:
     """``card`` without :data:`LIST_CARD_OMITTED_KEYS`."""
 
@@ -131,31 +156,44 @@ class CogVersion(BaseModel):
 
     model_config = ConfigDict(json_schema_extra=_not_required("source_id"))
     ANONYMOUS_EXCLUDE: ClassVar[dict[str, Any]] = {"source_id": True}
+    PUBLICATION_EXCLUDE: ClassVar[dict[str, Any]] = {"published_by": True, "published_org": True}
 
     digest: str = Field(description="`sha256:<64 hex>`: the artifact's identity.")
     version: str | None = None
     source_id: str = Field(description=SOURCE_ID_DESCRIPTION)
     repository: str
-    reference: str = Field(description="The pinned install reference `<host>/<repository>@<digest>`.")
+    reference: str = Field(
+        description=(
+            "The pinned install reference `<host>/<repository>@<digest>`. The host is the Hub's own registry "
+            "host when the Hub serves pulls, else the backing registry's."
+        )
+    )
     tags: list[str] = Field(default_factory=list)
     pushed_at: datetime | None = None
     indexed_at: datetime | None = None
     removed_at: datetime | None = Field(
         default=None, description="Set once the artifact is gone from its registry; the row stays readable."
     )
+    published_by: str | None = Field(default=None, description=PUBLISHED_BY_DESCRIPTION)
+    published_org: str | None = Field(
+        default=None,
+        description="The organization `published_by` acted in. Present and omitted exactly as `published_by` is.",
+    )
 
     @classmethod
-    def of(cls, row: CogArtifact) -> CogVersion:
+    def of(cls, row: CogArtifact, registry_host: str | None = None) -> CogVersion:
         return cls(
             digest=row.digest,
             version=row.version,
             source_id=row.source_id,
             repository=row.repository,
-            reference=row.reference,
+            reference=client_reference(row, registry_host),
             tags=list(row.tags),
             pushed_at=row.pushed_at,
             indexed_at=row.indexed_at,
             removed_at=row.removed_at,
+            published_by=row.published_by,
+            published_org=row.published_org,
         )
 
 
@@ -168,8 +206,8 @@ class CogEntry(CogVersion):
     card: CardDocument
 
     @classmethod
-    def of(cls, row: CogArtifact) -> CogEntry:
-        return cls(**CogVersion.of(row).model_dump(), cog_id=row.cog_id or "", card=row.card or {})
+    def of(cls, row: CogArtifact, registry_host: str | None = None) -> CogEntry:
+        return cls(**CogVersion.of(row, registry_host).model_dump(), cog_id=row.cog_id or "", card=row.card or {})
 
 
 class CogListEntry(CogVersion):
@@ -181,14 +219,17 @@ class CogListEntry(CogVersion):
     card: ListCardDocument
 
     @classmethod
-    def of(cls, row: CogArtifact) -> CogListEntry:
-        return cls(**CogVersion.of(row).model_dump(), cog_id=row.cog_id or "", card=list_card(row.card))
+    def of(cls, row: CogArtifact, registry_host: str | None = None) -> CogListEntry:
+        return cls(
+            **CogVersion.of(row, registry_host).model_dump(), cog_id=row.cog_id or "", card=list_card(row.card)
+        )
 
 
 class CogListPage(BaseModel):
     """One page of current Cogs, ordered by `cog_id`."""
 
     ANONYMOUS_EXCLUDE: ClassVar[dict[str, Any]] = {"items": {"__all__": CogListEntry.ANONYMOUS_EXCLUDE}}
+    PUBLICATION_EXCLUDE: ClassVar[dict[str, Any]] = {"items": {"__all__": CogVersion.PUBLICATION_EXCLUDE}}
 
     items: list[CogListEntry]
     limit: int
@@ -203,6 +244,10 @@ class CogDetail(CogEntry):
         **CogEntry.ANONYMOUS_EXCLUDE,
         "versions": {"__all__": CogVersion.ANONYMOUS_EXCLUDE},
     }
+    PUBLICATION_EXCLUDE: ClassVar[dict[str, Any]] = {
+        **CogVersion.PUBLICATION_EXCLUDE,
+        "versions": {"__all__": CogVersion.PUBLICATION_EXCLUDE},
+    }
 
     versions: list[CogVersion] = Field(description="Every indexed location of every version, removed ones included.")
 
@@ -214,15 +259,17 @@ class CogLocation(BaseModel):
     ANONYMOUS_EXCLUDE: ClassVar[dict[str, Any]] = {"source_id": True}
 
     reference: str
+    backing_reference: str | None = Field(default=None, description=BACKING_REFERENCE_DESCRIPTION)
     source_id: str = Field(description=SOURCE_ID_DESCRIPTION)
     repository: str
     pushed_at: datetime | None = None
     removed_at: datetime | None = None
 
     @classmethod
-    def of(cls, row: CogArtifact) -> CogLocation:
+    def of(cls, row: CogArtifact, registry_host: str | None = None, *, backing: bool = False) -> CogLocation:
         return cls(
-            reference=row.reference,
+            reference=client_reference(row, registry_host),
+            backing_reference=row.reference if backing else None,
             source_id=row.source_id,
             repository=row.repository,
             pushed_at=row.pushed_at,
@@ -238,13 +285,48 @@ class CogReference(BaseModel):
         "source_id": True,
         "locations": {"__all__": CogLocation.ANONYMOUS_EXCLUDE},
     }
+    BACKING_EXCLUDE: ClassVar[dict[str, Any]] = {
+        "backing_reference": True,
+        "locations": {"__all__": {"backing_reference": True}},
+    }
+    """Dropped, on top of the caller's own cut, for everyone the backing location is not for."""
 
     reference: str = Field(description="`<host>/<repository>@<digest>` of the preferred location.")
+    backing_reference: str | None = Field(default=None, description=BACKING_REFERENCE_DESCRIPTION)
     source_id: str = Field(description=SOURCE_ID_DESCRIPTION)
     repository: str
     digest: str
     present: bool = Field(description="False when every location of this digest has been removed from its registry.")
     locations: list[CogLocation] = Field(description="The digest's other indexed locations, preferred first.")
+
+
+class RegistryCredentialRequest(BaseModel):
+    """What to exchange the Hub session for: `pull` (the default), or `publish`, which may also pull."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal["pull", "publish"] = "pull"
+
+
+class PullOnlyRegistryCredentialRequest(BaseModel):
+    """The request as a Hub that accepts no publishes validates it: `pull` is the only scope there is."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal["pull"] = "pull"
+
+
+class RegistryCredentialResponse(BaseModel):
+    """A registry credential, shown once: the Hub keeps only a digest of `secret`."""
+
+    id: str = Field(description="Names the credential for `DELETE /v1/cogs/registry-credentials/{id}`.")
+    registry: str = Field(description="`host[:port]` of the Hub's registry: what a client logs in to and pulls from.")
+    username: str
+    secret: str = Field(description="The password. Not retrievable again.")
+    scope: Literal["pull", "publish"]
+    expires_at: datetime = Field(
+        description="RFC 3339, UTC. The credential, and every token minted from it, stops here."
+    )
 
 
 class CatalogV1Repository(BaseModel):

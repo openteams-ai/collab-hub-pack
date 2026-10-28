@@ -18,10 +18,11 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
+from .gates import DEFAULT_APPROVERS
 from .ops import OpDefinition, _deserialize_op, _serialize_op
 from .states import InvalidTransition, Run, RunState
-from .states.run import DECISIONS
-from .track import SCHEMA_VERSION, TrackEvent, TrackStore, upgrade
+from .states.run import DECISIONS, RUN
+from .track import RETRY_ASKED, RETRY_REFUSED, SCHEMA_VERSION, TrackEvent, TrackStore, upgrade
 
 CANCEL_REQUESTED = "cancel_requested"
 _log = logging.getLogger(__name__)
@@ -118,6 +119,14 @@ class RunView:
     """The controller that picked the run up, which alone advances it; ``None`` until one does."""
     decision: Mapping[str, Any] | None = None
     """A decision on the open Gate that a client asked for and the controller has not delivered yet."""
+    escalation: str | None = None
+    """The escalation the run waits on, which a decision must name; ``None`` unless it waits at a Gate."""
+    approvers: tuple[str, ...] = ()
+    """Who may decide the open escalation: the roles its Gate declared, or the default ones."""
+    retry_asked_by: str | None = None
+    """Who asked for the run to be retried since it ended, while no controller has taken it."""
+    sequence: int = 0
+    """The sequence of the run's last event: where a client watching from this view continues the stream."""
 
     @property
     def status(self) -> str:
@@ -166,13 +175,23 @@ def _view(run_id: str, events: tuple[TrackEvent, ...]) -> RunView | None:
         # ended with the run, cancelled, rejected or interrupted as the run was.
         for name in open_steps:
             steps[name]["state"] = run.state.value
+    waiting = run.state is RunState.WAITING_AT_GATE
+    approvers: tuple[str, ...] = ()
+    if waiting:
+        escalated = next((e.payload for e in reversed(events)
+                          if e.event_type == "gate_escalated" and e.payload.get("escalation") == run.open_escalation),
+                         None)
+        approvers = tuple((escalated or {}).get("approvers") or DEFAULT_APPROVERS)
     return RunView(
         run_id=run_id, state=run.state, op=op,
         steps=tuple(StepView(name=step.name, cog=step.cog, **steps[step.name]) for step in op.steps),
         submitted_by=dict(submission.payload.get("submitted_by") or {}), name=submission.payload.get("name"),
         submitted_at=submission.occurred_at, updated_at=events[-1].occurred_at,
         cancel_requested_by=cancel_requested_by, error=error, reason=reason, controller=run.controller,
-        decision=pending_decision(events) if run.state is RunState.WAITING_AT_GATE else None,
+        decision=pending_decision(events) if waiting else None,
+        escalation=run.open_escalation if waiting else None, approvers=approvers,
+        retry_asked_by=retry_ask(events) if run.state.ended else None,
+        sequence=max((e.sequence or 0 for e in events), default=0),
     )
 
 
@@ -425,7 +444,11 @@ DECISION_REQUESTED, DECISION_REFUSED = "decision_requested", "decision_refused"
 
 
 class StaleDecision(ValueError):
-    """A decision on an escalation the run no longer waits on, or while another one is still pending."""
+    """A decision on an escalation the run no longer waits on."""
+
+
+class PendingDecision(StaleDecision):
+    """A decision asked while another one on the run is still waiting to be delivered."""
 
 
 def pending_decision(events: Iterable[TrackEvent]) -> dict[str, Any] | None:
@@ -491,7 +514,7 @@ def request_decision(track: TrackStore, run_id: str, *, escalation: str, outcome
         if view.state.ended:
             raise RunEnded(view.state, DECISION_REQUESTED, f"the run has ended {view.status}")
         if view.decision is not None:
-            raise StaleDecision(f"a decision on run {run_id!r} is already waiting to be delivered")
+            raise PendingDecision(f"a decision on run {run_id!r} is already waiting to be delivered")
         raise StaleDecision(f"run {run_id!r} is {view.status}, and does not wait on escalation {escalation!r}")
     return view
 
@@ -499,3 +522,68 @@ def request_decision(track: TrackStore, run_id: str, *, escalation: str, outcome
 def refuse_decision(track: TrackStore, run_id: str, *, escalation: str, error: str) -> None:
     """The controller's record of a decision its runner did not take, and why."""
     _append(track, run_id, DECISION_REFUSED, {"escalation": escalation, "error": error[:1024]})
+
+
+# --- retries: a person asking for an ended run to run again -----------------------------------------
+#
+# A run that ended `failed`, `interrupted` or `budget_exceeded` can be retried. A client asks here; a
+# controller takes the run (`retry_requested`, which the run machine records as it moves) and
+# advances it, or records why it would not (`retry_refused`).
+
+
+class NotRetryable(InvalidTransition):
+    """A retry asked of a run the machine does not retry from where it is, or that holds one already."""
+
+
+def retry_ask(events: Iterable[TrackEvent]) -> str | None:
+    """Who asked for a retry since the run last ended, while no controller has taken or refused it."""
+    actor = None
+    for event in events:
+        if event.event_type == RETRY_ASKED:
+            actor = event.payload.get("actor")
+        elif event.event_type in ("retry_requested", RETRY_REFUSED):
+            actor = None
+    return actor
+
+
+def request_retry(track: TrackStore, run_id: str, *, actor: str) -> RunView:
+    """Record that ``actor`` asked for an ended run to be retried; a controller takes it from there.
+
+    ``LookupError`` for a run never submitted; :class:`NotRetryable` for one
+    that has not ended, that the machine does not retry from its state
+    (completed, rejected, cancelled), or that holds an ask already. A run that
+    exhausted its budget is refused here too: the runner starts no new budget
+    epoch, so a new run is the answer. The check and the append are one step
+    on the Track.
+    """
+    if not actor:
+        raise ValueError("a retry names who asked for it")
+
+    def retryable(events: tuple[TrackEvent, ...]) -> bool:
+        events = tuple(upgrade(event) for event in events)
+        run = Run.replay(events)
+        return (run is not None and run.state.ended and run.state is not RunState.BUDGET_EXCEEDED
+                and RUN.accepts(run.state, "retry") and retry_ask(events) is None)
+
+    request = TrackEvent(run_id=run_id, event_type=RETRY_ASKED, payload={"actor": actor}, schema=SCHEMA_VERSION)
+    recorded = track.append_if(request, retryable)
+    view = describe(track, run_id)
+    if view is None:
+        raise LookupError(f"no run {run_id!r} on the Track")
+    if recorded is None:
+        if not view.state.ended:
+            raise NotRetryable(view.state, RETRY_ASKED, f"the run is {view.status}, and has not ended")
+        if view.retry_asked_by is not None:
+            raise NotRetryable(view.state, RETRY_ASKED, f"a retry was already asked for by {view.retry_asked_by}")
+        if view.state is RunState.BUDGET_EXCEEDED:
+            raise NotRetryable(view.state, RETRY_ASKED, "the run exhausted its budget; start a new run instead")
+        raise NotRetryable(view.state, RETRY_ASKED, f"the run {view.status.lower()}; there is nothing to retry")
+    return view
+
+
+def refuse_retry(track: TrackStore, run_id: str, *, error: str) -> bool:
+    """The controller's record of a retry it did not take, and why: written only while the ask still stands, so
+    a refusal never lands on a retry another controller took. Returns whether it was written."""
+    event = TrackEvent(run_id=run_id, event_type=RETRY_REFUSED, payload={"error": error[:1024]},
+                       schema=SCHEMA_VERSION)
+    return track.append_if(event, lambda events: retry_ask(events) is not None) is not None

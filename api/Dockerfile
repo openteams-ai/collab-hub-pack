@@ -1,5 +1,5 @@
-FROM python:3.14.9-slim-trixie AS python
-FROM ghcr.io/astral-sh/uv:0.13.5 AS uv
+FROM python:3.15.0-slim-trixie AS python
+FROM ghcr.io/astral-sh/uv:0.13.6 AS uv
 FROM node:24.22.1-bookworm-slim AS node
 # At least 0.82.1: the first pixi whose bundled roots exclude the compromised eMudhra chain, which
 # cogs/hermes/pixi.toml requires (requires-pixi).

@@ -54,7 +54,7 @@ async def smoke_slack_connector(base_url: str, *, bearer_token: str | None) -> N
         search.raise_for_status()
         search_payload = search.json()
         assert [hit["channel_id"] for hit in search_payload["hits"]] == ["C0001"]
-        assert all(not hit["is_im"] and not hit["is_mpim"] for hit in search_payload["hits"])
+        assert all(not hit.get("is_im") and not hit.get("is_mpim") for hit in search_payload["hits"])
         assert "fake-slack-access-token" not in search.text
 
         dm_read = await client.post("/v1/connectors/slack/channels/D0001/read", json={"limit": 10})
@@ -76,7 +76,10 @@ async def smoke_slack_connector(base_url: str, *, bearer_token: str | None) -> N
         assert read_payload["messages"][0]["text"] == "Kickoff notes in the kickoff doc; mirror at [link]"
         assert "http://" not in read.text
         assert "https://" not in read.text
-        assert "next_cursor" in read_payload
+        # Default-valued fields such as has_more: false are left out (#139);
+        # the untrusted-content marking is always sent.
+        assert not read_payload.get("has_more")
+        assert read_payload["content_trust"] == "external_untrusted"
 
 
 def parse_args() -> argparse.Namespace:

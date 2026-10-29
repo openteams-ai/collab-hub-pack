@@ -53,11 +53,41 @@ Reads return bounded normalized text. MIME attachments are not returned;
 alternative exists. The response reports `body_format` (`plain_text`, `html`,
 `multipart`, or `empty`) plus `has_attachments` and `attachment_count`, so an
 agent can distinguish converted HTML and omitted attachments from an empty
-message body without exposing attachment contents.
+message body without exposing attachment contents. A read omits the message's
+`snippet` only when the returned `text` (after `max_chars`) already
+contains it, allowing only for Gmail's HTML escaping, whitespace, invisible
+formatting characters and accent encoding (an accented letter stored as one
+character or as a letter plus a combining accent). Otherwise the snippet is
+kept: Gmail may build it from a part the read did not select, such as an HTML
+body behind a plain-text stub, and `max_chars` may cut the text short. Search
+hits always keep their snippet, since search returns no body.
 
 Search responses include `next_page_token` and `result_size_estimate`. To fetch
 the next page, repeat the same request fields and pass `next_page_token` as
 `page_token`. An empty token means the search is complete.
+
+Each search hit carries at most the first 10 `recipients` (To, then Cc). Every
+hit repeats its full recipient list, so an uncapped company-wide thread would
+dominate the response a model receives. When the cap cuts a list, the hit also
+carries `recipients_omitted`, the number of addresses left out; a complete list
+has no `recipients_omitted` key at all. The message read is never capped: it
+returns every recipient, and never carries `recipients_omitted`. To check
+whether a particular person received a message, use Gmail's `to:` and `cc:`
+operators in the query — Gmail matches them against the full list.
+
+A hit from a message sent to 42 people, for example, carries 10 addresses and:
+
+```json
+"recipients_omitted": 32
+```
+
+A message field left at its empty default is not sent: an empty `snippet`, an
+empty `label_ids` or `recipients` list, a missing `sent_at`, and so on. Its absence
+means exactly that default. Labels are always sent in full, because a missing
+label reads as "not marked": hiding Gmail's `IMPORTANT` from search hits made a
+model answer "not important" for mail that was. The response-level fields are
+always present, including `content_trust`, `security_notice` and
+`next_page_token`, whose empty value means the search is complete.
 
 Example search and continuation:
 
@@ -81,6 +111,10 @@ Example search and continuation:
       "thread_id": "thread-id",
       "subject": "Connector rollout",
       "sender": "Mark <mark [at] example [dot] com>",
+      "recipients": [
+        "Alice <alice [at] example [dot] com>",
+        "Bob <bob [at] example [dot] com>"
+      ],
       "snippet": "Please verify the remaining rollout items.",
       "label_ids": ["INBOX"]
     }

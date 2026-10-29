@@ -29,3 +29,4 @@ cogs:
     enabled: true
     intervalSeconds: 120
     runOnStartup: false
+    removedSourceRetentionHours: 48

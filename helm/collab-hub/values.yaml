@@ -741,6 +741,12 @@ cogs:
     intervalSeconds: 300
     # -- Whether a sweep runs when the indexer starts, before the first interval.
     runOnStartup: true
+    # -- Hours the blob descriptors of a source removed from
+    # `registry.sources` are kept after the source was last seen configured
+    # (1..8760). Each sweep then deletes a bounded batch of them; catalog rows
+    # and history are kept. Keep it well above how long a rollout can leave a
+    # pod on the old configuration. See docs/cog-registry.md.
+    removedSourceRetentionHours: 168
   serve:
     # -- Whether the Hub serves Cog pulls itself: the OCI read API (`/v2/`)
     # on the Hub host, in front of `registry.sources`, so installing a Cog

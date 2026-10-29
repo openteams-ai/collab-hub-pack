@@ -1014,6 +1014,11 @@
             },
             "runOnStartup": {
               "type": "boolean"
+            },
+            "removedSourceRetentionHours": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8760
             }
           },
           "additionalProperties": false

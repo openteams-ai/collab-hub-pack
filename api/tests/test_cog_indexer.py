@@ -18,7 +18,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,7 @@ from collab_hub_api.cogs.catalog import (
     STATUS_FAILED,
     STATUS_INDEXED,
     STATUS_NON_COG,
+    BlobDescriptor,
     CogArtifact,
     CogCatalogDataError,
     InMemoryCogCatalogStore,
@@ -686,6 +688,34 @@ async def test_mark_removed_marks_one_row():
         await indexer.mark_removed("no-such-source", "cogs/notes", "sha256:" + "b" * 64)
 
 
+async def test_a_sweep_collects_the_descriptors_of_a_source_no_longer_configured():
+    """Issue #193: once per sweep, after every source; bounded, and the configured source is stamped and kept."""
+
+    indexer, store, _ = make(max_collected_manifests_per_sweep=1)
+    await indexer.sweep()
+    present = store.list_current()
+    for row in present:
+        store.record_manifest_blobs(SOURCE_ID, row.repository, row.digest, [BlobDescriptor("sha256:" + "c" * 64, 1)])
+    # Rows a source dropped from the configuration left behind, last seen configured long ago.
+    for seed in "de":
+        dropped = replace(present[0], source_id="dropped", digest="sha256:" + seed * 64)
+        store.upsert(dropped)
+        descriptors = [BlobDescriptor("sha256:" + "f" * 64, 1)]
+        store.record_manifest_blobs("dropped", dropped.repository, dropped.digest, descriptors)
+    store._activity["dropped"] -= timedelta(days=8)
+    store._activity[SOURCE_ID] -= timedelta(days=30)
+
+    first = await indexer.sweep()
+    assert first.collected == 1, "bounded: one manifest per sweep here"
+    assert (await indexer.sweep()).collected == 1
+    assert (await indexer.sweep()).collected == 0
+    assert {key[0] for key in store._blobs} == {SOURCE_ID}, "the configured source's descriptors all survive"
+    assert len(store._blobs) == len(present)
+    assert store._activity[SOURCE_ID] > datetime.now(UTC) - timedelta(minutes=1), "the sweep stamped it"
+    # The dropped source's catalog rows are untouched.
+    assert [row.present for row in store.locations("sha256:" + "d" * 64)] == [True]
+
+
 async def test_the_sweep_writes_through_the_locks_view_and_reindex_through_the_store():
     # Issues #128 and #148: the sweep's reads and writes go through the view
     # its lock returned (on Postgres, the lock's own session) and never
@@ -726,6 +756,10 @@ async def test_the_sweep_writes_through_the_locks_view_and_reindex_through_the_s
             routes.append("view:mark_removed")
             return self._store.mark_removed(*args, **kwargs)
 
+        def collect_unconfigured_blobs(self, *args, **kwargs):
+            routes.append("view:collect_unconfigured_blobs")
+            return self._store.collect_unconfigured_blobs(*args, **kwargs)
+
     base, _, _ = make()
     indexer = CogIndexer(RecordingStore(), base.sources)
 
@@ -736,7 +770,9 @@ async def test_the_sweep_writes_through_the_locks_view_and_reindex_through_the_s
     summary = await indexer.sweep()
     assert summary.indexed + summary.failed == 2
     assert routes and all(route.startswith("view") for route in routes), routes
-    assert {"view:known", "view", "view:mark_removed"} <= set(routes), "every sweep-path call went through the view"
+    assert {"view:known", "view", "view:mark_removed", "view:collect_unconfigured_blobs"} <= set(routes), (
+        "every sweep-path call went through the view"
+    )
 
     # A retag on the next sweep is a view write too.
     client = base.sources[0].oci()
@@ -884,6 +920,12 @@ def test_build_cog_indexing_builds_sources_and_reads_the_loop_parameters():
     assert indexing is not None and indexing.sweeps is True
     assert indexing.interval_seconds == 42.0 and indexing.run_on_startup is False
     assert [s.id for s in indexing.indexer.sources] == ["s"]
+    assert indexing.indexer._removed_source_retention == timedelta(days=7), "the default"
+
+    config = Config.parse({"cogs": cogs_block(STATIC_SOURCE, removed_source_retention_hours=12)})
+    assert build_cog_indexing(config, InMemoryCogCatalogStore()).indexer._removed_source_retention == timedelta(
+        hours=12
+    )
 
 
 def test_build_cog_indexing_refuses_a_one_connection_pool():

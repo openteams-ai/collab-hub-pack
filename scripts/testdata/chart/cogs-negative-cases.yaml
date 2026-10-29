@@ -916,6 +916,36 @@ cases:
       index: {enabled: true, interval_seconds: 90000}
     app_error: 'less than or equal to 86400'
 
+  - name: removed-source retention below the floor
+    layers: [schema]
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+        index: {enabled: true, removedSourceRetentionHours: 0}
+    chart_error: 'removedSourceRetentionHours.*(minimum|greater than or equal)'
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+      index: {enabled: true, removed_source_retention_hours: 0}
+    app_error: 'greater than or equal to 1'
+
+  - name: removed-source retention above the ceiling
+    layers: [schema]
+    values:
+      cogs:
+        registry:
+          sources:
+            - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+        index: {enabled: true, removedSourceRetentionHours: 8761}
+    chart_error: 'removedSourceRetentionHours.*(maximum|less than or equal)'
+    settings:
+      registry_sources:
+        - {id: public, kind: static, url: https://registry.example.com, repositories: [cogs/alpha]}
+      index: {enabled: true, removed_source_retention_hours: 8761}
+    app_error: 'less than or equal to 8760'
+
   - name: unknown index key
     layers: [schema]
     values:
@@ -1103,7 +1133,7 @@ accepted:
               tokenUrl: http://harbor-core.harbor.svc.cluster.local:80/service/token
               projects: [cogs, team.x]
               requestTimeoutSeconds: 60
-        index: {enabled: true, intervalSeconds: 10}
+        index: {enabled: true, intervalSeconds: 10, removedSourceRetentionHours: 1}
     settings:
       registry_sources:
         - {id: edge.a, kind: static, url: 'https://registry.example.com:65535/v2', repositories: [cogs/alpha, team/cog-beta.v2]}
@@ -1119,7 +1149,7 @@ accepted:
           token_url: http://harbor-core.harbor.svc.cluster.local:80/service/token
           projects: [cogs, team.x]
           request_timeout_seconds: 60
-      index: {enabled: true, interval_seconds: 10}
+      index: {enabled: true, interval_seconds: 10, removed_source_retention_hours: 1}
 
   - name: serving with an explicit public URL on a port, at every limit
     values:

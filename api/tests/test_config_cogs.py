@@ -57,6 +57,7 @@ def test_defaults_are_off_and_empty():
     assert cogs.index.enabled is False
     assert cogs.index.interval_seconds == 300
     assert cogs.index.run_on_startup is True
+    assert cogs.index.removed_source_retention_hours == 168, "a week"
 
 
 def test_sources_with_index_disabled_is_valid():
@@ -358,6 +359,7 @@ def test_env_round_trip_as_the_chart_renders_it(monkeypatch):
     monkeypatch.setenv("COLLAB_HUB_API__COGS__INDEX__ENABLED", "true")
     monkeypatch.setenv("COLLAB_HUB_API__COGS__INDEX__INTERVAL_SECONDS", "120")
     monkeypatch.setenv("COLLAB_HUB_API__COGS__INDEX__RUN_ON_STARTUP", "false")
+    monkeypatch.setenv("COLLAB_HUB_API__COGS__INDEX__REMOVED_SOURCE_RETENTION_HOURS", "48")
     monkeypatch.setenv("COLLAB_HUB_COGS_SOURCE_HARBOR_MAIN_USERNAME", "robot$cogs+indexer")
     monkeypatch.setenv("COLLAB_HUB_COGS_SOURCE_HARBOR_MAIN_PASSWORD", "robot-secret-value")
     monkeypatch.setenv("COLLAB_HUB_COGS_SOURCE_HARBOR_MAIN_WEBHOOK_SECRET", "hook-secret-value")
@@ -369,6 +371,7 @@ def test_env_round_trip_as_the_chart_renders_it(monkeypatch):
     assert cogs.index.enabled is True
     assert cogs.index.interval_seconds == 120
     assert cogs.index.run_on_startup is False
+    assert cogs.index.removed_source_retention_hours == 48
     harbor, static = cogs.registry_sources
     assert harbor.kind == "harbor"
     assert harbor.api_url == "http://harbor-core.harbor.svc:80"

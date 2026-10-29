@@ -58,6 +58,7 @@ SOURCES_VAR = "COLLAB_HUB_API__COGS__REGISTRY_SOURCES"
 ENABLED_VAR = "COLLAB_HUB_API__COGS__INDEX__ENABLED"
 INTERVAL_VAR = "COLLAB_HUB_API__COGS__INDEX__INTERVAL_SECONDS"
 RUN_ON_STARTUP_VAR = "COLLAB_HUB_API__COGS__INDEX__RUN_ON_STARTUP"
+RETENTION_VAR = "COLLAB_HUB_API__COGS__INDEX__REMOVED_SOURCE_RETENTION_HOURS"
 VALIDATIONS_TEMPLATE = Path("templates") / "cogs-validations.yaml"
 
 # `fail "..."` and `fail (printf "..." ...)` in a Go template; the literal is
@@ -66,7 +67,12 @@ VALIDATIONS_TEMPLATE = Path("templates") / "cogs-validations.yaml"
 FAIL_LITERAL = re.compile(r'\bfail\s*\(?\s*(?:printf\s*)?"((?:[^"\\]|\\.)*)"')
 PLACEHOLDER = re.compile(r"%[sdvq%]")
 
-INDEX_DEFAULTS = {"enabled": False, "interval_seconds": 300, "run_on_startup": True}
+INDEX_DEFAULTS = {
+    "enabled": False,
+    "interval_seconds": 300,
+    "run_on_startup": True,
+    "removed_source_retention_hours": 168,
+}
 
 # cogs.serve (issue #179). The chart renders the block only when serving is
 # on, so everything but `enabled` falls back to the API's own defaults here.
@@ -135,6 +141,8 @@ def rendered_cogs(manifests: str) -> dict[str, Any]:
         index["interval_seconds"] = int(env[INTERVAL_VAR] or 0)
     if RUN_ON_STARTUP_VAR in env:
         index["run_on_startup"] = env[RUN_ON_STARTUP_VAR] == "true"
+    if RETENTION_VAR in env:
+        index["removed_source_retention_hours"] = int(env[RETENTION_VAR] or 0)
     sources = json.loads(env[SOURCES_VAR] or "[]") if SOURCES_VAR in env else []
     serve = dict(SERVE_DEFAULTS)
     for key, default in SERVE_DEFAULTS.items():

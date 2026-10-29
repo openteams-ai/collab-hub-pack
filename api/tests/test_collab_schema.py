@@ -51,6 +51,7 @@ COLLAB_TABLES = (
     "collab_cog_registry_tokens",
     "collab_cog_registry_credentials",
     "collab_cog_manifest_blobs",
+    "collab_cog_source_activity",
     "collab_cog_repositories",
     "collab_cog_publication_attempts",
     "collab_cog_upload_sessions",
@@ -458,7 +459,25 @@ def test_migration_creates_the_cog_publishing_schema():
         "org_id text",
     ):
         assert name not in earlier, name
-    assert LATEST_COLLAB_SCHEMA_VERSION == 15
+    assert LATEST_COLLAB_SCHEMA_VERSION == 16
+
+
+def test_migration_creates_the_source_activity_table():
+    server = FakeServer()
+
+    run_collab_schema_migrations(FakeDatabase(server))
+
+    (activity,) = server.ddl_for("collab_cog_source_activity")
+    # One stamp per source id: when it was last seen configured (issue #193).
+    assert "source_id text PRIMARY KEY" in activity
+    assert "last_configured_at timestamptz NOT NULL DEFAULT now()" in activity
+    # Appended as version 16, alone: nothing earlier mentions it, and it alters nothing that exists.
+    statements = dict(COLLAB_SCHEMA_MIGRATIONS)[16]
+    assert len(statements) == 1 and "ALTER" not in statements[0] and "DROP" not in statements[0]
+    earlier = " ".join(
+        statement for version, statements in COLLAB_SCHEMA_MIGRATIONS if version < 16 for statement in statements
+    )
+    assert "collab_cog_source_activity" not in earlier
 
 
 def test_rerunning_the_migration_applies_nothing():
@@ -506,6 +525,7 @@ PINNED_CHECKSUMS = {
     13: "0fdba92b5b894fa4358da5ebada5a33ce23a527e181dce411268df650a71935d",
     14: "c3ceed5775cd624aabf1b9b9ac90aa23f8909cf93777f90836c7a263f72a2494",
     15: "94c87d3dc97dfc138ea1ee78bdb067ba114163995f4ef27d44398a930690d84d",
+    16: "b2140ce96b42c4e7e9daabbac44b8ee6828d3ce9b39cccd37ca7f818747ca33f",
 }
 
 

@@ -15,6 +15,12 @@ One sweep, per configured source:
 5. record per-artifact failures in ``read_errors`` and carry on; log a
    summary and export it as metrics.
 
+After the last source, once per sweep, the blob descriptors of sources that
+are no longer configured are collected, a bounded batch at a time, once the
+source has gone unseen for the retention period (issue #193; see
+:meth:`~.catalog.SweepView.collect_unconfigured_blobs`). Catalog rows are not
+touched by it.
+
 Three things keep a sweep from doing damage:
 
 - **Single flight, by deployment shape; the lock is a belt.** The chart
@@ -88,12 +94,14 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import partial
 
 from ..frames.observability import COG_INDEX_ARTIFACTS, COG_INDEX_SWEEP_DURATION, COG_INDEX_SWEEPS
 from .bundle import COG_ENTRY_FILE, PROG_KIND, CogCard, read_cog_bundle
 from .catalog import (
+    DEFAULT_REMOVED_SOURCE_RETENTION,
+    MAX_COLLECTED_MANIFESTS_PER_SWEEP,
     STATUS_FAILED,
     STATUS_INDEXED,
     STATUS_NON_COG,
@@ -218,6 +226,8 @@ class SweepSummary:
     sources: int = 0
     sources_failed: int = 0
     """Sources whose enumeration did not complete; their removal step was skipped."""
+    collected: int = 0
+    """Manifests of sources no longer configured whose blob descriptors were deleted (issue #193)."""
     locked_out: bool = False
     """Another sweeper held the sweep lock; nothing was done."""
     duration_seconds: float = 0.0
@@ -256,9 +266,16 @@ class CogIndexer:
         clock: Callable[[], float] = time.monotonic,
         published_repositories: Callable[[str], Sequence[str]] | None = None,
         repositories_found: Callable[[str, Mapping[str, Sequence[str]]], object] | None = None,
+        removed_source_retention: timedelta = DEFAULT_REMOVED_SOURCE_RETENTION,
+        max_collected_manifests_per_sweep: int = MAX_COLLECTED_MANIFESTS_PER_SWEEP,
     ) -> None:
         self._store = store
         self._sources = list(sources)
+        # How long the descriptors of a source dropped from the configuration
+        # outlive the last time anything saw it configured, and how many
+        # manifests' worth one sweep may delete (issue #193).
+        self._removed_source_retention = removed_source_retention
+        self._max_collected = max_collected_manifests_per_sweep
         # Repositories published through the Hub into a source (issue #180):
         # enumerated along with whatever the source itself lists, so the
         # publish target needs no configured repository list.
@@ -386,6 +403,15 @@ class CogIndexer:
                     return summary
                 for source in self._sources:
                     await self._sweep_source(source, summary, view)
+                # Housekeeping on the lock session too, after every source:
+                # stamps the configured sources and collects a bounded batch
+                # of the descriptors of sources no longer configured.
+                summary.collected = await self._on_sweep_thread(
+                    view.collect_unconfigured_blobs,
+                    [source.id for source in self._sources],
+                    retention=self._removed_source_retention,
+                    limit=self._max_collected,
+                )
                 COG_INDEX_SWEEPS.labels(result="completed").inc()
             except asyncio.CancelledError:
                 # A shutdown mid-sweep, not a failure of the sweep.

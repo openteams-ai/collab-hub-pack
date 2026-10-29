@@ -22,6 +22,7 @@ why the registry stays swappable — are documented in
 [#85]: https://github.com/openteams-ai/collab-hub-pack/issues/85
 [#86]: https://github.com/openteams-ai/collab-hub-pack/issues/86
 [#148]: https://github.com/openteams-ai/collab-hub-pack/issues/148
+[#193]: https://github.com/openteams-ai/collab-hub-pack/issues/193
 
 Two rules shape everything below:
 
@@ -145,6 +146,7 @@ cogs:
     enabled: false      # sweep the sources on a schedule
     intervalSeconds: 300
     runOnStartup: true
+    removedSourceRetentionHours: 168   # see "Removing a source" below
   indexer:
     resources: {}       # empty = api.deployment.resources
 ```
@@ -179,6 +181,48 @@ because a sweep lists every repository of every source.
 With no sources and the indexer off, the chart renders only the `enabled`
 flag (`false`) on the API, so a deployment without Cogs carries no other
 `cogs` environment.
+
+### Removing a source
+
+Removing a source from `registry.sources` stops its sweeps and its pulls at
+once: the Hub serves only from configured sources. What it leaves in the
+database ([#193]):
+
+- **Catalog rows stay.** The source's rows in `collab_cog_artifacts` (cards,
+  provenance, removed versions) are kept as they are; nothing marks them
+  removed or deletes them. Re-adding the source under the same `id` picks
+  them up on its next sweep.
+- **Blob descriptors are collected after a retention period.** The
+  descriptors recorded for the source's manifests (`collab_cog_manifest_blobs`,
+  see [Read API](#read-api)) are deleted once the source has gone unseen in
+  the configuration for `removedSourceRetentionHours` (default 168, one week;
+  1 to 8760). "Seen" is a stamp per source id in `collab_cog_source_activity`
+  (migration 16). Every sweep stamps the sources the indexer has configured,
+  and every first recording of a manifest's descriptors stamps the source it
+  was recorded for, on whichever replica made it. A replica still on the old
+  configuration during a rollout, or another release on the same database
+  that still lists the source, therefore keeps the source alive by serving
+  it. A source that has descriptors and no stamp (one removed before
+  migration 16) is stamped by the first sweep after the upgrade, and its
+  retention starts there.
+- **Bounded per sweep.** One sweep deletes the descriptors of at most 500
+  manifests, each manifest's whole set at once, and takes each manifest's
+  catalog row first, as recording and removal do; a row something else holds
+  is skipped until the next sweep. A configured source's descriptors are
+  never deleted. The count is `collected` on the `cog_index_sweep` log line.
+- **Re-adding a source.** A manifest whose descriptors were collected is
+  recorded again by its next manifest read, which every client makes before
+  it asks for a blob, and that recording stamps the source again. Until then,
+  a blob that only the re-added source holds is `BLOB_UNKNOWN`.
+- **Only where the indexer runs.** Collection is part of the sweep, so with
+  `cogs.index.enabled: false` nothing is collected. The manual path in
+  [frames-operations.md](frames-operations.md#the-cog-catalog-collab_cog_artifacts)
+  covers that case, and getting the space back sooner.
+
+Keep the retention well above how long a rollout can leave a pod on the old
+configuration. A pod that outlives it can have the descriptors of a manifest
+it serves collected; its next manifest read records them again, so the cost
+is a failed blob request in between, not a wrong answer.
 
 ## Read API
 
@@ -590,7 +634,9 @@ requests may land on any replica. A client that asks for a blob of a manifest
 nobody has yet pulled through the Hub gets `BLOB_UNKNOWN` until the manifest
 is read. The record of a version is deleted when the indexer marks that
 version removed, so the table holds rows for present versions only; a version
-that comes back is recorded again by its next manifest read. Recording and
+that comes back is recorded again by its next manifest read. The records of a
+source removed from the configuration are deleted after a retention period
+(see [Removing a source](#removing-a-source)). Recording and
 removal take the version's catalog row, so a manifest has all of its
 descriptors or none.
 
@@ -637,10 +683,9 @@ blobs to a signed URL would take that traffic off the Hub at the price of
 showing clients the storage host; streaming is the default and the only
 mode today.)
 
-A source removed from configuration no longer has a sweep to collect its
-stored blob descriptors. Those descriptors grant no pulls for that source,
-but their retention needs a separate cleanup policy; tracked in
-[#193](https://github.com/nebari-dev/collab-hub-pack/issues/193).
+A source removed from configuration no longer has a sweep of its own, and
+its stored blob descriptors grant no pulls for it. The indexer deletes them
+after a retention period ([#193]; see [Removing a source](#removing-a-source)).
 
 ### Redirects
 

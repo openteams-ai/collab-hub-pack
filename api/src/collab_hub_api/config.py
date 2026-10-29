@@ -2,6 +2,7 @@ import os
 import re
 import sys
 from collections.abc import Mapping
+from datetime import timedelta
 from typing import Any, Literal, Self
 from urllib.parse import urlsplit
 
@@ -828,6 +829,9 @@ class TasksConfig(BaseModel):
 
 COGS_INDEX_INTERVAL_MIN_SECONDS = 10
 COGS_INDEX_INTERVAL_MAX_SECONDS = 24 * 3600
+COGS_INDEX_REMOVED_SOURCE_RETENTION_DEFAULT_HOURS = 7 * 24
+COGS_INDEX_REMOVED_SOURCE_RETENTION_MIN_HOURS = 1
+COGS_INDEX_REMOVED_SOURCE_RETENTION_MAX_HOURS = 365 * 24
 
 
 class CogIndexConfig(BaseModel):
@@ -849,6 +853,15 @@ class CogIndexConfig(BaseModel):
     enabled: bool = False
     interval_seconds: int = Field(default=300, ge=COGS_INDEX_INTERVAL_MIN_SECONDS, le=COGS_INDEX_INTERVAL_MAX_SECONDS)
     run_on_startup: bool = True
+    # How long the blob descriptors of a source removed from
+    # `registry_sources` are kept after it was last seen configured (issue
+    # #193). The floor keeps a collection from overtaking a rollout; the
+    # default is a week.
+    removed_source_retention_hours: int = Field(
+        default=COGS_INDEX_REMOVED_SOURCE_RETENTION_DEFAULT_HOURS,
+        ge=COGS_INDEX_REMOVED_SOURCE_RETENTION_MIN_HOURS,
+        le=COGS_INDEX_REMOVED_SOURCE_RETENTION_MAX_HOURS,
+    )
 
 
 class CogCatalogConfig(BaseModel):
@@ -1608,6 +1621,7 @@ def build_cog_indexing(
             sources,
             published_repositories=publish_store.published_repositories if publishing else None,
             repositories_found=settle_found(publish_store, store) if publishing else None,
+            removed_source_retention=timedelta(hours=index.removed_source_retention_hours),
         ),
         sweeps=index.enabled,
         interval_seconds=float(index.interval_seconds),

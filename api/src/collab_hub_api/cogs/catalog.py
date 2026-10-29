@@ -24,11 +24,14 @@ content ``jsonb`` cannot represent (:class:`CogCatalogDataError`), so one
 pathological card can be recorded as failed instead of poisoning writes.
 
 The write surface is exactly what the reconciliation indexer needs -- the
-four calls of :class:`SweepView` (``known``, ``upsert``, ``update_tags``,
-``mark_removed``) plus ``mark_removed_one`` for a webhook delete; the read
-surface is what the catalog API (#85) builds on. Rows are never deleted:
-installs and runs may reference a digest long after its publisher removed
-it, so removal is ``removed_at = now()`` and the row stays readable.
+calls of :class:`SweepView` (``known``, ``upsert``, ``update_tags``,
+``mark_removed``, and the housekeeping ``collect_unconfigured_blobs``) plus
+``mark_removed_one`` for a webhook delete; the read surface is what the
+catalog API (#85) builds on. Rows are never deleted: installs and runs may
+reference a digest long after its publisher removed it, so removal is
+``removed_at = now()`` and the row stays readable. What is deleted is the
+pull path's blob descriptors: a removed version's at once, and those of a
+source no longer configured after a retention period (issue #193).
 
 **Sessions.** A sweep runs under :meth:`CogCatalogStore.sweep_lock`, which
 yields a :class:`SweepView` when the lock was taken. On Postgres that view is
@@ -168,6 +171,24 @@ may fall back across.
 DEFAULT_TAGS_PAGE = 1000
 MAX_TAGS_PAGE = 1000
 """Tags in one ``tags/list`` page: what a request gets without ``n``, and the most ``n`` may ask for."""
+
+DEFAULT_REMOVED_SOURCE_RETENTION = timedelta(days=7)
+"""How long the blob descriptors of a source dropped from the configuration are kept (issue #193).
+
+Counted from the last time the source was seen configured: stamped by every
+sweep of an indexer that has it, and by every first recording of a manifest's
+descriptors for it, on any replica. Long against any rollout, so a replica
+still running the old configuration has long since gone (or has kept the
+source alive by writing for it) before anything of the source is collected.
+``cogs.index.removed_source_retention_hours`` sets it.
+"""
+
+MAX_COLLECTED_MANIFESTS_PER_SWEEP = 500
+"""Manifests whose descriptors one sweep may collect for unconfigured sources; the rest wait for the next sweep.
+
+Per manifest, never per descriptor row, so a manifest loses all of its
+descriptors or none (what :attr:`PullableArtifact.blobs_recorded` relies on).
+"""
 
 
 @dataclass(frozen=True)
@@ -336,6 +357,56 @@ class SweepView(ABC):
         """
 
         raise NotImplementedError
+
+    @abstractmethod
+    def collect_unconfigured_blobs(
+        self,
+        configured: Iterable[str],
+        *,
+        retention: timedelta = DEFAULT_REMOVED_SOURCE_RETENTION,
+        limit: int = MAX_COLLECTED_MANIFESTS_PER_SWEEP,
+    ) -> int:
+        """Delete the blob descriptors of sources that are no longer configured; at most ``limit`` manifests' worth.
+
+        Housekeeping for issue #193, run once at the end of every sweep with
+        the ids of the sources the indexer has configured. Three steps:
+
+        1. stamp every ``configured`` source as seen configured now;
+        2. give a source that has descriptors but no stamp one (now): its
+           retention clock starts, and nothing of it goes this time;
+        3. for sources that are not ``configured`` and were last seen
+           configured more than ``retention`` ago, delete the descriptors of
+           up to ``limit`` manifests, each manifest's whole set at once.
+
+        A configured source's descriptors are never touched, whatever its
+        stamp says. A source a replica still has configured is kept alive by
+        that replica: its first recording of any manifest's descriptors
+        stamps the source again (:meth:`record_manifest_blobs`), and its
+        indexer, if it runs one, stamps it every sweep. Each manifest is
+        taken under its artifact's row, like :meth:`mark_removed`, so a
+        recording in flight is never split; a row something else holds is
+        skipped until the next sweep. Only ``collab_cog_manifest_blobs`` is
+        deleted from: catalog rows and their history stay. A manifest whose
+        descriptors were collected is recorded again by its next manifest
+        read once its source is configured again.
+
+        Returns the number of manifests whose descriptors were deleted.
+        Raises :class:`ValueError` for an empty ``configured`` (that would
+        declare every source gone) or a retention that is not positive.
+        """
+
+        raise NotImplementedError
+
+
+def _checked_collection(configured: Iterable[str], retention: timedelta, limit: int) -> tuple[list[str], int]:
+    """The arguments of :meth:`SweepView.collect_unconfigured_blobs`, checked: sorted unique ids and a sane limit."""
+
+    ids = sorted(set(configured))
+    if not ids:
+        raise ValueError("collect_unconfigured_blobs needs the configured source ids; none would declare all gone")
+    if retention <= timedelta(0):
+        raise ValueError("the retention of an unconfigured source's descriptors must be positive")
+    return ids, max(1, min(int(limit), MAX_COLLECTED_MANIFESTS_PER_SWEEP))
 
 
 class CogCatalogStore(SweepView):
@@ -575,6 +646,12 @@ class CogCatalogStore(SweepView):
         recorded for it. A manifest therefore has either all of its
         descriptors or none, and one that comes back is recorded again by
         its next manifest read.
+
+        A call that records anything also stamps ``source_id`` as seen
+        configured now (issue #193): only a process that has the source
+        configured records for it, so a replica still serving a source keeps
+        :meth:`collect_unconfigured_blobs` away from it, and re-adding a
+        collected source restarts its clock with its first manifest read.
         """
 
         raise NotImplementedError
@@ -797,6 +874,11 @@ class UnavailableCogCatalogStore(CogCatalogStore):
     def mark_removed(self, source_id, present, *, excluding=(), written_before=None) -> int:
         raise self._refuse()
 
+    def collect_unconfigured_blobs(
+        self, configured, *, retention=DEFAULT_REMOVED_SOURCE_RETENTION, limit=MAX_COLLECTED_MANIFESTS_PER_SWEEP
+    ) -> int:
+        raise self._refuse()
+
     def clock(self) -> datetime:
         raise self._refuse()
 
@@ -866,6 +948,8 @@ class InMemoryCogCatalogStore(CogCatalogStore):
 
     _rows: dict[tuple[str, str, str], CogArtifact] = field(default_factory=dict)
     _blobs: dict[tuple[str, str, str], dict[str, BlobDescriptor]] = field(default_factory=dict)
+    _activity: dict[str, datetime] = field(default_factory=dict)
+    """``collab_cog_source_activity``: when each source was last seen configured."""
     _attempts: dict[str, dict[str, Any]] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _sweep: threading.Lock = field(default_factory=threading.Lock)
@@ -1137,8 +1221,40 @@ class InMemoryCogCatalogStore(CogCatalogStore):
             if not descriptors or row is None or row.removed_at is not None:
                 return
             recorded = self._blobs.setdefault(key, {})
+            wrote = False
             for blob in descriptors:
-                recorded.setdefault(blob.digest, blob)
+                if blob.digest not in recorded:
+                    recorded[blob.digest] = blob
+                    wrote = True
+            if wrote:
+                self._stamp(source_id, datetime.now(UTC))
+
+    def _stamp(self, source_id: str, now: datetime) -> None:
+        """Seen configured at ``now``; never moves a stamp backwards. Caller holds ``_lock``."""
+
+        seen = self._activity.get(source_id)
+        self._activity[source_id] = now if seen is None else max(seen, now)
+
+    def collect_unconfigured_blobs(
+        self, configured, *, retention=DEFAULT_REMOVED_SOURCE_RETENTION, limit=MAX_COLLECTED_MANIFESTS_PER_SWEEP
+    ) -> int:
+        ids, limit = _checked_collection(configured, retention, limit)
+        now = datetime.now(UTC)
+        with self._lock:
+            for source_id in ids:
+                self._stamp(source_id, now)
+            for source_id in {key[0] for key in self._blobs} - set(ids):
+                self._activity.setdefault(source_id, now)
+            collectable = {
+                source_id
+                for source_id, seen in self._activity.items()
+                if source_id not in ids and seen < now - retention
+            }
+            # No row locks to skip here: the in-memory store is one lock.
+            batch = sorted(key for key in self._blobs if key[0] in collectable)[:limit]
+            for key in batch:
+                del self._blobs[key]
+        return len(batch)
 
     def find_blob(self, repository, blob_digest, source_ids) -> list[PullableBlob]:
         found: list[PullableBlob] = []
@@ -1434,6 +1550,13 @@ class PostgresCogCatalogStore(CogCatalogStore):
             _forget_removed_blobs(conn, source_id)
         return marked
 
+    def collect_unconfigured_blobs(
+        self, configured, *, retention=DEFAULT_REMOVED_SOURCE_RETENTION, limit=MAX_COLLECTED_MANIFESTS_PER_SWEEP
+    ) -> int:
+        ids, limit = _checked_collection(configured, retention, limit)
+        with self._own_connection() as conn:
+            return _collect_unconfigured_blobs(conn, ids, retention, limit)
+
     def clock(self) -> datetime:
         with self._own_connection() as conn:
             return _read_clock(conn)
@@ -1664,19 +1787,31 @@ class PostgresCogCatalogStore(CogCatalogStore):
             # everything it wrote, and a recording that arrives behind a
             # removal finds no present row and writes nothing. That is what
             # keeps a manifest's descriptors all-or-none (see the base class).
+            #
+            # A recording that wrote anything also stamps the source as seen
+            # configured (issue #193), in the same statement: whoever records
+            # for a source has it configured, so the indexer's collection of
+            # unconfigured sources' descriptors leaves this one alone. Only a
+            # first recording writes, so the stamp costs no later read a write.
             conn.execute(
                 """
                 WITH present AS (
                     SELECT 1 FROM collab_cog_artifacts
                     WHERE source_id = %s AND repository = %s AND digest = %s AND removed_at IS NULL
                     FOR SHARE
+                ), recorded AS (
+                    INSERT INTO collab_cog_manifest_blobs
+                        (source_id, repository, manifest_digest, blob_digest, size, media_type)
+                    SELECT %s, %s, %s, blob.digest, blob.size, blob.media_type
+                    FROM unnest(%s::text[], %s::bigint[], %s::text[]) AS blob(digest, size, media_type)
+                    WHERE EXISTS (SELECT 1 FROM present)
+                    ON CONFLICT DO NOTHING
+                    RETURNING 1
                 )
-                INSERT INTO collab_cog_manifest_blobs
-                    (source_id, repository, manifest_digest, blob_digest, size, media_type)
-                SELECT %s, %s, %s, blob.digest, blob.size, blob.media_type
-                FROM unnest(%s::text[], %s::bigint[], %s::text[]) AS blob(digest, size, media_type)
-                WHERE EXISTS (SELECT 1 FROM present)
-                ON CONFLICT DO NOTHING
+                INSERT INTO collab_cog_source_activity AS seen (source_id, last_configured_at)
+                SELECT %s, now() WHERE EXISTS (SELECT 1 FROM recorded)
+                ON CONFLICT (source_id) DO UPDATE
+                SET last_configured_at = GREATEST(seen.last_configured_at, EXCLUDED.last_configured_at)
                 """,
                 (
                     source_id,
@@ -1688,6 +1823,7 @@ class PostgresCogCatalogStore(CogCatalogStore):
                     [blob.digest for blob in descriptors],
                     [blob.size for blob in descriptors],
                     [blob.media_type for blob in descriptors],
+                    source_id,
                 ),
             )
 
@@ -1755,6 +1891,12 @@ class _PostgresSweepView(SweepView):
         marked = _mark_removed_rows(self._conn, source_id, present, excluding=excluding, written_before=written_before)
         _forget_removed_blobs(self._conn, source_id)  # autocommit: the removal already stands
         return marked
+
+    def collect_unconfigured_blobs(
+        self, configured, *, retention=DEFAULT_REMOVED_SOURCE_RETENTION, limit=MAX_COLLECTED_MANIFESTS_PER_SWEEP
+    ) -> int:
+        ids, limit = _checked_collection(configured, retention, limit)
+        return _collect_unconfigured_blobs(self._conn, ids, retention, limit)
 
 
 def _select_known(conn, source_id: str) -> list[KnownArtifact]:
@@ -1930,6 +2072,107 @@ def _forget_removed_blobs(conn, source_id: str) -> None:
         logger.warning(
             "cog_catalog_blob_cleanup_failed", extra={"source_id": source_id, "error": type(exc).__name__}
         )
+
+
+def _collect_unconfigured_blobs(conn, configured: list[str], retention: timedelta, limit: int) -> int:
+    """Stamp the configured sources, start the clock of unstamped ones, and collect a batch (issue #193).
+
+    See :meth:`SweepView.collect_unconfigured_blobs`. Three statements, each
+    atomic on its own and each safe in any order against the others and
+    against a concurrent sweep, recording or removal:
+
+    - The stamp only moves forward (``GREATEST``), and only for configured
+      ids, which step three never deletes for.
+    - Starting a clock inserts ``now()`` for a source with descriptors and
+      no stamp and never updates an existing stamp, so it can only delay a
+      collection. It finds the sources with a loose index scan over the
+      primary key (one probe per distinct ``source_id``), not a table scan.
+    - The deletion picks up to ``limit`` manifests of collectable sources,
+      locks each one's artifact row ``FOR UPDATE SKIP LOCKED`` (the lock a
+      recording takes ``FOR SHARE``, so a recording in flight is waited out
+      by skipping, and one that arrives later waits and then writes a whole
+      set), and deletes every descriptor of each manifest it holds -- plus
+      those of a manifest with no artifact row at all, which nothing can
+      record for. Only ``collab_cog_manifest_blobs`` is deleted from.
+
+    Housekeeping, like :func:`_forget_removed_blobs`: a database error is
+    logged by class and answers ``0``; the next sweep tries again. The sweep
+    is not failed for it.
+    """
+
+    import psycopg
+
+    try:
+        conn.execute(
+            """
+            INSERT INTO collab_cog_source_activity AS seen (source_id, last_configured_at)
+            SELECT source_id, now() FROM unnest(%s::text[]) AS configured(source_id)
+            ON CONFLICT (source_id) DO UPDATE
+            SET last_configured_at = GREATEST(seen.last_configured_at, EXCLUDED.last_configured_at)
+            """,
+            (configured,),
+        )
+        conn.execute(
+            """
+            WITH RECURSIVE sources AS (
+                (SELECT source_id FROM collab_cog_manifest_blobs ORDER BY source_id LIMIT 1)
+                UNION ALL
+                SELECT (
+                    SELECT b.source_id FROM collab_cog_manifest_blobs b
+                    WHERE b.source_id > sources.source_id ORDER BY b.source_id LIMIT 1
+                )
+                FROM sources WHERE sources.source_id IS NOT NULL
+            )
+            INSERT INTO collab_cog_source_activity (source_id, last_configured_at)
+            SELECT source_id, now() FROM sources
+            WHERE source_id IS NOT NULL AND NOT (source_id = ANY(%s::text[]))
+            ON CONFLICT (source_id) DO NOTHING
+            """,
+            (configured,),
+        )
+        row = conn.execute(
+            """
+            WITH collectable AS MATERIALIZED (
+                SELECT source_id FROM collab_cog_source_activity
+                WHERE NOT (source_id = ANY(%s::text[])) AND last_configured_at < now() - %s::interval
+            ), batch AS MATERIALIZED (
+                SELECT DISTINCT b.source_id, b.repository, b.manifest_digest
+                FROM collab_cog_manifest_blobs b
+                WHERE b.source_id IN (SELECT source_id FROM collectable)
+                ORDER BY b.source_id, b.repository, b.manifest_digest
+                LIMIT %s
+            ), held AS MATERIALIZED (
+                SELECT a.source_id, a.repository, a.digest
+                FROM collab_cog_artifacts a
+                JOIN batch k
+                  ON a.source_id = k.source_id AND a.repository = k.repository AND a.digest = k.manifest_digest
+                FOR UPDATE OF a SKIP LOCKED
+            ), doomed AS MATERIALIZED (
+                SELECT k.source_id, k.repository, k.manifest_digest FROM batch k
+                WHERE EXISTS (
+                          SELECT 1 FROM held h
+                          WHERE h.source_id = k.source_id AND h.repository = k.repository
+                            AND h.digest = k.manifest_digest
+                      )
+                   OR NOT EXISTS (
+                          SELECT 1 FROM collab_cog_artifacts a
+                          WHERE a.source_id = k.source_id AND a.repository = k.repository
+                            AND a.digest = k.manifest_digest
+                      )
+            ), deleted AS (
+                DELETE FROM collab_cog_manifest_blobs b USING doomed d
+                WHERE b.source_id = d.source_id AND b.repository = d.repository
+                  AND b.manifest_digest = d.manifest_digest
+                RETURNING b.source_id, b.repository, b.manifest_digest
+            )
+            SELECT count(DISTINCT (source_id, repository, manifest_digest)) AS manifests FROM deleted
+            """,
+            (configured, retention, limit),
+        ).fetchone()
+    except psycopg.Error as exc:
+        logger.warning("cog_catalog_source_blob_collection_failed", extra={"error": type(exc).__name__})
+        return 0
+    return int(row["manifests"]) if row else 0
 
 
 @contextmanager

@@ -27,6 +27,7 @@ from collab_hub_api.cogs import deadline
 from collab_hub_api.cogs.catalog import (
     COG_INDEX_LOCK_KEY,
     DEFAULT_TAGS_PAGE,
+    MAX_COLLECTED_MANIFESTS_PER_SWEEP,
     MAX_LIST_LIMIT,
     MAX_PULL_CANDIDATES,
     MAX_TAGS_PAGE,
@@ -1371,6 +1372,275 @@ def test_live_the_sweeps_cleanup_leaves_a_version_that_came_back_and_skips_a_row
     assert manifests() == {digest("1")}, "the next sweep takes what was skipped; a present version keeps its own"
 
 
+# -- issue #193: descriptors of sources removed from the configuration -------
+
+GONE = "gone"
+"""A source dropped from the configuration."""
+LEFT = "left"
+"""A source dropped too recently to be collected."""
+WEEK = timedelta(days=7)
+
+
+def _exercise_unconfigured_collection(store, rows, age, unstamp) -> None:
+    """Retention, bounds and survivors of :meth:`collect_unconfigured_blobs`, on either backend.
+
+    ``rows()`` is every descriptor as ``(source_id, repository, manifest, blob)``;
+    ``age(source_id, delta)`` moves a source's stamp back; ``unstamp(source_id)``
+    deletes it, as a database migrated while descriptors already existed has none.
+    """
+
+    two = [BlobDescriptor(digest("x"), 1), BlobDescriptor(digest("y"), 2)]
+    layout = {
+        SOURCE: [("cogs/a", "1"), ("cogs/a", "2")],
+        GONE: [("cogs/a", "1"), ("cogs/a", "3"), ("cogs/b", "4")],
+        LEFT: [("cogs/a", "5")],
+    }
+    for source_id, keys in layout.items():
+        for repository, name in keys:
+            store.upsert(artifact(name, source_id=source_id, repository=repository))
+            store.record_manifest_blobs(source_id, repository, digest(name), two)
+    # A removed version of the dropped source: history the catalog keeps.
+    store.upsert(artifact("6", source_id=GONE, repository="cogs/b"))
+    store.mark_removed_one(GONE, "cogs/b", digest("6"))
+    catalog = {name: sorted(store.locations(digest(name)), key=lambda row: row.source_id) for name in "123456"}
+
+    def manifests(source_id: str) -> set[tuple[str, str]]:
+        return {(repository, manifest) for source, repository, manifest, _ in rows() if source == source_id}
+
+    def blobs_per_manifest() -> set[int]:
+        counts: dict[tuple, int] = {}
+        for source_id, repository, manifest, _ in rows():
+            counts[(source_id, repository, manifest)] = counts.get((source_id, repository, manifest), 0) + 1
+        return set(counts.values())
+
+    with pytest.raises(ValueError, match="none would declare all gone"):
+        store.collect_unconfigured_blobs([], retention=WEEK)
+    with pytest.raises(ValueError, match="must be positive"):
+        store.collect_unconfigured_blobs([SOURCE], retention=timedelta(0))
+
+    # Recording stamped every source just now: nothing has been gone for a week.
+    assert store.collect_unconfigured_blobs([SOURCE], retention=WEEK) == 0
+    assert len(rows()) == 12
+
+    # GONE has been unseen for longer than the retention; LEFT has not. A configured
+    # source is never collected, however old its stamp.
+    age(GONE, timedelta(days=8))
+    age(SOURCE, timedelta(days=30))
+    age(LEFT, timedelta(days=6))
+    # Bounded: two manifests this time, each with all of its descriptors, never a part of one.
+    assert store.collect_unconfigured_blobs([SOURCE], retention=WEEK, limit=2) == 2
+    assert len(manifests(GONE)) == 1 and blobs_per_manifest() == {2}
+    assert store.collect_unconfigured_blobs([SOURCE], retention=WEEK, limit=2) == 1
+    assert manifests(GONE) == set()
+    assert store.collect_unconfigured_blobs([SOURCE], retention=WEEK, limit=2) == 0
+    assert manifests(SOURCE) == {("cogs/a", digest("1")), ("cogs/a", digest("2"))}
+    assert manifests(LEFT) == {("cogs/a", digest("5"))}
+
+    # Only descriptors went: every catalog row, the removed one included, is as it was.
+    assert {name: sorted(store.locations(digest(name)), key=lambda row: row.source_id) for name in "123456"} == catalog
+
+    # A source with descriptors and no stamp gets one, and its clock starts there.
+    unstamp(LEFT)
+    assert store.collect_unconfigured_blobs([SOURCE], retention=timedelta(hours=1)) == 0
+    assert manifests(LEFT) == {("cogs/a", digest("5"))}
+    age(LEFT, timedelta(hours=2))
+    assert store.collect_unconfigured_blobs([SOURCE], retention=timedelta(hours=1)) == 1
+    assert manifests(LEFT) == set()
+
+    # GONE is configured again: the lookups say its descriptors are missing, the next
+    # manifest read records them, and that recording restarts its clock.
+    assert [row.blobs_recorded for row in store.find_pullable("cogs/a", (GONE,), digest=digest("3"))] == [False]
+    store.record_manifest_blobs(GONE, "cogs/a", digest("3"), two)
+    assert [row.blobs_recorded for row in store.find_pullable("cogs/a", (GONE,), digest=digest("3"))] == [True]
+    assert store.collect_unconfigured_blobs([SOURCE], retention=WEEK) == 0, "the recording stamped it"
+    assert manifests(GONE) == {("cogs/a", digest("3"))}
+    # And configured, it is not collected whatever its stamp says.
+    age(GONE, timedelta(days=30))
+    assert store.collect_unconfigured_blobs([SOURCE, GONE], retention=WEEK) == 0
+    assert manifests(GONE) == {("cogs/a", digest("3"))}
+
+
+def test_unconfigured_collection_in_memory(store):
+    def rows():
+        return [(*key, blob) for key, blobs in store._blobs.items() for blob in blobs]
+
+    def age(source_id, delta):
+        store._activity[source_id] = store._activity.get(source_id, datetime.now(UTC)) - delta
+
+    _exercise_unconfigured_collection(store, rows, age, lambda source_id: store._activity.pop(source_id))
+
+
+def _live_rows(database) -> list[tuple[str, str, str, str]]:
+    with database.connection() as conn:
+        found = conn.execute(
+            "SELECT source_id, repository, manifest_digest, blob_digest FROM collab_cog_manifest_blobs"
+        ).fetchall()
+    return [(row["source_id"], row["repository"], row["manifest_digest"], row["blob_digest"]) for row in found]
+
+
+def _live_age(database, source_id: str, delta: timedelta) -> None:
+    with database.connection() as conn:
+        conn.execute(
+            "UPDATE collab_cog_source_activity SET last_configured_at = last_configured_at - %s WHERE source_id = %s",
+            (delta, source_id),
+        )
+
+
+@live_postgres
+def test_live_unconfigured_collection(live_store):
+    store, database = live_store
+
+    def unstamp(source_id):
+        with database.connection() as conn:
+            conn.execute("DELETE FROM collab_cog_source_activity WHERE source_id = %s", (source_id,))
+
+    _exercise_unconfigured_collection(
+        store, lambda: _live_rows(database), lambda source_id, delta: _live_age(database, source_id, delta), unstamp
+    )
+
+
+@live_postgres
+def test_live_unconfigured_collection_on_the_sweep_session_skips_a_manifest_being_recorded(live_store):
+    """The sweep's collection never splits a recording in flight, and never waits for one."""
+
+    store, database = live_store
+    for name in ("1", "2"):
+        store.upsert(artifact(name, source_id=GONE, repository="cogs/a"))
+        store.record_manifest_blobs(GONE, "cogs/a", digest(name), [BlobDescriptor(digest("x"), 1)])
+    # An orphan: descriptors whose artifact row is gone (by hand). Nothing can record for it.
+    with database.connection() as conn:
+        conn.execute(
+            "INSERT INTO collab_cog_manifest_blobs (source_id, repository, manifest_digest, blob_digest, size)"
+            " VALUES (%s, 'cogs/a', %s, %s, 1)",
+            (GONE, digest("9"), digest("x")),
+        )
+    _live_age(database, GONE, timedelta(days=8))
+
+    held = (GONE, "cogs/a", digest("2"))
+    with database.connection() as recorder:
+        # A recording of manifest 2 caught mid-statement: its row held shared, one more descriptor written.
+        recorder.execute(
+            "SELECT 1 FROM collab_cog_artifacts WHERE source_id = %s AND repository = %s AND digest = %s FOR SHARE",
+            held,
+        )
+        recorder.execute(
+            "INSERT INTO collab_cog_manifest_blobs (source_id, repository, manifest_digest, blob_digest, size)"
+            " VALUES (%s, %s, %s, %s, 1)",
+            (*held, digest("y")),
+        )
+        started = time.monotonic()
+        with store.sweep_lock() as view:
+            assert view is not None
+            assert view.collect_unconfigured_blobs([SOURCE], retention=WEEK) == 2, "manifest 1 and the orphan"
+        assert time.monotonic() - started < 2.0, "the collection waited on the held row"
+    # The recording committed both of manifest 2's descriptors; they are a whole set, and the
+    # next sweep takes the whole set.
+    assert sorted(blob for *_, blob in _live_rows(database)) == [digest("x"), digest("y")]
+    assert store.collect_unconfigured_blobs([SOURCE], retention=WEEK) == 1
+    assert _live_rows(database) == []
+    # Nothing but descriptors: both catalog rows are still there and present.
+    assert [row.present for row in store.locations(digest("1")) + store.locations(digest("2"))] == [True, True]
+
+
+@live_postgres
+def test_live_a_collection_holding_a_manifest_makes_a_recording_wait_and_then_write_it_whole(live_store):
+    store, database = live_store
+    store.upsert(artifact("1", source_id=GONE, repository="cogs/a"))
+    key = (GONE, "cogs/a", digest("1"))
+    two = [BlobDescriptor(digest("x"), 1), BlobDescriptor(digest("y"), 1)]
+    store.record_manifest_blobs(*key, two)
+    _live_age(database, GONE, timedelta(days=8))
+    with database.connection() as collector:
+        # The collection's lock on the artifact row, taken and not yet committed.
+        collector.execute(
+            "SELECT 1 FROM collab_cog_artifacts WHERE source_id = %s AND repository = %s AND digest = %s FOR UPDATE",
+            key,
+        )
+        collector.execute(
+            "DELETE FROM collab_cog_manifest_blobs WHERE source_id = %s AND repository = %s AND manifest_digest = %s",
+            key,
+        )
+        recording = threading.Thread(target=lambda: store.record_manifest_blobs(*key, two))
+        recording.start()
+        recording.join(timeout=1.0)
+        assert recording.is_alive(), "the recording did not wait for the collection holding the row"
+    recording.join(timeout=30)
+    assert not recording.is_alive()
+    assert sorted(blob for *_, blob in _live_rows(database)) == [digest("x"), digest("y")]
+    # ... and stamped the source, so it is not collected again for another retention.
+    assert store.collect_unconfigured_blobs([SOURCE], retention=WEEK) == 0
+
+
+@live_postgres
+def test_live_a_recording_stamps_its_source_only_when_it_writes(live_store):
+    store, database = live_store
+
+    def stamp() -> datetime | None:
+        with database.connection() as conn:
+            row = conn.execute(
+                "SELECT last_configured_at FROM collab_cog_source_activity WHERE source_id = %s", (GONE,)
+            ).fetchone()
+        return row["last_configured_at"] if row else None
+
+    store.upsert(artifact("1", source_id=GONE, repository="cogs/a"))
+    store.record_manifest_blobs(GONE, "cogs/a", digest("0"), [BlobDescriptor(digest("x"), 1)])
+    assert stamp() is None, "nothing recorded (no artifact row), nothing stamped"
+    store.record_manifest_blobs(GONE, "cogs/a", digest("1"), [BlobDescriptor(digest("x"), 1)])
+    first = stamp()
+    assert first is not None
+    _live_age(database, GONE, timedelta(days=1))
+    aged = stamp()
+    store.record_manifest_blobs(GONE, "cogs/a", digest("1"), [BlobDescriptor(digest("x"), 1)])
+    assert stamp() == aged, "a read that writes nothing stamps nothing"
+
+
+def test_unconfigured_collection_deletes_descriptors_and_nothing_else():
+    store, conn = _fake_store([[], [], [{"manifests": 3}]])
+    assert store.collect_unconfigured_blobs(["b", "a", "b"], retention=WEEK, limit=10_000) == 3
+    stamp, start_clocks, collect = conn.queries
+    # Configured sources are stamped, sorted and once each; the stamp only moves forward.
+    assert stamp[1] == (["a", "b"],)
+    assert "GREATEST(seen.last_configured_at, EXCLUDED.last_configured_at)" in stamp[0]
+    # Unstamped sources get a clock and nothing else: an existing stamp is never touched by it.
+    assert start_clocks[0].endswith("ON CONFLICT (source_id) DO NOTHING")
+    assert "NOT (source_id = ANY(%s::text[]))" in start_clocks[0]
+    sql, params = collect
+    assert params == (["a", "b"], WEEK, MAX_COLLECTED_MANIFESTS_PER_SWEEP), "the limit is clamped"
+    assert "WHERE NOT (source_id = ANY(%s::text[])) AND last_configured_at < now() - %s::interval" in sql
+    # Each manifest is taken under its artifact's row, skipping one something else holds.
+    assert "FOR UPDATE OF a SKIP LOCKED" in sql
+    assert "ORDER BY b.source_id, b.repository, b.manifest_digest LIMIT %s" in sql
+    # The one table anything is deleted from.
+    deletes = [statement for statement, _ in conn.queries if "DELETE" in statement]
+    assert deletes == [sql] and sql.count("DELETE") == 1
+    assert "DELETE FROM collab_cog_manifest_blobs b USING doomed d" in sql
+    for statement in conn.statements:
+        for table in ("collab_cog_artifacts", "collab_cog_publication_attempts", "collab_cog_repositories"):
+            assert f"UPDATE {table}" not in statement and f"DELETE FROM {table}" not in statement
+            assert f"INSERT INTO {table}" not in statement
+
+
+def test_a_failed_unconfigured_collection_is_logged_and_answers_zero(caplog):
+    import psycopg
+
+    class _Fails(_FakeConnection):
+        def execute(self, sql, params=None):
+            if "DELETE FROM collab_cog_manifest_blobs" in sql:
+                raise psycopg.errors.QueryCanceled("canceling statement due to statement timeout on db.internal")
+            return super().execute(sql, params)
+
+    store = PostgresCogCatalogStore(_FakeDb(_Fails()))
+    with caplog.at_level("WARNING", logger="frames_server.cogs.catalog"):
+        assert store.collect_unconfigured_blobs([SOURCE], retention=WEEK) == 0
+    (record,) = [r for r in caplog.records if r.message == "cog_catalog_source_blob_collection_failed"]
+    assert record.error == "QueryCanceled" and "db.internal" not in caplog.text
+
+
+def test_the_unavailable_store_refuses_a_collection():
+    with pytest.raises(CogCatalogUnavailableError):
+        UnavailableCogCatalogStore().collect_unconfigured_blobs([SOURCE])
+
+
 def test_pullable_lookups_in_memory(store):
     _exercise_pullable(store)
 
@@ -2226,12 +2496,19 @@ def test_record_manifest_blobs_is_one_idempotent_insert():
     # One statement that holds the artifact's present row shared while it writes, and writes nothing without one.
     assert sql.startswith(
         "WITH present AS ( SELECT 1 FROM collab_cog_artifacts"
-        " WHERE source_id = %s AND repository = %s AND digest = %s AND removed_at IS NULL FOR SHARE )"
-        " INSERT INTO collab_cog_manifest_blobs"
+        " WHERE source_id = %s AND repository = %s AND digest = %s AND removed_at IS NULL FOR SHARE ),"
+        " recorded AS ( INSERT INTO collab_cog_manifest_blobs"
     )
-    assert "WHERE EXISTS (SELECT 1 FROM present)" in sql and sql.endswith("ON CONFLICT DO NOTHING")
+    assert "WHERE EXISTS (SELECT 1 FROM present) ON CONFLICT DO NOTHING RETURNING 1 )" in sql
+    # A recording that wrote anything stamps its source as seen configured (issue #193), forward only.
+    assert "INSERT INTO collab_cog_source_activity AS seen (source_id, last_configured_at)" in sql
+    assert "SELECT %s, now() WHERE EXISTS (SELECT 1 FROM recorded)" in sql
+    assert sql.endswith(
+        "ON CONFLICT (source_id) DO UPDATE"
+        " SET last_configured_at = GREATEST(seen.last_configured_at, EXCLUDED.last_configured_at)"
+    )
     key = (SOURCE, "cogs/a", DIGEST_A)
-    assert params == (*key, *key, [DIGEST_B, digest("c")], [12, 0], ["text/plain", ""])
+    assert params == (*key, *key, [DIGEST_B, digest("c")], [12, 0], ["text/plain", ""], SOURCE)
     store.record_manifest_blobs(SOURCE, "cogs/a", DIGEST_A, [])
     assert len(conn.queries) == 1, "an index or an empty manifest writes nothing"
 

@@ -30,6 +30,7 @@ INDEX_VARS = (
     "COLLAB_HUB_API__COGS__INDEX__ENABLED",
     "COLLAB_HUB_API__COGS__INDEX__INTERVAL_SECONDS",
     "COLLAB_HUB_API__COGS__INDEX__RUN_ON_STARTUP",
+    "COLLAB_HUB_API__COGS__INDEX__REMOVED_SOURCE_RETENTION_HOURS",
 )
 
 
@@ -90,7 +91,7 @@ class Rendered:
     def no_indexer(self) -> None:
         assert self.indexer is None, "an indexer Deployment rendered with cogs.index.enabled=false"
 
-    def indexer_is_the_one_sweeper(self, *, interval: str, run_on_startup: str) -> None:
+    def indexer_is_the_one_sweeper(self, *, interval: str, run_on_startup: str, retention_hours: str = "168") -> None:
         """The indexer Deployment: one replica, Recreate, the API's image and settings, index on."""
 
         indexer = self.indexer
@@ -100,6 +101,7 @@ class Rendered:
         assert indexer.value("COLLAB_HUB_API__COGS__INDEX__ENABLED") == "true"
         assert indexer.value("COLLAB_HUB_API__COGS__INDEX__INTERVAL_SECONDS") == interval
         assert indexer.value("COLLAB_HUB_API__COGS__INDEX__RUN_ON_STARTUP") == run_on_startup
+        assert indexer.value("COLLAB_HUB_API__COGS__INDEX__REMOVED_SOURCE_RETENTION_HOURS") == retention_hours
         # Same process image and settings as the API: everything but the
         # index switch and its tuning is identical, Secret refs included.
         api = self.api
@@ -168,7 +170,7 @@ def case_default(r: Rendered) -> None:
 
 def case_fixture(r: Rendered) -> None:
     r.api_does_not_sweep()
-    r.indexer_is_the_one_sweeper(interval="120", run_on_startup="false")
+    r.indexer_is_the_one_sweeper(interval="120", run_on_startup="false", retention_hours="48")
     assert r.source_order == ["harbor-main", "public.mirror"]
     harbor = r.sources["harbor-main"]
     assert harbor["kind"] == "harbor"

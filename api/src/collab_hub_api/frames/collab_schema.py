@@ -992,6 +992,35 @@ COLLAB_SCHEMA_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             "CREATE INDEX IF NOT EXISTS collab_track_runs_status ON collab_track_runs (status)",
         ),
     ),
+    (
+        16,
+        (
+            # When each registry source was last seen configured (issue #193).
+            # The blob descriptors of version 13 are deleted when their
+            # artifact is marked removed, but a source dropped from
+            # `cogs.registry_sources` is never swept again, so its descriptors
+            # would stay forever. This is the clock their collection waits on:
+            # every sweep stamps the sources the indexer has configured, and
+            # every first recording of a manifest's descriptors stamps the
+            # source it was recorded for, so a replica that still has a source
+            # configured (an old pod in a rollout, another release on the same
+            # database) keeps it alive by writing for it. The indexer deletes
+            # the descriptors of a source that is not configured and whose
+            # stamp is older than `cogs.index.removed_source_retention_hours`,
+            # a bounded batch per sweep; a source with descriptors and no
+            # stamp gets one (its clock starts) before anything of it can go.
+            # Only descriptors are deleted: catalog rows, their provenance
+            # and their history are not touched. One row per source id ever
+            # seen; nothing deletes these rows, so a source that comes back
+            # resumes its own clock.
+            """
+            CREATE TABLE IF NOT EXISTS collab_cog_source_activity (
+                source_id          text PRIMARY KEY,
+                last_configured_at timestamptz NOT NULL DEFAULT now()
+            )
+            """,
+        ),
+    ),
 )
 
 

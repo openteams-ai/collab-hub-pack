@@ -1212,6 +1212,34 @@ digest)`. It rides the same shared `frames.postgres.url` and the same
   marked `removed_at = now()` and stays readable by digest — installs and runs
   may reference it long after its publisher removed it. A digest that comes
   back is restored (and retagged) without a refetch.
+- **A removed source's blob descriptors are collected; its rows are not.**
+  When a source leaves `cogs.registry_sources`, its catalog rows stay as they
+  are, and the descriptors the pull path recorded for its manifests
+  (`collab_cog_manifest_blobs`) are deleted by the indexer once the source has
+  gone unseen in the configuration for `cogs.index.removedSourceRetentionHours`
+  (default a week), at most 500 manifests per sweep. Migration version 16 adds
+  `collab_cog_source_activity`, one `last_configured_at` stamp per source id,
+  which every sweep and every first recording of a manifest's descriptors
+  moves forward. The rules, including rollouts and re-adding a source, are in
+  [cog-registry.md](cog-registry.md#removing-a-source). To get the space back
+  without waiting, or on a deployment that does not run the indexer, delete
+  them by hand once **no release using this database still lists the source**:
+
+  ```sql
+  -- What is still stored, per source, and when each was last seen configured.
+  SELECT b.source_id, count(DISTINCT b.manifest_digest) AS manifests, count(*) AS descriptors,
+         s.last_configured_at
+  FROM collab_cog_manifest_blobs b
+  LEFT JOIN collab_cog_source_activity s USING (source_id)
+  GROUP BY b.source_id, s.last_configured_at;
+
+  -- The descriptors of one removed source. Nothing else: never delete from
+  -- collab_cog_artifacts, which is the catalog's history.
+  DELETE FROM collab_cog_manifest_blobs WHERE source_id = '<removed source id>';
+  ```
+
+  Descriptors grant nothing on their own, so this cannot open a pull; if the
+  source is configured again, its manifest reads record them again.
 
 The indexer is a reconciliation loop: enumerate each source, skip digests
 already indexed with the same tag set, fetch and read only new digests
@@ -1318,8 +1346,8 @@ as present, so removal stays correct. Safety rules operators should know:
   chart starts with `cogs.index.enabled=false`.
 
 Every sweep logs one `cog_index_sweep` line (indexed / skipped / retagged /
-non_cog / failed / removed / sources_failed / duration) and exports the same
-counts as `frames_server_cog_index_artifacts_total{outcome}`,
+non_cog / failed / removed / sources_failed / collected / duration) and exports
+metrics: `frames_server_cog_index_artifacts_total{outcome}`,
 `frames_server_cog_index_sweeps_total{result}` (`completed`, `locked_out`,
 `failed`, or `cancelled` for a sweep a shutdown interrupted) and
 `frames_server_cog_index_sweep_duration_seconds`. Per-artifact failures are

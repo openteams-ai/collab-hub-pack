@@ -313,6 +313,72 @@ async def test_a_blob_falls_back_to_another_source_holding_the_same_manifest():
         await front.blob(REPO, config)
 
 
+async def test_a_removed_source_loses_its_descriptors_and_gets_them_back_when_re_added():
+    """Issue #193: collecting a dropped source's descriptors, then re-adding the source.
+
+    Sources a and b hold one digest. b is dropped from the configuration and
+    its retention passes: its descriptors are collected, a's stay, and the
+    catalog rows of both stay exactly as they were. b is configured again:
+    the next manifest read records b's descriptors again, and b's blobs are
+    served from b once more.
+    """
+
+    from collab_hub_api.cogs.catalog import InMemoryCogCatalogStore
+
+    bundle = Bundle("readded")
+    config = sha256(bundle.config)
+    blob_hosts: list[str] = []
+
+    def registry(name: str):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "/manifests/" in request.url.path:
+                return httpx.Response(200, content=bundle.manifest, headers={"Content-Type": MEDIA_TYPE_OCI_MANIFEST})
+            blob_hosts.append(name)
+            return httpx.Response(200, content=bundle.config)
+
+        client = OCIClient(f"https://{name}.example", transport=httpx.MockTransport(handler))
+        return type("Source", (), {"id": name, "host": f"{name}.example", "oci": lambda self: client})()
+
+    store = InMemoryCogCatalogStore()
+    store.upsert(catalog_row(REPO, bundle.digest, source_id="a", pushed_at=T0 - timedelta(days=1)))
+    store.upsert(catalog_row(REPO, bundle.digest, source_id="b", pushed_at=T0))
+    both = [registry("a"), registry("b")]
+    await CogRegistryFront(store, both, max_blob_bytes=1 << 20).manifest(REPO, bundle.digest)
+    assert [found.source_id for found in store.find_blob(REPO, config, ("a", "b"))] == ["b", "a"]
+    catalog_before = sorted(store.locations(bundle.digest), key=lambda row: row.source_id)
+
+    # b is dropped; within the retention nothing of it goes, after it b's descriptors do.
+    assert store.collect_unconfigured_blobs(["a"], retention=timedelta(days=7)) == 0
+    store._activity["b"] -= timedelta(days=8)
+    assert store.collect_unconfigured_blobs(["a"], retention=timedelta(days=7)) == 1
+    assert [found.source_id for found in store.find_blob(REPO, config, ("a", "b"))] == ["a"]
+    # The catalog keeps both rows as they were: only descriptors were collected.
+    assert sorted(store.locations(bundle.digest), key=lambda row: row.source_id) == catalog_before
+    # A replica that only has a configured serves the blob from a, as before.
+    only_a = CogRegistryFront(store, both[:1], max_blob_bytes=1 << 20)
+    served = await only_a.blob(REPO, config)
+    assert b"".join([chunk async for chunk in served.chunks]) == bundle.config
+    await served.aclose()
+    assert blob_hosts == ["a"]
+
+    # b is configured again: the lookup says its descriptors are missing, so the next
+    # manifest read records them, and b (the newer push) serves its blobs again.
+    readded = CogRegistryFront(store, both, max_blob_bytes=1 << 20)
+    rows = store.find_pullable(REPO, ("a", "b"), digest=bundle.digest)
+    assert {row.source_id: row.blobs_recorded for row in rows} == {"a": True, "b": False}
+    await readded.manifest(REPO, bundle.digest)
+    assert [found.source_id for found in store.find_blob(REPO, config, ("a", "b"))] == ["b", "a"]
+    blob_hosts.clear()
+    served = await readded.blob(REPO, config)
+    assert b"".join([chunk async for chunk in served.chunks]) == bundle.config
+    await served.aclose()
+    assert blob_hosts == ["b"]
+    # And that recording stamped b as seen configured: an indexer still on the old
+    # configuration (a alone) leaves it alone for another full retention.
+    assert store.collect_unconfigured_blobs(["a"], retention=timedelta(days=7)) == 0
+    assert [found.source_id for found in store.find_blob(REPO, config, ("a", "b"))] == ["b", "a"]
+
+
 async def test_a_manifest_read_writes_its_descriptors_once(hub: Hub, monkeypatch):
     """HEAD then GET, then every later pull: one write for the life of the digest."""
 

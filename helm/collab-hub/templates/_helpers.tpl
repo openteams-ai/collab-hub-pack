@@ -677,6 +677,8 @@ include with nindent.
   value: {{ .Values.cogs.index.intervalSeconds | quote }}
 - name: COLLAB_HUB_API__COGS__INDEX__RUN_ON_STARTUP
   value: {{ .Values.cogs.index.runOnStartup | quote }}
+- name: COLLAB_HUB_API__COGS__INDEX__REMOVED_SOURCE_RETENTION_HOURS
+  value: {{ .Values.cogs.index.removedSourceRetentionHours | quote }}
 {{- end }}
 {{- /* Pulls through the Hub (issue #179). Nothing renders unless it is on,
 so a deployment that does not serve pulls carries no trace of it. On the

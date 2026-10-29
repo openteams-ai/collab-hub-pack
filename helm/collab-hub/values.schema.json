@@ -378,7 +378,8 @@
           "type": "boolean"
         },
         "rootPath": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^$|^/.*[^/]$"
         }
       },
       "additionalProperties": false
@@ -1016,6 +1017,81 @@
             }
           },
           "additionalProperties": false
+        },
+        "publish": {
+          "type": "object",
+          "properties": {
+            "allowedRoles": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "operator",
+                  "owner",
+                  "member"
+                ]
+              }
+            },
+            "allowedUsers": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "\\S"
+              }
+            },
+            "maxPendingRepositories": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          },
+          "additionalProperties": false
+        },
+        "serve": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "publicUrl": {
+              "type": "string",
+              "pattern": "^$|^https?://(?:[A-Za-z0-9._-]+|\\[(?:(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,7}:|(?:[0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,5}(?::[0-9A-Fa-f]{1,4}){1,2}|(?:[0-9A-Fa-f]{1,4}:){1,4}(?::[0-9A-Fa-f]{1,4}){1,3}|(?:[0-9A-Fa-f]{1,4}:){1,3}(?::[0-9A-Fa-f]{1,4}){1,4}|(?:[0-9A-Fa-f]{1,4}:){1,2}(?::[0-9A-Fa-f]{1,4}){1,5}|[0-9A-Fa-f]{1,4}:(?::[0-9A-Fa-f]{1,4}){1,6}|:(?:(?::[0-9A-Fa-f]{1,4}){1,7}|:)|(?:[0-9A-Fa-f]{1,4}:){6}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|(?:[0-9A-Fa-f]{1,4}:){1,5}:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|(?:[0-9A-Fa-f]{1,4}:){1,4}(?::[0-9A-Fa-f]{1,4}){0,1}:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|(?:[0-9A-Fa-f]{1,4}:){1,3}(?::[0-9A-Fa-f]{1,4}){0,2}:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|(?:[0-9A-Fa-f]{1,4}:){1,2}(?::[0-9A-Fa-f]{1,4}){0,3}:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|[0-9A-Fa-f]{1,4}:(?::[0-9A-Fa-f]{1,4}){0,4}:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}|::(?:[0-9A-Fa-f]{1,4}:){0,5}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3})(?:%25[A-Za-z0-9._~-]+)?\\])(?::(?:0*(?:6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[0-9]{1,4}))?)?$"
+            },
+            "credentialTtlSeconds": {
+              "type": "integer",
+              "minimum": 60,
+              "maximum": 86400
+            },
+            "tokenTtlSeconds": {
+              "type": "integer",
+              "minimum": 30,
+              "maximum": 3600
+            },
+            "maxBlobBytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxBlobSeconds": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 21600
+            },
+            "routeTimeout": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "indexer": {
+          "type": "object",
+          "properties": {
+            "resources": {
+              "$ref": "#/$defs/resources"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -1029,6 +1105,112 @@
       "additionalProperties": {
         "type": "boolean"
       }
+    },
+    "runs": {
+      "type": "object",
+      "description": "The run API is always served; a run controller beside it runs the Cogs launched through it.",
+      "properties": {
+        "controller": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Run a run controller, so this hub runs the Cogs launched through /v1/runs."
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+              "description": "The controller's id, the same across restarts and rollouts."
+            },
+            "waitSeconds": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Seconds to wait at start for the Track's tables and the controller's id."
+            },
+            "environment": {
+              "type": "string",
+              "enum": [
+                "pixi",
+                "host"
+              ],
+              "description": "How a Cog's serve runs."
+            },
+            "interactionTimeoutSeconds": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Seconds one interaction may take; 0 for no limit."
+            },
+            "models": {
+              "type": "string",
+              "description": "The models block, in TOML."
+            },
+            "extraEnv": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "Extra environment for the controller."
+            },
+            "cacheSizeLimit": {
+              "type": "string",
+              "description": "The size limit of the volume Cog environments and run output are kept on."
+            },
+            "healthPort": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "The port of the controller's /healthz."
+            },
+            "resources": {
+              "type": "object",
+              "description": "Resources for the controller container."
+            },
+            "workerStartSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Seconds a worker may take to start, building a Cog's environment on its first launch included."
+            },
+            "tmpSizeLimit": {
+              "type": "string",
+              "description": "The size limit of the controller's /tmp, where Cogs write."
+            },
+            "location": {
+              "type": "string",
+              "enum": [
+                "local",
+                "remote"
+              ],
+              "description": "Where a Cog's worker runs: a pod of its own (remote), or a process of the API's pod (local, the default)."
+            },
+            "serviceAccountAnnotations": {
+              "type": "object",
+              "description": "Annotations on the controller's ServiceAccount, at the remote location."
+            },
+            "worker": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "At the remote location, each worker pod: its resources and the size limits of its cache and /tmp volumes.",
+              "properties": {
+                "resources": {
+                  "type": "object",
+                  "description": "Resources for a worker pod's container."
+                },
+                "cacheSizeLimit": {
+                  "type": "string",
+                  "description": "The size limit of a worker's cache volume, where pixi builds the Cog's environment."
+                },
+                "tmpSizeLimit": {
+                  "type": "string",
+                  "description": "The size limit of a worker's /tmp, its HOME."
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,
@@ -1273,6 +1455,17 @@
         },
         "caBundlePath": {
           "type": "string"
+        },
+        "publish": {
+          "type": "boolean"
+        },
+        "blobRedirectHosts": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^\\.?[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$"
+          }
         },
         "requestTimeoutSeconds": {
           "type": "number",

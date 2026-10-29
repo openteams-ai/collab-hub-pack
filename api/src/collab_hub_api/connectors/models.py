@@ -66,6 +66,35 @@ class ConnectorSummary(BaseModel):
     detail: str | None = None
 
 
+class ConnectorLink(BaseModel):
+    """How a user connects a connector.
+
+    ``identity_provider`` is the only kind today: the client asks the hub's
+    identity service to link the provider named by ``alias`` to the signed-in
+    account. A client must skip the connect action for a ``type`` it does not
+    know rather than guess.
+    """
+
+    type: Literal["identity_provider"] = "identity_provider"
+    alias: str
+    prompt: str | None = None
+
+
+class ConnectorListing(ConnectorSummary):
+    """One entry of ``GET /v1/connectors``: a connector this hub offers.
+
+    The caller's connection state, plus what a client needs to show the
+    connector and connect it without a list of its own.
+    """
+
+    short_name: str
+    description: str
+    provider: str
+    link: ConnectorLink | None = None
+    connect_hint: str | None = None
+    account: str = ""
+
+
 class GoogleDriveStatus(ConnectorSummary):
     id: str = GOOGLE_DRIVE_CONNECTOR_ID
     name: str = "Google Drive"

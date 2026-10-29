@@ -124,12 +124,10 @@ async def test_the_unauthenticated_are_sent_to_sign_in(tmp_path, idp: _StubIdp):
 async def test_a_deployment_with_no_built_panel_serves_none(tmp_path, idp: _StubIdp):
     """Absent assets mount no routes, rather than a route that 500s on open.
 
-    The refusal is the protection map's, not a 404: ``/admin`` matches no route
-    on such a deployment, and an unrouted path falls through the web guard to
-    the API credential check, which a browser session cannot satisfy. That is
-    what every unmounted ``/admin`` path has always answered here, and it is
-    asserted rather than corrected because nothing about a missing front-end
-    build should change how the protection map treats an unrouted path.
+    ``/admin`` matches no route on such a deployment, so a signed-in operator
+    gets the router's plain 404. (While the MCP app was mounted at ``/`` it
+    answered here instead, with its own credential refusal; #67 removed that
+    catch-all, so an unrouted path now answers as unrouted.)
 
     What matters for this spec is the part below: no shell reaches the browser.
     """
@@ -141,7 +139,7 @@ async def test_a_deployment_with_no_built_panel_serves_none(tmp_path, idp: _Stub
         await sign_in(client, idp, next_path="/web")
         response = await client.get("/admin")
 
-    assert response.status_code == 401
+    assert response.status_code == 404
     assert "id=root" not in response.text
 
 

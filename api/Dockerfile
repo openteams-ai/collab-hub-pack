@@ -1,6 +1,9 @@
-FROM python:3.14-slim-trixie AS python
-FROM ghcr.io/astral-sh/uv:0.12.7 AS uv
-FROM node:24-bookworm-slim AS node
+FROM python:3.14.9-slim-trixie AS python
+FROM ghcr.io/astral-sh/uv:0.13.5 AS uv
+FROM node:24.22.1-bookworm-slim AS node
+# At least 0.82.1: the first pixi whose bundled roots exclude the compromised eMudhra chain, which
+# cogs/hermes/pixi.toml requires (requires-pixi).
+FROM ghcr.io/prefix-dev/pixi:0.83.0-bookworm-slim AS pixi
 
 # The admin panel is a built bundle, so it is built here rather than committed.
 # `npm ci --ignore-scripts` installs exactly what package-lock.json pins and
@@ -21,10 +24,16 @@ FROM python AS builder
 WORKDIR /var/collab-hub-api
 
 COPY pyproject.toml uv.lock ./
+# The execution package (the run API's Track and intents, and the run controller's
+# entrypoint, collab-hub-run-controller) is a path dependency at ../execution: it
+# comes from the repository root through the projectroot context, and is installed
+# into the virtual environment as a package, not linked to this source.
+COPY --from=projectroot execution/pyproject.toml /var/execution/pyproject.toml
+COPY --from=projectroot execution/src /var/execution/src
 RUN --mount=from=uv,source=/uv,target=/bin/uv \
     uv sync \
     --no-progress --link-mode=copy --compile-bytecode \
-    --frozen --python=$(which python) --no-default-groups --no-install-project
+    --frozen --python=$(which python) --no-default-groups --no-install-project --no-editable
 
 COPY src ./src
 RUN --mount=from=uv,source=/uv,target=/bin/uv \
@@ -38,6 +47,25 @@ FROM python AS runtime
 
 RUN groupadd --gid 1000 nonroot && \
     useradd --shell "$(which bash)" --uid 1000 --gid 1000 nonroot
+
+# The Cogs this hub launches when a run controller runs beside the API (runs.controller in the chart),
+# and pixi, which runs each Cog's `serve` in the environment its own lock pins. The packages are read
+# only: pixi keeps every environment, and its downloads, under /var/cache/collab-hub, which the chart
+# mounts writable, and builds a Cog's environment the first time that Cog is launched.
+COPY --from=pixi /usr/local/bin/pixi /usr/local/bin/pixi
+# The worker SDK, beside the Cogs: cogs/hermes pins it by path (../../worker), so it lives at the same
+# distance here as in the repository.
+COPY --from=projectroot worker/pyproject.toml worker/README.md /opt/collab-hub/worker/
+COPY --from=projectroot worker/src /opt/collab-hub/worker/src
+COPY --from=projectroot cogs/hermes/pixi.toml cogs/hermes/pixi.lock cogs/hermes/serve.py cogs/hermes/hermes_acp.py \
+     /opt/collab-hub/cogs/hermes/
+COPY --from=projectroot examples/cog-local/cogs/hello/pixi.toml examples/cog-local/cogs/hello/pixi.lock \
+     examples/cog-local/cogs/hello/serve.py /opt/collab-hub/cogs/hello/
+RUN mkdir -p /opt/pixi && \
+    printf 'detached-environments = "/var/cache/collab-hub/pixi-envs"\n' > /opt/pixi/config.toml
+ENV PIXI_HOME=/opt/pixi \
+    PIXI_CACHE_DIR=/var/cache/collab-hub/pixi-cache
+
 USER nonroot
 
 WORKDIR /var/collab-hub-api

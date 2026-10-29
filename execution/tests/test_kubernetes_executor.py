@@ -93,14 +93,24 @@ class FakeK8sApi:
         self, *, conflict_on_deployment: bool = False, ready_after: int = 0, fail_delete: bool = False
     ) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.bodies: list[tuple[str, dict]] = []  # what was POSTed, path and manifest
+        self.deleted_missing: set[str] = set()  # paths whose delete answers 404
         self.conflict_on_deployment = conflict_on_deployment
+        self.conflict_on_secret = False  # the first Secret POST of a name answers 409, as one left behind would
         self._gets = 0
         self._ready_after = ready_after
         self.fail_delete = fail_delete
 
     def post(self, path: str, *, json: dict) -> FakeResponse:
         self.calls.append(("POST", path))
+        self.bodies.append((path, json))
         if self.conflict_on_deployment and "deployments" in path:
+            return FakeResponse(409)
+        if path.endswith("/deployments"):
+            name = json["metadata"]["name"]
+            return FakeResponse(201, {"metadata": {"name": name, "uid": f"uid-{name}"}})
+        if path.endswith("/secrets") and self.conflict_on_secret:
+            self.conflict_on_secret = False
             return FakeResponse(409)
         return FakeResponse(201)
 
@@ -112,21 +122,28 @@ class FakeK8sApi:
         self.calls.append(("DELETE", path))
         # httpx does not raise on 4xx/5xx; a real failed delete returns an error
         # response the caller must inspect.
+        if path in self.deleted_missing:
+            return FakeResponse(404)
         return FakeResponse(500 if self.fail_delete else 200)
 
     def get(self, path: str) -> FakeResponse:
         self.calls.append(("GET", path))
         ready = 1 if self._gets >= self._ready_after else 0
         self._gets += 1
-        return FakeResponse(200, {"status": {"readyReplicas": ready}})
+        return FakeResponse(200, {"metadata": {"uid": f"uid-{path.rsplit('/', 1)[-1]}"},
+                                  "status": {"readyReplicas": ready}})
 
 
 class FakeWorkerHttp:
     def __init__(self) -> None:
         self.posts: list[tuple[str, dict]] = []
+        self.headers: list[dict] = []
 
-    def post(self, url: str, *, json: dict) -> FakeResponse:
+    def post(self, url: str, *, json: dict, headers: dict | None = None) -> FakeResponse:
         self.posts.append((url, json))
+        self.headers.append(dict(headers or {}))
+        if url.endswith("/turn"):
+            return FakeResponse(200, {"text": f"you said: {json['text']}"})
         return FakeResponse(200, {"envelope": 1, "ok": True, "payload": f"handled:{json['entry_point']}"})
 
 
@@ -197,7 +214,7 @@ def test_teardown_deletes_deployment_and_service_by_worker_name():
 
 
 class PausingWorkerHttp:
-    def post(self, url: str, *, json: dict) -> FakeResponse:
+    def post(self, url: str, *, json: dict, headers: dict | None = None) -> FakeResponse:
         return FakeResponse(200, {"pause": True, "reason": "needs approval"})
 
 
@@ -303,7 +320,8 @@ def test_label_value_is_a_safe_kubernetes_label(monkeypatch):
 def test_manifests_keep_the_exact_run_id_in_an_annotation():
     ex = _executor(FakeK8sApi(), FakeWorkerHttp())
     _deployment, service = ex._manifests("openteams/reviewer", "org/ws/run 42", "cog-reviewer-abcd1234")
-    assert service["metadata"]["labels"]["collab-hub/run"] == "org-ws-run-42"  # sanitized label
+    label = service["metadata"]["labels"]["collab-hub/run"]  # sanitized, with a digest of the exact id
+    assert label.startswith("org-ws-run-42-") and len(label) == len("org-ws-run-42-") + 16
     assert service["metadata"]["annotations"]["collab-hub/run-id"] == "org/ws/run 42"  # exact id preserved
 
 

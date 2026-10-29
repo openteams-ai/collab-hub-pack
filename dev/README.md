@@ -27,7 +27,7 @@ one, and only matters once you reach level 3.
 | Docker with Compose v2 | levels 2–4 (**not** level 1) | `docker compose version` |
 | [kind](https://kind.sigs.k8s.io/), `helm`, `kubectl` | level 4 only | `kind version` |
 | [kubeconform](https://github.com/yannh/kubeconform) | `make lint` only | `kubeconform -v` |
-| [pixi](https://pixi.sh) | `make controller` and `make op LOCATION=local` only | `pixi --version` |
+| [pixi](https://pixi.sh) | `make controller` (unless `ENVIRONMENT=host`) and `make op LOCATION=local` only | `pixi --version` |
 
 You do **not** need a local Python: `uv` provisions the interpreter pinned in
 `api/.python-version` (3.14, the one the image runs) on first run. The API
@@ -519,6 +519,13 @@ Other level-3 targets:
 
 ## Level 4 — the chart on kind
 
+With a database (`frames.postgres`), the chart runs the run controller as a
+Deployment of its own and each Cog's worker as a pod: `runs.controller.enabled`
+with `location: remote`, the default ([standalone-deployment.md](../docs/standalone-deployment.md#running-cogs-in-pods)).
+`values/kind.yaml` keeps frames on the local filesystem and no database, so it
+runs no controller; the kind E2E (`scripts/cog-execution-e2e/run.sh`)
+materializes worker pods through the same location on a cluster of its own.
+
 Levels 1–3 run the API as a process. Level 4 runs the **published artifact**:
 the image built from `api/Dockerfile`, installed through `helm/collab-hub`. Use
 it when your change touches the chart, the container, or anything that only
@@ -849,9 +856,9 @@ post() { curl -s -X POST -H "Authorization: Bearer $TOKEN" \
            -H 'Content-Type: application/json' -d "$2" "$B/$1"; }
 
 post search            '{"query":"orbits"}'
-post items/42/read     '{"repo":"nebari-dev/collab-hub-pack"}'   # an issue
-post items/43/read     '{"repo":"nebari-dev/collab-hub-pack"}'   # a pull request
-post files/read        '{"repo":"nebari-dev/collab-hub-pack","path":"README.md"}'
+post items/42/read     '{"repo":"openteams-ai/collab-hub-pack"}'   # an issue
+post items/43/read     '{"repo":"openteams-ai/collab-hub-pack"}'   # a pull request
+post files/read        '{"repo":"openteams-ai/collab-hub-pack","path":"README.md"}'
 post projects/list     '{"owner":"nebari-dev"}'
 post projects/7/read   '{"owner":"nebari-dev"}'
 ```
@@ -1093,9 +1100,8 @@ Frames and the user directory work immediately. Three things do not:
 ## Running Cogs and Ops
 
 A Cog runs through the hub at level 1: `make api` serves the run API
-(`/v1/runs`, behind the `cog_runs` feature flag, which this target sets),
-`make controller` advances the runs it accepts, and the `collab-hub` CLI
-launches them. This section is where the rest arrives, one target at a time, under the rule
+(`/v1/runs`, over the SQLite Track in `.local/`), `make controller` advances
+the runs it accepts, and the `collab-hub` CLI launches them. This section is where the rest arrives, one target at a time, under the rule
 [ADR-0002](../docs/adr/0002-lifecycle-runner-durability-and-placement.md) D9
 sets for every Cog execution change. In the same PR, what a change adds is:
 
@@ -1145,8 +1151,9 @@ The API records the submission and nothing else; the controller reads it from
 the Track, runs the Cog package's `serve` task in its own pixi environment, and
 records what happened; the CLI reads the run back through the API. `run list`,
 `run show` and `run terminate` are the other commands.
-`make api-oidc` serves the run API too, with real sign-in through Keycloak,
-and `make controller` works beside either. [`examples/cog-local`](../examples/cog-local/README.md)
+`make api-oidc` serves the run API too, with real sign-in through Keycloak, on
+the hub's own Postgres, so its controller is `make controller
+TRACK=postgresql://collab:collab@127.0.0.1:5432/collab`. [`examples/cog-local`](../examples/cog-local/README.md)
 walks a Cog through its whole life on them — sign in, launch, list, talk to it
 from Toad over ACP, stop it — and `make -C ../examples/cog-local demo` runs it
 end to end and checks it.
@@ -1160,10 +1167,13 @@ Cog packages are found in `COGS`, a `:`-separated list that defaults to
 Cog) and `examples/cog-local/cogs` (`hello`); both targets read it, so set it
 on both to add a directory of your own.
 
-**The Hermes Cog's model.** `make controller` hands the Hermes Cog's workers,
-and no other's, the model in `COLLAB_MODEL_PROVIDER` (`openai-compatible`, or
-`anthropic` for Claude), `COLLAB_MODEL_BASE_URL`, `COLLAB_MODEL_NAME` and
-`COLLAB_MODEL_API_KEY`. By default it is `make fake-model`, an OpenAI-compatible
+**The Hermes Cog's model.** `make controller` first writes the hub's models
+block, `.local/models.toml` (`make models`), from `COLLAB_MODEL_PROVIDER`
+(`openai-compatible`, or `anthropic` for Claude), `COLLAB_MODEL_BASE_URL`,
+`COLLAB_MODEL_NAME` and `COLLAB_MODEL_API_KEY`, and binds the Hermes Cog to it;
+the block names the variable the key is in, never the key. The controller hands
+that model to the Hermes Cog's workers, and no other's
+([runs.md](../docs/cog-execution/runs.md#configuration-health-and-models)). By default it is `make fake-model`, an OpenAI-compatible
 endpoint on port 8090 that answers `The fake model heard: ...` with no account
 and no network ([`fake-model/fake_model.py`](fake-model/fake_model.py)). Set
 the three in your environment to use a real one. Hermes's environment is about
@@ -1172,9 +1182,86 @@ the three in your environment to use a real one. Hermes's environment is about
 output is under `.local/runs/`.
 
 **What persists.** The Track file, until `make clean`. The controller keeps
-nothing else: stop it mid-run and the next `make controller` records that run
-`interrupted`. **One controller at a time**, and not beside a `make op`: each
-holds the same lock next to the Track.
+nothing else: stop it mid-run, `kill -9` included, and its next start records
+that run `interrupted`.
+
+### Running Hermes — `make op OP=hermes LOCATION=local`, `make fake-model`
+
+Level 1, no container, no hub: the Hermes harness Cog's `ask`, as one Op step,
+against the fake model. Hermes's environment (about 400 MB) is installed by
+pixi on the first run, or ahead of time with `make -C ../examples/cog-local env`:
+
+```sh
+make fake-model                          # terminal 1: an OpenAI-compatible model that answers without one
+make op OP=hermes LOCATION=local         # terminal 2: Hermes answers, through the fake model; the Track prints
+```
+
+`ops/hermes.yaml` declares `gate: {escalate: never}`, since deciding a Gate
+from a client arrives later in the plan. With `LOCATION=local`, `make op`
+delivers the `COLLAB_MODEL_*` variables in its environment to every worker,
+so the same run reaches a real endpoint, or Claude with
+`COLLAB_MODEL_PROVIDER=anthropic`, the way `make controller` does.
+
+The Cog's worker runs on the [worker SDK](../worker/README.md), and so does
+anything that drives an ACP agent or calls a model: its adapters are tested
+against two stand-ins here that need nothing installed,
+[`fake-agent/fake_acp_agent.py`](fake-agent/fake_acp_agent.py), an ACP agent
+on stdio that echoes and misbehaves on request, and the fake model. `cd
+../worker && uv run --group test pytest` runs that suite.
+
+### The run API and run pickup — `make api`, `make controller`, `make submit`
+
+Level 1, no container; level 2 for Postgres. `make submit OP=<name>` launches an
+Op from `ops/` through the run API (`POST /v1/runs` on `make api`), as any
+client does, then follows it until it ends or waits at a Gate, prints its
+events, and says which controller picked it up. `make controller` picks it up,
+and `make run-events RUN=` streams a run's events as they land
+(`GET /v1/runs/{id}/events`, server-sent events) until it ends:
+
+```sh
+make api                                            # terminal 1: the run API, over .local/track.sqlite
+make controller ENVIRONMENT=host HEALTH_PORT=8770   # terminal 2; ENVIRONMENT=host needs no pixi
+make submit OP=echo                                 # terminal 3: "picked up by: dev", COMPLETED
+make run-events RUN=run-...                         # every event of the run, then `end`
+curl -s localhost:8770/readyz                       # {"controller": "dev", "live": true, "ready": true, ...}
+```
+
+At level 2, `make api-pg` serves the run API on the hub's own Postgres, as a
+deployed hub does: its Track's tables come from the hub's migrations. Run the
+controller on the same database, `make controller TRACK=postgresql://collab:collab@127.0.0.1:5432/collab`.
+
+A run waiting at a Gate is decided through the API: `make run-decide RUN=run-...
+STEP=draft OUTCOME=approve` (or `reject`, or `send_back` with `FINDING=`), which
+reads the escalation the run waits on and answers it; `make run-retry RUN=`
+asks for an ended run to run again. The `collab-hub` CLI does the same from
+anywhere: `run submit --file ops/needs-review.yaml --watch`, then `run decide`,
+`run payload` and `run retry` ([`cli/README.md`](../cli/README.md)). Dev auth
+resolves no roles, so the run's submitter decides its Gates here; at level 3
+the approver roles come from `make seed-org`.
+
+| Variable | Default | What |
+|---|---|---|
+| `TRACK` | `.local/track.sqlite` | the controller's Track: the SQLite file `make api` uses, or `postgresql://...`, the database `make api-pg` uses (its migrations create the Track's tables) |
+| `CONTROLLER_ID` | `dev` | the controller's name, held while it runs, recorded on each run it picks up |
+| `ENVIRONMENT` | `pixi` | `host` runs a package's `serve` task directly, without its pixi environment |
+| `HEALTH_PORT` | none | serves `/healthz` and `/readyz` |
+
+Several controllers share one Track, each under its own `CONTROLLER_ID`, and
+each run is picked up by one of them:
+
+```sh
+make controller ENVIRONMENT=host CONTROLLER_ID=one &
+make controller ENVIRONMENT=host CONTROLLER_ID=two &
+for n in 1 2 3 4; do make submit OP=echo & done; wait   # "picked up by: one" or "two", once each
+```
+
+A controller owns the runs it picked up: it alone advances them, and delivers
+their cancels, turns and Gate decisions. Kill one mid-run (`make submit OP=slow`,
+then `kill -9` it), and its run stays `RUNNING` — another controller leaves it
+alone — until that controller starts again under the same id, which records it
+`interrupted` and reaps any of its workers left alive. A second controller under
+an id already running refuses to start. `spender` declares a budget, which is the
+runner's, so it runs with `make op` only.
 
 ### Fake Ops — `make op`
 
@@ -1219,17 +1306,20 @@ Stopping the host any way at all, `kill -9` included, leaves no worker: the
 launcher that holds each worker kills it when its pipe to the host closes.
 
 **What persists.** The Track is a SQLite file, `.local/track.sqlite`, kept
-across runs until `make clean`. Every `make op` starts the way a host does: a
-run a previous one left running or waiting at a Gate is recorded
-`interrupted`, since `none` keeps nothing across a restart
-([runs.md](../docs/cog-execution/runs.md)). That includes a `needs-review` run
+across runs until `make clean`. Every `make op` starts the way a controller
+does, as the controller `make-op`: a run a previous one left running or waiting
+at a Gate is recorded `interrupted`, since `none` keeps nothing across a restart
+([runs.md](../docs/cog-execution/runs.md)), and the runs of any other
+controller on the Track are left alone. That includes a `needs-review` run
 still waiting at its Gate: nothing here decides it yet (the run API, #103, does).
 
-**One `make op` at a time.** The runner takes every unfinished run on its Track
-as its own when it starts, so `make op` holds a lock beside the Track, and a
-second one refuses to start while the first runs. `BACKEND=dbos` and
+**One `make op` at a time.** Each is the controller `make-op`, which holds its
+name while it runs, so a second one refuses to start while the first runs. Run
+`make op` with no `make controller` on the same Track: a controller passing over
+it could pick up the run `make op` just recorded; `make submit` is the way to
+hand a controller an Op. `BACKEND=dbos` and
 `BACKEND=temporal` are refused until those backends are built, and so is
-`LOCATION=remote` until Phase 21 puts the cluster executor behind the switch.
+`LOCATION=remote` until Phase 22 puts the cluster executor behind the switch.
 The fake Cogs' pixi environments, `cogs/<name>/.pixi/`, are git-ignored and
 survive `make clean`; delete them to install afresh.
 
@@ -1261,6 +1351,7 @@ list against Postgres.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Every route answers 401 on level 1 | Only `DEV_AUTH_USER` is set | All three switches are required — use `make api` |
+| `make op OP=hermes LOCATION=local` fails `model-unavailable`, naming `COLLAB_MODEL_BASE_URL` | No model reached the worker: `make op` was run outside `dev/`, or the variables were cleared | Run it from `dev/` (the Makefile exports the fake model's defaults), with `make fake-model` up, or set `COLLAB_MODEL_*` to a real endpoint |
 | 401 with a token that looks fine | Issuer mismatch, or the token has no `sub` claim | Check `iss` matches `FRAMES_BEARER_ISSUER` exactly; check the client kept the `basic` client scope |
 | `403 no_organization` | Membership mode with no row for that subject | `make seed-org SUB=$(make -s sub)` |
 | `503` from history / groups / invitations | No Postgres — `make api` starts none | Use `make api-pg` or above |
@@ -1270,9 +1361,13 @@ list against Postgres.
 | Connector says `unavailable`, names a missing role | The broker `read-token` role was never granted | `make broker-role` |
 | `make op LOCATION=local` says to install pixi | The `local` location runs each Cog in its own pixi environment | Install [pixi](https://pixi.sh), or drop `LOCATION` to run the fake Cogs in process |
 | `make op LOCATION=local` fails a step with `WorkerStartFailed` | The worker exited or never answered `/healthz`; the reason on the Track ends with its last lines of stderr | Read `stderr.log` in the directory the run's `worker_started` names as `logs`, under `.local/runs/` |
-| `collab-hub cog launch` answers 404 | The hub's run API is off: it is behind the `cog_runs` feature flag | Use `make api`, which sets it; another target needs `COLLAB_HUB_API__FEATURES__COG_RUNS=true` and `COLLAB_HUB_API__RUNS__TRACK_PATH` |
+| `collab-hub cog launch` answers 503 `runs_unavailable` | The API has no Track: no database and no `runs.track_path` | `make api`, which sets the SQLite one, or `make api-pg`, which uses Postgres |
+| `collab-hub cog launch` is refused, naming no Cog it can launch | The API was given no Cog package directories (`runs.packages`) | `make api` and `make api-pg` give it `COGS`; another target needs `COLLAB_HUB_API__RUNS__PACKAGES` |
 | A launched run stays `SUBMITTED` | No controller is watching the Track | `make controller` in another terminal |
-| `make controller` says another controller, or `make op`, is running | One host at a time on a Track | Stop the other one |
+| `make controller` says a controller named `dev` is running | One controller per id on a Track | Stop the other one, or give this one its own `CONTROLLER_ID` |
+| A run stays `RUNNING` after its controller was killed | Its controller owns it, and records it `interrupted` only when it starts again | Start that controller again, under the same `CONTROLLER_ID` |
+| `make controller TRACK=postgresql://...` says this Postgres has no Track | The Track's tables come from the hub's migrations | Run `make api-pg` once against that database |
+| `make submit OP=spender` refuses | A budget is the runner's, not the Op's | `make op OP=spender` |
 | `make op` says another `make op` is running | A previous one is still running on the same Track, possibly in another terminal | Let it finish or stop it; one host per Track until run pickup (#121) |
 | Connector says `reconnect_required` | Stored token cannot make that provider call | Add the scope to the IdP, then **unlink and relink** the user |
 | Connector status needs "a Hub bearer token" | Called with dev auth | Connectors need level 3 — use `make api-fakes` or `make api-oidc` |
@@ -1320,8 +1415,8 @@ that gap.
 
 | Level | Where | What it asserts |
 |---|---|---|
-| 1 | Linux **and macOS** | `hosts-check` both ways, then a frame written and read back with no token, and the empty Cog catalog (`/v1/cogs`, `/v1/cogs/catalog.v1.json`); every fake Op of `make op` ends as it should, and a run whose host is killed mid-step is reported `interrupted` by the next; with `LOCATION=local`, `echo` runs as real worker processes in its pixi environment, and a host killed with `SIGKILL` mid-step leaves no worker |
-| 2 | Linux | `/health/db` reports a real database, `/v1/frame-groups` answers 200 instead of 503, and a `/v1/cogs` list with every filter answers 200 from Postgres |
+| 1 | Linux **and macOS** | `hosts-check` both ways, then a frame written and read back with no token, and the empty Cog catalog (`/v1/cogs`, `/v1/cogs/catalog.v1.json`); every fake Op of `make op` ends as it should, and a run whose host is killed mid-step is reported `interrupted` by the next; `make submit` hands the fake Ops to `make controller`, another process, which picks each up and ends it as it should, and a controller killed with `SIGKILL` mid-run records the run `interrupted` when it starts again; with `LOCATION=local`, `echo` runs as real worker processes in its pixi environment, and a host killed with `SIGKILL` mid-step leaves no worker |
+| 2 | Linux | `/health/db` reports a real database, `/v1/frame-groups` answers 200 instead of 503, and a `/v1/cogs` list with every filter answers 200 from Postgres; two controllers on one Postgres Track complete eight runs submitted at once, and none is picked up twice |
 | 3 | Linux | 401 without a bearer, 200 with one, and the token carries a `sub` |
 | 4 | Linux | Rendered only — the chart, the dev-auth switches, the `IMAGE` override and the port overrides |
 
@@ -1331,7 +1426,11 @@ pull requests that touch what they use: `examples/cog-local`'s `make demo`
 starts Postgres and Keycloak, signs in with the CLI, launches the Hermes Cog
 against the fake model, talks to it over ACP and with `run say`, and
 terminates it with no worker left. It is apart from this one because Hermes's
-environment is about 400 MB.
+environment is about 400 MB; it is also where Hermes itself, on the worker
+SDK, is run in CI. The SDK's own suite, both adapters against the fake agent
+and the fake model and the seam over HTTP, runs in
+[`.github/workflows/test-worker.yaml`](../.github/workflows/test-worker.yaml)
+on Python 3.11 and 3.14, with no container and nothing installed.
 
 **Coverage relaxes as the levels get more expensive**, which is how the levels
 are meant to be used in the first place.

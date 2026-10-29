@@ -40,6 +40,7 @@ from typing import Any
 from .backends import DurabilityBackend, select_backend
 from .envelope import EnvelopeInvalid, ResultEnvelope
 from .gates import DEFAULT_APPROVERS, Gate, GateOutcome, envelope_digest, escalation_id
+from .intents import retry_ask
 from .lifecycle import BudgetExceeded, BudgetTracker, RunBudget
 from .locations import select_executor
 from .ops import (
@@ -242,8 +243,16 @@ class _Cancelled(Exception):
     """An attempt stopped because its run was cancelled; the driver ends the run ``cancelled``."""
 
 
+class RetryTaken(ValueError):
+    """A retry asked for that this runner did not take: another controller did, or the ask was refused."""
+
+
 class RunBusy(RuntimeError):
     """The run is claimed by another call in this host."""
+
+
+class RunOwnedElsewhere(RuntimeError):
+    """The run was picked up by another controller, which alone advances it, cancels it and decides on it."""
 
 
 @dataclass
@@ -295,6 +304,7 @@ class LifecycleRunner(WorkflowEngine):
         backend: str = "none",
         location: str | None = None,
         location_settings: Mapping[str, Any] | None = None,
+        controller: str | None = None,
     ) -> None:
         if (executor is None) == (location is None):
             raise ValueError("a runner takes a location, 'local' or 'remote', or an executor handed to it; not both")
@@ -309,6 +319,10 @@ class LifecycleRunner(WorkflowEngine):
         self.backend: DurabilityBackend = select_backend(backend)
         self._lock = threading.Lock()
         self._advancing: dict[str, _Advancing] = {}
+        self.controller = controller
+        """The controller this runner advances runs for, named on each run it picks up; ``None`` for a host
+        alone on its Track. Named, a runner shares its Track with other controllers: of several picking up
+        one run, one does, and each takes on start and moves only the runs it picked up."""
 
     def _append(self, run_id: str, event_type: str, payload: Mapping[str, Any],
                 into: list[TrackEvent] | None = None) -> TrackEvent:
@@ -337,7 +351,8 @@ class LifecycleRunner(WorkflowEngine):
         """A ``step_completed`` payload: what produced the result, and the result inline or by reference."""
         record: dict[str, Any] = {
             "step": step.name, "attempt": attempt, "cog": step.cog, "digest": step.digest, "usage": usage,
-            "frames": [], **_recorded(envelope), **result,
+            "frames": [{"id": frame.id, "digest": frame.digest} for frame in step.frames],
+            **_recorded(envelope), **result,
         }
         if escalation is not None:
             record["escalation"] = escalation
@@ -363,6 +378,41 @@ class LifecycleRunner(WorkflowEngine):
         for record in transition.records:
             self._append(run_id, record.event_type, record.payload, into)
         return transition.after
+
+    def _record_if_still(self, run_id: str, transition: Transition[Run], seen: Run,
+                         into: list[TrackEvent] | None = None,
+                         also: Callable[[tuple[TrackEvent, ...]], bool] | None = None) -> Run | None:
+        """Write a run's one-record transition only if, as it lands, the run is where ``seen`` was.
+
+        Where is its state and the controller that has it. The check and the
+        write are one step on the Track (``append_if``), so of two controllers
+        moving one run from the same place, one does, and the other gets ``None``.
+        """
+        (record,) = transition.records
+        event = TrackEvent(run_id=run_id, event_type=record.event_type, payload=dict(record.payload),
+                           schema=SCHEMA_VERSION)
+
+        def still(events: tuple[TrackEvent, ...]) -> bool:
+            events = tuple(upgrade(e) for e in events)
+            run = Run.replay(events)
+            return (run is not None and (run.state, run.controller) == (seen.state, seen.controller)
+                    and (also is None or also(events)))
+
+        stored = self.track.append_if(event, still)
+        if stored is None:
+            return None
+        if into is not None:
+            into.append(stored)
+        return transition.after
+
+    def _owns(self, run: Run) -> bool:
+        """Whether this runner may move a run that has been picked up: one it, or a host before controllers
+        named themselves, picked up. A runner with no name owns every run on its Track."""
+        return self.controller is None or run.controller in (None, self.controller)
+
+    def _refuse_elsewhere(self, run_id: str, run: Run) -> None:
+        if not self._owns(run):
+            raise RunOwnedElsewhere(f"run {run_id!r} is advanced by controller {run.controller!r}, not this one")
 
     def _read(self, run_id: str) -> tuple[TrackEvent, ...]:
         """The run's Track, read once and in schema v1 whatever version it was written in."""
@@ -475,24 +525,35 @@ class LifecycleRunner(WorkflowEngine):
         recorded ``interrupted`` rather than left looking alive, and continues only
         when a person retries it (ADR-0002 D2). A run this host is advancing right
         now is left alone. Returns the runs it interrupted. A durable backend
-        resumes its runs instead, which Phases 26 and 32 build.
+        resumes its runs instead, which Phases 27 and 33 build.
 
-        Every unfinished run on the Track is taken as this host's, the single
-        owner the runner assumes; run pickup by a controller (Phase 11) narrows
-        this to the runs the starting controller picked up.
+        A runner named for a controller takes only the runs that controller
+        picked up, and those a host picked up before controllers named
+        themselves; one with no name takes every unfinished run on the Track.
+        Each is written only if it is still where it was read, so two
+        controllers starting at once interrupt it once. A worker of an
+        interrupted run that is still alive — whose ``worker_started`` has no
+        ``worker_stopped`` — is reaped through the executor, and its stop recorded.
         """
         if self.backend.durable:
             return ()
         interrupted = []
-        for run_id in self.track.run_ids():
+        self._sweep(controller=self.controller)
+        for run_id in self._unfinished():
             # Claimed first, then read: a retry or a decision in this host claims its run
             # before it writes, so a run it is starting is never taken for one left behind.
             try:
                 with self._claim(run_id):
-                    run = Run.replay(self._read(run_id))
-                    if run is not None and run.state in (RunState.RUNNING, RunState.WAITING_AT_GATE):
-                        self._record(run_id, run.host_stopped(backend=self.backend.name))
-                        interrupted.append(run_id)
+                    events = self._read(run_id)
+                    run = Run.replay(events)
+                    if run is None or run.state not in (RunState.RUNNING, RunState.WAITING_AT_GATE):
+                        continue
+                    if not self._owns(run):
+                        continue  # another controller's, which records it when it starts
+                    if self._record_if_still(run_id, run.host_stopped(backend=self.backend.name), run) is None:
+                        continue  # it moved as it was read: whoever moved it has it
+                    interrupted.append(run_id)
+                    self._reap(run_id, events)
             except RunBusy:
                 continue
             except InvalidTransition as exc:
@@ -500,6 +561,74 @@ class LifecycleRunner(WorkflowEngine):
                 # it: one such run never keeps a host from starting, and nothing is written to it.
                 _log.warning("run %s cannot be read, and is left as it is: %s", run_id, exc)
         return tuple(interrupted)
+
+    def _unfinished(self) -> tuple[str, ...]:
+        """The runs left running or waiting at a Gate, from the Track's index: a start costs what is unfinished,
+        not the Track's history."""
+        rows = [*self.track.runs(status=RunState.RUNNING.name), *self.track.runs(status=RunState.WAITING_AT_GATE.name)]
+        return tuple(dict.fromkeys(row.run_id for row in sorted(rows, key=lambda row: row.submitted_at)))
+
+    def take_over(self, run_id: str, *, from_controller: str) -> RunState | None:
+        """End a run whose owner no longer holds its id: ``cancelled`` if a cancel was asked, else ``interrupted``.
+
+        What a live controller does for a run picked up by a controller that
+        never started again (a replaced pod), so the run does not wait on it
+        for good. Written only if the run is still where it was read, and only
+        for a run that ``from_controller`` owns; its workers are reaped where
+        this host can reach them. Returns the run's state after, or ``None``
+        when nothing was done.
+        """
+        with self._claim_or_refuse(run_id) as advancing:
+            events = self._read(run_id)
+            run = Run.replay(events)
+            if run is None or run.state.ended or run.controller != from_controller:
+                return None
+            cancelled_by = next((e.payload.get("actor") for e in reversed(events)
+                                 if e.event_type == "cancel_requested"), None)
+            if cancelled_by and RUN.accepts(run.state, "cancel"):
+                transition = run.cancel(actor=cancelled_by)
+            else:
+                transition = run.host_stopped(backend=self.backend.name, taken_over_by=self.controller,
+                                              from_controller=from_controller)
+            written: list[TrackEvent] = []
+            if self._record_if_still(run_id, transition, run, written) is None:
+                return None
+            self._reap(run_id, events)
+            self._sweep(run_id=run_id)
+            del advancing
+            return transition.after.state
+
+    def _sweep(self, *, controller: str | None = None, run_id: str | None = None) -> None:
+        """Delete what the executor made for the controller, or the run, that no ``worker_started`` names: a
+        worker whose controller died while it was starting. Only an executor that can (the remote one) does."""
+        sweep = getattr(self.executor, "sweep", None)
+        if sweep is None or (controller is None and run_id is None):
+            return
+        try:
+            sweep(controller=controller, run_id=run_id)
+        except Exception:  # noqa: BLE001 - a sweep that fails never stops a start or a takeover
+            _log.exception("sweeping the workloads left by %s failed", controller or run_id)
+
+    def _reap(self, run_id: str, events: Sequence[TrackEvent]) -> None:
+        """Stop each worker of the run that was started and never recorded stopped, and record its stop."""
+        stopped = {(e.payload.get("step"), e.payload.get("attempt"), e.payload.get("instance"))
+                   for e in events if e.event_type == "worker_stopped"}
+        reap = getattr(self.executor, "reap", None)
+        for event in events:
+            if event.event_type != "worker_started":
+                continue
+            started = event.payload
+            which = (started.get("step"), started.get("attempt"), started.get("instance"))
+            if which in stopped:
+                continue
+            try:
+                reaped = bool(reap(started, run_id)) if reap is not None else False
+            except Exception:  # noqa: BLE001 - one worker that could not be reaped never stops a start
+                _log.exception("reaping the worker of %s step %s failed", run_id, which[0])
+                reaped = False
+            # Recorded either way: the worker's run token expires here, alive or not.
+            self._append(run_id, "worker_stopped", {"step": which[0], "attempt": which[1], "instance": which[2],
+                                                    "reaped": reaped})
 
     def live_worker(self, run_id: str) -> CogWorker | None:
         """The worker this host has invoked for the run and not yet let go of; ``None`` otherwise.
@@ -557,7 +686,11 @@ class LifecycleRunner(WorkflowEngine):
                     run = Run.replay(self._read(run_id))
                     if run is None:
                         raise LookupError(f"no run {run_id!r} on the Track")
-                    return self._record(run_id, run.cancel(actor=actor)).state
+                    self._refuse_elsewhere(run_id, run)
+                    cancelled = self._record_if_still(run_id, run.cancel(actor=actor), run)
+                    if cancelled is not None:
+                        return cancelled.state
+                    # It moved as it was read — picked up by a controller, say: look at it again.
             except RunBusy:
                 continue
 
@@ -695,8 +828,13 @@ class LifecycleRunner(WorkflowEngine):
             raise ValueError(f"run {op.run_id!r} was submitted with a different Op")
         return Run.replay(existing).state
 
-    def retry(self, run_id: str) -> RunState:
+    def retry(self, run_id: str, *, asked: bool = False) -> RunState:
         """Re-drive an unsuccessfully-ended run from its first incomplete step.
+
+        ``asked`` makes a client's ``retry_asked`` the condition: the retry is
+        recorded only while that ask still stands, so of several controllers
+        taking one ask, one does, and ``RetryTaken`` tells the others nothing
+        is theirs to refuse.
 
         Retry is for failed runs. Exhausted duration/token/cost budgets are not
         reset — the run machine allows it as a new budget epoch, which #4 builds —
@@ -709,12 +847,16 @@ class LifecycleRunner(WorkflowEngine):
         the caller is asking for the work to run again.
         """
         with self._claim_or_refuse(run_id) as advancing:
-            return self._retry(run_id, advancing)
+            return self._retry(run_id, advancing, asked=asked)
 
-    def _retry(self, run_id: str, advancing: _Advancing) -> RunState:
+    def _retry(self, run_id: str, advancing: _Advancing, *, asked: bool = False) -> RunState:
         events = self._read(run_id)
         run = Run.replay(events)
         state = None if run is None else run.state
+        if asked and retry_ask(events) is None:
+            # Before any look at the state: a controller that saw the ask and arrives after another took it
+            # reads a running or finished run, which is nothing to refuse.
+            raise RetryTaken(f"run {run_id!r} has no retry asked for it: another controller took it, or it was refused")
         if run is None or not run.state.ended:
             raise ValueError(f"run {run_id!r} is not terminal (status={state}); nothing to retry")
         if state is RunState.BUDGET_EXCEEDED:
@@ -725,7 +867,11 @@ class LifecycleRunner(WorkflowEngine):
             raise ValueError(f"run {run_id!r} {done}; nothing to retry (start a new run instead)")
         op = self._submitted_definition(run_id, events)
         written: list[TrackEvent] = []
-        self._record(run_id, run.retry(), into=written)
+        still_asked = (lambda current: retry_ask(current) is not None) if asked else None
+        if self._record_if_still(run_id, run.retry(controller=self.controller), run, written, also=still_asked) is None:
+            if asked:
+                raise RetryTaken(f"run {run_id!r} moved while its retry was taken: another controller took it")
+            raise ValueError(f"run {run_id!r} moved while it was being retried; look at it again")
         return self._advance(_Pass(self, run_id, (*events, *written), advancing), op)
 
     # --- advancing a run ------------------------------------------------------------------------
@@ -743,7 +889,12 @@ class LifecycleRunner(WorkflowEngine):
             now.advancing.changed.notify_all()
         run = Run.replay(now.history)
         if run.state is RunState.SUBMITTED:
-            run = now.record(run.pickup())
+            # Picked up only if nobody picked it up, or cancelled it, as this lands: of several
+            # controllers sharing the Track, one starts the run.
+            picked = self._record_if_still(now.run_id, run.pickup(controller=self.controller), run, now.history)
+            if picked is None:
+                return self.observe(now.run_id)
+            run = picked
         completed = self._completed_steps(now.history)
         retries = self._retry_count(now.history)
         spent_on: str | None = None
@@ -893,9 +1044,27 @@ class LifecycleRunner(WorkflowEngine):
         attempt.cog_worker = now.record(attempt.cog_worker.invoke(entry_point=step.entry_point, step=step.name))
         signal_value = self._signal_for(now.history, step.name)
         feedback = {} if signal_value is _NO_SIGNAL else {"signal": signal_value}
+        if step.frames:
+            feedback["frames"] = self._frames(step)
         attempt.invoked = True
         attempt.result = attempt.worker.interact(step.entry_point, step.input, idempotency_key=attempt.key,
                                                  **feedback)
+
+    def _frames(self, step: OpStep) -> list[dict[str, Any]]:
+        """The step's Frame snapshots as the task bundle carries them, read from where submit kept them."""
+        frames = []
+        for frame in step.frames:
+            try:
+                kept = self.track.get_payload(frame.ref)
+            except KeyError:
+                raise RuntimeError(f"the snapshot of Frame {frame.id!r} for step {step.name!r} is not on the "
+                                   f"Track ({frame.ref})") from None
+            text = kept.get("text") if isinstance(kept, Mapping) else None
+            if not isinstance(text, str):
+                raise RuntimeError(f"the snapshot of Frame {frame.id!r} ({frame.ref}) holds no text")
+            frames.append({"id": frame.id, "title": frame.name, "uri": frame.uri or f"frame:{frame.id}",
+                           "digest": frame.digest, "text": text})
+        return frames
 
     @step_function
     def read_envelope(self, now: _Pass, attempt: Attempt) -> None:
@@ -1092,6 +1261,7 @@ class LifecycleRunner(WorkflowEngine):
         run = Run.replay(events)
         if run is None or run.state is not RunState.WAITING_AT_GATE:
             raise ValueError(f"run {run_id!r} is not waiting at a Gate")
+        self._refuse_elsewhere(run_id, run)
         waiting_on = self._open_escalation(events, run)
         if outcome == "approve" and waiting_on is not None and waiting_on["envelope"] is None:
             # An escalation recorded before Gates holds no result, so there is nothing to

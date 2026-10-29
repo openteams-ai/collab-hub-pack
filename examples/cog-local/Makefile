@@ -66,17 +66,25 @@ $(LOCAL):
 env: ## Install what the example uses: the CLI, the hub, Toad, pixi, and Hermes's environment
 	@command -v uv >/dev/null || { echo "install uv first: https://docs.astral.sh/uv/getting-started/installation/"; exit 1; }
 	cd $(ROOT)/cli && uv sync --quiet
-	cd $(ROOT)/api && uv sync --quiet --group runs
+	cd $(ROOT)/api && uv sync --quiet
 	cd $(ROOT)/execution && uv sync --quiet
 	uv tool install --quiet -U batrachian-toad --python 3.14
-	@command -v pixi >/dev/null || { echo "installing pixi (https://pixi.sh)"; curl -fsSL https://pixi.sh/install.sh | bash; }
+	@# pixi 0.82.1 or later: cogs/hermes/pixi.toml requires it (earlier releases trust a compromised CA chain), and
+	@# an older pixi already on PATH would otherwise be kept and then refuse to install that package. Checked with
+	@# ~/.pixi/bin first on PATH, as the install lines below run, so a pixi this installed is found before a new shell.
+	@PATH="$$HOME/.pixi/bin:$$PATH"; { command -v pixi >/dev/null && [ "$$(printf '%s\n' 0.82.1 "$$(pixi --version | cut -d' ' -f2)" | sort -V | head -n1)" = 0.82.1 ]; } \
+	  || { echo "installing pixi 0.82.1 (https://pixi.sh)"; curl -fsSL https://pixi.sh/install.sh | PIXI_VERSION=v0.82.1 bash; }
 	PATH="$$HOME/.pixi/bin:$$PATH" pixi install --manifest-path $(ROOT)/cogs/hermes/pixi.toml
 	PATH="$$HOME/.pixi/bin:$$PATH" pixi install --manifest-path $(CURDIR)/cogs/hello/pixi.toml
-	@echo "Ready. If pixi or toad was just installed, open a new shell, or add ~/.pixi/bin and ~/.local/bin to PATH."
+	@echo "Ready. If pixi or toad was just installed, or pixi replaced, open a new shell, or put ~/.pixi/bin and ~/.local/bin first on PATH."
 
 tools: ## Check what the example needs: docker, uv, pixi, and toad for `make connect` and `make toad`
-	@for tool in docker uv pixi; do command -v $$tool >/dev/null \
+	@for tool in docker uv; do command -v $$tool >/dev/null \
 		&& echo "  ok      $$tool" || { echo "  missing $$tool"; missing=1; }; done; \
+	if ! command -v pixi >/dev/null; then echo "  missing pixi"; missing=1; \
+	elif [ "$$(printf '%s\n' 0.82.1 "$$(pixi --version | cut -d' ' -f2)" | sort -V | head -n1)" = 0.82.1 ]; then echo "  ok      pixi"; \
+	else echo "  too old pixi $$(pixi --version | cut -d' ' -f2) at $$(command -v pixi): the Cogs need 0.82.1 or later, and the" \
+	     "controller runs the first pixi on PATH (make env installs one to ~/.pixi/bin; put it first)"; missing=1; fi; \
 	command -v toad >/dev/null && echo "  ok      toad" || echo "  missing toad (only for make connect and make toad): make env"; \
 	test -d $(ROOT)/cogs/hermes/.pixi/envs/default && echo "  ok      Hermes's environment" \
 		|| echo "  missing Hermes's environment (the first launch installs it, slowly): make env"; \
@@ -119,8 +127,12 @@ model: ## The fake model Hermes calls, on port 8090 (foreground); not needed wit
 api: ## The hub's API, verifying the realm's tokens (foreground)
 	$(MAKE) -C $(DEV) api-oidc API_PORT=$(PORT)
 
+# The controller watches the hub's own database, the Track the API records runs in. Its tables come
+# from the API's migrations, so the controller starts once the API answers.
+TRACK ?= postgresql://collab:collab@127.0.0.1:5432/collab
 controller: ## The run controller, which starts each Cog as a local process (foreground)
-	$(MAKE) -C $(DEV) controller
+	@until curl -sf $(COLLAB_HUB_URL)/health > /dev/null; do sleep 1; done
+	$(MAKE) -C $(DEV) controller TRACK=$(TRACK)
 
 start: | $(LOCAL) ## The fake model (if used), the API and the controller in the background; logs in .local/
 	@echo "  Hermes's model: $(MODEL_SOURCE)$(if $(filter claude,$(MODEL_SOURCE)), ($(CLAUDE_MODEL)))"

@@ -11,6 +11,7 @@ from .frames.account_provisioning import DisabledServiceAccessGranter
 
 if TYPE_CHECKING:
     from .cogs.catalog import CogCatalogStore
+    from .cogs.serving import CogRegistryServing
     from .config import FeaturesConfig
     from .frames.account_provisioning import ServiceAccessGranter
     from .frames.active_state import ActiveFrameStore
@@ -65,6 +66,12 @@ def get_usage_store(request: Request) -> UsageStore:
 
 def get_cog_catalog_store(request: Request) -> CogCatalogStore:
     return request.app.state.cog_catalog_store
+
+
+def get_cog_registry_serving(request: Request) -> CogRegistryServing | None:
+    """The Hub's own registry surface, or ``None`` when ``cogs.serve.enabled`` is off (issue #179)."""
+
+    return getattr(request.app.state, "cog_registry_serving", None)
 
 
 def get_task_store(request: Request) -> InMemoryTaskStore | PostgresTaskStore:

@@ -4,6 +4,8 @@
 name = "hermes"
 channels = ["conda-forge"]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64", "osx-64"]
+# 0.82.1 is the first pixi whose bundled roots exclude the compromised eMudhra chain.
+requires-pixi = ">=0.82.1"
 
 [tasks]
 serve = "python serve.py"
@@ -13,3 +15,12 @@ python = "3.12.*"
 
 [pypi-dependencies]
 hermes-agent = { version = "==0.19.0", extras = ["acp", "anthropic"] }
+# The worker SDK, from this repository: the Cog lives beside it, so it pins the SDK by path.
+collab-hub-cog-worker = { path = "../../worker" }
+
+[pypi-options]
+# hermes-agent 0.19.0 pins certifi==2026.5.20, which still trusts the compromised
+# eMudhra intermediates. Override until a hermes-agent release lifts the pin
+# (its main already carries certifi==2026.10.19), then drop this override only:
+# the worker's own trust-store default (serve.py, README) stays.
+dependency-overrides = { certifi = ">=2026.10.19" }

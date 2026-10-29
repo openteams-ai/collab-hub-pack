@@ -26,7 +26,12 @@ The same rule makes rollback a two-step change. An image that predates a flag do
 
 | Flag | What it exposes | Also needs |
 |---|---|---|
-| `cog_runs` | The run API, `/v1/runs`: launch a Cog, list runs, cancel one | `runs.track_path`, the Track file a run controller watches, and the `collab-hub-execution` package installed beside the API, which the image does not ship yet. See [runs](cog-execution/runs.md#the-run-controller-and-the-run-api) |
+| — | No flag is registered today | |
+
+**Retired.** `cog_runs` (the run API, `/v1/runs`) shipped with the image's
+execution package and is always served: on the hub's own database, or on
+`runs.track_path` ([runs](cog-execution/runs.md#the-run-controller-and-the-run-api)).
+A deployment that still sets it starts, and the API logs it.
 
 ## Turning a flag on
 

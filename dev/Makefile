@@ -124,14 +124,15 @@ DEV_AUTH_ENV := \
 LEVEL1_ENV := \
   COLLAB_HUB_API__COGS__CATALOG__BACKEND=memory
 
-# Level 1 only: the run API (/v1/runs), behind its feature flag, over the SQLite
-# Track `make controller` watches. PACKAGES are the directories a Cog package
-# may be launched from, the same ones the controller is given.
+# The run API (/v1/runs). PACKAGES are the directories a Cog package may be
+# launched from, the same ones the controller is given. At level 1 its Track is
+# the SQLite file `make controller` watches; at level 2 (`make api-pg`, no
+# TRACK_PATH), and at level 3 (`make api-oidc`), it is the hub's own Postgres, as on a deployed hub.
 COGS ?= $(CURDIR)/cogs:$(ROOT)/cogs:$(ROOT)/examples/cog-local/cogs
+RUNS_PACKAGES_ENV := COLLAB_HUB_API__RUNS__PACKAGES=$(COGS)
 RUNS_ENV := \
-  COLLAB_HUB_API__FEATURES__COG_RUNS=true \
   COLLAB_HUB_API__RUNS__TRACK_PATH=$(LOCAL)/track.sqlite \
-  COLLAB_HUB_API__RUNS__PACKAGES=$(COGS)
+  $(RUNS_PACKAGES_ENV)
 
 # Real bearer verification against the local Keycloak realm.
 #
@@ -224,7 +225,7 @@ KC_CONNECTOR_ENV := \
         keycloak-admin realm-import broker-role idp-google idp-github idp-list \
         token sub whoami seed-org psql \
         kind-up kind-cluster kind-image kind-redeploy kind-forward kind-logs \
-        kind-smoke kind-down test lint clean op controller fake-model
+        kind-smoke kind-down test lint clean op submit run-events controller models fake-model
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "; \
@@ -241,11 +242,11 @@ help: ## Show this help
 
 api: | $(LOCAL)/frames ## The API alone: no containers, dev auth, local-FS frames, in-memory stores
 	cd $(API_DIR) && env $(BASE_ENV) $(DEV_AUTH_ENV) $(LEVEL1_ENV) $(RUNS_ENV) \
-		uv run --group runs python -m collab_hub_api
+		uv run python -m collab_hub_api
 
 api-watch: | $(LOCAL)/frames ## Same as `api` (no containers), restarted on every source change
 	cd $(API_DIR) && env $(BASE_ENV) $(DEV_AUTH_ENV) $(LEVEL1_ENV) $(RUNS_ENV) \
-		uv run --group runs --with watchfiles watchfiles 'python -m collab_hub_api' src
+		uv run --with watchfiles watchfiles 'python -m collab_hub_api' src
 
 # ---------------------------------------------------------------------------
 ## Level 1 — running Cogs and Ops
@@ -254,6 +255,10 @@ api-watch: | $(LOCAL)/frames ## Same as `api` (no containers), restarted on ever
 OP       ?= echo
 BACKEND  ?= none
 LOCATION ?=
+# The Track: the SQLite file in .local/ at level 1, or Postgres at level 2 (TRACK=$(PG_URL) after `make postgres`).
+TRACK    ?= $(LOCAL)/track.sqlite
+# psycopg, only for a Track on Postgres: a SQLite one needs nothing more, on any Python psycopg has no wheel for yet.
+TRACK_EXTRA = $(if $(filter postgres%,$(TRACK)),--extra postgres)
 
 # No container. Without a LOCATION the fake Cogs under cogs/ answer in the same
 # process. With LOCATION=local each step's worker is a real process: the Cog
@@ -264,22 +269,71 @@ LOCATION ?=
 op: ## Run a fake Op and print its Track (OP=echo|needs-review|fails|slow|spender, LOCATION=local for real worker processes)
 	@if [ "$(LOCATION)" = local ] && ! command -v pixi >/dev/null; then \
 		echo "LOCATION=local runs each fake Cog in its own pixi environment: install pixi (https://pixi.sh), or run without LOCATION"; exit 1; fi
-	cd $(ROOT)/execution && LOCATION=$(LOCATION) uv run --quiet --with pyyaml python $(CURDIR)/op.py $(OP) \
-		--backend $(BACKEND) --track $(LOCAL)/track.sqlite
+	cd $(ROOT)/execution && LOCATION=$(LOCATION) uv run --quiet $(TRACK_EXTRA) --with pyyaml python $(CURDIR)/op.py $(OP) \
+		--backend $(BACKEND) --track $(TRACK)
 
-# The process that advances the runs `make api` (or `make api-oidc`) accepts: it
-# watches the same SQLite Track, starts each submitted run's worker as a local
-# process (the Cog package's `serve` task in its own pixi environment), and
-# delivers cancels and turns. No limit on how long an interaction takes: a Cog
-# holding a session stays in one for as long as someone talks to it.
-controller: | $(LOCAL)/frames ## The run controller for `make api`: runs the Cogs launched through /v1/runs as local processes
-	@command -v pixi >/dev/null || { \
-		echo "the controller runs each Cog in its own pixi environment: install pixi (https://pixi.sh)"; exit 1; }
-	cd $(ROOT)/execution && uv run --quiet python -m collab_hub_execution.controller \
-		--track $(LOCAL)/track.sqlite $(foreach dir,$(subst :, ,$(COGS)),--packages $(dir)) \
-		--work-dir $(LOCAL)/runs --backend $(BACKEND) --location local --interaction-timeout 0 \
-		--deliver hermes:COLLAB_MODEL_PROVIDER --deliver hermes:COLLAB_MODEL_BASE_URL \
-		--deliver hermes:COLLAB_MODEL_NAME --deliver hermes:COLLAB_MODEL_API_KEY
+# A fake Op launched through the run API (POST /v1/runs on `make api`, or `make api-pg`), as any
+# client launches one: a controller (`make controller`, in another terminal) picks it up. Follows the
+# run until it ends or waits at a Gate, prints its events, and says which controller picked it up.
+submit: ## Launch a fake Op through /v1/runs for `make controller`, and follow it (OP=echo|needs-review|fails|slow)
+	cd $(ROOT)/execution && uv run --quiet --with pyyaml python $(CURDIR)/op.py $(OP) --submit --api $(API_URL)
+
+# A run's events as they land, from GET /v1/runs/{id}/events as a server-sent event stream, until
+# the run ends. Dev auth answers at levels 1 and 2; at level 3 pass a token (TOKEN=$$(make -s token)).
+RUN ?=
+TOKEN ?=
+run-events: ## Stream a run's events until it ends (RUN=run-...)
+	@[ -n "$(RUN)" ] || { echo "RUN=run-... names the run, as make submit or collab-hub run list print it"; exit 1; }
+	curl -sSN -H 'Accept: text/event-stream' $(if $(TOKEN),-H "Authorization: Bearer $(TOKEN)") \
+		$(API_URL)/v1/runs/$(RUN)/events
+
+# A decision on the Gate a run waits at, through the run API: the escalation it answers is read from
+# the run, so a decision on a revision nobody saw is refused as stale. OUTCOME=approve|reject|send_back,
+# FINDING= what to send the step back with.
+STEP    ?=
+OUTCOME ?= approve
+FINDING ?=
+run-decide: ## Decide the Gate a run waits at (RUN= STEP= OUTCOME=approve|reject|send_back FINDING=)
+	@[ -n "$(RUN)" ] && [ -n "$(STEP)" ] || { echo "RUN=run-... and STEP=<name> name the run and its waiting step"; exit 1; }
+	@esc=$$(curl -sS $(if $(TOKEN),-H "Authorization: Bearer $(TOKEN)") $(API_URL)/v1/runs/$(RUN) \
+		| python3 -c 'import json,sys; print(json.load(sys.stdin).get("escalation") or "")'); \
+	[ -n "$$esc" ] || { echo "$(RUN) waits on no decision"; exit 1; }; \
+	curl -sS -X POST -H 'Content-Type: application/json' $(if $(TOKEN),-H "Authorization: Bearer $(TOKEN)") \
+		-d "$$(python3 -c 'import json; print(json.dumps({"escalation": "'$$esc'", "outcome": "$(OUTCOME)", "findings": [f for f in ["$(FINDING)"] if f]}))')" \
+		$(API_URL)/v1/runs/$(RUN)/steps/$(STEP)/decision | python3 -m json.tool
+
+run-retry: ## Ask for an ended run to run again (RUN=run-...)
+	@[ -n "$(RUN)" ] || { echo "RUN=run-... names the run"; exit 1; }
+	curl -sS -X POST $(if $(TOKEN),-H "Authorization: Bearer $(TOKEN)") $(API_URL)/v1/runs/$(RUN)/retry | python3 -m json.tool
+
+# The process that advances the runs `make api` (or `make api-oidc`) accepts, and `make submit`
+# records: it watches the Track (TRACK), picks up each submitted run, starts its worker as a local
+# process (the Cog package's `serve` task in its own pixi environment, or directly with
+# ENVIRONMENT=host), and delivers cancels, turns and decisions on Gates. Several can share a Track,
+# each under its own CONTROLLER_ID: of those picking up one run, one starts it, and a restarted
+# controller records the runs it left unfinished `interrupted`. HEALTH_PORT serves /healthz and
+# /readyz. Each Cog gets the model the models block binds it to (`make models`). No limit on how
+# long an interaction takes: a Cog holding a session stays in one for as long as someone talks to it.
+CONTROLLER_ID ?= dev
+ENVIRONMENT   ?= pixi
+HEALTH_PORT   ?=
+MODELS        ?= $(LOCAL)/models.toml
+controller: models | $(LOCAL)/frames ## The run controller: picks up what /v1/runs and `make submit` record (TRACK, CONTROLLER_ID)
+	@[ "$(ENVIRONMENT)" = host ] || command -v pixi >/dev/null || { \
+		echo "the controller runs each Cog in its own pixi environment: install pixi (https://pixi.sh), or ENVIRONMENT=host"; exit 1; }
+	cd $(ROOT)/execution && uv run --quiet $(TRACK_EXTRA) python -m collab_hub_execution.controller \
+		--track $(TRACK) --id $(CONTROLLER_ID) $(foreach dir,$(subst :, ,$(COGS)),--packages $(dir)) \
+		--work-dir $(LOCAL)/runs --backend $(BACKEND) --location local --environment $(ENVIRONMENT) \
+		--interaction-timeout 0 --models $(MODELS) $(if $(HEALTH_PORT),--health-port $(HEALTH_PORT))
+
+# The hub's models block, from COLLAB_MODEL_* (below): the one model the Hermes Cog is bound to. The
+# key is never written here: the block names the variable it is in, which the controller reads.
+models: | $(LOCAL)/frames ## Write the models block the controller delivers from (.local/models.toml)
+	@{ printf '[models.default]\nprovider = "%s"\n' "$${COLLAB_MODEL_PROVIDER:-openai-compatible}"; \
+	   [ -z "$$COLLAB_MODEL_BASE_URL" ] || printf 'endpoint = "%s"\n' "$$COLLAB_MODEL_BASE_URL"; \
+	   [ -z "$$COLLAB_MODEL_NAME" ] || printf 'model = "%s"\n' "$$COLLAB_MODEL_NAME"; \
+	   [ -z "$$COLLAB_MODEL_API_KEY" ] || printf 'auth_ref = "env:COLLAB_MODEL_API_KEY"\n'; \
+	   printf '\n[cogs]\nhermes = "default"\n'; } > $(MODELS)
 
 # The model the Hermes Cog calls: `make fake-model` by default. Point it at a real
 # OpenAI-compatible endpoint by setting these before `make controller`, or at
@@ -300,14 +354,14 @@ fake-model: ## An OpenAI-compatible model that answers without one, for the Herm
 # ---------------------------------------------------------------------------
 
 api-pg: postgres | $(LOCAL)/frames ## Starts Postgres, then the API: history, groups, orgs, tasks
-	cd $(API_DIR) && env $(BASE_ENV) $(DEV_AUTH_ENV) $(PG_ENV) uv run python -m collab_hub_api
+	cd $(API_DIR) && env $(BASE_ENV) $(DEV_AUTH_ENV) $(PG_ENV) $(RUNS_PACKAGES_ENV) uv run python -m collab_hub_api
 
 # ---------------------------------------------------------------------------
 ## Level 3 — API with Keycloak (real bearer tokens, web surface, connectors)
 # ---------------------------------------------------------------------------
 
 api-oidc: postgres keycloak | $(LOCAL)/frames ## API verifying real Keycloak bearer tokens (no dev-auth shortcut)
-	cd $(API_DIR) && env $(BASE_ENV) $(OIDC_ENV) $(PG_ENV) $(RUNS_ENV) uv run --group runs python -m collab_hub_api
+	cd $(API_DIR) && env $(BASE_ENV) $(OIDC_ENV) $(PG_ENV) $(RUNS_PACKAGES_ENV) uv run python -m collab_hub_api
 
 # Connector routes exchange the CALLER's bearer with the broker, so the
 # dev-auth shortcut cannot reach them -- it authenticates a subject without

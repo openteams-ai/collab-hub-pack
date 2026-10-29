@@ -4,7 +4,7 @@ Route-level dependencies protect the API routers, but they cannot protect what
 they do not decorate: ``/`` and ``/metrics`` were reachable without credentials
 and relied on the Nebari gateway (``enforceAtGateway``) to keep browsers out.
 Behind an ordinary Ingress there is no gateway, so that reliance turns into a
-public metrics endpoint (issue #60).
+public metrics endpoint.
 
 The fix is a middleware that consults a protection map — a list of path rules
 supplied as configuration — before the request is routed, and a default that
@@ -26,6 +26,7 @@ from fastapi import HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.routing import get_route_path
 
 from .config import PathAccess, PathRule
 
@@ -65,19 +66,26 @@ def api_path(path: str) -> bool:
 
 
 def request_path(request: Request) -> str:
-    """The request path relative to the app, with any mount prefix removed.
+    """The request path relative to the app, byte-identical to what the router routes.
 
     When the app is served under a prefix (``server.root_path``), a proxy that
     does not strip the prefix leaves it on ``scope["path"]``. Rules are written
-    against the app's own paths, so strip it before matching — otherwise a
-    prefixed deployment matches nothing and every path falls to the default.
+    against the app's own paths, so the prefix has to come off before matching
+    — otherwise a prefixed deployment matches nothing and every path falls to
+    the default.
+
+    That strip is :func:`starlette.routing.get_route_path`, the function the
+    router itself calls, and deliberately not a reimplementation of it. The
+    previous version used a raw ``startswith``, which is not segment-aware:
+    with ``root_path="/"`` a request for ``/metrics`` reduced to ``metrics``,
+    matched no rule and fell to the default, while the router still served
+    ``/metrics``. Under ``default_access="public"`` that turned an
+    ``authenticated`` entry into an anonymous 200. A path-based control must
+    derive its path from the same function the router does (``web/guard.py``
+    records the same rule for the browser surface).
     """
 
-    path = request.url.path
-    root_path = request.scope.get("root_path") or ""
-    if root_path and path.startswith(root_path):
-        path = path[len(root_path) :] or "/"
-    return path
+    return get_route_path(request.scope)
 
 
 def _matches(rule: PathRule, path: str) -> bool:
@@ -154,6 +162,7 @@ class PathProtectionMiddleware(BaseHTTPMiddleware):
         authenticate: Callable[[Request], object],
         unauthorized_response: Callable[[Request, HTTPException], Response] = default_unauthorized_response,
         authenticate_error_response: Callable[[Request, Exception], Response | None] | None = None,
+        self_authenticating: Callable[[str], bool] | None = None,
     ) -> None:
         super().__init__(app)
         self.rules = list(rules)
@@ -165,8 +174,17 @@ class PathProtectionMiddleware(BaseHTTPMiddleware):
         # re-raises, so a genuine bug still surfaces as a 500 rather than being
         # laundered into a plausible-looking error.
         self.authenticate_error_response = authenticate_error_response
+        # Paths whose routes run their own credential check on every request
+        # and must answer its refusal themselves -- the OCI registry surface,
+        # whose 401 carries the challenge a client follows to its token
+        # endpoint. Passed through whatever the map says; "public" in the map
+        # would say the same thing, but an operator's more specific rule
+        # could then undo it and break every registry client.
+        self.self_authenticating = self_authenticating
 
     async def dispatch(self, request: Request, call_next):
+        if self.self_authenticating is not None and self.self_authenticating(request_path(request)):
+            return await call_next(request)
         if resolve_access(request_path(request), self.rules, self.default_access) == "public":
             return await call_next(request)
         try:

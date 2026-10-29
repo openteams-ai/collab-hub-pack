@@ -740,5 +740,5 @@ class PostgresFrameGroupStore(FrameGroupStore):
 
     def _connect(self):
         # A transaction-scoped checkout from the shared pool — never a fresh
-        # per-request psycopg.connect (issue #58).
+        # per-request psycopg.connect.
         return self.db.connection()

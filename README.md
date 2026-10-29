@@ -1,9 +1,9 @@
 # Collab Hub
 
 ![Status: Beta](https://img.shields.io/badge/status-beta-orange)
-[![Lint](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/lint.yaml/badge.svg)](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/lint.yaml)
-[![Test](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/test.yaml/badge.svg)](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/test.yaml)
-[![Dev Environment](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/dev-env.yaml/badge.svg)](https://github.com/nebari-dev/collab-hub-pack/actions/workflows/dev-env.yaml)
+[![Lint](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/lint.yaml/badge.svg)](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/lint.yaml)
+[![Test](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/test.yaml/badge.svg)](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/test.yaml)
+[![Dev Environment](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/dev-env.yaml/badge.svg)](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/dev-env.yaml)
 
 > **Beta** — stable enough to deploy in your own environment with engineering
 > support. APIs and chart values may still change between releases. See the
@@ -42,12 +42,12 @@ The API is a FastAPI service exposing:
 
 ## Quickstart
 
-Install the versioned chart from the latest [release](../../releases/latest)
-(pinned to an immutable image):
+Install a versioned chart (pinned to an immutable image) from GHCR; the
+[releases](../../releases) list the versions and attach the same chart:
 
 ```sh
 helm install collab-hub-pack \
-  https://github.com/nebari-dev/collab-hub-pack/releases/download/v0.1.0/collab-hub-0.1.0.tgz \
+  oci://ghcr.io/openteams-ai/charts/collab-hub --version <version> \
   --namespace nebari-nexus --create-namespace \
   --values values-example.yaml
 ```
@@ -67,7 +67,15 @@ flowchart LR
   api --> frames[Frames store<br/>S3 / Postgres]
   api --> conn[Connectors<br/>Slack / Google]
   api --> dir[User directory<br/>Keycloak]
+  api -->|records intent,<br/>reads status| track[(Track<br/>Postgres / SQLite)]
+  controller[Run controllers<br/>one or more] -->|picks up runs,<br/>records progress| track
+  controller -->|starts and tears down| workers[Cog workers<br/>local processes]
 ```
+
+The API never calls a run controller and never starts a worker: it records what
+a client asked for on the Track, and the controllers act on it. Of several
+controllers, one picks up each run
+([`docs/cog-execution/runs.md`](docs/cog-execution/runs.md#the-run-controller-and-the-run-api)).
 
 ## Known limitations
 
@@ -77,13 +85,13 @@ flowchart LR
   starts again, and continues only when someone retries it. `dbos` (#104) is
   the backend that resumes runs; see
   [`docs/cog-execution/runs.md`](docs/cog-execution/runs.md).
-- **One host per Track.** Until run pickup (#121), a host takes every
-  unfinished run on its Track as its own when it starts, so one run controller
-  runs per Track.
-- **The run API is behind a feature flag.** `/v1/runs` and the run controller
-  are a first form, for one machine: a SQLite Track, workers as local
-  processes, and the `cog_runs` flag off by default. See
-  [`examples/cog-local`](examples/cog-local/README.md).
+- **Cogs on a deployed hub run in the API's pod.** Every hub serves the run
+  API (`/v1/runs`) on its own database. With `runs.controller.enabled`, a run
+  controller beside the API runs the Cogs the image ships as processes of that
+  pod, not isolated from the hub: for a development hub. Cogs in pods of their
+  own come later. See
+  [`docs/standalone-deployment.md`](docs/standalone-deployment.md#running-cogs-beside-the-api)
+  and [`examples/cog-local`](examples/cog-local/README.md).
 
 ## Local development
 
@@ -124,7 +132,7 @@ production build.
 
 ## Documentation
 
-Setup and reference docs — connector setup, Frames, operations, the
+Setup and reference docs — connector setup, [connector discovery](docs/connector-discovery.md), Frames, operations, the
 [Cog registry](docs/cog-registry.md), [feature flags](docs/feature-flags.md) — live in [`docs/`](docs/).
 
 The basis for Cog and Op execution — vocabulary, the Op–Cog seam, the
@@ -136,9 +144,15 @@ The [`collab-hub` CLI](cli/README.md) is a terminal client for the hub's REST
 API: it signs in the way the Collab desktop does, and lists the Cogs the hub
 offers.
 
+The [worker SDK](worker/README.md), `collab-hub-cog-worker`, is how a Cog is
+written against the hub's seam: it serves `/invoke` and the envelope, and
+drives the Cog's harness through an adapter — any ACP agent, or a direct
+model call. [`cogs/hermes`](cogs/README.md) is the reference harness Cog on
+it. The hub itself never imports the SDK.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Contributions are accepted under the
 [Apache-2.0 license](LICENSE). Report
 security issues privately via GitHub's
-[Report a vulnerability](https://github.com/nebari-dev/collab-hub-pack/security/advisories/new).
+[Report a vulnerability](https://github.com/openteams-ai/collab-hub-pack/security/advisories/new).

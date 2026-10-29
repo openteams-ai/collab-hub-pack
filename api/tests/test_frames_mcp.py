@@ -299,7 +299,7 @@ async def test_mcp_rejects_invalid_frame_ids_before_store_lookup(tmp_path):
     assert store_lookup_called is False
 
 
-def test_mcp_http_mount_starts_session_manager(tmp_path, monkeypatch):
+def test_mcp_http_route_starts_session_manager(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
     monkeypatch.setenv("DEV_AUTH_ENABLED", "true")
     monkeypatch.setenv("DEV_AUTH_USER", "dev-user")
@@ -332,6 +332,207 @@ def test_mcp_http_mount_starts_session_manager(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert '"name":"frames"' in response.text or '"name": "frames"' in response.text
+
+
+# The MCP app used to be mounted at "/", where it matched every path the API did
+# not route: its auth middleware answered 401 for a trailing-slash typo, and its
+# plain-text 404 answered unmatched paths. It is now registered at the one path
+# it serves (#67); these pin what falls through to the app itself.
+
+
+async def test_mcp_mount_lets_trailing_slash_paths_redirect(client):
+    for path, target in (
+        ("/v1/usage/summary/", "/v1/usage/summary"),
+        ("/v1/frames/", "/v1/frames"),
+        ("/v1/tasks/", "/v1/tasks"),
+        ("/usage/", "/usage"),
+    ):
+        # Unauthenticated on purpose: the 401 this replaces came from the MCP
+        # mount's auth middleware, which ran before any routing decision.
+        response = await client.get(path)
+        assert response.status_code == 307, path
+        assert response.headers["location"].endswith(target), path
+
+
+async def test_mcp_mount_lets_unmatched_api_paths_answer_the_frames_envelope(client):
+    for path in ("/v1/usage/", "/v1/frames/a/b/c", "/v1/tasks/nope/nope", "/frames/a/b/c"):
+        response = await client.get(path)
+        assert response.status_code == 404, path
+        assert response.json() == {"error": {"code": "not_found", "message": "Not Found"}}, path
+
+
+async def test_bad_method_on_api_path_answers_the_envelope_and_keeps_allow(client):
+    # Bad methods used to reach the MCP mount (401); now Starlette's router
+    # raises 405 and the handler must keep the Allow header it attaches.
+    response = await client.delete("/v1/frames")
+    assert response.status_code == 405
+    assert "GET" in response.headers["allow"]
+    assert response.json() == {"error": {"code": "http_error", "message": "Method Not Allowed"}}
+
+
+async def test_unsupported_options_on_api_paths_answers_405_with_allow(client):
+    # Not a CORS preflight (no Origin / Access-Control-Request-Method), so the
+    # request is routed and the GET-only route refuses it.
+    response = await client.options("/v1/frames")
+    assert response.status_code == 405
+    assert "GET" in response.headers["allow"]
+
+
+async def test_body_parse_errors_on_api_paths_answer_the_envelope(client):
+    # FastAPI raises Starlette's HTTPException(400) for an unparseable body, so
+    # registering the handler on the base class brings it into the envelope.
+    response = await client.post(
+        "/v1/frames",
+        content=b"{\"name\": \"\xff\"}",
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "http_error"
+
+
+@pytest.mark.parametrize(
+    ("root_path", "request_prefix"),
+    [("/nexus", "/nexus"), ("/nexus", ""), ("/v", "")],
+)
+async def test_routing_errors_keep_the_envelope_under_a_root_path(
+    tmp_path, monkeypatch, root_path, request_prefix
+):
+    # A proxy that keeps the `server.root_path` prefix ("/nexus" requested as
+    # "/nexus/..."), one that strips it, and a root path that is a textual but
+    # not a segment prefix of the API path ("/v"): in every case the path the
+    # router matched on is an API path, and the answer is the envelope.
+    monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
+    monkeypatch.setenv("FRAMES_IDTOKEN_ALLOW_UNSIGNED", "true")
+    config = Config.parse(
+        {
+            "storage": {"frames_path": str(tmp_path / "frames")},
+            "server": {"root_path": root_path},
+            "frames": {
+                "active_state": {"backend": "memory"},
+                "history": {"backend": "memory"},
+                "usage": {"backend": "memory"},
+                "mcp_session_manager_enabled": False,
+            },
+            "tasks": {"backend": "memory"},
+        }
+    )
+    app = make_app(config)
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app, root_path=root_path)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            unmatched = await client.get(f"{request_prefix}/v1/frames/a/b/c")
+            bad_method = await client.delete(f"{request_prefix}/v1/frames")
+            # A route-raised 401 goes through the same handler.
+            anonymous = await client.get(f"{request_prefix}/v1/frames")
+    assert anonymous.status_code == 401
+    assert anonymous.json()["error"]["code"] == "unauthorized"
+    assert unmatched.status_code == 404
+    assert unmatched.json() == {"error": {"code": "not_found", "message": "Not Found"}}
+    assert bad_method.status_code == 405
+    assert "GET" in bad_method.headers["allow"]
+    assert bad_method.json() == {"error": {"code": "http_error", "message": "Method Not Allowed"}}
+
+
+async def test_a_refusal_has_one_body_whichever_layer_raised_it(tmp_path, monkeypatch):
+    # With default_access="authenticated" the protection middleware refuses
+    # an anonymous request before routing; with "public" the route's own
+    # dependency does.
+    # Both classify the path with request_path, so the caller cannot tell the
+    # two apart. root_path="/frames" is the case that used to split them: the
+    # raw path spells an API prefix, the app-relative /v1/connectors does not.
+    monkeypatch.setenv("FRAMES_IDTOKEN_ALLOW_UNSIGNED", "true")
+    bodies = []
+    for default_access in ("authenticated", "public"):
+        config = Config.parse(
+            {
+                "storage": {"frames_path": str(tmp_path / f"frames-{default_access}")},
+                "server": {"root_path": "/frames"},
+                "security": {"default_access": default_access},
+                "frames": {"active_state": {"backend": "memory"}, "mcp_session_manager_enabled": False},
+            }
+        )
+        app = make_app(config)
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app, root_path="/frames")
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.get("/frames/v1/connectors")
+        assert response.status_code == 401, default_access
+        bodies.append(response.json())
+    assert bodies[0] == bodies[1]
+    assert set(bodies[0]) == {"detail"}
+
+
+async def test_mcp_mount_removal_leaves_other_response_shapes_alone(client):
+    # `/v1/connectors/*` stays out of core._api_path, so it keeps FastAPI's
+    # default error body. Converging error shapes app-wide is a contract
+    # decision of its own; #67 only moves the routing decision.
+    unmatched_connector = await client.get("/v1/connectors/bogus")
+    assert unmatched_connector.status_code == 404
+    assert unmatched_connector.json() == {"detail": "Not Found"}
+
+    # A path outside every API prefix gets FastAPI's default body too, rather
+    # than the MCP app's plain text.
+    unmatched_elsewhere = await client.get("/no-such-page")
+    assert unmatched_elsewhere.status_code == 404
+    assert unmatched_elsewhere.json() == {"detail": "Not Found"}
+
+    assert (await client.get("/health")).status_code == 200
+    assert (await client.get("/metrics")).status_code == 200
+    assert (await client.get("/")).status_code == 200
+
+
+def test_mcp_endpoint_stays_reachable_while_other_paths_fall_through(tmp_path, monkeypatch):
+    monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
+    monkeypatch.setenv("DEV_AUTH_ENABLED", "true")
+    monkeypatch.setenv("DEV_AUTH_USER", "dev-user")
+    config = Config.parse(
+        {
+            "storage": {"frames_path": str(tmp_path / "frames")},
+            "frames": {"active_state": {"backend": "memory"}},
+        }
+    )
+    app = make_app(config)
+
+    with TestClient(app) as client:
+        # `/mcp` is the URL the docs, the chart's ingress and MCP clients all
+        # use. The catch-all mount became an exact-path registration, so the
+        # path the MCP app builds its endpoint on has to be routed to it.
+        mcp_path = app.state.mcp_server.settings.streamable_http_path
+        assert mcp_path == "/mcp"
+        assert mcp_path in {getattr(route, "path", None) for route in app.router.routes}
+
+        initialize = client.post(
+            mcp_path,
+            headers={
+                "accept": "application/json, text/event-stream",
+                "content-type": "application/json",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"},
+                },
+            },
+        )
+        assert initialize.status_code == 200
+        assert '"name":"frames"' in initialize.text or '"name": "frames"' in initialize.text
+
+        # The slash form of the MCP path now redirects to it like any other
+        # registered path, instead of being refused by the MCP auth middleware.
+        slashed = client.post(f"{mcp_path}/", follow_redirects=False)
+        assert slashed.status_code == 307
+        assert slashed.headers["location"].endswith(mcp_path)
+
+        # ...while the same app now answers for everything else itself.
+        redirected = client.get("/v1/usage/summary/", follow_redirects=False)
+        assert redirected.status_code == 307
+        unmatched = client.get("/v1/usage/")
+        assert unmatched.status_code == 404
+        assert unmatched.json() == {"error": {"code": "not_found", "message": "Not Found"}}
 
 
 def test_mcp_http_smoke_helper_parses_tool_json_payloads(tmp_path, monkeypatch):

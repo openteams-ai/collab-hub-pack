@@ -52,7 +52,8 @@ def store(request, tmp_path):
         kwargs = {"row_factory": dict_row} if request.param == "postgres-dict-rows" else {}
         pool = ConnectionPool(TEST_PG, min_size=1, max_size=4, open=True, kwargs=kwargs)
         with pool.connection() as conn:
-            for statement in ("DROP TABLE IF EXISTS collab_track_payloads", "DROP TABLE IF EXISTS collab_track_events",
+            for statement in ("DROP TABLE IF EXISTS collab_track_payloads", "DROP TABLE IF EXISTS collab_track_runs",
+                              "DROP TABLE IF EXISTS collab_track_events",
                               "DROP SEQUENCE IF EXISTS collab_track_event_sequence"):
                 conn.execute(statement)
             PostgresTrackStore.ensure_schema(conn)
@@ -335,3 +336,99 @@ def test_append_if_is_one_step_so_racing_callers_cannot_all_pass_the_check(store
         thread.join()
     assert len([event for event in stored if event is not None]) == 1
     assert [event.event_type for event in store.replay("r")] == ["op_submitted", "cancel_requested"]
+
+
+def test_replay_reads_at_most_limit_events_after_a_sequence(store):
+    from collab_hub_execution.track import SCHEMA_VERSION, TrackEvent
+
+    for n in range(5):
+        store.append(TrackEvent(run_id="limited", event_type="op_submitted" if n == 0 else "step_started",
+                                payload={"n": n}, schema=SCHEMA_VERSION))
+    every = store.replay("limited")
+    assert [e.sequence for e in store.replay("limited", limit=2)] == [e.sequence for e in every[:2]]
+    assert [e.sequence for e in store.replay("limited", after_sequence=every[1].sequence, limit=2)] == \
+        [e.sequence for e in every[2:4]]
+    assert len(store.replay("limited", limit=None)) == 5
+
+
+# --- the index of runs ---------------------------------------------------------------------------
+
+
+def _submit(store, run_id, org="acme", when=None):
+    payload = {"op": {"run_id": run_id, "steps": []}, "submitted_by": {"user": "alice", "org_id": org}}
+    event = TrackEvent(run_id=run_id, event_type="op_submitted", payload=payload, schema=SCHEMA_VERSION,
+                       **({"occurred_at": when} if when else {}))
+    return store.append(event)
+
+
+def test_the_index_lists_runs_newest_first_and_follows_every_move_of_the_run(store):
+    first = _submit(store, "r1", when=datetime(2026, 1, 1, tzinfo=UTC))
+    _submit(store, "r2", org="other", when=datetime(2026, 1, 2, tzinfo=UTC))
+    _submit(store, "r3", when=datetime(2026, 1, 3, tzinfo=UTC))
+    assert [row.run_id for row in store.runs()] == ["r3", "r2", "r1"]
+    assert [row.run_id for row in store.runs(org_id="acme")] == ["r3", "r1"]
+    assert [row.status for row in store.runs()] == ["SUBMITTED"] * 3
+    row = next(row for row in store.runs() if row.run_id == "r1")
+    assert row.org_id == "acme" and row.submitted_at == first.occurred_at and row.updated_at == first.occurred_at
+    # An event that does not move the run only touches updated_at; one that moves it changes the status.
+    noted = store.append(_event("worker_started", run_id="r1", instance="a:0"))
+    row = next(row for row in store.runs() if row.run_id == "r1")
+    assert row.status == "SUBMITTED" and row.updated_at == noted.occurred_at
+    store.append(_event("run_picked_up", run_id="r1", controller="one"))
+    assert [row.run_id for row in store.runs(status="RUNNING")] == ["r1"]
+    store.append(_event("completed", run_id="r1"))
+    assert [row.run_id for row in store.runs(status="COMPLETED")] == ["r1"]
+    assert [row.run_id for row in store.runs(status="SUBMITTED")] == ["r3", "r2"]
+    assert [row.run_id for row in store.runs(limit=1, offset=1)] == ["r2"]
+    assert store.runs(org_id="nobody") == ()
+
+
+def test_the_index_says_which_ended_runs_have_a_retry_asked_for(store):
+    _submit(store, "r")
+    store.append(_event("run_picked_up", run_id="r", controller="one"))
+    store.append(_event("failed", run_id="r", step="a", error="boom"))
+    assert store.runs(retry_asked=True) == ()
+    store.append(_event("retry_asked", run_id="r", actor="alice"))
+    assert [row.run_id for row in store.runs(retry_asked=True)] == ["r"]
+    store.append(_event("retry_requested", run_id="r", from_status="failed", attempt="new", controller="one"))
+    assert store.runs(retry_asked=True) == () and store.runs()[0].status == "RUNNING"
+    store.append(_event("failed", run_id="r", step="a", error="boom"))
+    store.append(_event("retry_asked", run_id="r", actor="alice"))
+    store.append(_event("retry_refused", run_id="r", error="no"))
+    assert store.runs(retry_asked=True) == () and store.runs()[0].status == "FAILED"
+
+
+def test_reindex_derives_the_index_from_the_events_again(store):
+    _submit(store, "r1")
+    _submit(store, "r2")
+    store.append(_event("run_picked_up", run_id="r2", controller="one"))
+    before = store.runs()
+    if isinstance(store, SqliteTrackStore):
+        with sqlite3.connect(store.path) as connection:
+            connection.execute("DELETE FROM collab_track_runs")
+        assert store.runs() == ()
+    elif isinstance(store, PostgresTrackStore):
+        with store.pool.connection() as connection:
+            connection.execute("DELETE FROM collab_track_runs")
+        assert store.runs() == ()
+    assert store.reindex() == 2
+    assert store.runs() == before
+
+
+def test_a_submitted_run_without_an_index_row_is_what_asks_for_a_reindex(store):
+    """A Track written before the index existed is told apart by a run with no row, not by an empty index: a
+    controller may have written one row (an `interrupted` at its start) before the first API with an index ran."""
+    _submit(store, "r1")
+    assert not store.has_unindexed()
+    if isinstance(store, SqliteTrackStore):
+        with sqlite3.connect(store.path) as connection:
+            connection.execute("DELETE FROM collab_track_runs WHERE run_id = 'r1'")
+    elif isinstance(store, PostgresTrackStore):
+        with store.pool.connection() as connection:
+            connection.execute("DELETE FROM collab_track_runs WHERE run_id = 'r1'")
+    else:
+        return  # derived on each read: never out of date
+    _submit(store, "r2")  # the index is not empty, and r1 is still missing from it
+    assert store.runs() != () and store.has_unindexed()
+    store.reindex()
+    assert not store.has_unindexed() and [run.run_id for run in store.runs()] == ["r2", "r1"]

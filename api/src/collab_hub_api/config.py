@@ -3,6 +3,7 @@ import re
 import sys
 from collections.abc import Mapping
 from typing import Any, Literal, Self
+from urllib.parse import urlsplit
 
 import l2sl
 from pydantic import (
@@ -25,7 +26,22 @@ from .cogs.catalog import (
     UnavailableCogCatalogStore,
 )
 from .cogs.indexer import CogIndexer
-from .cogs.registry import CogRegistrySourceConfig, build_registry_sources
+from .cogs.oci import install_log_redaction
+from .cogs.publish_store import (
+    InMemoryPublishStore,
+    PostgresPublishStore,
+    PublishStore,
+    UnavailablePublishStore,
+)
+from .cogs.publishing import CogPublisher, PublishPolicy, settle_found
+from .cogs.registry import CogRegistrySourceConfig, build_registry_sources, registry_host
+from .cogs.registry_credentials import (
+    InMemoryRegistryCredentialStore,
+    PostgresRegistryCredentialStore,
+    RegistryCredentialStore,
+    UnavailableRegistryCredentialStore,
+)
+from .cogs.serving import CogRegistryFront, CogRegistryServing
 from .frames.account_provisioning import DisabledServiceAccessGranter, ServiceAccessGranter
 from .frames.active_state import (
     ActiveFrameStore,
@@ -97,6 +113,14 @@ class ServerConfig(BaseModel):
     exactly that reason (``server.proxyHeaders``). ``forwarded_allow_ips``
     bounds which peers may set them; ``["*"]`` is only sound when the pod is
     unreachable except through the proxy.
+
+    ``root_path`` is a URL prefix (``/hub``): it starts with a slash and never
+    ends in one. The router strips it only on a segment boundary, so ``/hub/``
+    is never stripped from ``/hub/metrics`` and every protection rule goes
+    unmatched; ``/`` and ``/hub/`` both turn the pages' ``{root_path}/web``
+    links into ``//web``. A request path always starts with a slash, so
+    ``hub`` is never a prefix of one and every route 404s. None of these has
+    a working reading, so all are refused at load (#69).
     """
 
     hostname: str = "127.0.0.1"
@@ -104,6 +128,21 @@ class ServerConfig(BaseModel):
     proxy_headers: bool = False
     forwarded_allow_ips: list[str] = Field(default_factory=lambda: ["*"])
     root_path: str = ""
+
+    @field_validator("root_path")
+    @classmethod
+    def _root_path_is_a_prefix(cls, value: str) -> str:
+        if value and not value.startswith("/"):
+            raise ValueError(
+                'root_path must start with "/": use "" to serve at the root of the host, '
+                'or a prefix such as "/hub"'
+            )
+        if value.endswith("/"):
+            raise ValueError(
+                'root_path must not end with "/": use "" to serve at the root of the host, '
+                'or a prefix such as "/hub"'
+            )
+        return value
 
 
 class LoggingConfig(BaseModel):
@@ -717,11 +756,10 @@ class GitHubConnectorConfig(BaseModel):
     api_base_url: str = "https://api.github.com"
     static_access_token: str = ""
     request_timeout_seconds: float = 10.0
-    # Restrict the generic api_get read to these GitHub org logins. Empty = the
-    # token's full visibility (personal repos + every approved org). Set this in
-    # real deploys so the generic read cannot reach outside the allowlist. (The
-    # curated search reads the SAME key once PR #76 lands its _build_query
-    # enforcement; on this branch only api_get consults it.)
+    # Restrict BOTH GitHub read surfaces to these org logins: the curated search
+    # (via _build_query) and the generic api_get read. Empty = the token's full
+    # visibility (personal repos + every approved org). Set this in real deploys
+    # so neither read can reach outside the allowlist.
     allowed_orgs: list[str] = Field(default_factory=list)
 
     @field_validator("allowed_orgs")
@@ -828,6 +866,157 @@ class CogCatalogConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     backend: Literal["", "memory"] = ""
+
+
+COGS_SERVE_CREDENTIAL_TTL_MIN_SECONDS = 60
+COGS_SERVE_CREDENTIAL_TTL_MAX_SECONDS = 24 * 3600
+COGS_SERVE_TOKEN_TTL_MIN_SECONDS = 30
+COGS_SERVE_TOKEN_TTL_MAX_SECONDS = 3600
+COGS_SERVE_MAX_BLOB_SECONDS_MIN = 10
+COGS_SERVE_MAX_BLOB_SECONDS_MAX = 6 * 3600
+
+
+def origin_authority(url: str) -> str:
+    """``host[:port]`` of an http(s) origin, lowercase, without the scheme's default port."""
+
+    parts = urlsplit(url)
+    authority = registry_host(url).lower()
+    default = {"https": 443, "http": 80}.get(parts.scheme)
+    if parts.port is not None and parts.port == default:
+        authority = authority.rsplit(":", 1)[0]
+    return authority
+
+
+class CogServeConfig(BaseModel):
+    """Whether, and how, the Hub serves Cog pulls itself (issue #179).
+
+    Off by default, and off changes nothing: no ``/v2/`` route is mounted,
+    no registry credential can be exchanged, and catalog references keep
+    naming the backing registry, which is what clients released before this
+    existed pull from. On, the Hub answers the OCI read API on its own host,
+    in front of ``registry_sources``, and every catalog ``reference`` names
+    the Hub instead.
+
+    ``public_url`` is the origin clients reach the Hub at -- **the same origin
+    that serves the Hub API**, not a registry hostname of its own: a client
+    accepts a registry credential only when its ``registry`` is exactly the
+    authority it sent the exchange to, and treats anything else as a Hub that
+    does not serve installs. The chart derives it from the API's host and
+    refuses a value naming another one; the API refuses one that disagrees
+    with ``web.public_base_url`` when that is set. It is
+    configuration rather than read from the request's ``Host`` header because
+    it is handed to clients three ways -- the ``registry`` of an exchanged
+    credential, the bearer ``realm`` of the challenge, and the host of every
+    reference -- and a value a caller could influence has no business in any
+    of them. It must be a bare origin: registry clients address ``/v2/`` at
+    the root of a host, never under a path.
+
+    The two lifetimes bound what a leaked secret is worth; the two blob
+    limits bound what one pull can make the Hub carry.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    public_url: str = ""
+    credential_ttl_seconds: int = Field(
+        default=900, ge=COGS_SERVE_CREDENTIAL_TTL_MIN_SECONDS, le=COGS_SERVE_CREDENTIAL_TTL_MAX_SECONDS
+    )
+    token_ttl_seconds: int = Field(
+        default=300, ge=COGS_SERVE_TOKEN_TTL_MIN_SECONDS, le=COGS_SERVE_TOKEN_TTL_MAX_SECONDS
+    )
+    max_blob_bytes: int = Field(default=1024 * 1024 * 1024, ge=1)
+    max_blob_seconds: int = Field(
+        default=900, ge=COGS_SERVE_MAX_BLOB_SECONDS_MIN, le=COGS_SERVE_MAX_BLOB_SECONDS_MAX
+    )
+
+    @field_validator("public_url", mode="before")
+    @classmethod
+    def _strip(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("public_url")
+    @classmethod
+    def _check_public_url(cls, value: str) -> str:
+        if not value:
+            return value
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError("cogs.serve.public_url must be an http(s) origin with a host")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("cogs.serve.public_url must not embed a username or password")
+        try:
+            parts.port  # noqa: B018 - raises for a non-numeric or out-of-range port
+        except ValueError:
+            raise ValueError("cogs.serve.public_url has an invalid port") from None
+        if parts.path or parts.query or parts.fragment or "?" in value or "#" in value:
+            raise ValueError(
+                "cogs.serve.public_url must be a bare origin (scheme://host[:port]) with no path, query or "
+                "fragment, and no trailing slash: registry clients address /v2/ at the root of a host"
+            )
+        return value
+
+    @property
+    def host(self) -> str:
+        """The authority of ``public_url``: what clients call the Hub registry.
+
+        ``host[:port]`` with the scheme's default port left out, so it is
+        byte-for-byte the authority of the Hub API origin a client already
+        talks to -- clients accept an exchanged credential only when its
+        ``registry`` is exactly that.
+        """
+
+        return origin_authority(self.public_url)
+
+
+class CogPublishConfig(BaseModel):
+    """Who may publish Cogs through the Hub (issue #180). Nobody, by default.
+
+    Publishing is switched on by marking one registry source ``publish:
+    true``; this block only says who holds the permission. Pull rights never
+    imply it.
+
+    ``allowed_roles`` grants it by role: ``operator`` (the platform role),
+    ``owner`` and ``member`` (the caller's role in their organization). Roles
+    exist only where the Hub resolves organizations from membership; under
+    claims-sourced auth nobody has one, and ``allowed_users`` -- a list of
+    user ids, as the Hub's ACL principal -- is the only way to grant it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allowed_roles: list[Literal["operator", "owner", "member"]] = Field(default_factory=list)
+    allowed_users: list[str] = Field(default_factory=list)
+    max_pending_repositories: int = Field(default=20, ge=1, le=1000)
+    """How many repositories one organization may have pending at once.
+
+    A repository is pending from its first publish until the registry is
+    known to have accepted a manifest for it, and stays pending while that
+    outcome is unknown. Nothing expires, so this is what bounds the names an
+    organization can hold during a registry outage. Publishing again to a
+    name that is already pending is never refused by it.
+    """
+
+    @field_validator("allowed_roles")
+    @classmethod
+    def _check_roles(cls, value: list[str]) -> list[str]:
+        # The chart's schema refuses a repeated entry (uniqueItems); so does this.
+        for role in value:
+            if value.count(role) > 1:
+                raise ValueError(f"cogs.publish.allowed_roles lists {role!r} twice")
+        return value
+
+    @field_validator("allowed_users")
+    @classmethod
+    def _check_users(cls, value: list[str]) -> list[str]:
+        cleaned = [user.strip() for user in value]
+        if any(not user for user in cleaned):
+            raise ValueError("cogs.publish.allowed_users entries must not be blank")
+        # As written, like the chart's uniqueItems: the two layers refuse the same lists.
+        for user in value:
+            if value.count(user) > 1:
+                raise ValueError(f"cogs.publish.allowed_users lists {user!r} twice")
+        return cleaned
 
 
 COGS_SOURCE_SECRET_ENV_FIELDS: tuple[tuple[str, str, bool], ...] = (
@@ -962,6 +1151,8 @@ class CogsConfig(BaseModel):
     registry_sources: list[CogRegistrySourceConfig] = Field(default_factory=list)
     index: CogIndexConfig = Field(default_factory=CogIndexConfig)
     catalog: CogCatalogConfig = Field(default_factory=CogCatalogConfig)
+    serve: CogServeConfig = Field(default_factory=CogServeConfig)
+    publish: CogPublishConfig = Field(default_factory=CogPublishConfig)
 
     @field_validator("registry_sources", mode="before")
     @classmethod
@@ -987,11 +1178,32 @@ class CogsConfig(BaseModel):
                 "to index is a misconfiguration, not an idle worker. Add a source or set enabled=false "
                 "(the read API stays up either way)."
             )
+        if self.serve.enabled and not self.registry_sources:
+            raise ValueError(
+                "cogs.serve.enabled is true but cogs.registry_sources is empty: a registry endpoint with "
+                "no source behind it can serve nothing. Add a source or set enabled=false."
+            )
+        publishing = [source.id for source in self.registry_sources if source.publish]
+        if len(publishing) > 1:
+            raise ValueError(
+                f"cogs.registry_sources marks {len(publishing)} sources publish: true ({', '.join(publishing)}): "
+                "pushes through the Hub are written to exactly one source"
+            )
+        if publishing and not self.serve.enabled:
+            raise ValueError(
+                f"cogs.registry_sources source {publishing[0]!r} is publish: true but cogs.serve.enabled is false: "
+                "pushes arrive on the Hub's /v2/ surface, which serving mounts"
+            )
+        if self.serve.enabled and not self.serve.public_url:
+            raise ValueError(
+                "cogs.serve.enabled is true but cogs.serve.public_url is empty: the Hub hands clients its "
+                "own registry address, and does not guess it from a request's Host header."
+            )
         return self
 
 
 class RunsConfig(BaseModel):
-    """Where the run API (``/v1/runs``, behind the ``cog_runs`` feature flag) records and reads runs.
+    """Where the run API (``/v1/runs``) records and reads runs.
 
     The API writes intent to the Track and reads a run's status from it; a run
     controller, a separate process over the same Track, advances the runs
@@ -1004,7 +1216,9 @@ class RunsConfig(BaseModel):
     model_config = ConfigDict(hide_input_in_errors=True, extra="forbid")
 
     track_path: str | None = None
-    """The SQLite Track file shared with the run controller. Required when ``cog_runs`` is on."""
+    """A SQLite Track file shared with the run controller, for a hub without Postgres (dev level 1).
+    Unset, the Track is the hub's own database (``frames.postgres.url``), whose tables come from the
+    hub's migrations; with neither, the run routes answer 503."""
     packages: list[str] | str = Field(default_factory=list)
     """The directories the controller finds Cog packages under: a step's ``cog`` must name one of them.
     A list, or from the environment one string of directories joined by ``os.pathsep``."""
@@ -1022,9 +1236,7 @@ class RunsConfig(BaseModel):
         return value
 
 
-FEATURE_FLAGS: dict[str, str] = {
-    "cog_runs": "The run API (/v1/runs): launch a Cog, list runs, cancel one. Needs the runs section set.",
-}
+FEATURE_FLAGS: dict[str, str] = {}
 """Every feature flag this hub knows: name to one line on what it exposes.
 
 Adding a flag starts here. A name that is not listed is refused wherever it
@@ -1033,7 +1245,9 @@ appears: set in the environment or the chart, it stops startup; passed to
 instead of silently reading as off.
 """
 
-RETIRED_FEATURE_FLAGS: frozenset[str] = frozenset()
+RETIRED_FEATURE_FLAGS: frozenset[str] = frozenset({
+    "cog_runs",  # the run API (/v1/runs) is always served since the hub ships the execution package
+})
 """Flags that have been removed but that deployments may still set.
 
 When a flag's feature ships, move its name here from :data:`FEATURE_FLAGS`.
@@ -1298,57 +1512,191 @@ def build_cog_catalog_store(config: BaseConfig, pools: PostgresPools) -> CogCata
 
 
 class CogIndexing:
-    """A built indexer plus the loop parameters the app lifespan runs it with."""
+    """A built indexer, whether this process sweeps with it, and the loop parameters if it does."""
 
-    def __init__(self, indexer: CogIndexer, *, interval_seconds: float, run_on_startup: bool) -> None:
+    def __init__(self, indexer: CogIndexer, *, sweeps: bool, interval_seconds: float, run_on_startup: bool) -> None:
         self.indexer = indexer
+        self.sweeps = sweeps
         self.interval_seconds = interval_seconds
         self.run_on_startup = run_on_startup
 
 
-def build_cog_indexing(config: BaseConfig, store: CogCatalogStore) -> CogIndexing | None:
-    """The reconciliation indexer (issue #84) when ``cogs.index.enabled``, else ``None``.
+def build_cog_publish_store(config: BaseConfig, pools: PostgresPools) -> PublishStore:
+    """Where repository ownership and upload sessions live (issue #180); follows the catalog's backend."""
+
+    if config.cogs.catalog.backend == "memory":
+        return InMemoryPublishStore()
+    url = config.frames.postgres.url
+    if url:
+        return PostgresPublishStore(pools.database(url))
+    return UnavailablePublishStore()
+
+
+def publish_source_id(config: BaseConfig) -> str | None:
+    """The id of the source pushes are written to, or ``None`` when publishing is off."""
+
+    return next((source.id for source in config.cogs.registry_sources if source.publish), None)
+
+
+def build_cog_indexing(
+    config: BaseConfig, store: CogCatalogStore, publish_store: PublishStore | None = None
+) -> CogIndexing | None:
+    """The indexer (issue #84) wherever registry sources and a catalog store are configured, else ``None``.
 
     Reads the ``cogs`` block (issue #87): ``cogs.registry_sources`` and
     ``cogs.index`` (``enabled``, ``interval_seconds``, ``run_on_startup``).
     ``CogsConfig`` has already refused an enabled index with no sources and
     resolved every credential indirection, so what arrives here is complete.
 
+    ``cogs.index.enabled`` decides one thing: whether this process runs the
+    sweep loop (``sweeps``). The indexer object itself is built without it,
+    because its targeted entry points (``reindex``, ``mark_removed``) take no
+    sweep lock and are what a request-serving process calls -- and the chart
+    renders ``enabled=false`` on every API replica (issue #148), which are
+    the only pods a Service reaches.
+
     Sources are constructed here, once, so a duplicate id or an unsupported
-    kind fails the rollout rather than the first sweep, and are not
-    constructed at all when indexing is disabled. Indexing into the
-    unavailable store is refused: the store is what a sweep writes, and a
-    deployment that enables sweeping without a database would otherwise fail
-    every interval for as long as the pod lived.
+    kind fails the rollout rather than the first sweep or the first targeted
+    call. Sweeping into the unavailable store is refused: the store is what a
+    sweep writes, and a deployment that enables sweeping without a database
+    would otherwise fail every interval for as long as the pod lived. With
+    sweeping off and no database there is nothing an indexer could write, so
+    none is built.
     """
 
     cogs = config.cogs
     index = cogs.index
-    if not index.enabled:
-        return None
     if isinstance(store, UnavailableCogCatalogStore):
+        if not index.enabled:
+            return None
         raise RuntimeError(
             "cogs.index.enabled requires the Cog catalog store: set the shared "
             "COLLAB_HUB_API__FRAMES__POSTGRES__URL (frames.postgres.url), or disable indexing."
         )
+    if not cogs.registry_sources:
+        return None
     pool = config.frames.postgres.pool
-    if pool.max_size < 2:
+    if index.enabled and pool.max_size < 2:
         # A sweep occupies one pooled connection for its whole duration: the
         # session-level advisory lock is held on it, and the sweep's reads and
         # writes ride it too (issue #128). With max_size=1 that is the pool's
-        # only connection gone for minutes at a time -- every API read and
-        # every webhook write would wait on the sweep and time out, silently,
-        # at runtime. Refuse the rollout instead.
+        # only connection gone for minutes at a time -- every catalog read
+        # and every webhook write this process serves would wait on the sweep
+        # and time out, silently, at runtime. Refuse the rollout instead. A
+        # check on the sweeping process only: a targeted call borrows a
+        # connection for one statement, and the chart enables sweeping on its
+        # dedicated indexer workload and never on the API replicas (issue
+        # #148), so this never constrains an API pod.
         raise RuntimeError(
             "cogs.index.enabled requires frames.postgres.pool.max_size >= 2 "
             f"(configured: {pool.max_size}): the indexer's sweep occupies one pooled "
             "connection for the whole sweep while everything else needs another."
         )
-    sources = build_registry_sources(list(cogs.registry_sources))
+    # With serving off the indexer follows registry redirects exactly as it
+    # always has. With serving on it is held to the redirect policy the
+    # serving clients are: a source the Hub could not serve a pull from
+    # should not index as healthy.
+    sources = build_registry_sources(list(cogs.registry_sources), restrict_redirects=cogs.serve.enabled)
+    publishing = publish_store is not None and publish_source_id(config) is not None
     return CogIndexing(
-        CogIndexer(store, sources),
+        # With a publish source, the repositories published through the Hub
+        # are enumerated too: that source needs no configured list. And a
+        # repository a sweep finds content in is settled as published, which
+        # is how a publish whose commit was lost is recovered.
+        CogIndexer(
+            store,
+            sources,
+            published_repositories=publish_store.published_repositories if publishing else None,
+            repositories_found=settle_found(publish_store, store) if publishing else None,
+        ),
+        sweeps=index.enabled,
         interval_seconds=float(index.interval_seconds),
         run_on_startup=index.run_on_startup,
+    )
+
+
+def build_cog_registry_credential_store(config: BaseConfig, pools: PostgresPools) -> RegistryCredentialStore:
+    """Where registry credentials and pull tokens live (issue #179).
+
+    Follows the catalog it authorizes pulls of: in memory when the catalog is
+    (``cogs.catalog.backend=memory``, development only), else the shared
+    ``frames.postgres`` (tables from ``collab_`` migration 13), else a store
+    that refuses.
+    """
+
+    if config.cogs.catalog.backend == "memory":
+        return InMemoryRegistryCredentialStore()
+    url = config.frames.postgres.url
+    if url:
+        return PostgresRegistryCredentialStore(pools.database(url))
+    return UnavailableRegistryCredentialStore()
+
+
+def build_cog_registry_serving(
+    config: BaseConfig, store: CogCatalogStore, pools: PostgresPools, publish_store: PublishStore | None = None
+) -> CogRegistryServing | None:
+    """The Hub's own registry surface when ``cogs.serve.enabled``, else ``None`` (issue #179).
+
+    Builds its **own** registry sources rather than borrowing the indexer's:
+    serving needs a source's OCI client on every API replica, whether or not
+    that process sweeps (the indexer may be a separate workload, or off), so
+    the two are constructed and closed independently. ``CogsConfig`` has
+    already refused serving with no sources or no public URL.
+    """
+
+    cogs = config.cogs
+    if not cogs.serve.enabled:
+        return None
+    if isinstance(store, UnavailableCogCatalogStore):
+        raise RuntimeError(
+            "cogs.serve.enabled requires the Cog catalog store: set the shared "
+            "COLLAB_HUB_API__FRAMES__POSTGRES__URL (frames.postgres.url), or disable serving."
+        )
+    serve = cogs.serve
+    public_url = serve.public_url
+    web_url = config.web.public_base_url
+    if web_url and origin_authority(web_url) != serve.host:
+        # The one other place this deployment states its own external origin.
+        # Two answers means one is wrong, and a registry host that is not the
+        # API's host is one every client refuses.
+        raise RuntimeError(
+            "cogs.serve.public_url and web.public_base_url name different hosts: the Hub serves /v2/ on the "
+            "same origin as its API, and clients accept a registry credential only for that origin."
+        )
+    # Serving follows registry redirects on clients' behalf: keep signed
+    # storage URLs out of the HTTP libraries' own logs. Process-wide, and
+    # only here -- with serving off (indexing on or not) logging is untouched.
+    install_log_redaction()
+    sources = build_registry_sources(list(cogs.registry_sources), restrict_redirects=True)
+    publisher = None
+    target = publish_source_id(config)
+    if target is not None:
+        # Publishing (issue #180): pushes are written through to the one
+        # source marked publish, with that source's own client. The indexer
+        # here never sweeps; it is the reader a manifest is validated with
+        # and the lock-less targeted write that lists it.
+        publisher = CogPublisher(
+            catalog=store,
+            store=publish_store if publish_store is not None else build_cog_publish_store(config, pools),
+            source=next(source for source in sources if source.id == target),
+            indexer=CogIndexer(store, sources),
+            policy=PublishPolicy(
+                allowed_roles=frozenset(cogs.publish.allowed_roles),
+                allowed_users=frozenset(cogs.publish.allowed_users),
+            ),
+            max_blob_bytes=serve.max_blob_bytes,
+            max_blob_seconds=serve.max_blob_seconds,
+            max_pending_repositories=cogs.publish.max_pending_repositories,
+        )
+    return CogRegistryServing(
+        front=CogRegistryFront(store, sources, max_blob_bytes=serve.max_blob_bytes),
+        publisher=publisher,
+        credentials=build_cog_registry_credential_store(config, pools),
+        host=serve.host,
+        token_url=f"{public_url}/v2/token",
+        credential_ttl_seconds=serve.credential_ttl_seconds,
+        token_ttl_seconds=serve.token_ttl_seconds,
+        max_blob_seconds=serve.max_blob_seconds,
     )
 
 

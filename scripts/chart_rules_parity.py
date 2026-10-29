@@ -68,6 +68,24 @@ PLACEHOLDER = re.compile(r"%[sdvq%]")
 
 INDEX_DEFAULTS = {"enabled": False, "interval_seconds": 300, "run_on_startup": True}
 
+# cogs.serve (issue #179). The chart renders the block only when serving is
+# on, so everything but `enabled` falls back to the API's own defaults here.
+# cogs.publish (issue #180): two JSON lists, each rendered only when non-empty,
+# and one number, rendered only when it is not the API's default.
+PUBLISH_PREFIX = "COLLAB_HUB_API__COGS__PUBLISH__"
+PUBLISH_KEYS = ("allowed_roles", "allowed_users")
+PUBLISH_MAX_PENDING = "max_pending_repositories"
+PUBLISH_MAX_PENDING_DEFAULT = 20
+SERVE_PREFIX = "COLLAB_HUB_API__COGS__SERVE__"
+SERVE_DEFAULTS = {
+    "enabled": False,
+    "public_url": "",
+    "credential_ttl_seconds": 900,
+    "token_ttl_seconds": 300,
+    "max_blob_bytes": 1024 * 1024 * 1024,
+    "max_blob_seconds": 900,
+}
+
 
 class Reporter:
     def __init__(self) -> None:
@@ -96,10 +114,18 @@ def first_lines(text: str, n: int = 3) -> str:
 
 
 def rendered_cogs(manifests: str) -> dict[str, Any]:
-    """The ``cogs`` settings the rendered Deployment hands the API, in the API's shape."""
+    """The ``cogs`` settings the rendered release hands the sweeping process, in the API's shape.
+
+    With ``cogs.index.enabled`` the chart renders a dedicated indexer
+    Deployment and that is the process the index settings reach (issue
+    #148); the API Deployment then carries ``enabled=false`` and no tuning.
+    So the indexer's environment is read when it is rendered, the API's
+    otherwise -- the source list and the serve settings are the same on both.
+    """
 
     docs = [d for d in yaml.safe_load_all(manifests) if d]
-    deployment = next(d for d in docs if d.get("kind") == "Deployment")
+    deployments = {d["metadata"]["labels"]["app.kubernetes.io/component"]: d for d in docs if d.get("kind") == "Deployment"}
+    deployment = deployments.get("indexer") or deployments["api"]
     env: dict[str, str | None] = {}
     for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]:
         env[entry["name"]] = entry.get("value")
@@ -110,14 +136,38 @@ def rendered_cogs(manifests: str) -> dict[str, Any]:
     if RUN_ON_STARTUP_VAR in env:
         index["run_on_startup"] = env[RUN_ON_STARTUP_VAR] == "true"
     sources = json.loads(env[SOURCES_VAR] or "[]") if SOURCES_VAR in env else []
-    return {"registry_sources": sources, "index": index}
+    serve = dict(SERVE_DEFAULTS)
+    for key, default in SERVE_DEFAULTS.items():
+        name = SERVE_PREFIX + key.upper()
+        if name not in env:
+            continue
+        value = env[name] or ""
+        if isinstance(default, bool):
+            serve[key] = value == "true"
+        elif isinstance(default, int):
+            serve[key] = int(value or 0)
+        else:
+            serve[key] = value
+    publish = {key: json.loads(env.get(PUBLISH_PREFIX + key.upper()) or "[]") for key in PUBLISH_KEYS}
+    publish[PUBLISH_MAX_PENDING] = int(
+        env.get(PUBLISH_PREFIX + PUBLISH_MAX_PENDING.upper()) or PUBLISH_MAX_PENDING_DEFAULT
+    )
+    return {"registry_sources": sources, "index": index, "serve": serve, "publish": publish}
 
 
 def normalized_settings(settings: dict[str, Any]) -> dict[str, Any]:
     """The fixture's ``settings`` with the API's defaults filled, for comparison with a render."""
 
     index = {**INDEX_DEFAULTS, **settings.get("index", {})}
-    return {"registry_sources": settings.get("registry_sources", []), "index": index}
+    serve = {**SERVE_DEFAULTS, **settings.get("serve", {})}
+    publish = {key: settings.get("publish", {}).get(key, []) for key in PUBLISH_KEYS}
+    publish[PUBLISH_MAX_PENDING] = settings.get("publish", {}).get(PUBLISH_MAX_PENDING, PUBLISH_MAX_PENDING_DEFAULT)
+    return {
+        "registry_sources": settings.get("registry_sources", []),
+        "index": index,
+        "serve": serve,
+        "publish": publish,
+    }
 
 
 def check_case(

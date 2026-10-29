@@ -212,6 +212,11 @@ combination, but not restating the list is the better habit.)
   the CLI signs in with and whether dev auth is on — nothing the realm's own
   discovery document does not already publish. `GET /v1/me`, which the CLI's
   `whoami` reads, stays behind the default like every other route.
+- `/v1/runs/**`, the run API, needs no entry either, and is never made public:
+  every run route also carries its own auth dependency, and scopes each run to
+  the organization that launched it, another organization's run being a 404. A
+  request without credentials is a 401 there under the hardened map
+  ([runs.md](cog-execution/runs.md#the-run-controller-and-the-run-api)).
 - The API routes under `/v1` need no entry: the default covers them, and each
   also carries its own auth dependency, so a `public` entry does not make
   frames or tasks anonymous. The one exception is the Cog catalog: a `public`
@@ -257,7 +262,7 @@ hole. Unhardened installs never see these entries at all: the chart passes
 false.
 
 `/admin` was listed ahead of its routes for merge ordering: the operator page
-(nebari-dev/collab-hub-pack#91) added `/admin` routes without a values change,
+(openteams-ai/collab-hub-pack#91) added `/admin` routes without a values change,
 so with the entry on neither side a hardened install would have refused to
 start between the two merges. `/admin` now serves the admin panel (`/admin/`,
 `/admin/assets/*` and the JSON API under `/admin/api/*`) on an install that
@@ -286,7 +291,7 @@ On a gateway install nothing changes: `/metrics` stays unauthenticated and
 in-cluster scrapes keep working. Under enforcement it answers 401 unless the
 scraper carries a credential `get_auth_context` accepts. There is no
 scrape-token mode yet — that is
-[nebari-dev/collab-hub-pack#97](https://github.com/nebari-dev/collab-hub-pack/issues/97).
+[openteams-ai/collab-hub-pack#97](https://github.com/openteams-ai/collab-hub-pack/issues/97).
 
 To let an in-cluster Prometheus scrape a hardened deployment, open the one
 path and keep it off the internet:
@@ -358,7 +363,10 @@ server:
   records in its logs and audit trail.
 - **`rootPath`** is for serving the app under a URL prefix. The protection map
   is matched against paths with the prefix stripped, so rules stay written
-  against the app's own paths.
+  against the app's own paths. Write it with a leading slash and without a
+  trailing one (`/hub`, not `hub` or `/hub/`, and never `/`): the chart and the
+  app both refuse the others, because the router would not strip them and
+  every rule would go unmatched or every route 404.
 
 These were previously reachable only by smuggling `extraEnv` entries.
 `api.deployment.extraEnv` still renders last and therefore still wins, so an
@@ -406,6 +414,141 @@ refuses them two ways:
 
 Gateway-only installs are unaffected in both cases — that is where the dev and
 smoke-test workflows that need these switches actually run.
+
+## Running Cogs in pods
+
+The run API (`/v1/runs`) is always served, on the hub's database. Something
+must also run what it launches: a run controller. `runs.controller.enabled`
+runs one, and `runs.controller.location` says where each Cog's worker runs.
+`remote` is how a hub is deployed; the default is `local`, the shape a hub
+that enabled the controller before `location` existed already has, so an
+upgrade changes nothing until the values say `remote`:
+
+```yaml
+runs:
+  controller:
+    enabled: true
+    location: remote
+    models: |
+      [models.default]
+      provider = "anthropic"
+      model = "claude-opus-5-5"
+      auth_ref = "env:ANTHROPIC_API_KEY"
+
+      [cogs]
+      hermes = "default"
+    extraEnv:
+      - name: ANTHROPIC_API_KEY
+        valueFrom:
+          secretKeyRef: {name: claude, key: api-key}
+```
+
+- **The controller is a Deployment of its own**, one replica of the API's
+  image running `collab-hub-run-controller`, with a ServiceAccount and a
+  namespace-scoped Role over exactly the kinds it makes (Deployments,
+  Services, NetworkPolicies, and a Secret per worker, which it creates,
+  owned by the worker's Deployment so garbage collection removes it, and
+  never reads, lists or sweeps) and the verbs it uses. The API pod holds no
+  workload permissions, and may have as many replicas as its frame store
+  allows. The Role is in the release namespace, so the controller's identity
+  can start a pod under any ServiceAccount there and mount any Secret there,
+  the database URL among them: what putting workers beside the hub costs. A
+  namespace of the workers' own, holding the Role to them alone, is #253. The controller's id (`id`) is the same across rollouts; the new
+  pod's controller waits (`waitSeconds`) for the old one to let it go, and a
+  run picked up by an id that never returns is ended by a live controller.
+- **Each worker is a pod of its own**: the same image, running the Cog
+  package's `serve` task in the environment pixi builds on the pod's own
+  volumes the first time, so each pod builds it (`workerStartSeconds` bounds
+  that; materialization from a published artifact with a cache is #105). It
+  carries no ServiceAccount token, and a NetworkPolicy per worker admits only
+  the controller's pods to its `/invoke`, enforced by a policy-enforcing CNI.
+  The run token and the model key its Cog is bound to reach the pod through
+  a Secret of the worker's own (`envFrom`), never the pod template, and only
+  the token's hash is on the Track. The pod runs restricted (`runAsNonRoot`,
+  no privilege escalation, capabilities dropped, the runtime's seccomp
+  profile), with `worker.resources` and size limits on its two volumes
+  (`worker.cacheSizeLimit`, the environment pixi builds, several GiB for
+  Hermes; `worker.tmpSizeLimit`, its HOME). Workers need egress to
+  conda-forge and PyPI to build their environment, and to the model
+  endpoints the binding names; egress is otherwise open (#11), the database
+  service included.
+- **Its Track** is the hub's database (`frames.postgres`); the chart refuses
+  the controller without it. `models` and `extraEnv` are as below.
+
+## Running Cogs beside the API
+
+For a development hub, `runs.controller.location: local` runs the controller
+in the API's pod instead, as a second container of the same image, and it
+runs each Cog launched through the API as a process of that pod, the `local`
+agent location ([runs.md](cog-execution/runs.md#agent-locations)). What
+follows is that shape.
+
+```yaml
+runs:
+  controller:
+    enabled: true
+    location: local
+    models: |
+      [models.default]
+      provider = "anthropic"
+      model = "claude-opus-5-5"
+      auth_ref = "env:ANTHROPIC_API_KEY"
+
+      [cogs]
+      hermes = "default"
+    extraEnv:
+      - name: ANTHROPIC_API_KEY
+        valueFrom:
+          secretKeyRef: {name: claude, key: api-key}
+```
+
+- **What it runs.** The Cog packages the image ships under
+  `/opt/collab-hub/cogs`: `hello`, the smallest Cog that holds a session, and
+  `hermes`, the Hermes harness Cog. The API is told the same directory, so
+  `collab-hub cog list --launchable` names them. With `environment: pixi`, the
+  default, a Cog runs in the environment its lock pins, which pixi builds the
+  first time the Cog is launched: it downloads the packages, so the pod needs
+  egress to conda-forge and PyPI, and Hermes's first launch takes a few
+  minutes, within `workerStartSeconds` (900 by default), how long a worker
+  may take to start. Environments and each run's output are kept on an `emptyDir`
+  (`cacheSizeLimit`), and what Cogs write under `/tmp` on another
+  (`tmpSizeLimit`), so a new pod builds them again. Past either limit the
+  kubelet evicts the whole pod, the API with it, and with one API pod that
+  is an outage until the pod is rescheduled.
+- **Its Track** is the hub's database (`frames.postgres`), the one the API
+  records runs in; the chart refuses the controller without it.
+- **One API pod.** Each pod would run a controller under the same id, so the
+  chart refuses the controller with `replicaCount` above 1 or autoscaling on.
+  In a rollout, the new pod's controller waits (`waitSeconds`) until the old
+  pod's has stopped, then takes its id, and records the runs the old one left
+  unfinished `interrupted`. It waits the same way for a database that does
+  not answer yet and for the Track's tables, logging why; a misconfigured
+  Track, a URL of another scheme, stops it at once. It has a liveness probe
+  and no readiness probe, so waiting never holds the API out of service.
+- **Models and keys.** `models` is the hub's models block, in TOML
+  ([runs.md](cog-execution/runs.md#configuration-health-and-models)), rendered
+  into a ConfigMap; the controller reads it once, at start, so a changed block
+  rolls the pod (a checksum of it is on the pod template). A key is named by
+  `auth_ref = "env:NAME"` and arrives in `extraEnv` from a Secret. A worker
+  inherits only the key of the model its Cog is bound to, but every key is in
+  the controller's own environment, which any worker can read (below): keep
+  to the keys the shipped Cogs need.
+- **Not isolated.** A Cog's worker is a process of the API's pod, run as the
+  same user, and shares that pod with the API and the controller:
+  - **Their environment.** A worker inherits none of it, but it can read it
+    through `/proc`: the database URL, and every model key in `extraEnv`.
+  - **The pod's credentials.** The controller's container has the API's
+    ServiceAccount token mounted; the chart grants it no RBAC. With IRSA on
+    EKS (`api.serviceAccount.annotations`), the pod's AWS web identity, which
+    the S3 frame store uses, would be projected into every container, so the
+    chart marks the controller's container `eks.amazonaws.com/skip-containers`
+    and it gets none. Other identity webhooks need the same exclusion.
+  - **Its network and filesystem**, as any process of the pod.
+
+  Run only Cogs you trust this way, the ones the image ships, on a
+  development hub. The `remote` location, a pod per worker under a
+  least-privilege controller, is a later phase of
+  [`COG_EXECUTION.md`](../COG_EXECUTION.md).
 
 ## Configuring the admin panel
 

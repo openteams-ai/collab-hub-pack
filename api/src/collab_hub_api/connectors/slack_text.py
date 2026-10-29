@@ -93,10 +93,8 @@ def _neutralize_urls(label: str) -> str:
 
 def _split_trailing(url: str) -> tuple[str, str]:
     """Split trailing punctuation (``)``, ``.``, closing quotes, ...) off a matched URL."""
-    end = len(url)
-    while end and url[end - 1] in _TRAILING_PUNCTUATION:
-        end -= 1
-    return url[:end], url[end:]
+    stripped = url.rstrip(_TRAILING_PUNCTUATION)
+    return stripped, url[len(stripped) :]
 
 
 def _render_plain_url(match: re.Match[str]) -> str:

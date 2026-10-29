@@ -81,12 +81,18 @@ helm template helm/collab-hub | kubeconform -strict -ignore-missing-schemas -
 
 ## Pull requests
 
+Follow [the PR style guide](docs/pr-style-guide.md) for descriptions and squash
+commit messages. Include applicable validation and review evidence below the
+reviewer-context marker. Complete the applicable template checklist items
+and explain any that do not apply.
+
 - Open an issue first for anything non-trivial, and link it from the PR with a
   closing keyword (`Fixes #123`).
 - CI (`lint`, `test`, including the `admin-ui` job) must pass. Add tests with your change: unit tests for new
   functionality, regression tests for bug fixes.
 - A [code owner](.github/CODEOWNERS) must approve before merge. Take PRs out of
   draft before requesting code-owner review.
+- User-facing UI changes include useful before/after screenshots.
 - Keep the change focused; describe *how* it addresses the issue.
 - Work that lands on `main` before it's ready to expose goes behind a feature
   flag: declare the flag, gate the code on it, and retire it once the feature
@@ -100,9 +106,16 @@ helm template helm/collab-hub | kubeconform -strict -ignore-missing-schemas -
 
 ## PR titles and releases
 
-PRs are squash-merged, and the squash commit takes the PR title as its
-subject and the PR description as its body. Leave both as they are in the
-merge dialog: the squash commit is what the release reads. Every merge to
+PRs are squash-merged. Keep the Conventional Commits PR title as the subject
+in the merge dialog. The merger must drop the reviewer context: in the GitHub
+UI, delete `<!-- reviewer-context -->` and below (and any Dependabot
+`<details>`) directly in the dialog; on the CLI, run
+`python3 scripts/strip_pr_body.py` on the PR description and pass its output
+with `--body-file`.
+Preserve issue references, `BREAKING CHANGE:` footers, and revert metadata
+as described in the [PR style guide](docs/pr-style-guide.md).
+
+The squash commit is what the release reads. Every merge to
 `main` whose title calls for a release is released automatically, so the
 title decides the version.
 

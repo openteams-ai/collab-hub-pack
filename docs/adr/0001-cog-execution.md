@@ -57,4 +57,4 @@ The workflow engine and the executor are pluggable behind interfaces; the specif
 
 [^1]: Hub planning decisions, 2026-08-25 — sensitivity levels agreed as an A4 goal; full enforcement and data-source registration deferred.
 [^2]: [Sensitivity: labels born on data, declared rarely, enforced at the seam](../cog-execution/sensitivity.md) — source of the data-catalog model, the bind/flow-time seams, and the declared-downgrade rule.
-[^3]: [cog-spec](https://github.com/openteams-ai/cog-spec/blob/main/SPEC.md) (private at time of writing) — the shared Cog specification our profile extends (the `COG.md` identity envelope, `kind` vocabulary, and capability strings).
+[^3]: [cog-spec](https://github.com/cogcloud-ai/cog-spec/blob/main/SPEC.md) (private at time of writing) — the shared Cog specification our profile extends (the `COG.md` identity envelope, `kind` vocabulary, and capability strings).

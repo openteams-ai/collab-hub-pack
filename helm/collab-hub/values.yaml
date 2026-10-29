@@ -643,6 +643,36 @@ connectors:
     notionVersion: "2022-06-28"
     # -- Timeout for broker and Notion API requests.
     requestTimeoutSeconds: 10
+  sharepoint:
+    # -- Keycloak broker token endpoint for the linked Microsoft identity (IdP
+    # alias `microsoft`). Normal hub users must also receive the broker client
+    # role `read-token` through their default role or group; otherwise Keycloak
+    # returns 403. See docs/sharepoint-connector.md.
+    brokerTokenUrl: ""
+    # -- Microsoft Graph API base URL. Override for local fake Graph API smoke tests.
+    apiBaseUrl: https://graph.microsoft.com/v1.0
+    # -- Timeout for broker, Graph search and metadata requests.
+    requestTimeoutSeconds: 15
+    # -- Timeout for file downloads and Office -> PDF conversion.
+    downloadTimeoutSeconds: 30
+    # -- Largest file (bytes) the read route downloads before extracting text.
+    # Larger files are reported as unsupported with their metadata.
+    maxDownloadBytes: 26214400
+    # -- Text extraction runs in a separate worker process, one at a time. A
+    # parse that overruns this deadline is killed and the file is reported as
+    # unsupported; the API keeps serving.
+    extractionTimeoutSeconds: 30
+    # -- Memory ceiling (bytes) for that worker. Keep it inside the pod's
+    # headroom: the chart's default memory limit is 512Mi.
+    extractionMemoryLimitBytes: 268435456
+    # -- Document reads (PDF and Office) are admitted one at a time, from before
+    # the download to after the parse, so a waiting read never holds a body. A
+    # read not admitted within this many seconds answers 503 with Retry-After.
+    extractionWaitSeconds: 10
+    # -- Whether search also returns files from each user's personal OneDrive.
+    # Off: SharePoint document libraries only, so a daily digest never surfaces
+    # someone's private drafts by default.
+    includePersonalOnedrive: false
 
 userDirectory:
   # -- Whether to configure Collab Hub API access to the hub user directory.

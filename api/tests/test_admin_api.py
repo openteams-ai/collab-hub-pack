@@ -955,7 +955,7 @@ async def test_an_unknown_connector_cannot_be_switched(tmp_path, idp: _StubIdp):
         await sign_in(client, idp, next_path="/web")
         csrf = (await client.get(ADMIN_SESSION_PATH)).json()["csrf_token"]
         response = await client.post(
-            "/admin/api/connectors/sharepoint",
+            "/admin/api/connectors/dropbox",
             json={"enabled": False},
             headers={"X-CSRF-Token": csrf},
         )

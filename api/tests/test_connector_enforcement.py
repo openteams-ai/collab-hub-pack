@@ -130,6 +130,7 @@ STATUS_ROUTES = {
     "google": ["google-drive", "gmail", "google-calendar"],
     "slack": ["slack"],
     "github": ["github"],
+    "sharepoint": ["sharepoint"],
 }
 ALL_STATUS_ROUTES = [route for routes in STATUS_ROUTES.values() for route in routes]
 
@@ -243,7 +244,7 @@ async def test_the_connector_list_leaves_out_what_is_switched_off(hub):
     listed = await _get(hub(Store(disabled={"google"})), "/v1/connectors")
     everything = await _get(hub(Store()), "/v1/connectors")
 
-    assert [item["id"] for item in listed.json()] == ["slack", "github"]
+    assert [item["id"] for item in listed.json()] == ["slack", "github", "sharepoint"]
     assert [item["id"] for item in everything.json()] == ALL_STATUS_ROUTES
 
 

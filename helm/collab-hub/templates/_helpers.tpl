@@ -483,6 +483,24 @@ include with nindent.
   value: {{ .Values.connectors.notion.notionVersion | quote }}
 - name: COLLAB_HUB_API__CONNECTORS__NOTION__REQUEST_TIMEOUT_SECONDS
   value: {{ .Values.connectors.notion.requestTimeoutSeconds | quote }}
+- name: COLLAB_HUB_API__CONNECTORS__SHAREPOINT__BROKER_TOKEN_URL
+  value: {{ .Values.connectors.sharepoint.brokerTokenUrl | quote }}
+- name: COLLAB_HUB_API__CONNECTORS__SHAREPOINT__API_BASE_URL
+  value: {{ .Values.connectors.sharepoint.apiBaseUrl | quote }}
+- name: COLLAB_HUB_API__CONNECTORS__SHAREPOINT__REQUEST_TIMEOUT_SECONDS
+  value: {{ .Values.connectors.sharepoint.requestTimeoutSeconds | quote }}
+- name: COLLAB_HUB_API__CONNECTORS__SHAREPOINT__DOWNLOAD_TIMEOUT_SECONDS
+  value: {{ .Values.connectors.sharepoint.downloadTimeoutSeconds | quote }}
+- name: COLLAB_HUB_API__CONNECTORS__SHAREPOINT__MAX_DOWNLOAD_BYTES
+  value: {{ .Values.connectors.sharepoint.maxDownloadBytes | int64 | quote }}
+- name: COLLAB_HUB_API__CONNECTORS__SHAREPOINT__EXTRACTION_TIMEOUT_SECONDS
+  value: {{ .Values.connectors.sharepoint.extractionTimeoutSeconds | quote }}
+- name: COLLAB_HUB_API__CONNECTORS__SHAREPOINT__EXTRACTION_MEMORY_LIMIT_BYTES
+  value: {{ .Values.connectors.sharepoint.extractionMemoryLimitBytes | int64 | quote }}
+- name: COLLAB_HUB_API__CONNECTORS__SHAREPOINT__EXTRACTION_WAIT_SECONDS
+  value: {{ .Values.connectors.sharepoint.extractionWaitSeconds | quote }}
+- name: COLLAB_HUB_API__CONNECTORS__SHAREPOINT__INCLUDE_PERSONAL_ONEDRIVE
+  value: {{ .Values.connectors.sharepoint.includePersonalOnedrive | quote }}
 {{- with .Values.frames.auth.idToken.jwksUrl }}
 - name: FRAMES_IDTOKEN_JWKS_URL
   value: {{ . | quote }}

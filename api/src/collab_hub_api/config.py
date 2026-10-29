@@ -706,6 +706,7 @@ class FramesInvitationsConfig(BaseModel):
     friction rather than assurance.
     """
 
+
 class FramesConfig(BaseModel):
     storage_backend: str = "local"
     s3: FramesS3Config = Field(default_factory=FramesS3Config)
@@ -800,11 +801,43 @@ class NotionConnectorConfig(BaseModel):
     request_timeout_seconds: float = 10.0
 
 
+class SharePointConnectorConfig(BaseModel):
+    # Keycloak broker token endpoint for the linked Microsoft identity (alias
+    # ``microsoft``). The same per-user brokering as GitHub: the Hub never holds
+    # the Entra client secret; Keycloak refreshes the ~1h Graph token itself.
+    broker_token_url: str = ""
+    api_base_url: str = "https://graph.microsoft.com/v1.0"
+    static_access_token: str = ""  # dev/CI only -- never in prod values
+    # Graph search and document conversion are slower than a plain REST read.
+    request_timeout_seconds: float = 15.0
+    # File downloads (and Office -> PDF conversion) get a longer budget than JSON.
+    download_timeout_seconds: float = 30.0
+    # Largest file the read route will download before extracting text. Larger
+    # files are reported as unsupported with their metadata, never fetched.
+    max_download_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
+    # Text extraction runs in a separate worker process, one at a time. A parse
+    # that overruns this deadline is killed, and one that needs more memory
+    # than this ceiling fails inside the worker; either way the file is
+    # reported as unsupported and the API keeps serving. The ceiling must stay
+    # inside the pod's memory headroom (the chart's default limit is 512Mi).
+    extraction_timeout_seconds: float = 30.0
+    extraction_memory_limit_bytes: int = Field(default=256 * 1024 * 1024, ge=1)
+    # Document reads (PDF and Office) are admitted one at a time, from before
+    # the download to after the parse, so a waiting read holds no body. A read
+    # not admitted within this wait answers 503 with Retry-After.
+    extraction_wait_seconds: float = Field(default=10.0, ge=0)
+    # Search covers SharePoint document libraries. The user's personal OneDrive
+    # is reachable with the same scopes; it is excluded unless a hub opts in,
+    # so a daily digest never surfaces someone's private drafts by default.
+    include_personal_onedrive: bool = False
+
+
 class ConnectorsConfig(BaseModel):
     google: GoogleConnectorConfig = Field(default_factory=GoogleConnectorConfig)
     slack: SlackConnectorConfig = Field(default_factory=SlackConnectorConfig)
     github: GitHubConnectorConfig = Field(default_factory=GitHubConnectorConfig)
     notion: NotionConnectorConfig = Field(default_factory=NotionConnectorConfig)
+    sharepoint: SharePointConnectorConfig = Field(default_factory=SharePointConnectorConfig)
 
 
 class KeycloakUserDirectoryConfig(BaseModel):

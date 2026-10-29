@@ -33,7 +33,7 @@ from collections.abc import Iterable
 
 __all__ = ["CONNECTOR_KEYS", "apply_disabled"]
 
-CONNECTOR_KEYS = ("google", "slack", "github")
+CONNECTOR_KEYS = ("google", "slack", "github", "sharepoint")
 """The connectors this hub knows how to switch.
 
 Enumerated rather than derived from the config object's fields, so that adding

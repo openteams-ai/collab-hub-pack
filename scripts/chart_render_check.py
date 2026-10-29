@@ -250,6 +250,17 @@ def case_features(r: Rendered) -> None:
     }, flags
 
 
+def case_sharepoint(r: Rendered) -> None:
+    # values.yaml numbers reach templates as floats: without `| int64` the caps
+    # render as 2.62144e+07, which the API's config refuses at startup.
+    for name, want in (
+        ("COLLAB_HUB_API__CONNECTORS__SHAREPOINT__MAX_DOWNLOAD_BYTES", "26214400"),
+        ("COLLAB_HUB_API__CONNECTORS__SHAREPOINT__EXTRACTION_MEMORY_LIMIT_BYTES", "268435456"),
+    ):
+        value = r.value(name)
+        assert value == want, f"{name}: {value}"
+
+
 SERVE_PREFIX = "COLLAB_HUB_API__COGS__SERVE__"
 
 
@@ -442,6 +453,7 @@ def case_run_controller_remote(r: Rendered) -> None:
 
 
 CASES = {
+    "sharepoint": case_sharepoint,
     "serve-off": case_serve_off,
     "serve-with-indexer": case_serve_with_indexer,
     "publish-with-indexer": case_publish_with_indexer,

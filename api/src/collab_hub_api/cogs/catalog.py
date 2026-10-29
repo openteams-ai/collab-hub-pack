@@ -2082,8 +2082,12 @@ def _collect_unconfigured_blobs(conn, configured: list[str], retention: timedelt
     """Stamp the configured sources, start the clock of unstamped ones, and collect a batch (issue #193).
 
     See :meth:`SweepView.collect_unconfigured_blobs`. Three statements, each
-    atomic on its own and each safe in any order against the others and
-    against a concurrent sweep, recording or removal:
+    atomic on its own. On the sweep's autocommit session each commits alone,
+    so none holds a stamp row's lock into the next, and each is safe in any
+    order against the others and against a concurrent sweep, recording or
+    removal. (The store's own method runs them in one transaction; two such
+    direct calls with different configurations can deadlock on stamp rows,
+    which Postgres resolves by aborting one, logged here and answered ``0``.)
 
     - The stamp only moves forward (``GREATEST``), and only for configured
       ids, which step three never deletes for.

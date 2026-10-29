@@ -378,14 +378,17 @@ class SweepView(ABC):
            configured more than ``retention`` ago, delete the descriptors of
            up to ``limit`` manifests, each manifest's whole set at once.
 
-        A configured source's descriptors are never touched, whatever its
-        stamp says. A source a replica still has configured is kept alive by
-        that replica: its first recording of any manifest's descriptors
-        stamps the source again (:meth:`record_manifest_blobs`), and its
-        indexer, if it runs one, stamps it every sweep. Each manifest is
-        taken under its artifact's row, like :meth:`mark_removed`, so a
+        A source in ``configured`` is never collected, whatever its stamp
+        says. Another process that still has the source configured moves
+        its stamp only by writing for it: its indexer, if it runs one, every
+        sweep, and its first recording of any manifest's descriptors
+        (:meth:`record_manifest_blobs`). Reads of manifests already recorded
+        write nothing, so a process that only serves them does not keep the
+        source alive; the retention is what covers a rollout. Each manifest
+        is taken under its artifact's row, like :meth:`mark_removed`, so a
         recording in flight is never split; a row something else holds is
-        skipped until the next sweep. Only ``collab_cog_manifest_blobs`` is
+        skipped until the next sweep. Descriptors with no artifact row are
+        left alone (only hand edits make them). Only ``collab_cog_manifest_blobs`` is
         deleted from: catalog rows and their history stay. A manifest whose
         descriptors were collected is recorded again by its next manifest
         read once its source is configured again.
@@ -1250,8 +1253,9 @@ class InMemoryCogCatalogStore(CogCatalogStore):
                 for source_id, seen in self._activity.items()
                 if source_id not in ids and seen < now - retention
             }
-            # No row locks to skip here: the in-memory store is one lock.
-            batch = sorted(key for key in self._blobs if key[0] in collectable)[:limit]
+            # No row locks to skip here: the in-memory store is one lock. Like Postgres,
+            # descriptors with no artifact row are left alone.
+            batch = sorted(key for key in self._blobs if key[0] in collectable and key in self._rows)[:limit]
             for key in batch:
                 del self._blobs[key]
         return len(batch)
@@ -2087,13 +2091,17 @@ def _collect_unconfigured_blobs(conn, configured: list[str], retention: timedelt
       no stamp and never updates an existing stamp, so it can only delay a
       collection. It finds the sources with a loose index scan over the
       primary key (one probe per distinct ``source_id``), not a table scan.
-    - The deletion picks up to ``limit`` manifests of collectable sources,
-      locks each one's artifact row ``FOR UPDATE SKIP LOCKED`` (the lock a
-      recording takes ``FOR SHARE``, so a recording in flight is waited out
-      by skipping, and one that arrives later waits and then writes a whole
-      set), and deletes every descriptor of each manifest it holds -- plus
-      those of a manifest with no artifact row at all, which nothing can
-      record for. Only ``collab_cog_manifest_blobs`` is deleted from.
+    - The deletion locks the artifact rows of up to ``limit`` manifests of
+      collectable sources that have descriptors, ``FOR UPDATE SKIP LOCKED``
+      (the lock a recording takes ``FOR SHARE``, so a recording in flight is
+      skipped rather than split, and one that arrives later waits and then
+      writes a whole set; a skipped row does not use up the batch), and
+      deletes every descriptor of each manifest it holds. Only
+      ``collab_cog_manifest_blobs`` is deleted from. Descriptors with no
+      artifact row at all are left alone: without a row there is nothing to
+      lock against a recording of an artifact recreated mid-statement, and
+      the catalog never deletes artifact rows, so only hand edits make them
+      (the manual cleanup in docs/frames-operations.md covers them).
 
     Housekeeping, like :func:`_forget_removed_blobs`: a database error is
     logged by class and answers ``0``; the next sweep tries again. The sweep
@@ -2133,36 +2141,25 @@ def _collect_unconfigured_blobs(conn, configured: list[str], retention: timedelt
         row = conn.execute(
             """
             WITH collectable AS MATERIALIZED (
-                SELECT source_id FROM collab_cog_source_activity
-                WHERE NOT (source_id = ANY(%s::text[])) AND last_configured_at < now() - %s::interval
-            ), batch AS MATERIALIZED (
-                SELECT DISTINCT b.source_id, b.repository, b.manifest_digest
-                FROM collab_cog_manifest_blobs b
-                WHERE b.source_id IN (SELECT source_id FROM collectable)
-                ORDER BY b.source_id, b.repository, b.manifest_digest
-                LIMIT %s
+                SELECT s.source_id FROM collab_cog_source_activity s
+                WHERE NOT (s.source_id = ANY(%s::text[])) AND s.last_configured_at < now() - %s::interval
+                  AND EXISTS (SELECT 1 FROM collab_cog_manifest_blobs b WHERE b.source_id = s.source_id)
             ), held AS MATERIALIZED (
                 SELECT a.source_id, a.repository, a.digest
                 FROM collab_cog_artifacts a
-                JOIN batch k
-                  ON a.source_id = k.source_id AND a.repository = k.repository AND a.digest = k.manifest_digest
+                WHERE a.source_id IN (SELECT source_id FROM collectable)
+                  AND EXISTS (
+                      SELECT 1 FROM collab_cog_manifest_blobs b
+                      WHERE b.source_id = a.source_id AND b.repository = a.repository
+                        AND b.manifest_digest = a.digest
+                  )
+                ORDER BY a.source_id, a.repository, a.digest
+                LIMIT %s
                 FOR UPDATE OF a SKIP LOCKED
-            ), doomed AS MATERIALIZED (
-                SELECT k.source_id, k.repository, k.manifest_digest FROM batch k
-                WHERE EXISTS (
-                          SELECT 1 FROM held h
-                          WHERE h.source_id = k.source_id AND h.repository = k.repository
-                            AND h.digest = k.manifest_digest
-                      )
-                   OR NOT EXISTS (
-                          SELECT 1 FROM collab_cog_artifacts a
-                          WHERE a.source_id = k.source_id AND a.repository = k.repository
-                            AND a.digest = k.manifest_digest
-                      )
             ), deleted AS (
-                DELETE FROM collab_cog_manifest_blobs b USING doomed d
-                WHERE b.source_id = d.source_id AND b.repository = d.repository
-                  AND b.manifest_digest = d.manifest_digest
+                DELETE FROM collab_cog_manifest_blobs b USING held h
+                WHERE b.source_id = h.source_id AND b.repository = h.repository
+                  AND b.manifest_digest = h.digest
                 RETURNING b.source_id, b.repository, b.manifest_digest
             )
             SELECT count(DISTINCT (source_id, repository, manifest_digest)) AS manifests FROM deleted

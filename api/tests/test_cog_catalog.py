@@ -1501,18 +1501,19 @@ def test_live_unconfigured_collection(live_store):
 
 @live_postgres
 def test_live_unconfigured_collection_on_the_sweep_session_skips_a_manifest_being_recorded(live_store):
-    """The sweep's collection never splits a recording in flight, and never waits for one."""
+    """The sweep's collection never splits a recording in flight, never waits for one, and is not starved."""
 
     store, database = live_store
-    for name in ("1", "2"):
+    for name in ("2", "3"):
         store.upsert(artifact(name, source_id=GONE, repository="cogs/a"))
         store.record_manifest_blobs(GONE, "cogs/a", digest(name), [BlobDescriptor(digest("x"), 1)])
-    # An orphan: descriptors whose artifact row is gone (by hand). Nothing can record for it.
+    # Descriptors with no artifact row (a hand edit), sorted first. Never collected: with no row
+    # there is nothing to hold against a recording of an artifact recreated mid-statement.
     with database.connection() as conn:
         conn.execute(
             "INSERT INTO collab_cog_manifest_blobs (source_id, repository, manifest_digest, blob_digest, size)"
             " VALUES (%s, 'cogs/a', %s, %s, 1)",
-            (GONE, digest("9"), digest("x")),
+            (GONE, digest("0"), digest("x")),
         )
     _live_age(database, GONE, timedelta(days=8))
 
@@ -1531,15 +1532,21 @@ def test_live_unconfigured_collection_on_the_sweep_session_skips_a_manifest_bein
         started = time.monotonic()
         with store.sweep_lock() as view:
             assert view is not None
-            assert view.collect_unconfigured_blobs([SOURCE], retention=WEEK) == 2, "manifest 1 and the orphan"
+            # A batch of one: neither the row-less descriptors nor the held row use it up.
+            assert view.collect_unconfigured_blobs([SOURCE], retention=WEEK, limit=1) == 1
         assert time.monotonic() - started < 2.0, "the collection waited on the held row"
+        assert {manifest for _, _, manifest, _ in _live_rows(database)} == {digest("0"), digest("2")}
     # The recording committed both of manifest 2's descriptors; they are a whole set, and the
     # next sweep takes the whole set.
-    assert sorted(blob for *_, blob in _live_rows(database)) == [digest("x"), digest("y")]
+    assert sorted(blob for _, _, manifest, blob in _live_rows(database) if manifest == digest("2")) == [
+        digest("x"),
+        digest("y"),
+    ]
     assert store.collect_unconfigured_blobs([SOURCE], retention=WEEK) == 1
-    assert _live_rows(database) == []
+    assert store.collect_unconfigured_blobs([SOURCE], retention=WEEK) == 0
+    assert [manifest for _, _, manifest, _ in _live_rows(database)] == [digest("0")]
     # Nothing but descriptors: both catalog rows are still there and present.
-    assert [row.present for row in store.locations(digest("1")) + store.locations(digest("2"))] == [True, True]
+    assert [row.present for row in store.locations(digest("2")) + store.locations(digest("3"))] == [True, True]
 
 
 @live_postgres
@@ -1606,14 +1613,13 @@ def test_unconfigured_collection_deletes_descriptors_and_nothing_else():
     assert "NOT (source_id = ANY(%s::text[]))" in start_clocks[0]
     sql, params = collect
     assert params == (["a", "b"], WEEK, MAX_COLLECTED_MANIFESTS_PER_SWEEP), "the limit is clamped"
-    assert "WHERE NOT (source_id = ANY(%s::text[])) AND last_configured_at < now() - %s::interval" in sql
+    assert "WHERE NOT (s.source_id = ANY(%s::text[])) AND s.last_configured_at < now() - %s::interval" in sql
     # Each manifest is taken under its artifact's row, skipping one something else holds.
-    assert "FOR UPDATE OF a SKIP LOCKED" in sql
-    assert "ORDER BY b.source_id, b.repository, b.manifest_digest LIMIT %s" in sql
+    assert "ORDER BY a.source_id, a.repository, a.digest LIMIT %s FOR UPDATE OF a SKIP LOCKED" in sql
     # The one table anything is deleted from.
     deletes = [statement for statement, _ in conn.queries if "DELETE" in statement]
     assert deletes == [sql] and sql.count("DELETE") == 1
-    assert "DELETE FROM collab_cog_manifest_blobs b USING doomed d" in sql
+    assert "DELETE FROM collab_cog_manifest_blobs b USING held h" in sql
     for statement in conn.statements:
         for table in ("collab_cog_artifacts", "collab_cog_publication_attempts", "collab_cog_repositories"):
             assert f"UPDATE {table}" not in statement and f"DELETE FROM {table}" not in statement

@@ -199,17 +199,20 @@ database ([#193]):
   1 to 8760). "Seen" is a stamp per source id in `collab_cog_source_activity`
   (migration 16). Every sweep stamps the sources the indexer has configured,
   and every first recording of a manifest's descriptors stamps the source it
-  was recorded for, on whichever replica made it. A replica still on the old
-  configuration during a rollout, or another release on the same database
-  that still lists the source, therefore keeps the source alive by serving
-  it. A source that has descriptors and no stamp (one removed before
+  was recorded for, on whichever replica made it. Another release on the
+  same database that still lists the source keeps it alive through its own
+  indexer's sweeps, or by recording descriptors for it; a replica that only
+  serves manifests whose descriptors are already recorded writes nothing and
+  does not. The retention is what covers a rollout. A source that has descriptors and no stamp (one removed before
   migration 16) is stamped by the first sweep after the upgrade, and its
   retention starts there.
 - **Bounded per sweep.** One sweep deletes the descriptors of at most 500
   manifests, each manifest's whole set at once, and takes each manifest's
   catalog row first, as recording and removal do; a row something else holds
-  is skipped until the next sweep. A configured source's descriptors are
-  never deleted. The count is `collected` on the `cog_index_sweep` log line.
+  is skipped until the next sweep. A source the indexer has configured is
+  never collected. Descriptors with no catalog row at all, which only a hand
+  edit of the database can leave, are not collected; the manual path below
+  covers them. The count is `collected` on the `cog_index_sweep` log line.
 - **Re-adding a source.** A manifest whose descriptors were collected is
   recorded again by its next manifest read, which every client makes before
   it asks for a blob, and that recording stamps the source again. Until then,

@@ -107,9 +107,11 @@ and explain any that do not apply.
 ## PR titles and releases
 
 PRs are squash-merged. Keep the Conventional Commits PR title as the subject
-in the merge dialog. The merger must run `python3 scripts/strip_pr_body.py`
-on the PR description and use its output as the squash commit body;
-CLI mergers must pass the output with `--body-file`.
+in the merge dialog. The merger must drop the reviewer context: in the GitHub
+UI, delete `<!-- reviewer-context -->` and below (and any Dependabot
+`<details>`) directly in the dialog; on the CLI, run
+`python3 scripts/strip_pr_body.py` on the PR description and pass its output
+with `--body-file`.
 Preserve issue references, `BREAKING CHANGE:` footers, and revert metadata
 as described in the [PR style guide](docs/pr-style-guide.md).
 

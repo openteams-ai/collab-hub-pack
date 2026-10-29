@@ -74,17 +74,23 @@ explicitly to `gh pr merge --body-file`.
 
 The script reads UTF-8 PR text from stdin and writes the cleaned body to stdout:
 
-1. Remove the first `<!-- reviewer-context -->` marker and everything after it.
-2. Remove everything from the first opening `<details>` tag through the last
-   closing `</details>` tag in the remaining text, including the tags. This
-   handles Dependabot release notes and commit lists, including nested blocks.
-3. Trim surrounding whitespace while preserving the remaining text, including
+1. Normalize `\r\n` line endings to `\n`.
+2. Remove the first `<!-- reviewer-context -->` marker and everything after it.
+3. Remove HTML comments and `##`-or-deeper Markdown heading lines, so older PRs
+   that predate the template need no manual cleanup.
+4. Remove everything from the first opening `<details>` tag through the last
+   closing `</details>` tag, including the tags. Only tags at the start of a
+   line count, so a literal `<details>` mentioned in prose survives. If the
+   last opening tag is never closed (GitHub truncates large grouped Dependabot
+   descriptions), removal runs to the end of the description.
+5. Trim surrounding whitespace while preserving the remaining text, including
    issue references, release footers, and any trailing Dependabot metadata.
 
 Keep essential summary and release metadata outside `<details>` blocks and above
-the marker. Text between separate details blocks is removed too. Unmatched
-opening or closing details tags cause an error with no output; inspect and fix
-the source rather than merging with an accidentally empty body.
+the marker. Text between separate details blocks is removed too. The script
+fails with no output on a closing `</details>` tag that has no opening tag, or
+on an unedited template (`SUMMARY_HERE` or a bare `Fixes #`); fix the PR
+description rather than merging with a wrong or empty body.
 
 From the repository root, prepare the message (replace `123` with the PR number).
 Run each command only if the preceding command succeeded:
@@ -105,15 +111,15 @@ gh pr merge "$pr" --squash --body-file "$body_file"
 rm "$body_file" "$body_file.source"
 ```
 
-In the GitHub UI, run the same script on the PR description and paste its output
-into the squash commit body. Keep the PR title as the subject and remove any
-automatically appended list of intermediate commits.
+If using the GitHub UI, keep the PR title as the subject and delete
+`<!-- reviewer-context -->` and below and any Dependabot cruft/`<details>`.
+For any PRs not using the new template, clean up the commit message
+directly in the squash merge dialog.
 
-For a Dependabot PR without the marker, the script still removes the details
-blocks while preserving the dependency/version summary. For a legacy PR with
-neither the marker nor details blocks, it preserves the description: first edit
-the PR to place reviewer-only material below the marker, then run the script.
-Do not assume an unmarked legacy description is already a concise commit body.
+On the CLI, a Dependabot PR without the marker still has its details blocks
+removed while the dependency/version summary is preserved. Do not assume an
+unmarked legacy description is already a concise commit body; inspect the
+output and edit the PR description first if needed.
 
 These steps do not grant permission to merge or bypass required reviews and
 checks. Marker enforcement in CI is a separate follow-up; this change does not

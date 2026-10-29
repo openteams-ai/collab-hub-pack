@@ -5,13 +5,18 @@ import re
 import sys
 
 MARKER = "<!-- reviewer-context -->"
-OPEN_DETAILS = re.compile(r"<details\b[^>]*>", re.IGNORECASE)
-CLOSE_DETAILS = re.compile(r"</details\s*>", re.IGNORECASE)
+HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+HEADING = re.compile(r"^##+ .*(?:\n|$)", re.MULTILINE)
+# Only tags at the start of a line count, so a literal <details> in prose survives.
+OPEN_DETAILS = re.compile(r"^[ \t]*<details\b[^>]*>", re.IGNORECASE | re.MULTILINE)
+CLOSE_DETAILS = re.compile(r"^[ \t]*</details\s*>", re.IGNORECASE | re.MULTILINE)
+UNEDITED = re.compile(r"SUMMARY_HERE|Fixes #(?!\d)")
 
 
 def strip_pr_body(body: str) -> str:
-    """Drop reviewer context, then the first-through-last details block span."""
-    summary = body.split(MARKER, 1)[0]
+    """Drop reviewer context, comments, headings, then the details block span."""
+    summary = body.replace("\r\n", "\n").split(MARKER, 1)[0]
+    summary = HEADING.sub("", HTML_COMMENT.sub("", summary))
     opening = OPEN_DETAILS.search(summary)
     closings = list(CLOSE_DETAILS.finditer(summary))
     if opening or closings:
@@ -21,10 +26,12 @@ def strip_pr_body(body: str) -> str:
         for _, delta in sorted(tags):
             depth += delta
             if depth < 0:
-                raise ValueError("unmatched <details> tags; inspect the PR body manually")
-        if depth:
-            raise ValueError("unmatched <details> tags; inspect the PR body manually")
-        summary = summary[: opening.start()] + summary[closings[-1].end() :]
+                raise ValueError("unmatched </details> tag; inspect the PR body manually")
+        # GitHub truncates long Dependabot bodies, leaving details unclosed.
+        end = len(summary) if depth else closings[-1].end()
+        summary = summary[: opening.start()] + summary[end:]
+    if UNEDITED.search(summary):
+        raise ValueError("PR template placeholders are unedited; fill in the summary and issue number")
     summary = summary.strip()
     return summary + "\n" if summary else ""
 

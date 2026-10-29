@@ -4,12 +4,15 @@ SUMMARY_HERE
 
 <!-- reviewer-context -->
 
-<!-- Replace SUMMARY_HERE with one to three short paragraphs explaining the problem,
-resulting behavior, and lasting compatibility or migration implications.
-Replace Fixes # with the parent issue reference and keep release metadata above the marker.
-Follow docs/pr-style-guide.md and the repository's contribution guide.
-The merger must run scripts/strip_pr_body.py and use its output as the squash commit body;
-GitHub does not remove reviewer context automatically. -->
+<!-- Everything above the review-context marker becomes the squash commit body.
+Add the issue number this fixes after 'Fixes #' (e.g. Fixes #123).
+Replace SUMMARY_HERE with a one to three short paragraph summary of
+the problem and resulting behavior, lasting compat or migration implications,
+and any release metadata (docs/pr-style-guide.md). -->
+
+<!-- Everything at and below the review-context marker is for reviewers
+and must be dropped by the merger (manually if merging from the web UI,
+or via running scripts/strip_pr_body.py if merging from the command line). -->
 
 ## Validation
 

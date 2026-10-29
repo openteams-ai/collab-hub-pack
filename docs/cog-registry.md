@@ -101,6 +101,30 @@ hunt through 401s on the first sweep. A username without a password (or the
 reverse) is refused for the same reason: it is the shape a half-mounted
 Secret produces.
 
+### What the credential must be allowed to do
+
+The Secret says *where* the credential lives; the registry decides what it
+may do, and the indexer needs more than a pull-only credential. Harbor's
+`repository:list` is a separate permission from `repository:pull`, and the
+sweep's very first call — listing a project's repositories — needs it. A robot
+account created with Harbor's usual pull-only set fails every sweep at that
+call with a bare `403 forbidden`, before any artifact is read:
+
+```
+GET /api/v2.0/projects/cogs/repositories -> 403
+cog_index_source_failed source=harbor-dev reason="list_repositories: RegistrySourceAuthError"
+```
+
+| Kind | Grant the credential | Why |
+| --- | --- | --- |
+| `harbor` | Project-scoped `repository:list`, `repository:pull`, `artifact:read`, `artifact:list`, `tag:list` on each project in `projects` | `repository:list` enumerates the project's repositories, `artifact:list` and `tag:list` enumerate what is in each one, and `artifact:read` with `repository:pull` fetch the manifests and the `COG.md` blobs. |
+| `static` | Pull on each repository in `repositories` (and in the index document, if `indexUrl` is set) | A static source enumerates through the OCI distribution API alone, so tag listing, manifest reads and blob reads are all covered by the registry's pull right. |
+
+The indexer only reads, none of these needs push, delete, or project
+admin. A project-scoped robot account in Harbor (*Project → Robot Accounts*)
+with exactly the five permissions above is enough. A system-scoped robot works
+too but grants more than the indexer uses.
+
 Surrounding whitespace is removed from every resolved value, on purpose: a
 Secret created with `--from-file` carries the file's trailing newline, and
 forwarding it verbatim fails authentication at the registry with an error

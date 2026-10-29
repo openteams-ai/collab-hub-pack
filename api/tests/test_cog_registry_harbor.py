@@ -262,6 +262,22 @@ async def test_rest_refused_credential_is_a_clear_error_without_the_secret(statu
     assert f"refused the configured credential for /projects/cogs/repositories (HTTP {status})" in message
     assert CREDENTIALS["password"] not in message
     assert "unauthorized" not in message  # Harbor's body is not echoed either
+    # A 403 names the permission the pull-only robot set lacks; a 401 is a
+    # bad credential, not a missing grant, so it stays silent about permissions.
+    assert ("repository:list" in message) == (status == 403)
+
+
+async def test_rest_403_on_artifacts_names_the_artifact_permissions() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/repositories"):
+            return httpx.Response(200, json=[{"name": "cogs/cog-a1b2"}])
+        return httpx.Response(403, json={"errors": [{"code": "FORBIDDEN", "message": "forbidden"}]})
+
+    with pytest.raises(RegistrySourceAuthError) as excinfo:
+        await make_source(handler).list_artifacts("cogs/cog-a1b2")
+    message = str(excinfo.value)
+    assert "artifact:list" in message
+    assert "repository:list" not in message
 
 
 async def test_rest_404_and_5xx_and_bad_bodies() -> None:

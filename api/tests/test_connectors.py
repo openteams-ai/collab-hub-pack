@@ -839,7 +839,7 @@ def _slack_api_handler(request: httpx.Request, seen_authorization: list[str]) ->
                         "id": "C0001",
                         "name": "proposals",
                         "is_private": False,
-                        "topic": {"value": "Proposal work"},
+                        "topic": {"value": "Proposal work: <https://wiki.test/proposals?a=1&amp;b=2>"},
                         "num_members": 12,
                     }
                 ],
@@ -947,6 +947,7 @@ async def test_slack_endpoints_cover_channels_dms_search_and_reads(tmp_path, mon
     assert channels.status_code == 200
     assert channels.json()["channels"][0]["id"] == "C0001"
     assert channels.json()["channels"][0]["name"] == "proposals"
+    assert channels.json()["channels"][0]["topic"] == "Proposal work: https://wiki.test/proposals?a=1&b=2"
 
     assert dms.status_code == 200
     dm_payload = dms.json()["dms"]
@@ -1397,7 +1398,7 @@ async def test_slack_read_forwards_friendly_time_fields_as_slack_params(tmp_path
     assert seen["latest"].startswith("1719791999.")
 
 
-async def test_slack_read_sanitizes_link_shaped_message_text(tmp_path, monkeypatch):
+async def test_slack_read_renders_link_entities_with_exact_targets(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
     monkeypatch.setenv("FRAMES_BEARER_ALLOW_UNSIGNED", "true")
 
@@ -1434,23 +1435,268 @@ async def test_slack_read_sanitizes_link_shaped_message_text(tmp_path, monkeypat
             )
 
     assert read.status_code == 200
-    assert read.json()["messages"][0]["text"] == "docs here and [link]"
-    assert "http://" not in read.text
-    assert "https://" not in read.text
+    assert read.json()["messages"][0]["text"] == "docs here (https://intranet.test/x) and https://example.test/y"
+    assert read.json()["content_trust"] == "external_untrusted"
 
 
-def test_sanitize_slack_text_neutralizes_links_and_preserves_mentions():
-    assert sanitize_slack_text("see <https://x.test/a|the doc>") == "see the doc"
-    assert sanitize_slack_text("bare <https://x.test/a>") == "bare [link]"
-    assert sanitize_slack_text("go to https://x.test/a, now") == "go to [link], now"
-    assert sanitize_slack_text("visit www.x.test") == "visit [link]"
-    # Slack auto-links a pasted URL as <url|url>; the label must not leak the URL.
-    assert sanitize_slack_text("auto <https://x.test/a|https://x.test/a>") == "auto [link]"
+def test_sanitize_slack_text_keeps_http_targets_and_preserves_mentions():
+    assert sanitize_slack_text("see <https://x.test/a|the doc>") == "see the doc (https://x.test/a)"
+    assert sanitize_slack_text("bare <https://x.test/a>") == "bare https://x.test/a"
+    assert sanitize_slack_text("go to https://x.test/a, now") == "go to https://x.test/a, now"
     assert sanitize_slack_text("hi <@U1> in <#C1|general>") == "hi @U1 in #general"
     assert sanitize_slack_text("heads up <!here> and <!subteam^S1|frontend>") == "heads up @here and @frontend"
     assert sanitize_slack_text("email <mailto:bob@x.test|Bob>") == "email Bob"
+    assert sanitize_slack_text("email <mailto:bob@x.test>") == "email bob@x.test"
     assert sanitize_slack_text("plain text, no links") == "plain text, no links"
     assert sanitize_slack_text("") == ""
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "javascript:alert(1)",
+        "JavaScript:alert(1)",
+        "data:text/html;base64,PHNjcmlwdD4=",
+        "vbscript:msgbox(1)",
+        "file:///etc/passwd",
+        "tel:+15551212",
+        "slack://channel?team=T1&amp;id=C1",
+        "ftp://x.test/a",
+        "x.test/a",
+    ],
+)
+def test_sanitize_slack_text_neutralizes_non_http_targets(target):
+    assert sanitize_slack_text(f"go <{target}|here> now") == "go here now"
+    assert sanitize_slack_text(f"go <{target}> now") == "go [link] now"
+    # A URL-shaped label must not stand in for a target that was dropped.
+    assert sanitize_slack_text(f"go <{target}|https://good.test/y> now") == "go [link] now"
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "https://x.test/a b",
+        "https://x.test/a\tb",
+        "https://x.test/a\x00b",
+        "https://x.test/a\x7fb",
+        "https://good.test\u202e/gpj.exe",
+        "https://go\u200bod.test/x",
+        'https://x.test/a"onmouseover="b',
+        "https://x.test/a'b",
+    ],
+)
+def test_sanitize_slack_text_neutralizes_http_targets_with_unsafe_characters(target):
+    assert sanitize_slack_text(f"go <{target}|here> now") == "go here now"
+    assert sanitize_slack_text(f"go <{target}> now") == "go [link] now"
+
+
+def test_sanitize_slack_text_unescapes_only_amp_in_http_targets():
+    assert sanitize_slack_text("<https://x.test/a?b=1&amp;c=2|query>") == "query (https://x.test/a?b=1&c=2)"
+    # &lt; / &gt; stay escaped, so they never become angle brackets in the URL.
+    assert sanitize_slack_text("<https://x.test/a?q=&lt;b&gt;>") == "https://x.test/a?q=&lt;b&gt;"
+
+
+def test_sanitize_slack_text_unescapes_amp_in_plain_urls():
+    assert sanitize_slack_text("see https://x.test/a?b=1&amp;c=2 now") == "see https://x.test/a?b=1&c=2 now"
+    assert sanitize_slack_text("see www.x.test/a?b=1&amp;c=2.") == "see www.x.test/a?b=1&c=2."
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://go\u200bod.test/x",
+        "https://good.test\u202e/gpj.exe",
+        "https://x.test/a\x00b",
+        'https://x.test/a"onmouseover="b',
+        "https://x.test/a'b",
+        "www.go\u200bod.test/x",
+    ],
+)
+def test_sanitize_slack_text_neutralizes_plain_urls_with_unsafe_characters(url):
+    assert sanitize_slack_text(f"go {url} now") == "go [link] now"
+    assert sanitize_slack_text(f"go ({url}).") == "go ([link])."
+
+
+def test_sanitize_slack_text_strips_trailing_punctuation_before_checking_plain_urls():
+    assert sanitize_slack_text('"see https://x.test/a"') == '"see https://x.test/a"'
+    assert sanitize_slack_text("'see https://x.test/a'.") == "'see https://x.test/a'."
+
+
+def test_sanitize_slack_text_does_not_reprocess_rendered_entity_urls():
+    # The entity target is unescaped once; a second pass would turn &amp; into &.
+    assert sanitize_slack_text("<https://x.test/a?q=&amp;amp;>") == "https://x.test/a?q=&amp;"
+    assert sanitize_slack_text("<https://x.test/a?q=&amp;amp;|doc>") == "doc (https://x.test/a?q=&amp;)"
+    # A plain URL right next to an entity is checked on its own.
+    assert sanitize_slack_text("https://a.test/x&amp;y<https://b.test/z|b>") == "https://a.test/x&yb (https://b.test/z)"
+
+
+def test_sanitize_slack_text_shows_target_when_label_is_a_different_url():
+    # A URL in the label must not pass itself off as the target.
+    assert sanitize_slack_text("open <https://evil.test/x|https://good.test/y>") == "open [link] (https://evil.test/x)"
+    assert (
+        sanitize_slack_text("open <https://evil.test/x|click (https://good.test/y)>")
+        == "open click ([link]) (https://evil.test/x)"
+    )
+
+
+def test_sanitize_slack_text_link_edge_cases():
+    # Slack auto-links a pasted URL as <url|url>, or <url|host> for a bare domain.
+    assert sanitize_slack_text("auto <https://x.test/a|https://x.test/a>") == "auto https://x.test/a"
+    assert sanitize_slack_text("auto <http://www.x.test|www.x.test>") == "auto http://www.x.test"
+    assert sanitize_slack_text("auto <https://x.test/|X.test>.") == "auto https://x.test/."
+    # A label differing from the target only in case is the same link.
+    assert sanitize_slack_text("<https://x.test/a|HTTPS://X.TEST/A>") == "https://x.test/a"
+    assert sanitize_slack_text("<https://en.wikipedia.org/wiki/Foo_(bar)|Foo>") == (
+        "Foo (https://en.wikipedia.org/wiki/Foo_(bar))"
+    )
+    # Trailing punctuation stays outside the link, typed or auto-linked.
+    assert sanitize_slack_text("see <https://x.test/a>, then <https://x.test/b>).") == (
+        "see https://x.test/a, then https://x.test/b)."
+    )
+    assert sanitize_slack_text("(see https://x.test/a)!") == "(see https://x.test/a)!"
+    assert sanitize_slack_text("visit www.x.test/a.") == "visit www.x.test/a."
+    # The scheme is matched case-insensitively and the target is kept as written.
+    assert sanitize_slack_text("<HTTPS://a.test/x>") == "HTTPS://a.test/x"
+    assert sanitize_slack_text("<HTTPS://a.test/x|doc>") == "doc (HTTPS://a.test/x)"
+    assert sanitize_slack_text("<https://a.test/x|see (this)>") == "see (this) (https://a.test/x)"
+    long_url = "https://x.test/" + "a" * 4000 + "?q=" + "b" * 4000
+    assert sanitize_slack_text(f"long <{long_url}|x.test/aaa…>") == f"long x.test/aaa… ({long_url})"
+    assert sanitize_slack_text(f"long {long_url}") == f"long {long_url}"
+
+
+# Issue #143: Slack shortens long link labels with an ellipsis, so the visible label
+# alone cannot recover the target. The exact http(s) targets must reach the model.
+_TRUNCATED_LABEL_TEXT = (
+    "docs <https://gitlab.example/group/project/-/issues/12|gitlab.example/group/…/12>"
+    " and https://example.test/y?a=1&amp;b=2"
+)
+_TRUNCATED_LABEL_RENDERED = (
+    "docs gitlab.example/group/…/12 (https://gitlab.example/group/project/-/issues/12)"
+    " and https://example.test/y?a=1&b=2"
+)
+
+
+def _assert_exact_slack_targets_preserved(body: dict, message: dict) -> None:
+    assert message["text"] == _TRUNCATED_LABEL_RENDERED
+    assert body["content_trust"] == "external_untrusted"
+    assert body["security_notice"]
+
+
+async def test_slack_read_preserves_exact_link_targets(tmp_path, monkeypatch):
+    monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
+    monkeypatch.setenv("FRAMES_BEARER_ALLOW_UNSIGNED", "true")
+
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith("/conversations.info"):
+            return Response(200, json={"ok": True, "channel": {"id": "C0001", "is_channel": True}})
+        if request.url.path.endswith("/conversations.history"):
+            return Response(
+                200,
+                json={
+                    "ok": True,
+                    "messages": [{"ts": "1783041900.111000", "user": "U0002", "text": _TRUNCATED_LABEL_TEXT}],
+                    "has_more": False,
+                },
+            )
+        return Response(404)
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(slack_connector_config(tmp_path))
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            read = await client.post(
+                "/v1/connectors/slack/channels/C0001/read",
+                headers=auth_header(),
+                json={"limit": 10},
+            )
+
+    assert read.status_code == 200
+    _assert_exact_slack_targets_preserved(read.json(), read.json()["messages"][0])
+
+
+async def test_slack_thread_read_preserves_exact_link_targets(tmp_path, monkeypatch):
+    monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
+    monkeypatch.setenv("FRAMES_BEARER_ALLOW_UNSIGNED", "true")
+
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith("/conversations.info"):
+            return Response(200, json={"ok": True, "channel": {"id": "C0001", "is_channel": True}})
+        if request.url.path.endswith("/conversations.replies"):
+            return Response(
+                200,
+                json={
+                    "ok": True,
+                    "messages": [
+                        {"ts": "1783041866.494000", "user": "U0001", "text": "root", "reply_count": 1},
+                        {
+                            "ts": "1783041900.111000",
+                            "user": "U0002",
+                            "text": _TRUNCATED_LABEL_TEXT,
+                            "thread_ts": "1783041866.494000",
+                        },
+                    ],
+                    "has_more": False,
+                },
+            )
+        return Response(404)
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(slack_connector_config(tmp_path))
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            thread = await client.post(
+                "/v1/connectors/slack/channels/C0001/threads/1783041866.494000/read",
+                headers=auth_header(),
+                json={"limit": 10},
+            )
+
+    assert thread.status_code == 200
+    _assert_exact_slack_targets_preserved(thread.json(), thread.json()["messages"][1])
+
+
+async def test_slack_search_preserves_exact_link_targets(tmp_path, monkeypatch):
+    monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
+    monkeypatch.setenv("FRAMES_BEARER_ALLOW_UNSIGNED", "true")
+
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith("/search.messages"):
+            return Response(
+                200,
+                json={
+                    "ok": True,
+                    "messages": {
+                        "matches": [
+                            {
+                                "ts": "1783041900.111000",
+                                "user": "U0002",
+                                "text": _TRUNCATED_LABEL_TEXT,
+                                "channel": {"id": "C0001", "name": "proposals", "is_channel": True},
+                            }
+                        ],
+                        "paging": {"page": 1, "pages": 1},
+                    },
+                },
+            )
+        return Response(404)
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(slack_connector_config(tmp_path))
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            search = await client.post(
+                "/v1/connectors/slack/search",
+                headers=auth_header(),
+                json={"query": "docs", "limit": 5},
+            )
+
+    assert search.status_code == 200
+    _assert_exact_slack_targets_preserved(search.json(), search.json()["hits"][0])
 
 
 async def test_google_drive_client_limits_download_before_decoding(monkeypatch):

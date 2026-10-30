@@ -181,9 +181,7 @@ def _load_template() -> tuple[str, str]:
     text = files(__package__).joinpath(TEMPLATE_FILENAME).read_text(encoding="utf-8")
     first, _, body = text.partition("\n")
     if not first.startswith(SUBJECT_PREFIX):
-        raise ValueError(
-            f"{TEMPLATE_FILENAME} must begin with a {SUBJECT_PREFIX!r} line"
-        )
+        raise ValueError(f"{TEMPLATE_FILENAME} must begin with a {SUBJECT_PREFIX!r} line")
     return first[len(SUBJECT_PREFIX) :].strip(), body.lstrip("\n")
 
 
@@ -383,8 +381,5 @@ def render_for_automated_delivery(
     )
     unresolved = sorted(set(UNRESOLVED_PLACEHOLDER.findall(body)))
     if unresolved:
-        raise ValueError(
-            "refusing to send an invitation email with unresolved placeholders: "
-            + ", ".join(unresolved)
-        )
+        raise ValueError("refusing to send an invitation email with unresolved placeholders: " + ", ".join(unresolved))
     return body

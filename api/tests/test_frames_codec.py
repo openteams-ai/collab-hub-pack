@@ -64,9 +64,7 @@ def test_decode_metadata_round_trips_encode():
 
 def test_encode_metadata_pins_stored_byte_format():
     frame = make_frame()
-    expected = (
-        json.dumps(frame.model_dump(mode="json", exclude={"body"}), indent=2) + "\n"
-    ).encode("utf-8")
+    expected = (json.dumps(frame.model_dump(mode="json", exclude={"body"}), indent=2) + "\n").encode("utf-8")
     assert encode_metadata(frame) == expected
 
 

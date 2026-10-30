@@ -336,9 +336,7 @@ class InMemoryOrgStore(OrgStore):
             existing = self._memberships.get(user_id)
             if existing is not None:
                 return existing, False
-            membership = OrgMembership(
-                user_id=user_id, org_id=org_id, role=ROLE_MEMBER, status=MEMBERSHIP_ACTIVE
-            )
+            membership = OrgMembership(user_id=user_id, org_id=org_id, role=ROLE_MEMBER, status=MEMBERSHIP_ACTIVE)
             self._memberships[user_id] = membership
             return membership, True
 
@@ -497,6 +495,7 @@ class PostgresOrgStore(OrgStore):
                 extra={"user": user_id, "org": org_id},
             )
         return membership, created
+
     def get_platform_role_row(self, user_id: str) -> dict | None:
         """The stored role row, or ``None``.
 
@@ -527,10 +526,7 @@ class PostgresOrgStore(OrgStore):
                 ).fetchall()
         except psycopg.errors.UndefinedTable as exc:
             raise self._missing_schema() from exc
-        return {
-            row["user_id"]: {"role": row["role"], "status": row["status"], "source": row["source"]}
-            for row in rows
-        }
+        return {row["user_id"]: {"role": row["role"], "status": row["status"], "source": row["source"]} for row in rows}
 
     def _missing_schema(self) -> OrgSchemaMissingError:
         message = (

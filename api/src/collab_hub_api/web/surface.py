@@ -717,10 +717,7 @@ def enforce_web_surface_map_access(
 def on_admin_panel(path: str) -> bool:
     """Whether *path* is the panel's document or one of its bundle files."""
 
-    return (
-        path in (ADMIN_PANEL_DOCUMENT, ADMIN_PANEL_REDIRECT)
-        or path.startswith(ADMIN_PANEL_ASSETS_PREFIX)
-    )
+    return path in (ADMIN_PANEL_DOCUMENT, ADMIN_PANEL_REDIRECT) or path.startswith(ADMIN_PANEL_ASSETS_PREFIX)
 
 
 def answers_json(path: str) -> bool:

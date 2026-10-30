@@ -48,9 +48,7 @@ async def test_static_token_short_circuits_broker(monkeypatch):
         raise AssertionError("static token must not call the broker")
 
     _mock_httpx(monkeypatch, handler)
-    provider = NotionTokenProvider(
-        NotionConnectorConfig(static_access_token="ntn_static", broker_token_url=BROKER)
-    )
+    provider = NotionTokenProvider(NotionConnectorConfig(static_access_token="ntn_static", broker_token_url=BROKER))
     assert await provider.access_token(_request("Bearer hub")) == "ntn_static"
 
 

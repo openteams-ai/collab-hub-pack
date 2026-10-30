@@ -712,6 +712,7 @@ def test_an_org_read_inside_an_mcp_tool_body_fails_closed_as_a_tool_error(tmp_pa
 # doubles would be one psycopg change away from disagreeing about what the
 # pooled context manager does, which is the only thing the double is for.
 
+
 def test_audited_runs_the_mutation_and_the_event_insert_on_one_connection():
     db = FakeAuditDatabase()
 
@@ -961,7 +962,7 @@ def test_the_guard_still_allows_nested_savepoints():
         # identifier continuation to the server (no dollar-quote opens and the
         # COMMIT is a statement) while Python calls most of them non-alnum.
         "SELECT 1 AS a\u0301$tag$; COMMIT; SELECT $tag$foo$tag$;",  # combining acute
-        "SELECT 1 AS a\U0001F600$tag$; COMMIT; SELECT $tag$foo$tag$;",  # emoji
+        "SELECT 1 AS a\U0001f600$tag$; COMMIT; SELECT $tag$foo$tag$;",  # emoji
         "SELECT 1 AS a\u200d$tag$; COMMIT; SELECT $tag$foo$tag$;",  # zero-width joiner
         "SELECT 1 AS a\u00a0$tag$; COMMIT; SELECT $tag$foo$tag$;",  # no-break space
         "SELECT 1 AS a\u3000$tag$; COMMIT; SELECT $tag$foo$tag$;",  # ideographic space
@@ -1141,7 +1142,7 @@ def test_legitimate_composables_execute_as_the_bytes_that_were_screened():
     mutation, insert = conn.statements
     # What executed is the rendered bytes — the exact text that was screened.
     assert mutation == (
-        'INSERT INTO "collab_orgs" (id, name) VALUES (%s, \'please COMMIT to quality\') RETURNING id',
+        "INSERT INTO \"collab_orgs\" (id, name) VALUES (%s, 'please COMMIT to quality') RETURNING id",
         (ORG,),
     )
     assert "INSERT INTO collab_audit_events" in insert[0]
@@ -1345,9 +1346,7 @@ def test_no_code_path_updates_or_deletes_audit_rows():
         re.IGNORECASE,
     )
     offenders = [
-        str(path)
-        for path in sorted(source_root.rglob("*.py"))
-        if forbidden.search(" ".join(path.read_text().split()))
+        str(path) for path in sorted(source_root.rglob("*.py")) if forbidden.search(" ".join(path.read_text().split()))
     ]
     assert offenders == [], f"application code performs non-INSERT DML on collab_audit_events: {offenders}"
 
@@ -1384,9 +1383,7 @@ def test_the_only_schema_changes_to_the_audit_table_preserve_its_history():
     # is too broad a licence -- dropping `collab_audit_events_pkey` is a
     # constraint change too, and it would let duplicate rows in. Only the
     # vocabulary CHECKs may be replaced.
-    check_constraint = re.compile(
-        r"CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(collab_audit_events_\w+_check)\b", re.IGNORECASE
-    )
+    check_constraint = re.compile(r"CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(collab_audit_events_\w+_check)\b", re.IGNORECASE)
     dropped: dict[int, set[str]] = {}
     added: dict[int, set[str]] = {}
 
@@ -2203,9 +2200,7 @@ def test_live_the_documented_manual_repair_actually_clears_the_item(migrated_dat
             """,
             ("op-sub", "op@example.test", json.dumps({"summary": "added to /llm by hand"})),
         )
-    assert len(store.outstanding()) == 1, (
-        "an operator.manual row is the note that work happened, not the state change"
-    )
+    assert len(store.outstanding()) == 1, "an operator.manual row is the note that work happened, not the state change"
 
     # What the runbook now documents.
     with migrated_database.connection() as conn:

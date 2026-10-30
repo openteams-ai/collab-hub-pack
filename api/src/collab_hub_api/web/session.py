@@ -190,9 +190,7 @@ class SessionCodec:
 
     def __init__(self, secret: str) -> None:
         if len(secret) < MIN_SESSION_SECRET_LENGTH:
-            raise ValueError(
-                f"web session secret must be at least {MIN_SESSION_SECRET_LENGTH} characters"
-            )
+            raise ValueError(f"web session secret must be at least {MIN_SESSION_SECRET_LENGTH} characters")
         self._key = sha256(secret.encode()).digest()
 
     def _signature(self, purpose: str, payload: bytes) -> bytes:

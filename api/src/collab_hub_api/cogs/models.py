@@ -220,9 +220,7 @@ class CogListEntry(CogVersion):
 
     @classmethod
     def of(cls, row: CogArtifact, registry_host: str | None = None) -> CogListEntry:
-        return cls(
-            **CogVersion.of(row, registry_host).model_dump(), cog_id=row.cog_id or "", card=list_card(row.card)
-        )
+        return cls(**CogVersion.of(row, registry_host).model_dump(), cog_id=row.cog_id or "", card=list_card(row.card))
 
 
 class CogListPage(BaseModel):

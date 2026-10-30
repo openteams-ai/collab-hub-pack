@@ -164,9 +164,7 @@ class GoogleCalendarClient:
         """
         # Defense in depth for direct callers as well as the API model: an
         # omitted or empty selection means primary, never all readable calendars.
-        selected_ids = _dedupe(
-            value.strip() for value in (calendar_ids or ["primary"]) if value.strip()
-        ) or ["primary"]
+        selected_ids = _dedupe(value.strip() for value in (calendar_ids or ["primary"]) if value.strip()) or ["primary"]
         fingerprint = _search_fingerprint(
             query=query,
             calendar_ids=selected_ids,
@@ -193,10 +191,7 @@ class GoogleCalendarClient:
         # the cursor silently skip or duplicate a calendar.
         available = await self.list_calendars()
         by_id = {calendar.id: calendar for calendar in available}
-        calendars = [
-            by_id.get(value, CalendarInfo(value, "", "", False))
-            for value in selected_ids
-        ]
+        calendars = [by_id.get(value, CalendarInfo(value, "", "", False)) for value in selected_ids]
         if len(calendars) > _MAX_SEARCH_CALENDARS:
             raise CalendarSearchError(
                 f"Search spans {len(calendars)} calendars; choose at most {_MAX_SEARCH_CALENDARS} calendar_ids."
@@ -497,22 +492,12 @@ def _event_metadata(
         for item in attendees_data
         if isinstance(item, dict)
     ]
-    original_start_data = (
-        payload.get("originalStartTime")
-        if isinstance(payload.get("originalStartTime"), dict)
-        else {}
-    )
-    original_start = _string(original_start_data.get("dateTime")) or _string(
-        original_start_data.get("date")
-    )
+    original_start_data = payload.get("originalStartTime") if isinstance(payload.get("originalStartTime"), dict) else {}
+    original_start = _string(original_start_data.get("dateTime")) or _string(original_start_data.get("date"))
     recurrence_data = payload.get("recurrence", [])
     if not isinstance(recurrence_data, list):
         recurrence_data = []
-    recurrence = [
-        sanitize_connector_text(value)
-        for value in recurrence_data
-        if isinstance(value, str)
-    ]
+    recurrence = [sanitize_connector_text(value) for value in recurrence_data if isinstance(value, str)]
     attachments_data = payload.get("attachments", [])
     if not isinstance(attachments_data, list):
         attachments_data = []

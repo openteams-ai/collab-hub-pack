@@ -2073,9 +2073,7 @@ def _forget_removed_blobs(conn, source_id: str) -> None:
             (source_id, source_id),
         )
     except psycopg.Error as exc:
-        logger.warning(
-            "cog_catalog_blob_cleanup_failed", extra={"source_id": source_id, "error": type(exc).__name__}
-        )
+        logger.warning("cog_catalog_blob_cleanup_failed", extra={"source_id": source_id, "error": type(exc).__name__})
 
 
 def _collect_unconfigured_blobs(conn, configured: list[str], retention: timedelta, limit: int) -> int:

@@ -281,10 +281,7 @@ def render_markdown(analysis: InventoryAnalysis, *, redact: bool = False, contex
             candidates = ", ".join(
                 f"`{show(user.label)}` (`{show(user.sub)}`)" for user in summary.resolution.candidates
             )
-            out(
-                f"| `{show(summary.principal)}` | {candidates} | {summary.count} "
-                f"| {', '.join(summary.carriers)} |"
-            )
+            out(f"| `{show(summary.principal)}` | {candidates} | {summary.count} | {', '.join(summary.carriers)} |")
         out("")
 
     out("### 4b. Suspected address reassignment")

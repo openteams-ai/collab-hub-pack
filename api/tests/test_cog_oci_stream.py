@@ -586,9 +586,7 @@ async def test_a_real_redirect_over_a_real_socket_logs_no_signature(caplog, reda
             ).encode()
             writer.write(head)
         else:
-            writer.write(
-                f"HTTP/1.1 200 OK\r\nContent-Length: {len(BODY)}\r\nConnection: close\r\n\r\n".encode() + BODY
-            )
+            writer.write(f"HTTP/1.1 200 OK\r\nContent-Length: {len(BODY)}\r\nConnection: close\r\n\r\n".encode() + BODY)
         await writer.drain()
         writer.close()
 

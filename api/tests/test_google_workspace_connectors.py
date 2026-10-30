@@ -1096,9 +1096,7 @@ def test_google_connector_text_sanitizer_neutralizes_renderer_links():
     assert sanitize_connector_text("Email [Bob](mailto:bob@x.test) or tel:+15551212") == ("Email Bob or [link]")
     assert sanitize_connector_text("[](<https://x.test>)") == "[link]"
     assert sanitize_connector_text("Meet at meet.google.com/abc") == "Meet at [link]"
-    assert sanitize_connector_text("Email person@example.com") == (
-        "Email person [at] example [dot] com"
-    )
+    assert sanitize_connector_text("Email person@example.com") == ("Email person [at] example [dot] com")
     assert sanitize_connector_text("plain text") == "plain text"
 
     corpus = [
@@ -1132,11 +1130,11 @@ def test_google_workspace_openapi_contract_exposes_pagination_without_calendar_u
 def test_gmail_recipient_parser_preserves_quoted_commas():
     assert _recipient_headers(
         {
-            "to": '\"Doe, Jane\" <jane@example.com>, John <john@example.com>',
+            "to": '"Doe, Jane" <jane@example.com>, John <john@example.com>',
             "cc": "Team <team@example.com>",
         }
     ) == [
-        '\"Doe, Jane\" <jane@example.com>',
+        '"Doe, Jane" <jane@example.com>',
         "John <john@example.com>",
         "Team <team@example.com>",
     ]

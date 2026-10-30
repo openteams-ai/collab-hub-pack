@@ -156,9 +156,7 @@ def build_plan(payload: dict, *, acknowledge: set[str] | None = None) -> Plan:
     acknowledged = set(acknowledge or ())
     unknown = sorted(acknowledged - set(ACKNOWLEDGEABLE_CLASSES))
     if unknown:
-        raise PlanRefusedError(
-            f"Unknown acknowledgement {unknown!r}: expected any of {list(ACKNOWLEDGEABLE_CLASSES)}."
-        )
+        raise PlanRefusedError(f"Unknown acknowledgement {unknown!r}: expected any of {list(ACKNOWLEDGEABLE_CLASSES)}.")
 
     principals = payload.get("principals") or []
     _refuse_conflicting_subjects(principals)

@@ -92,9 +92,7 @@ class UnavailableAuditLog(AuditLog):
     """What a deployment with no database reads: nothing, loudly."""
 
     def list_events(self, **_kwargs) -> AuditPage:
-        raise AuditLogUnavailableError(
-            "this deployment records no audit log: it has no configured database"
-        )
+        raise AuditLogUnavailableError("this deployment records no audit log: it has no configured database")
 
 
 class PostgresAuditLog(AuditLog):

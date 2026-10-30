@@ -398,9 +398,7 @@ def test_saturated_pool_keeps_authenticated_and_mcp_traffic_responsive(tmp_path,
 # request — and the MCP event loop — until the socket closed.
 
 
-def test_stalled_server_delays_neither_authenticated_mcp_nor_unrelated_requests(
-    tmp_path, monkeypatch, stub_postgres
-):
+def test_stalled_server_delays_neither_authenticated_mcp_nor_unrelated_requests(tmp_path, monkeypatch, stub_postgres):
     monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
     monkeypatch.setenv("FRAMES_IDTOKEN_ALLOW_UNSIGNED", "true")
     app = make_app(_saturation_config(tmp_path, stub_postgres.url))

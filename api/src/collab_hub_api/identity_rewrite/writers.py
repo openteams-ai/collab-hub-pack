@@ -340,15 +340,10 @@ def rewrite_text_columns(conn, mapping: dict[str, str], manifest: Manifest, *, a
             manifest.skipped_carriers.append(f"{carrier}: {table} does not exist")
             continue
         for principal, sub in mapping.items():
-            rows = conn.execute(
-                f"SELECT {key_column} FROM {table} WHERE {column} = %s", (principal,)
-            ).fetchall()
+            rows = conn.execute(f"SELECT {key_column} FROM {table} WHERE {column} = %s", (principal,)).fetchall()
             if not rows:
                 continue
-            pending = [
-                Change(carrier, f"{table}:{_value(row, key_column)}", column, principal, sub)
-                for row in rows
-            ]
+            pending = [Change(carrier, f"{table}:{_value(row, key_column)}", column, principal, sub) for row in rows]
             if not apply:
                 for change in pending:
                     manifest.record(change)
@@ -576,8 +571,7 @@ def merge_task_state(conn, mapping: dict[str, str], manifest: Manifest, *, apply
             org_id, workspace_id = _value(row, "org_id"), _value(row, "workspace_id")
             entity = f"{org_id}/{workspace_id}/{principal}"
             existing = conn.execute(
-                f"SELECT payload, updated_at FROM {table} "
-                "WHERE org_id = %s AND workspace_id = %s AND owner_id = %s",
+                f"SELECT payload, updated_at FROM {table} WHERE org_id = %s AND workspace_id = %s AND owner_id = %s",
                 (org_id, workspace_id, sub),
             ).fetchone()
             if existing is None:
@@ -694,9 +688,7 @@ def merge_task_devices(conn, mapping: dict[str, str], manifest: Manifest, *, app
                 },
                 "kept": "legacy" if legacy_wins else "subject",
             }
-            change = Change(
-                "task_devices.user_id", entity, "user_id (merged)", principal, sub, before_image=before
-            )
+            change = Change("task_devices.user_id", entity, "user_id (merged)", principal, sub, before_image=before)
             note = (
                 f"task_devices {entity}: the same device exists under both; kept the "
                 f"{'legacy' if legacy_wins else 'existing subject'} registration as the newer one"
@@ -721,8 +713,7 @@ def merge_task_devices(conn, mapping: dict[str, str], manifest: Manifest, *, app
                     ),
                 )
             conn.execute(
-                f"DELETE FROM {table} "
-                "WHERE org_id = %s AND workspace_id = %s AND user_id = %s AND device_id = %s",
+                f"DELETE FROM {table} WHERE org_id = %s AND workspace_id = %s AND user_id = %s AND device_id = %s",
                 (org_id, workspace_id, principal, device_id),
             )
             manifest.stage([change])

@@ -382,9 +382,7 @@ def test_live_ensure_schema_is_idempotent_across_restarts(clean_live_database):
 
     PostgresUsageStore(database, auto_migrate=True)
     with database.connection() as conn:
-        conn.execute(
-            "INSERT INTO frames_server_usage_users (org_id, workspace_id, user_id) VALUES ('o', 'w', 'u')"
-        )
+        conn.execute("INSERT INTO frames_server_usage_users (org_id, workspace_id, user_id) VALUES ('o', 'w', 'u')")
 
     # A second (and third) replica running the same startup DDL must not
     # disturb data the first one already wrote.

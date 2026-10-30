@@ -745,9 +745,7 @@ def test_postgres_reserve_never_changes_whose_a_row_is_and_counts_new_names_unde
     # Nothing about time anywhere, and nothing that says whose an existing row is.
     assert not any("now()" in sql or "owner_org_id =" in sql for sql, _ in conn.calls)
 
-    joined, conn = _fake(
-        {"SET holders = CASE": [{"repository": "cogs/a"}], "SELECT repository": [REPOSITORY_ROW]}
-    )
+    joined, conn = _fake({"SET holders = CASE": [{"repository": "cogs/a"}], "SELECT repository": [REPOSITORY_ROW]})
     _reserve(joined)
     assert [sql.split()[0] for sql, _ in conn.calls] == ["SELECT", "UPDATE", "SELECT"], "no insert, no count"
     full, conn = _fake()
@@ -823,9 +821,7 @@ def test_postgres_open_upload_locks_counts_retires_and_inserts_a_leased_slot():
     assert (
         "AND expires_at > now() AND upstream_location IS NOT NULL AND leased_until IS NULL"
         " ORDER BY created_at, id LIMIT GREATEST(("
-    ) in (
-        retire[0]
-    )
+    ) in (retire[0])
     assert retire[1] == ("alice", "alice", MAX_UPLOAD_SESSIONS_PER_USER - 1)
     assert "(id, user_id, repository, source_id, leased_until, expires_at)" in insert[0], "no registry location yet"
     assert insert[1] == ("up-1", "alice", "cogs/a", "backing", OPENING, UPLOAD_SESSION_TTL_SECONDS)

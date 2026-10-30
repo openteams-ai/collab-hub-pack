@@ -206,9 +206,7 @@ def test_whole_value_match_outside_an_identity_field_is_reported_not_rewritten(f
 
 def test_an_operator_can_allow_one_reviewed_path():
     document = {"legacy_author": "alice@example.com"}
-    updated, changes, declined = rewrite_json_document(
-        document, MAP, allow_paths=frozenset({"$.legacy_author"})
-    )
+    updated, changes, declined = rewrite_json_document(document, MAP, allow_paths=frozenset({"$.legacy_author"}))
     assert updated["legacy_author"] == "sub-alice"
     assert declined == []
     assert len(changes) == 1
@@ -431,8 +429,14 @@ def _where_columns(sql: str) -> list[str]:
 
 
 def test_text_carriers_name_the_rows_they_changed_not_a_count():
-    conn = FakeConn({"frames_server_history": [{"id": "h1", "actor": "alice@example.com"},
-                                               {"id": "h2", "actor": "alice@example.com"}]})
+    conn = FakeConn(
+        {
+            "frames_server_history": [
+                {"id": "h1", "actor": "alice@example.com"},
+                {"id": "h2", "actor": "alice@example.com"},
+            ]
+        }
+    )
     manifest = Manifest(applied=True)
     rewrite_text_columns(conn, MAP, manifest, apply=True)
 
@@ -491,10 +495,20 @@ def test_task_state_merge_keeps_the_newer_payload():
     conn = FakeConn(
         {
             "nexus_task_state": [
-                {"org_id": "nebari", "workspace_id": "default", "owner_id": "alice@example.com",
-                 "payload": {"a": 1}, "updated_at": 9},
-                {"org_id": "nebari", "workspace_id": "default", "owner_id": "sub-alice",
-                 "payload": {"a": 0}, "updated_at": 2},
+                {
+                    "org_id": "nebari",
+                    "workspace_id": "default",
+                    "owner_id": "alice@example.com",
+                    "payload": {"a": 1},
+                    "updated_at": 9,
+                },
+                {
+                    "org_id": "nebari",
+                    "workspace_id": "default",
+                    "owner_id": "sub-alice",
+                    "payload": {"a": 0},
+                    "updated_at": 2,
+                },
             ]
         }
     )
@@ -512,10 +526,20 @@ def test_task_state_merge_keeps_the_existing_subject_when_it_is_newer():
     conn = FakeConn(
         {
             "nexus_task_state": [
-                {"org_id": "nebari", "workspace_id": "default", "owner_id": "alice@example.com",
-                 "payload": {"a": 1}, "updated_at": 1},
-                {"org_id": "nebari", "workspace_id": "default", "owner_id": "sub-alice",
-                 "payload": {"a": 0}, "updated_at": 7},
+                {
+                    "org_id": "nebari",
+                    "workspace_id": "default",
+                    "owner_id": "alice@example.com",
+                    "payload": {"a": 1},
+                    "updated_at": 1,
+                },
+                {
+                    "org_id": "nebari",
+                    "workspace_id": "default",
+                    "owner_id": "sub-alice",
+                    "payload": {"a": 0},
+                    "updated_at": 7,
+                },
             ]
         }
     )
@@ -594,8 +618,13 @@ def test_task_device_rows_move_and_collide_on_the_same_device():
     conn = FakeConn(
         {
             "nexus_task_devices": [
-                _row("alice@example.com", device_id="d1", payload={"u": "alice@example.com"},
-                     last_seen_at=9, expires_at=99),
+                _row(
+                    "alice@example.com",
+                    device_id="d1",
+                    payload={"u": "alice@example.com"},
+                    last_seen_at=9,
+                    expires_at=99,
+                ),
                 _row("sub-alice", device_id="d1", payload={"u": "sub-alice"}, last_seen_at=2, expires_at=20),
             ]
         }
@@ -683,10 +712,20 @@ def test_task_state_before_image_keeps_the_overwritten_subject_payload():
     conn = FakeConn(
         {
             "nexus_task_state": [
-                {"org_id": "nebari", "workspace_id": "default", "owner_id": "alice@example.com",
-                 "payload": {"legacy": True}, "updated_at": 9},
-                {"org_id": "nebari", "workspace_id": "default", "owner_id": "sub-alice",
-                 "payload": {"subject": True}, "updated_at": 2},
+                {
+                    "org_id": "nebari",
+                    "workspace_id": "default",
+                    "owner_id": "alice@example.com",
+                    "payload": {"legacy": True},
+                    "updated_at": 9,
+                },
+                {
+                    "org_id": "nebari",
+                    "workspace_id": "default",
+                    "owner_id": "sub-alice",
+                    "payload": {"subject": True},
+                    "updated_at": 2,
+                },
             ]
         }
     )
@@ -703,10 +742,8 @@ def test_task_device_before_image_keeps_the_overwritten_subject_registration():
     conn = FakeConn(
         {
             "nexus_task_devices": [
-                _row("alice@example.com", device_id="d1", payload={"legacy": True},
-                     last_seen_at=9, expires_at=99),
-                _row("sub-alice", device_id="d1", payload={"subject": True},
-                     last_seen_at=2, expires_at=20),
+                _row("alice@example.com", device_id="d1", payload={"legacy": True}, last_seen_at=9, expires_at=99),
+                _row("sub-alice", device_id="d1", payload={"subject": True}, last_seen_at=2, expires_at=20),
             ]
         }
     )
@@ -757,10 +794,20 @@ def test_task_state_before_image_keeps_the_discarded_payload():
     conn = FakeConn(
         {
             "nexus_task_state": [
-                {"org_id": "nebari", "workspace_id": "default", "owner_id": "alice@example.com",
-                 "payload": {"a": 1}, "updated_at": 1},
-                {"org_id": "nebari", "workspace_id": "default", "owner_id": "sub-alice",
-                 "payload": {"a": 0}, "updated_at": 7},
+                {
+                    "org_id": "nebari",
+                    "workspace_id": "default",
+                    "owner_id": "alice@example.com",
+                    "payload": {"a": 1},
+                    "updated_at": 1,
+                },
+                {
+                    "org_id": "nebari",
+                    "workspace_id": "default",
+                    "owner_id": "sub-alice",
+                    "payload": {"a": 0},
+                    "updated_at": 7,
+                },
             ]
         }
     )
@@ -789,8 +836,7 @@ def test_an_unsafe_manifest_destination_is_refused_before_any_data_write(tmp_pat
     monkeypatch.setenv("COLLAB_HUB_API__STORAGE__FRAMES_PATH", str(root))
 
     code = cli.main(
-        ["--inventory", inventory, "--frames-backend", "local", "--skip-postgres", "--apply",
-         "--manifest", str(link)]
+        ["--inventory", inventory, "--frames-backend", "local", "--skip-postgres", "--apply", "--manifest", str(link)]
     )
 
     assert code == 1
@@ -828,8 +874,16 @@ def test_an_abrupt_termination_can_leave_a_committed_write_unrecorded(tmp_path, 
 
     with pytest.raises(KeyboardInterrupt):
         cli.main(
-            ["--inventory", inventory, "--frames-backend", "local", "--skip-postgres", "--apply",
-             "--manifest", str(manifest_path)]
+            [
+                "--inventory",
+                inventory,
+                "--frames-backend",
+                "local",
+                "--skip-postgres",
+                "--apply",
+                "--manifest",
+                str(manifest_path),
+            ]
         )
 
     # The store changed...

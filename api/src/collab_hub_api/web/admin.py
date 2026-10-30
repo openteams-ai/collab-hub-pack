@@ -138,10 +138,7 @@ NOTICES: dict[str, str] = {
         " plain address, exactly as the invitee will register with — it is matched"
         " exactly, and this page does not correct capitalization."
     ),
-    NOTICE_REVOKED: (
-        "Invitation for {address} revoked. The link in the email already sent to"
-        " them no longer works."
-    ),
+    NOTICE_REVOKED: ("Invitation for {address} revoked. The link in the email already sent to them no longer works."),
     NOTICE_NOT_FOUND: "That invitation no longer exists, so nothing was revoked.",
     NOTICE_REVOKE_REFUSED: (
         "That invitation has already been accepted and can no longer be revoked."
@@ -191,9 +188,7 @@ def request_refused_page(*, root_path: str = "", status_code: int) -> str:
     "back" leads.
     """
 
-    return refused_form_page(
-        root_path=root_path, status_code=status_code, back_path=ADMIN_INVITATIONS_PATH
-    )
+    return refused_form_page(root_path=root_path, status_code=status_code, back_path=ADMIN_INVITATIONS_PATH)
 
 
 def _timestamp(value: datetime) -> str:
@@ -222,7 +217,7 @@ def _issue_form(root_path: str, csrf_token: str) -> str:
         f'<input id="invite-email" type="email" name="{EMAIL_FIELD}" required'
         f' maxlength="{MAX_EMAIL_LENGTH}" autocomplete="off" spellcheck="false"'
         ' inputmode="email" placeholder="person@example.com">'
-        "<button type=\"submit\">Create invitation</button>"
+        '<button type="submit">Create invitation</button>'
         "</form>"
     )
 
@@ -238,17 +233,11 @@ def _revoke_form(root_path: str, csrf_token: str, invitation_id: str) -> str:
     )
 
 
-def _rows(
-    invitations: Sequence[Invitation], now: datetime, root_path: str, csrf_token: str
-) -> str:
+def _rows(invitations: Sequence[Invitation], now: datetime, root_path: str, csrf_token: str) -> str:
     rows = []
     for invitation in invitations:
         status = effective_status(invitation, now)
-        action = (
-            _revoke_form(root_path, csrf_token, invitation.id)
-            if status in REVOCABLE_STATUSES
-            else ""
-        )
+        action = _revoke_form(root_path, csrf_token, invitation.id) if status in REVOCABLE_STATUSES else ""
         # `org_id` is null for everything this page issues; an invitation into
         # an existing organization can only come from the owner surface or the
         # API, and saying which is which keeps the operator from reading one
@@ -278,8 +267,7 @@ def _listing(
     if not invitations:
         return "<p>No invitations have been issued on this deployment yet.</p>"
     more = (
-        "<p>Only the most recent invitations are shown. Older ones are still"
-        " listed by the operator API.</p>"
+        "<p>Only the most recent invitations are shown. Older ones are still listed by the operator API.</p>"
         if has_more
         else ""
     )

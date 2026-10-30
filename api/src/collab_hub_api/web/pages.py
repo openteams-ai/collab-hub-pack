@@ -50,8 +50,7 @@ SECURITY_HEADERS = {
 intermediary treats the whole surface alike."""
 
 CONTENT_SECURITY_POLICY = (
-    "default-src 'none'; style-src 'self'; img-src 'self'; "
-    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 )
 """No script source at all: the surface serves none, so none may run.
 
@@ -141,6 +140,7 @@ def _script_page_headers() -> dict[str, dict[str, str]]:
     from .acceptance import ACCEPT_PAGE_PATH, ACCEPTANCE_PAGE_HEADERS
 
     return {ACCEPT_PAGE_PATH: ACCEPTANCE_PAGE_HEADERS}
+
 
 STYLESHEET = """\
 :root { color-scheme: light dark; }
@@ -378,10 +378,7 @@ def body_refused_page(*, root_path: str = "", status_code: int) -> str:
         )
     else:
         heading = "That request was too large"
-        detail = (
-            "The form you sent is larger than this page will read, so nothing"
-            " was changed."
-        )
+        detail = "The form you sent is larger than this page will read, so nothing was changed."
     return render_page(
         title=heading,
         body=(

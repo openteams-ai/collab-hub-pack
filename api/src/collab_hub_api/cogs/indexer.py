@@ -335,9 +335,7 @@ class CogIndexer:
         bounded by the request's budget.
         """
 
-        return await asyncio.wrap_future(
-            self._executor.submit(contextvars.copy_context().run, func, *args, **kwargs)
-        )
+        return await asyncio.wrap_future(self._executor.submit(contextvars.copy_context().run, func, *args, **kwargs))
 
     async def _on_sweep_thread(self, func, /, *args, **kwargs):
         """Run one of the sweep's store calls on the sweep thread, in order with the rest.

@@ -373,7 +373,7 @@ async def test_a_response_returning_a_carrier_cannot_put_the_secret_on_the_wire(
     for index, name in enumerate(sorted(carriers)):
         probe.add_api_route(
             f"/probe/{index}",
-            (lambda captured=carriers[name]: (lambda: captured))(),
+            (lambda captured=carriers[name]: lambda: captured)(),
             methods=["GET"],
         )
 
@@ -448,9 +448,7 @@ def test_a_traceback_that_captures_locals_does_not_reveal_the_secret(name):
     try:
         failing_frame(carrier)
     except RuntimeError as exc:
-        rendered = "".join(
-            traceback.TracebackException.from_exception(exc, capture_locals=True).format()
-        )
+        rendered = "".join(traceback.TracebackException.from_exception(exc, capture_locals=True).format())
 
     assert "held" in rendered  # the local really was captured
     assert SENTINEL_SECRET not in rendered
@@ -539,9 +537,7 @@ def _all_package_modules():
         try:
             importlib.import_module(name)
         except Exception as exc:  # pragma: no cover - a module that cannot import
-            raise AssertionError(
-                f"{name} could not be imported, so the credential-carrier scan cannot see it"
-            ) from exc
+            raise AssertionError(f"{name} could not be imported, so the credential-carrier scan cannot see it") from exc
 
     root = collab_hub_api.__name__
     return [
@@ -629,9 +625,7 @@ def _accept_request_builders():
         "validate": lambda: model(token=SENTINEL_SECRET),
         "model_construct": lambda: model.model_construct(token=SENTINEL_SECRET),
         "model_copy": lambda: model(token=SENTINEL_SECRET).model_copy(),
-        "model_copy_update": lambda: model(token=SENTINEL_SECRET).model_copy(
-            update={"token": SENTINEL_SECRET}
-        ),
+        "model_copy_update": lambda: model(token=SENTINEL_SECRET).model_copy(update={"token": SENTINEL_SECRET}),
     }
 
 
@@ -731,9 +725,7 @@ def _public_basemodel_api() -> set[str]:
     return found
 
 
-MUST_BUILD = frozenset(
-    {"__init__", "__setattr__", "model_validate", "model_construct", "model_copy", "copy"}
-)
+MUST_BUILD = frozenset({"__init__", "__setattr__", "model_validate", "model_construct", "model_copy", "copy"})
 """Entry points that are constructors or mutators as a matter of fact.
 
 Named explicitly because the classification above is data a person edits, and
@@ -926,8 +918,7 @@ def test_the_named_entry_point_is_the_one_that_actually_runs(entry_point, tmp_pa
         _invoke_entry_point(entry_point, tmp_path)
 
     assert spy.called, (
-        f"{entry_point} was never invoked — the audit for it proves nothing about "
-        f"{model.__name__}.{entry_point}"
+        f"{entry_point} was never invoked — the audit for it proves nothing about {model.__name__}.{entry_point}"
     )
 
 
@@ -1115,9 +1106,7 @@ def test_the_wrapper_compares_by_identity_on_purpose():
     assert len({same_value[0], same_value[0]}) == 1
 
     # And the consequence, stated: carriers inherit identity semantics.
-    minted = [
-        invitations_module.MintedSecret(raw=secret, token_hash="deadbeef") for secret in same_value
-    ]
+    minted = [invitations_module.MintedSecret(raw=secret, token_hash="deadbeef") for secret in same_value]
     assert minted[0] != minted[1]
     assert minted[0] == minted[0]
 
@@ -1133,9 +1122,7 @@ def test_the_known_carriers_still_declare_the_wrapper():
     """
 
     declared = {
-        (owner.__name__, field)
-        for module in _all_package_modules()
-        for owner, field in _credential_fields(module)
+        (owner.__name__, field) for module in _all_package_modules() for owner, field in _credential_fields(module)
     }
     assert declared == {
         ("MintedSecret", "raw"),
@@ -1366,9 +1353,7 @@ def test_the_only_normalization_is_the_bounded_ascii_fold():
     assert "lower" not in called, "str.lower() maps U+212A onto ASCII k; fold on bytes instead"
 
     defined = {
-        node.name
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
     }
     assert not any("canonicalize" in name for name in defined)
     # The one definition of address equality, which #157 ratified.
@@ -1417,10 +1402,7 @@ def test_relaxed_accepts_an_unverified_address_whatever_the_claim_says(verified)
     """The token stood in for the proof, so the flag stops being consulted --
     including the string and integer shapes the strict path refuses."""
 
-    assert (
-        verified_claim_email("someone@example.com", verified, require_verified=False)
-        == "someone@example.com"
-    )
+    assert verified_claim_email("someone@example.com", verified, require_verified=False) == "someone@example.com"
 
 
 @pytest.mark.parametrize("email", [None, "", 12345, [], {}])
@@ -1455,18 +1437,14 @@ def test_relaxing_verification_does_not_relax_the_address_match():
 
     # Unverified and the right address: accepted, which is the whole point.
     assert (
-        invitations_module._evaluate_acceptance(
-            invitation, now, INVITEE, INVITED_EMAIL, False, require_verified=False
-        )
+        invitations_module._evaluate_acceptance(invitation, now, INVITEE, INVITED_EMAIL, False, require_verified=False)
         is None
     )
 
     # And with the strict setting the same right-address claim is refused, so
     # the setting is what decides rather than the address.
     with pytest.raises(EmailNotVerifiedError):
-        invitations_module._evaluate_acceptance(
-            invitation, now, INVITEE, INVITED_EMAIL, False, require_verified=True
-        )
+        invitations_module._evaluate_acceptance(invitation, now, INVITEE, INVITED_EMAIL, False, require_verified=True)
 
 
 def test_a_dead_token_is_still_dead_however_verification_is_configured():
@@ -1554,9 +1532,7 @@ def test_accept_threads_the_setting_to_both_decisions_without_a_database(monkeyp
         monkeypatch.setattr(invitations_module, "_evaluate_acceptance", evaluate)
         monkeypatch.setattr(invitations_module, "verified_claim_email", claim)
 
-        service = invitations_module.PostgresInvitationService(
-            FakeDb(), require_verified_email=flag
-        )
+        service = invitations_module.PostgresInvitationService(FakeDb(), require_verified_email=flag)
         with pytest.raises(Stop):
             service.accept(
                 user_id=INVITEE,
@@ -1846,9 +1822,7 @@ def test_the_acceptance_transaction_body_touches_no_other_connection():
 def test_every_management_route_carries_a_guard_and_accept_deliberately_does_not():
     guarded = {}
     for route in invitations_router.router.routes:
-        guarded[(route.path, tuple(sorted(route.methods)))] = hasattr(
-            route.endpoint, "_authorization_guard_of"
-        )
+        guarded[(route.path, tuple(sorted(route.methods)))] = hasattr(route.endpoint, "_authorization_guard_of")
 
     assert guarded == {
         ("/operator/invitations", ("POST",)): True,
@@ -2232,9 +2206,7 @@ def _wait_until_blocked(database, expected: int = 1, timeout: float = 20.0) -> N
         timer.cancel()
 
 
-def _accept(
-    service, *, user_id=INVITEE, secret: str, email=INVITED_EMAIL, verified=True, name=None, service_groups=()
-):
+def _accept(service, *, user_id=INVITEE, secret: str, email=INVITED_EMAIL, verified=True, name=None, service_groups=()):
     return service.accept(
         user_id=user_id,
         display=display(email, verified=verified, name=name),
@@ -3016,9 +2988,7 @@ def test_live_the_database_refuses_to_change_an_invitations_org_id(service, live
     for new_org in (None, OTHER_ORG):
         with pytest.raises(psycopg.errors.CheckViolation):
             with live_db.connection() as conn:
-                conn.execute(
-                    "UPDATE collab_invitations SET org_id = %s WHERE id = %s", (new_org, scoped.id)
-                )
+                conn.execute("UPDATE collab_invitations SET org_id = %s WHERE id = %s", (new_org, scoped.id))
 
     # And every legitimate update still works: the trigger fires on the
     # column, not on the statement.
@@ -3174,9 +3144,7 @@ def test_live_racing_accepts_under_serializable_still_get_terminal_states(live_d
                 OTHER_ORG,
                 outcomes[0].org_id,
             }
-            members = _rows(
-                strict, "SELECT user_id FROM collab_org_members WHERE org_id = %s", (outcomes[0].org_id,)
-            )
+            members = _rows(strict, "SELECT user_id FROM collab_org_members WHERE org_id = %s", (outcomes[0].org_id,))
             assert len(members) == 1
             assert len([row for row in _audit_rows(strict) if row["action"] == "org.create"]) == 1
         finally:
@@ -3184,9 +3152,7 @@ def test_live_racing_accepts_under_serializable_still_get_terminal_states(live_d
     finally:
         with live_db.connection() as conn:
             conn.execute(
-                sql.SQL("ALTER DATABASE {} RESET default_transaction_isolation").format(
-                    sql.Identifier(database_name)
-                )
+                sql.SQL("ALTER DATABASE {} RESET default_transaction_isolation").format(sql.Identifier(database_name))
             )
 
 
@@ -3708,9 +3674,7 @@ async def test_live_http_the_operator_can_bootstrap_the_first_organization(live_
     assert not any(secret in str(record.__dict__) for record in caplog.records)
 
     with database.connection() as conn:
-        member = conn.execute(
-            "SELECT org_id, role FROM collab_org_members WHERE user_id = %s", (INVITEE,)
-        ).fetchone()
+        member = conn.execute("SELECT org_id, role FROM collab_org_members WHERE user_id = %s", (INVITEE,)).fetchone()
         name = conn.execute("SELECT name FROM collab_orgs WHERE id = %s", (outcome["org_id"],)).fetchone()["name"]
     assert member == {"org_id": outcome["org_id"], "role": ROLE_OWNER}
     assert name == NEUTRAL_ORG_NAME
@@ -3836,9 +3800,7 @@ async def test_live_http_terminal_states_have_distinct_codes(live_client):
 
     revoked_id = await issue()
     revoked_secret = delivery.calls[-1]["secret"]
-    revoked = await client.post(
-        f"/v1/operator/invitations/{revoked_id}/revoke", cookies=cookies_for(OPERATOR)
-    )
+    revoked = await client.post(f"/v1/operator/invitations/{revoked_id}/revoke", cookies=cookies_for(OPERATOR))
     assert revoked.status_code == 200
     assert revoked.json()["status"] == STATUS_REVOKED
 

@@ -174,9 +174,7 @@ class KeycloakServiceAccessGranter:
                 if not group_id:
                     raise ServiceAccessError(f"group {path!r} has no id in the Keycloak response")
                 return group_id
-        raise ServiceAccessError(
-            f"configured service group {path!r} does not exist in the realm"
-        )
+        raise ServiceAccessError(f"configured service group {path!r} does not exist in the realm")
 
     def _get(self, path: str, *, params: dict[str, object]) -> object:
         return self._request("GET", path, params=params).json()

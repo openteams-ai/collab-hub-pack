@@ -208,9 +208,7 @@ class FakeInvitationService:
         )
         if self.raises is not None:
             raise self.raises
-        return InvitationAcceptance(
-            invitation_id="inv-1", org_id="org-a", role="owner", org_created=True
-        )
+        return InvitationAcceptance(invitation_id="inv-1", org_id="org-a", role="owner", org_created=True)
 
     def settle_service_access_grant(self, *, user_id, group_path, granted) -> None:
         self.settled.append((user_id, group_path, granted))
@@ -366,9 +364,7 @@ async def test_a_failing_acceptance_page_answers_with_the_no_script_policy(tmp_p
 
 
 def test_the_policy_exception_is_keyed_on_one_path_and_no_other():
-    assert headers_for_path(ACCEPT_PAGE_PATH)["Content-Security-Policy"] == (
-        ACCEPTANCE_CONTENT_SECURITY_POLICY
-    )
+    assert headers_for_path(ACCEPT_PAGE_PATH)["Content-Security-Policy"] == (ACCEPTANCE_CONTENT_SECURITY_POLICY)
     for path in ("/web", "/web/signin", ACCEPT_REDEEM_PATH, "/invite/accept/", "/admin/invitations"):
         assert headers_for_path(path)["Content-Security-Policy"] == CONTENT_SECURITY_POLICY
 
@@ -455,9 +451,7 @@ def test_a_public_page_router_not_on_the_allowlist_is_refused(tmp_path, idp):
     async def backdoor():
         return {"secret": "invitee data"}
 
-    surface = build_web_surface(
-        Config.parse(web_values(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL}))
-    )
+    surface = build_web_surface(Config.parse(web_values(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL})))
     with pytest.raises(RuntimeError, match="PUBLIC_WEB_PATHS"):
         make_router(surface, public_page_routers=[rogue])
 
@@ -948,14 +942,10 @@ async def test_the_flow_survives_the_sign_in_round_trip(tmp_path, idp):
         href = re.search(r'href="(/web/signin\?[^"]+)"', anonymous.text).group(1)
         start = await client.get(href)
         assert start.status_code == 303
-        params = {
-            key: value[0] for key, value in parse_qs(urlsplit(start.headers["location"]).query).items()
-        }
+        params = {key: value[0] for key, value in parse_qs(urlsplit(start.headers["location"]).query).items()}
         idp.nonce = params["nonce"]
         idp.claims_override = {"email": INVITEE_EMAIL, "email_verified": True}
-        callback = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-        )
+        callback = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
         assert callback.status_code == 303
         # Back where they started, not at the operator overview.
         assert callback.headers["location"] == ACCEPT_PAGE_PATH
@@ -1192,9 +1182,7 @@ async def test_re_authentication_re_reads_the_claims_from_the_idp(tmp_path, idp)
         stale = await client.get(ACCEPT_PAGE_PATH)
 
         # The page's own renew link, followed exactly as a person would.
-        section = re.search(
-            r'<section data-state="reauthentication_required".*?</section>', stale.text, re.S
-        ).group(0)
+        section = re.search(r'<section data-state="reauthentication_required".*?</section>', stale.text, re.S).group(0)
         # Unescaped the way a browser does: the attribute is HTML-escaped, so
         # the raw text carries `&amp;` and an HTTP client would send it
         # literally. Following the escaped form is not what a person does.
@@ -1204,13 +1192,9 @@ async def test_re_authentication_re_reads_the_claims_from_the_idp(tmp_path, idp)
         idp.claims_override = {"email": INVITEE_EMAIL, "email_verified": False}
         start = await client.get(href)
         assert start.status_code == 303, "renew must run the flow, not short-circuit"
-        params = {
-            key: value[0] for key, value in parse_qs(urlsplit(start.headers["location"]).query).items()
-        }
+        params = {key: value[0] for key, value in parse_qs(urlsplit(start.headers["location"]).query).items()}
         idp.nonce = params["nonce"]
-        callback = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-        )
+        callback = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
         assert callback.status_code == 303
         assert callback.headers["location"] == ACCEPT_PAGE_PATH
 
@@ -1254,10 +1238,7 @@ def test_the_documented_worst_case_accounts_for_replica_skew():
     raising the skew allowance moves the documented number with it.
     """
 
-    assert (
-        VERIFIED_CLAIM_WORST_CASE_AGE_SECONDS
-        == VERIFIED_CLAIM_MAX_AGE_SECONDS + CLOCK_SKEW_SECONDS
-    )
+    assert VERIFIED_CLAIM_WORST_CASE_AGE_SECONDS == VERIFIED_CLAIM_MAX_AGE_SECONDS + CLOCK_SKEW_SECONDS
 
     # Demonstrated, not just asserted arithmetically: a session a replica at
     # the skew limit minted is still accepted when its real age is the worst
@@ -1400,7 +1381,7 @@ def test_redemption_waits_for_a_deliberate_click():
 
     document = acceptance_page(root_path="")
     ready = re.search(r'<section data-state="ready".*?</section>', document, re.S).group(0)
-    assert f"<button type=\"button\" {ACCEPT_BUTTON_ATTRIBUTE}>" in ready
+    assert f'<button type="button" {ACCEPT_BUTTON_ATTRIBUTE}>' in ready
     # The fetch is reachable only from the click handler, never from the
     # top-level flow: the last thing the script does on load is `present`.
     assert "button.addEventListener" in ACCEPTANCE_SCRIPT
@@ -1651,9 +1632,7 @@ def _sign_in_over_http(client: _LoopbackBrowser, idp: _StubIdp) -> str:
     params = {k: v[0] for k, v in parse_qs(urlsplit(start.headers["location"]).query).items()}
     idp.nonce = params["nonce"]
     idp.claims_override = {"email": INVITEE_EMAIL, "email_verified": True}
-    callback = client.get(
-        "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-    )
+    callback = client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
     assert callback.status_code == 303, callback.text
     return csrf_from(client.get(ACCEPT_PAGE_PATH).text)
 
@@ -1724,18 +1703,14 @@ def test_a_guard_refusal_does_not_hold_a_body_bearing_connection(tmp_path, idp):
 
     app, _ = build_app(tmp_path, idp)
     with running_server(app) as base_url:
-        anonymous = _post_body_over_socket(
-            base_url, headers={"Content-Type": "application/json"}
-        )
+        anonymous = _post_body_over_socket(base_url, headers={"Content-Type": "application/json"})
 
     # A different app: the guard cannot reach the surface's codec, so it
     # serves the documented 503 instead of a sign-in redirect.
     unavailable_app, _ = build_app(tmp_path, idp)
     unavailable_app.state.web_surface = None
     with running_server(unavailable_app) as base_url:
-        undecidable = _post_body_over_socket(
-            base_url, headers={"Content-Type": "application/json"}
-        )
+        undecidable = _post_body_over_socket(base_url, headers={"Content-Type": "application/json"})
 
     for label, status_line, (elapsed, received, closed) in (
         ("sign-in redirect", b"HTTP/1.1 303", anonymous),
@@ -1896,9 +1871,7 @@ async def test_live_an_invitation_is_redeemed_through_the_browser_page(live_app,
     assert second.json() == {"outcome": OUTCOME_ACCEPTED}
 
     with live_db.connection() as conn:
-        members = conn.execute(
-            "SELECT user_id, role FROM collab_org_members WHERE user_id = %s", (idp.sub,)
-        ).fetchall()
+        members = conn.execute("SELECT user_id, role FROM collab_org_members WHERE user_id = %s", (idp.sub,)).fetchall()
         # By actor, not by action name: this is an org-creating invitation,
         # so #89 records it as `org.create` rather than `invitation.redeem`.
         # The question the replay raises is "did the second POST write
@@ -1910,9 +1883,7 @@ async def test_live_an_invitation_is_redeemed_through_the_browser_page(live_app,
             "SELECT count(*) AS n FROM collab_audit_events WHERE detail::text LIKE %s",
             (f"%{token}%",),
         ).fetchone()["n"]
-        row = conn.execute(
-            "SELECT status FROM collab_invitations WHERE id = %s", (issued.invitation.id,)
-        ).fetchone()
+        row = conn.execute("SELECT status FROM collab_invitations WHERE id = %s", (issued.invitation.id,)).fetchone()
     assert len(members) == 1
     assert row["status"] == "accepted"
     assert redemptions == 1, "the replay must not write a second audit row"
@@ -2104,15 +2075,11 @@ def test_copy_that_does_not_vary_is_stored_once() -> None:
 
     for state, overrides in RELAXED_PARAGRAPHS.items():
         for index, text in overrides.items():
-            assert text != strict_paragraphs[state][index], (
-                f"{state}[{index}] overrides with the same text it replaces"
-            )
+            assert text != strict_paragraphs[state][index], f"{state}[{index}] overrides with the same text it replaces"
     # Headings too: a byte-identical entry would pass every other test and
     # freeze relaxed deployments on wording a later edit moved past.
     for state, heading in RELAXED_HEADINGS.items():
-        assert heading != strict_headings[state], (
-            f"{state} overrides its heading with the same text"
-        )
+        assert heading != strict_headings[state], f"{state} overrides its heading with the same text"
 
 
 @pytest.mark.asyncio
@@ -2147,6 +2114,4 @@ async def test_the_app_renders_the_page_copy_the_configuration_asks_for(tmp_path
             response = await client.get(ACCEPT_PAGE_PATH)
         assert response.status_code == 200
         mentions = "verification" in response.text.lower()
-        assert mentions is expect_verification_copy, (
-            f"require_verified_email={flag} rendered the wrong copy"
-        )
+        assert mentions is expect_verification_copy, f"require_verified_email={flag} rendered the wrong copy"

@@ -67,12 +67,13 @@ the version the image runs, and CI runs the suite on 3.13 as well
 `UV_PYTHON=3.13`. Keep code valid on 3.13: ruff targets `py313` and reports
 newer syntax.
 
-Lint the API with the ruff version `uv.lock` pins, as the `Ruff` CI check
-does:
+Lint and format the API with the ruff version `uv.lock` pins. The `Ruff` CI
+check runs `ruff check` and `ruff format --check`:
 
 ```bash
 cd api
 uv run --only-group lint ruff check src tests
+uv run --only-group lint ruff format src tests
 ```
 
 Running it by hand needs **all three** dev-auth switches —

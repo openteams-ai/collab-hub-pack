@@ -86,10 +86,7 @@ PRIVACY_STATEMENT_TEXT: tuple[Section, ...] = (
     ),
     (
         "Contact",
-        (
-            "Questions about this statement, and deletion requests, go to"
-            f" {DATA_STATEMENT_CONTACT}.",
-        ),
+        (f"Questions about this statement, and deletion requests, go to {DATA_STATEMENT_CONTACT}.",),
     ),
 )
 """The document, as one constant: a tuple of ``(heading, paragraphs)``.

@@ -87,26 +87,17 @@ def legal_document_page(
 
     from .pages import escape, render_page
 
-    banner = (
-        f'<p class="notice">{escape(PLACEHOLDER_NOTICE)}</p>' if placeholder else ""
-    )
-    date_line = (
-        f"<p><small>{escape(EFFECTIVE_DATE_LABEL)} {escape(last_updated)}.</small></p>"
-    )
+    banner = f'<p class="notice">{escape(PLACEHOLDER_NOTICE)}</p>' if placeholder else ""
+    date_line = f"<p><small>{escape(EFFECTIVE_DATE_LABEL)} {escape(last_updated)}.</small></p>"
     body = "".join(
-        f"<h2>{escape(heading)}</h2>"
-        + "".join(f"<p>{escape(paragraph)}</p>" for paragraph in paragraphs)
+        f"<h2>{escape(heading)}</h2>" + "".join(f"<p>{escape(paragraph)}</p>" for paragraph in paragraphs)
         for heading, paragraphs in sections
     )
     links = "".join(
-        f'<p><a href="{escape(root_path)}{escape(path)}">{escape(label)}</a></p>'
-        for path, label in related
+        f'<p><a href="{escape(root_path)}{escape(path)}">{escape(label)}</a></p>' for path, label in related
     )
     return render_page(
         title=title,
-        body=(
-            f"<h1>{escape(title)}</h1>{banner}{date_line}{body}"
-            f"<h2>Related</h2>{links}"
-        ),
+        body=(f"<h1>{escape(title)}</h1>{banner}{date_line}{body}<h2>Related</h2>{links}"),
         root_path=root_path,
     )

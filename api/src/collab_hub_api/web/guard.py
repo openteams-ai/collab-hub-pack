@@ -299,9 +299,7 @@ async def _deny_websocket(scope: Scope, receive: Receive, send: Send, path: str)
 
 
 CLIENT_REQUEST_ID_MAX_LENGTH = 128
-_CLIENT_REQUEST_ID_ALLOWED = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
-)
+_CLIENT_REQUEST_ID_ALLOWED = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
 
 
 def _client_request_id(scope: Scope) -> str | None:

@@ -383,7 +383,7 @@ async def test_body_parse_errors_on_api_paths_answer_the_envelope(client):
     # registering the handler on the base class brings it into the envelope.
     response = await client.post(
         "/v1/frames",
-        content=b"{\"name\": \"\xff\"}",
+        content=b'{"name": "\xff"}',
         headers={"content-type": "application/json"},
     )
     assert response.status_code == 400
@@ -394,9 +394,7 @@ async def test_body_parse_errors_on_api_paths_answer_the_envelope(client):
     ("root_path", "request_prefix"),
     [("/nexus", "/nexus"), ("/nexus", ""), ("/v", "")],
 )
-async def test_routing_errors_keep_the_envelope_under_a_root_path(
-    tmp_path, monkeypatch, root_path, request_prefix
-):
+async def test_routing_errors_keep_the_envelope_under_a_root_path(tmp_path, monkeypatch, root_path, request_prefix):
     # A proxy that keeps the `server.root_path` prefix ("/nexus" requested as
     # "/nexus/..."), one that strips it, and a root path that is a textual but
     # not a segment prefix of the API path ("/v"): in every case the path the

@@ -94,7 +94,7 @@ def test_the_page_size_is_capped_by_the_store_not_by_its_caller():
 
 
 def test_a_deployment_without_a_database_says_so_rather_than_answering_empty():
-    """"Nothing was recorded" and "the record is unreachable" are opposites."""
+    """ "Nothing was recorded" and "the record is unreachable" are opposites."""
 
     with pytest.raises(AuditLogUnavailableError):
         UnavailableAuditLog().list_events(limit=10)

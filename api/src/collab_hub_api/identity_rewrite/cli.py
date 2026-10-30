@@ -117,9 +117,7 @@ def _summarise(plan, manifest: Manifest, *, applied: bool) -> str:
         lines.append(f"MERGE: {note}")
     if manifest.unexpected_paths:
         lines.append("")
-        lines.append(
-            f"## {len(manifest.unexpected_paths)} match(es) NOT substituted: no identity belongs at that path"
-        )
+        lines.append(f"## {len(manifest.unexpected_paths)} match(es) NOT substituted: no identity belongs at that path")
         for item in manifest.unexpected_paths[:20]:
             lines.append(f"- {item.carrier} {item.entity} {item.path}")
         if len(manifest.unexpected_paths) > 20:
@@ -138,8 +136,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.apply and not args.manifest:
         print(
-            "--apply requires --manifest: a rewrite with no record of what it changed cannot be "
-            "reviewed or reversed.",
+            "--apply requires --manifest: a rewrite with no record of what it changed cannot be reviewed or reversed.",
             file=sys.stderr,
         )
         return 1
@@ -211,9 +208,7 @@ def main(argv: list[str] | None = None) -> int:
                     region_name=_env("FRAMES__S3__REGION") or None,
                 )
                 prefix = _env("FRAMES__S3__PREFIX", "frames")
-                rewrite_s3_sidecars(
-                    s3, bucket, prefix, mapping, manifest, apply=args.apply, allow_paths=allow_paths
-                )
+                rewrite_s3_sidecars(s3, bucket, prefix, mapping, manifest, apply=args.apply, allow_paths=allow_paths)
         elif backend == "local":
             rewrite_local_sidecars(
                 _env("STORAGE__FRAMES_PATH", "/var/frames"),

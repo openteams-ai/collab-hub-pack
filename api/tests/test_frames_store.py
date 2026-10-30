@@ -572,9 +572,7 @@ def test_s3_store_round_trips_a_frame_through_the_codec():
 
     fake = CapturingFakeS3()
     store = _capturing_s3_store(fake)
-    frame = make_frame(frame_id="b" * 32).model_copy(
-        update={"name": "Café Playbook", "body": "hello café ☕"}
-    )
+    frame = make_frame(frame_id="b" * 32).model_copy(update={"name": "Café Playbook", "body": "hello café ☕"})
 
     store._write_frame(frame)
 
@@ -590,9 +588,7 @@ def test_local_and_s3_backends_write_identical_bytes(tmp_path):
     ``body.md``. The shared codec is what guarantees it.
     """
 
-    frame = make_frame(frame_id="a" * 32).model_copy(
-        update={"name": "Café Playbook", "body": "hello café ☕"}
-    )
+    frame = make_frame(frame_id="a" * 32).model_copy(update={"name": "Café Playbook", "body": "hello café ☕"})
 
     local = LocalFsFrameStore(tmp_path)
     local._write_frame(frame)

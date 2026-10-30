@@ -46,6 +46,7 @@ def membership_env(monkeypatch):
     monkeypatch.setenv(IDENTITY_CLAIM_ENV, "sub")
     monkeypatch.setenv(ORG_SOURCE_ENV, "membership")
 
+
 ADMIN_GROUP = "/hub-admins"
 PUBLIC_BASE_URL = "https://web.test"
 

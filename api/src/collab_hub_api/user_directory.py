@@ -96,9 +96,7 @@ with no protocol mapper, so neither an ordinary user nor a token ever sees them
 
 
 class UserDirectoryClient(Protocol):
-    def search_users(
-        self, query: str | None = None, *, limit: int = 50, first: int = 0
-    ) -> list[UserDirectoryUser]: ...
+    def search_users(self, query: str | None = None, *, limit: int = 50, first: int = 0) -> list[UserDirectoryUser]: ...
 
     def search_groups(self, query: str | None = None, *, limit: int = 50) -> list[UserDirectoryGroup]: ...
 
@@ -108,9 +106,7 @@ class UserDirectoryClient(Protocol):
 
 
 class DisabledUserDirectoryClient:
-    def search_users(
-        self, query: str | None = None, *, limit: int = 50, first: int = 0
-    ) -> list[UserDirectoryUser]:
+    def search_users(self, query: str | None = None, *, limit: int = 50, first: int = 0) -> list[UserDirectoryUser]:
         raise UserDirectoryUnavailableError("User directory is not configured")
 
     def search_groups(self, query: str | None = None, *, limit: int = 50) -> list[UserDirectoryGroup]:
@@ -147,9 +143,7 @@ class KeycloakUserDirectoryClient:
         self._client = httpx.Client(timeout=timeout, transport=transport)
         self._token: _AccessToken | None = None
 
-    def search_users(
-        self, query: str | None = None, *, limit: int = 50, first: int = 0
-    ) -> list[UserDirectoryUser]:
+    def search_users(self, query: str | None = None, *, limit: int = 50, first: int = 0) -> list[UserDirectoryUser]:
         """Up to *limit* matching users, starting *first* results in."""
 
         params: dict[str, str | int | bool] = {"first": first, "max": limit}
@@ -227,9 +221,7 @@ class KeycloakUserDirectoryClient:
         # one address should have one spelling across every comparison in the
         # invitation path. Relying on the provider's collation instead would
         # make our matching a property of somebody else's default.
-        payload = self._admin_get(
-            "/users", params={"email": folded_email(email), "exact": True, "max": 2}
-        )
+        payload = self._admin_get("/users", params={"email": folded_email(email), "exact": True, "max": 2})
         if not isinstance(payload, list):
             raise UserDirectoryUnavailableError("Keycloak users response was not a list")
         records = [item for item in payload if isinstance(item, dict)]

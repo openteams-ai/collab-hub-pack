@@ -827,9 +827,7 @@ class S3FrameStore(FrameStore):
                 self._write_metadata(updated, metadata_etag=metadata_etag)
             except self.client_error as exc:
                 code = exc.response.get("Error", {}).get("Code")
-                status_code = exc.response.get("ResponseMetadata", {}).get(
-                    "HTTPStatusCode"
-                )
+                status_code = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
                 if code in {"PreconditionFailed", "412"} or status_code == 412:
                     time.sleep(0.05 * (attempt + 1))
                     continue
@@ -837,9 +835,7 @@ class S3FrameStore(FrameStore):
             if write_body:
                 self._write_body(updated)
             return updated
-        raise ConcurrentFrameUpdateError(
-            f"Could not update Frame {frame_id} after concurrent write retries"
-        )
+        raise ConcurrentFrameUpdateError(f"Could not update Frame {frame_id} after concurrent write retries")
 
     def _key(self, frame_id: str, name: str) -> str:
         return f"{self.prefix}/{frame_id}/{name}"

@@ -38,14 +38,23 @@ def runs_config(tmp_path) -> Config:
     # A directory that is allowlisted and has a manifest, and still cannot run: it has no lock.
     package(tmp_path / "cogs", "unlocked")
     (tmp_path / "cogs" / "unlocked" / "pixi.lock").unlink()
-    return Config.parse({
-        "storage": {"frames_path": str(tmp_path / "frames")},
-        "frames": {"active_state": {"backend": "memory"}, "history": {"backend": "memory"},
-                   "usage": {"backend": "memory"}, "mcp_session_manager_enabled": False},
-        "tasks": {"backend": "memory"},
-        "runs": {"track_path": str(tmp_path / "track.sqlite"), "packages": [str(tmp_path / "cogs")],
-                 "allow": ["echo", "slow", "unlocked"]},
-    })
+    return Config.parse(
+        {
+            "storage": {"frames_path": str(tmp_path / "frames")},
+            "frames": {
+                "active_state": {"backend": "memory"},
+                "history": {"backend": "memory"},
+                "usage": {"backend": "memory"},
+                "mcp_session_manager_enabled": False,
+            },
+            "tasks": {"backend": "memory"},
+            "runs": {
+                "track_path": str(tmp_path / "track.sqlite"),
+                "packages": [str(tmp_path / "cogs")],
+                "allow": ["echo", "slow", "unlocked"],
+            },
+        }
+    )
 
 
 @pytest_asyncio.fixture
@@ -89,8 +98,12 @@ def settle(controller, until=lambda: True):
 
 
 ECHO = {"steps": [{"name": "greet", "cog": "echo", "entry_point": "run", "input": {"text": "hi"}}]}
-SLOW = {"steps": [{"name": "wait", "cog": "slow", "entry_point": "run"}, {"name": "after", "cog": "echo",
-                                                                           "entry_point": "run"}]}
+SLOW = {
+    "steps": [
+        {"name": "wait", "cog": "slow", "entry_point": "run"},
+        {"name": "after", "cog": "echo", "entry_point": "run"},
+    ]
+}
 
 
 async def test_a_submitted_run_waits_for_a_controller_and_completes_once_one_picks_it_up(runs_client, controller):
@@ -100,8 +113,18 @@ async def test_a_submitted_run_waits_for_a_controller_and_completes_once_one_pic
     assert run["status"] == "SUBMITTED" and run["ended"] is False
     assert run["backend"] == "none" and run["location"] == "local"  # so a client assumes nothing of either
     assert run["submitted_by"] == "dev-user" and run["submitted_by_name"] is None  # dev auth carries no name
-    assert run["steps"] == [{"name": "greet", "cog": "echo", "entry_point": "run", "state": "pending",
-                             "attempt": None, "error": None, "output": None, "output_ref": None}]
+    assert run["steps"] == [
+        {
+            "name": "greet",
+            "cog": "echo",
+            "entry_point": "run",
+            "state": "pending",
+            "attempt": None,
+            "error": None,
+            "output": None,
+            "output_ref": None,
+        }
+    ]
     # The API started nothing: the run advances only once a controller reads the Track.
     assert (await runs_client.get(f"/v1/runs/{run['id']}")).json()["status"] == "SUBMITTED"
     settle(controller)
@@ -176,9 +199,15 @@ async def test_a_run_cancelled_before_any_controller_picked_it_up_never_starts(r
     assert controller.runner.executor.materialized == []
 
 
-@pytest.mark.parametrize(("cog", "why"), [("hidden", "not allowlisted"), ("absent", "not allowlisted"),
-                                          ("unlocked", "has no pixi.lock"),
-                                          ("../echo", "not a package name")])
+@pytest.mark.parametrize(
+    ("cog", "why"),
+    [
+        ("hidden", "not allowlisted"),
+        ("absent", "not allowlisted"),
+        ("unlocked", "has no pixi.lock"),
+        ("../echo", "not a package name"),
+    ],
+)
 async def test_a_step_naming_a_cog_the_hub_cannot_launch_is_refused_naming_those_it_can(runs_client, cog, why):
     body = {"steps": [{"name": "s", "cog": cog, "entry_point": "run"}]}
     refused = await runs_client.post("/v1/runs", json=body)
@@ -189,13 +218,21 @@ async def test_a_step_naming_a_cog_the_hub_cannot_launch_is_refused_naming_those
     assert (await runs_client.get("/v1/runs")).json()["items"] == []  # nothing was recorded
 
 
-@pytest.mark.parametrize("body", [
-    {"steps": []},
-    {"steps": [{"name": "s", "cog": "echo"}]},
-    {"steps": [{"name": "s", "cog": "echo", "entry_point": "run", "gate": {"escalate": "sometimes"}}]},
-    {"steps": [{"name": "s", "cog": "echo", "entry_point": "run"}, {"name": "s", "cog": "echo", "entry_point": "run"}]},
-    {"steps": [{"name": "s", "cog": "echo", "entry_point": "run"}], "run_id": "mine"},
-])
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"steps": []},
+        {"steps": [{"name": "s", "cog": "echo"}]},
+        {"steps": [{"name": "s", "cog": "echo", "entry_point": "run", "gate": {"escalate": "sometimes"}}]},
+        {
+            "steps": [
+                {"name": "s", "cog": "echo", "entry_point": "run"},
+                {"name": "s", "cog": "echo", "entry_point": "run"},
+            ]
+        },
+        {"steps": [{"name": "s", "cog": "echo", "entry_point": "run"}], "run_id": "mine"},
+    ],
+)
 async def test_a_malformed_op_is_refused(runs_client, body):
     assert (await runs_client.post("/v1/runs", json=body)).status_code == 422
 
@@ -262,8 +299,12 @@ def test_the_api_constructs_no_executor_and_reaches_execution_only_from_the_run_
             if used:
                 importers.append(path.name)
             for module in used:
-                assert not any(f".{part}" in f".{module.split('.', 1)[-1]}" or module.endswith("Executor")
-                               or module.endswith("LifecycleRunner") for part in forbidden), (path.name, module)
+                assert not any(
+                    f".{part}" in f".{module.split('.', 1)[-1]}"
+                    or module.endswith("Executor")
+                    or module.endswith("LifecycleRunner")
+                    for part in forbidden
+                ), (path.name, module)
     assert set(importers) == {"runs.py"}
 
 
@@ -310,10 +351,21 @@ def test_the_api_process_constructs_no_runner_controller_or_executor_while_servi
     import subprocess
     import sys
 
-    env = {**os.environ, "FRAMES_UNSAFE_AUTH_ENABLED": "true", "DEV_AUTH_ENABLED": "true",
-           "DEV_AUTH_USER": "dev-user", "DEV_AUTH_ORG": "dev-org", "DEV_AUTH_WORKSPACE": "default"}
-    probed = subprocess.run([sys.executable, "-c", RUNTIME_PROBE, json.dumps(runs_config.model_dump(mode="json")),
-                             json.dumps(ECHO)], capture_output=True, text=True, env=env, timeout=120)
+    env = {
+        **os.environ,
+        "FRAMES_UNSAFE_AUTH_ENABLED": "true",
+        "DEV_AUTH_ENABLED": "true",
+        "DEV_AUTH_USER": "dev-user",
+        "DEV_AUTH_ORG": "dev-org",
+        "DEV_AUTH_WORKSPACE": "default",
+    }
+    probed = subprocess.run(
+        [sys.executable, "-c", RUNTIME_PROBE, json.dumps(runs_config.model_dump(mode="json")), json.dumps(ECHO)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+    )
     assert probed.returncode == 0, probed.stderr[-3000:]
     assert json.loads(probed.stdout.strip().splitlines()[-1]) == []
 
@@ -330,12 +382,19 @@ async def test_with_no_package_directory_nothing_is_launchable(tmp_path, monkeyp
     monkeypatch.setenv("DEV_AUTH_ENABLED", "true")
     monkeypatch.setenv("DEV_AUTH_USER", "dev-user")
     monkeypatch.setenv("DEV_AUTH_ORG", "dev-org")
-    config = Config.parse({
-        "storage": {"frames_path": str(tmp_path / "frames")},
-        "frames": {"active_state": {"backend": "memory"}, "history": {"backend": "memory"},
-                   "usage": {"backend": "memory"}, "mcp_session_manager_enabled": False},
-        "tasks": {"backend": "memory"},
-        "runs": {"track_path": str(tmp_path / "track.sqlite")}})
+    config = Config.parse(
+        {
+            "storage": {"frames_path": str(tmp_path / "frames")},
+            "frames": {
+                "active_state": {"backend": "memory"},
+                "history": {"backend": "memory"},
+                "usage": {"backend": "memory"},
+                "mcp_session_manager_enabled": False,
+            },
+            "tasks": {"backend": "memory"},
+            "runs": {"track_path": str(tmp_path / "track.sqlite")},
+        }
+    )
     app = make_app(config)
     async with app.router.lifespan_context(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -344,7 +403,8 @@ async def test_with_no_package_directory_nothing_is_launchable(tmp_path, monkeyp
 
 
 async def test_a_package_that_does_not_exist_is_refused_without_naming_the_hubs_directories(
-        runs_config, tmp_path, monkeypatch):
+    runs_config, tmp_path, monkeypatch
+):
     monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
     monkeypatch.setenv("DEV_AUTH_ENABLED", "true")
     monkeypatch.setenv("DEV_AUTH_USER", "dev-user")
@@ -353,8 +413,9 @@ async def test_a_package_that_does_not_exist_is_refused_without_naming_the_hubs_
     app = make_app(runs_config)
     async with app.router.lifespan_context(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            refused = await client.post("/v1/runs", json={"steps": [{"name": "s", "cog": "absent",
-                                                                     "entry_point": "run"}]})
+            refused = await client.post(
+                "/v1/runs", json={"steps": [{"name": "s", "cog": "absent", "entry_point": "run"}]}
+            )
     assert refused.status_code == 422
     assert refused.json()["error"]["details"]["refused"] == {"absent": "no package 'absent'"}
     assert str(tmp_path) not in refused.text
@@ -411,8 +472,11 @@ async def test_a_run_shows_who_submitted_it_by_name_and_is_scoped_by_principal(r
     monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
     app = make_app(runs_config)
     app.dependency_overrides[get_auth_context] = lambda: AuthContext(
-        user="3b8ec34f", home_org_id="dev-org", workspace_id="default",
-        display=DisplayIdentity(name="Dev User", email="dev@example.com"))
+        user="3b8ec34f",
+        home_org_id="dev-org",
+        workspace_id="default",
+        display=DisplayIdentity(name="Dev User", email="dev@example.com"),
+    )
     async with app.router.lifespan_context(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             run = (await client.post("/v1/runs", json=ECHO)).json()
@@ -447,11 +511,19 @@ async def test_a_run_that_cannot_be_read_is_left_out_of_the_list_and_not_found_a
     good = (await runs_client.post("/v1/runs", json=ECHO)).json()["id"]
     track = SqliteTrackStore(runs_config.runs.track_path)
     by = {"user": "dev-user", "org_id": "dev-org", "workspace_id": "default"}
-    track.append(TrackEvent(run_id="run-broken00000", event_type="op_submitted",
-                            payload={"op": {"run_id": "run-broken00000", "steps": []}, "submitted_by": by},
-                            schema=SCHEMA_VERSION))
-    track.append(TrackEvent(run_id="run-broken00000", event_type="gate_decided", payload={"outcome": "approve"},
-                            schema=SCHEMA_VERSION))
+    track.append(
+        TrackEvent(
+            run_id="run-broken00000",
+            event_type="op_submitted",
+            payload={"op": {"run_id": "run-broken00000", "steps": []}, "submitted_by": by},
+            schema=SCHEMA_VERSION,
+        )
+    )
+    track.append(
+        TrackEvent(
+            run_id="run-broken00000", event_type="gate_decided", payload={"outcome": "approve"}, schema=SCHEMA_VERSION
+        )
+    )
     assert [item["id"] for item in (await runs_client.get("/v1/runs")).json()["items"]] == [good]
     assert (await runs_client.get("/v1/runs/run-broken00000")).status_code == 404
 
@@ -482,14 +554,35 @@ async def test_where_a_worker_is_on_the_controllers_host_stays_out_of_the_events
     from collab_hub_execution.track import SCHEMA_VERSION, TrackEvent
 
     run = (await runs_client.post("/v1/runs", json=ECHO)).json()
-    SqliteTrackStore(runs_config.runs.track_path).append(TrackEvent(
-        run_id=run["id"], event_type="worker_started", schema=SCHEMA_VERSION, payload={
-            "step": "greet", "attempt": 1, "instance": "greet:1", "location": "local", "pid": 4242, "pgid": 4242,
-            "logs": "/var/runs/x", "run_token_sha256": "0" * 64}))
-    [started] = [event for event in (await runs_client.get(f"/v1/runs/{run['id']}/events")).json()["items"]
-                 if event["type"] == "worker_started"]
-    assert started["payload"] == {"step": "greet", "attempt": 1, "instance": "greet:1", "location": "local",
-                                  "run_token_sha256": "0" * 64}
+    SqliteTrackStore(runs_config.runs.track_path).append(
+        TrackEvent(
+            run_id=run["id"],
+            event_type="worker_started",
+            schema=SCHEMA_VERSION,
+            payload={
+                "step": "greet",
+                "attempt": 1,
+                "instance": "greet:1",
+                "location": "local",
+                "pid": 4242,
+                "pgid": 4242,
+                "logs": "/var/runs/x",
+                "run_token_sha256": "0" * 64,
+            },
+        )
+    )
+    [started] = [
+        event
+        for event in (await runs_client.get(f"/v1/runs/{run['id']}/events")).json()["items"]
+        if event["type"] == "worker_started"
+    ]
+    assert started["payload"] == {
+        "step": "greet",
+        "attempt": 1,
+        "instance": "greet:1",
+        "location": "local",
+        "run_token_sha256": "0" * 64,
+    }
 
 
 async def test_only_the_fields_named_for_an_event_are_served_so_a_new_one_stays_out(runs_client, runs_config):
@@ -498,15 +591,29 @@ async def test_only_the_fields_named_for_an_event_are_served_so_a_new_one_stays_
     from collab_hub_api.routers.runs import _event
 
     run = (await runs_client.post("/v1/runs", json=ECHO)).json()
-    SqliteTrackStore(runs_config.runs.track_path).append(TrackEvent(
-        run_id=run["id"], event_type="cancel_requested", schema=SCHEMA_VERSION,
-        payload={"actor": "bob", "recorded_later": "x"}))
-    served = {event["type"]: event["payload"]
-              for event in (await runs_client.get(f"/v1/runs/{run['id']}/events")).json()["items"]}
+    SqliteTrackStore(runs_config.runs.track_path).append(
+        TrackEvent(
+            run_id=run["id"],
+            event_type="cancel_requested",
+            schema=SCHEMA_VERSION,
+            payload={"actor": "bob", "recorded_later": "x"},
+        )
+    )
+    served = {
+        event["type"]: event["payload"]
+        for event in (await runs_client.get(f"/v1/runs/{run['id']}/events")).json()["items"]
+    }
     assert served["cancel_requested"] == {"actor": "bob"}  # a field nobody named is not served
     # An event type nobody named is served with nothing of its payload.
-    later = _event(TrackEvent(run_id=run["id"], event_type="a_fact_from_a_later_controller", sequence=99,
-                              schema=SCHEMA_VERSION, payload={"anything": "x"}))
+    later = _event(
+        TrackEvent(
+            run_id=run["id"],
+            event_type="a_fact_from_a_later_controller",
+            sequence=99,
+            schema=SCHEMA_VERSION,
+            payload={"anything": "x"},
+        )
+    )
     assert later.type == "a_fact_from_a_later_controller" and later.payload == {}
 
 
@@ -530,8 +637,9 @@ async def test_a_runs_events_stream_until_it_ends_and_resume_from_the_last_one_s
     ids = [int(event_id) for event_id, kind, _ in events if kind != "end"]
     assert [kind for _, kind, _ in events][:2] == ["op_submitted", "run_picked_up"]
     # A client that lost the connection resumes after the last id it saw: nothing missed, nothing again.
-    resumed = await runs_client.get(f"/v1/runs/{run['id']}/events",
-                                    headers={"Accept": "text/event-stream", "Last-Event-ID": str(ids[2])})
+    resumed = await runs_client.get(
+        f"/v1/runs/{run['id']}/events", headers={"Accept": "text/event-stream", "Last-Event-ID": str(ids[2])}
+    )
     assert [int(event_id) for event_id, kind, _ in _sse(resumed.text) if kind != "end"] == ids[3:]
 
 
@@ -540,7 +648,8 @@ async def test_a_live_run_streams_its_events_as_they_land(runs_client, controlle
 
     run = (await runs_client.post("/v1/runs", json=SLOW)).json()
     stream = asyncio.create_task(
-        runs_client.get(f"/v1/runs/{run['id']}/events", headers={"Accept": "text/event-stream"}))
+        runs_client.get(f"/v1/runs/{run['id']}/events", headers={"Accept": "text/event-stream"})
+    )
     driving = threading.Thread(target=settle, args=(controller,))
     driving.start()
     await asyncio.sleep(0.5)
@@ -572,24 +681,36 @@ async def test_without_a_track_path_runs_are_recorded_in_the_hubs_own_database(t
                 conn.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
         run_collab_schema_migrations(database)  # the Track's tables come from the hub's migrations
         package(tmp_path / "cogs", "echo")
-        config = Config.parse({
-            "storage": {"frames_path": str(tmp_path / "frames")},
-            "frames": {"postgres": {"url": POSTGRES_URL}, "active_state": {"backend": "memory"},
-                       "history": {"backend": "memory"}, "usage": {"backend": "memory"},
-                       "mcp_session_manager_enabled": False},
-            "tasks": {"backend": "memory"},
-            "runs": {"packages": [str(tmp_path / "cogs")]},
-        })
-        for name, value in {"FRAMES_UNSAFE_AUTH_ENABLED": "true", "DEV_AUTH_ENABLED": "true",
-                            "DEV_AUTH_USER": "dev-user", "DEV_AUTH_ORG": "dev-org",
-                            "DEV_AUTH_WORKSPACE": "default"}.items():
+        config = Config.parse(
+            {
+                "storage": {"frames_path": str(tmp_path / "frames")},
+                "frames": {
+                    "postgres": {"url": POSTGRES_URL},
+                    "active_state": {"backend": "memory"},
+                    "history": {"backend": "memory"},
+                    "usage": {"backend": "memory"},
+                    "mcp_session_manager_enabled": False,
+                },
+                "tasks": {"backend": "memory"},
+                "runs": {"packages": [str(tmp_path / "cogs")]},
+            }
+        )
+        for name, value in {
+            "FRAMES_UNSAFE_AUTH_ENABLED": "true",
+            "DEV_AUTH_ENABLED": "true",
+            "DEV_AUTH_USER": "dev-user",
+            "DEV_AUTH_ORG": "dev-org",
+            "DEV_AUTH_WORKSPACE": "default",
+        }.items():
             monkeypatch.setenv(name, value)
         app = make_app(config)
         async with app.router.lifespan_context(app):
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 run = (await client.post("/v1/runs", json=ECHO)).json()
-                runner = LifecycleRunner(executor=InMemoryCogExecutor({"echo": lambda e, v, **f: {"echo": v}}),
-                                         track=PostgresTrackStore(database))
+                runner = LifecycleRunner(
+                    executor=InMemoryCogExecutor({"echo": lambda e, v, **f: {"echo": v}}),
+                    track=PostgresTrackStore(database),
+                )
                 settle(RunController(runner, poll_interval=0.01))
                 done = (await client.get(f"/v1/runs/{run['id']}")).json()
                 assert done["status"] == "COMPLETED", done
@@ -612,8 +733,10 @@ async def test_the_stream_ends_with_the_runs_last_event_then_end(runs_client, co
     reads = []
     real = service.track.replay
     monkeypatch.setattr(service.track, "replay", lambda run_id, **kw: reads.append(kw) or real(run_id, **kw))
-    streamed = await runs_client.get(f"/v1/runs/{run['id']}/events",
-                                     headers={"Accept": "text/event-stream", "Last-Event-ID": str(events[-2].sequence)})
+    streamed = await runs_client.get(
+        f"/v1/runs/{run['id']}/events",
+        headers={"Accept": "text/event-stream", "Last-Event-ID": str(events[-2].sequence)},
+    )
     assert [kind for _, kind, _ in _sse(streamed.text)] == [events[-1].event_type, "end"]
     # The route's check, then one tick: the run's incremental read, and, the run having ended and let its
     # events go, the tail after the cursor. No separate read to learn whether the run has ended.
@@ -622,11 +745,13 @@ async def test_the_stream_ends_with_the_runs_last_event_then_end(runs_client, co
 
 def test_a_hub_with_a_database_refuses_a_track_file_beside_it(tmp_path):
     # A pod-local SQLite file would win over the hub's database and vanish with the pod: refused at start.
-    config = Config.parse({
-        "storage": {"frames_path": str(tmp_path / "frames")},
-        "frames": {"postgres": {"url": "postgresql://collab:collab@127.0.0.1:1/collab"}},
-        "runs": {"track_path": str(tmp_path / "track.sqlite")},
-    })
+    config = Config.parse(
+        {
+            "storage": {"frames_path": str(tmp_path / "frames")},
+            "frames": {"postgres": {"url": "postgresql://collab:collab@127.0.0.1:1/collab"}},
+            "runs": {"track_path": str(tmp_path / "track.sqlite")},
+        }
+    )
     with pytest.raises(RuntimeError, match="unset COLLAB_HUB_API__RUNS__TRACK_PATH"):
         make_app(config)
     assert not (tmp_path / "track.sqlite").exists()
@@ -653,8 +778,10 @@ async def test_a_steps_frames_are_checked_snapshotted_at_submit_and_handed_to_th
         seen.update(feedback)
         return ResultEnvelope.success({"ok": True})
 
-    controller = RunController(LifecycleRunner(executor=InMemoryCogExecutor({"echo": grounded}),
-                                               track=_track_of(runs_config)), poll_interval=0.01)
+    controller = RunController(
+        LifecycleRunner(executor=InMemoryCogExecutor({"echo": grounded}), track=_track_of(runs_config)),
+        poll_interval=0.01,
+    )
     body = {"steps": [{"name": "draft", "cog": "echo", "entry_point": "run", "frames": [style]}]}
     created = await runs_client.post("/v1/runs", json=body)
     assert created.status_code == 201, created.text
@@ -674,25 +801,30 @@ async def test_a_steps_frames_are_checked_snapshotted_at_submit_and_handed_to_th
 
 
 async def test_a_frame_that_does_not_exist_or_cannot_be_read_refuses_the_submission(runs_client, monkeypatch):
-    missing = await runs_client.post("/v1/runs", json={"steps": [
-        {"name": "draft", "cog": "echo", "entry_point": "run", "frames": ["0" * 32]}]})
+    missing = await runs_client.post(
+        "/v1/runs", json={"steps": [{"name": "draft", "cog": "echo", "entry_point": "run", "frames": ["0" * 32]}]}
+    )
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "frame_not_found"
     assert missing.json()["error"]["details"] == {"frame": "0" * 32, "step": "draft"}
-    malformed = await runs_client.post("/v1/runs", json={"steps": [
-        {"name": "draft", "cog": "echo", "entry_point": "run", "frames": ["not-a-frame-id"]}]})
+    malformed = await runs_client.post(
+        "/v1/runs",
+        json={"steps": [{"name": "draft", "cog": "echo", "entry_point": "run", "frames": ["not-a-frame-id"]}]},
+    )
     assert malformed.status_code == 422
     monkeypatch.setenv("DEV_AUTH_USER", "bob")
     private = await _frame(runs_client, "Bob's notes", "secret", visibility="private")
     monkeypatch.setenv("DEV_AUTH_USER", "dev-user")
-    refused = await runs_client.post("/v1/runs", json={"steps": [
-        {"name": "draft", "cog": "echo", "entry_point": "run", "frames": [private]}]})
+    refused = await runs_client.post(
+        "/v1/runs", json={"steps": [{"name": "draft", "cog": "echo", "entry_point": "run", "frames": [private]}]}
+    )
     assert refused.status_code == 404 and refused.json()["error"]["details"]["frame"] == private
     assert (await runs_client.get("/v1/runs")).json()["items"] == []  # nothing was submitted
 
 
 async def test_a_steps_payload_is_read_back_inline_or_by_reference_and_a_failed_steps_error_too(
-        runs_client, runs_config, controller):
+    runs_client, runs_config, controller
+):
     created = (await runs_client.post("/v1/runs", json=ECHO)).json()
     not_yet = await runs_client.get(f"/v1/runs/{created['id']}/steps/greet/payload")
     assert not_yet.status_code == 409 and not_yet.json()["error"]["code"] == "step_not_finished"
@@ -703,8 +835,10 @@ async def test_a_steps_payload_is_read_back_inline_or_by_reference_and_a_failed_
     assert (await runs_client.get(f"/v1/runs/{created['id']}/steps/nope/payload")).status_code == 404
     # A large result is kept by reference, and read back whole.
     big = ResultEnvelope.success({"text": "x" * 70_000})
-    large = RunController(LifecycleRunner(executor=InMemoryCogExecutor({"echo": lambda e, v, **f: big}),
-                                          track=_track_of(runs_config)), poll_interval=0.01)
+    large = RunController(
+        LifecycleRunner(executor=InMemoryCogExecutor({"echo": lambda e, v, **f: big}), track=_track_of(runs_config)),
+        poll_interval=0.01,
+    )
     created = (await runs_client.post("/v1/runs", json=ECHO)).json()
     settle(large)
     shown = (await runs_client.get(f"/v1/runs/{created['id']}")).json()["steps"][0]
@@ -712,17 +846,28 @@ async def test_a_steps_payload_is_read_back_inline_or_by_reference_and_a_failed_
     assert (await runs_client.get(f"/v1/runs/{created['id']}/steps/greet/payload")).json()["payload"] == big.payload
     # A failed step answers its error, as the Cog gave it.
     failing = ResultEnvelope.failure("model-unavailable", "no model today")
-    broken = RunController(LifecycleRunner(executor=InMemoryCogExecutor({"echo": lambda e, v, **f: failing}),
-                                           track=_track_of(runs_config)), poll_interval=0.01)
+    broken = RunController(
+        LifecycleRunner(
+            executor=InMemoryCogExecutor({"echo": lambda e, v, **f: failing}), track=_track_of(runs_config)
+        ),
+        poll_interval=0.01,
+    )
     created = (await runs_client.post("/v1/runs", json=ECHO)).json()
     settle(broken)
     failed = (await runs_client.get(f"/v1/runs/{created['id']}/steps/greet/payload")).json()
-    assert failed == {"step": "greet", "state": "failed", "payload": None,
-                      "error": {"code": "model-unavailable", "message": "no model today"}}
+    assert failed == {
+        "step": "greet",
+        "state": "failed",
+        "payload": None,
+        "error": {"code": "model-unavailable", "message": "no model today"},
+    }
 
 
-GATED = {"steps": [{"name": "draft", "cog": "echo", "entry_point": "run", "input": {"text": "v1"},
-                    "gate": {"escalate": "always"}}]}
+GATED = {
+    "steps": [
+        {"name": "draft", "cog": "echo", "entry_point": "run", "input": {"text": "v1"}, "gate": {"escalate": "always"}}
+    ]
+}
 
 
 async def test_a_gate_is_decided_through_the_api_naming_its_escalation(runs_client, controller):
@@ -733,23 +878,28 @@ async def test_a_gate_is_decided_through_the_api_naming_its_escalation(runs_clie
     assert waiting["status"] == "WAITING_AT_GATE" and waiting["escalation"] and waiting["decision"] is None
     assert waiting["approvers"] == ["owner", "operator"]  # the default, since the Gate named none
     escalation = waiting["escalation"]
-    stale = await runs_client.post(f"/v1/runs/{run_id}/steps/draft/decision",
-                                   json={"escalation": "esc-other", "outcome": "approve"})
+    stale = await runs_client.post(
+        f"/v1/runs/{run_id}/steps/draft/decision", json={"escalation": "esc-other", "outcome": "approve"}
+    )
     assert stale.status_code == 409 and stale.json()["error"]["code"] == "stale_decision"
     assert stale.json()["error"]["details"] == {"escalation": escalation}
-    wrong_step = await runs_client.post(f"/v1/runs/{run_id}/steps/other/decision",
-                                        json={"escalation": escalation, "outcome": "approve"})
+    wrong_step = await runs_client.post(
+        f"/v1/runs/{run_id}/steps/other/decision", json={"escalation": escalation, "outcome": "approve"}
+    )
     assert wrong_step.status_code == 409 and wrong_step.json()["error"]["code"] == "step_not_waiting"
-    accepted = await runs_client.post(f"/v1/runs/{run_id}/steps/draft/decision",
-                                      json={"escalation": escalation, "outcome": "approve"})
+    accepted = await runs_client.post(
+        f"/v1/runs/{run_id}/steps/draft/decision", json={"escalation": escalation, "outcome": "approve"}
+    )
     assert accepted.status_code == 202, accepted.text
     assert accepted.json()["decision"] == {"escalation": escalation, "outcome": "approve", "actor": "dev-user"}
     # The same decision asked again is the one already recorded; a different one is a conflict.
-    again = await runs_client.post(f"/v1/runs/{run_id}/steps/draft/decision",
-                                   json={"escalation": escalation, "outcome": "approve"})
+    again = await runs_client.post(
+        f"/v1/runs/{run_id}/steps/draft/decision", json={"escalation": escalation, "outcome": "approve"}
+    )
     assert again.status_code == 202
-    other = await runs_client.post(f"/v1/runs/{run_id}/steps/draft/decision",
-                                   json={"escalation": escalation, "outcome": "reject"})
+    other = await runs_client.post(
+        f"/v1/runs/{run_id}/steps/draft/decision", json={"escalation": escalation, "outcome": "reject"}
+    )
     assert other.status_code == 409 and other.json()["error"]["code"] == "decision_pending"
     settle(controller)
     done = (await runs_client.get(f"/v1/runs/{run_id}")).json()
@@ -759,74 +909,99 @@ async def test_a_gate_is_decided_through_the_api_naming_its_escalation(runs_clie
     assert decided["actor"] == "dev-user" and decided["escalation"] == escalation and decided["outcome"] == "approve"
     # The decision asked once more after its delivery is the one on the Track: a client that lost the first
     # answer gets the run, not a conflict. A different decision on the ended run is one.
-    delivered = await runs_client.post(f"/v1/runs/{run_id}/steps/draft/decision",
-                                       json={"escalation": escalation, "outcome": "approve"})
+    delivered = await runs_client.post(
+        f"/v1/runs/{run_id}/steps/draft/decision", json={"escalation": escalation, "outcome": "approve"}
+    )
     assert delivered.status_code == 202 and delivered.json()["status"] == "COMPLETED"
-    ended = await runs_client.post(f"/v1/runs/{run_id}/steps/draft/decision",
-                                   json={"escalation": escalation, "outcome": "reject"})
+    ended = await runs_client.post(
+        f"/v1/runs/{run_id}/steps/draft/decision", json={"escalation": escalation, "outcome": "reject"}
+    )
     assert ended.status_code == 409 and ended.json()["error"]["code"] == "run_ended"
 
 
-async def test_a_send_back_reruns_the_step_with_the_findings_and_a_stale_approval_is_refused(
-        runs_client, runs_config):
+async def test_a_send_back_reruns_the_step_with_the_findings_and_a_stale_approval_is_refused(runs_client, runs_config):
     seen = []
 
     def echo(entry_point, value, **feedback):
         seen.append(feedback.get("signal"))
         return ResultEnvelope.success({"draft": value["text"], "revision": len(seen)})
 
-    controller = RunController(LifecycleRunner(executor=InMemoryCogExecutor({"echo": echo}),
-                                               track=_track_of(runs_config)), poll_interval=0.01)
+    controller = RunController(
+        LifecycleRunner(executor=InMemoryCogExecutor({"echo": echo}), track=_track_of(runs_config)), poll_interval=0.01
+    )
     run_id = (await runs_client.post("/v1/runs", json=GATED)).json()["id"]
     settle(controller)
     first = (await runs_client.get(f"/v1/runs/{run_id}")).json()["escalation"]
-    sent_back = await runs_client.post(f"/v1/runs/{run_id}/steps/draft/decision", json={
-        "escalation": first, "outcome": "send_back", "findings": [{"check": "tone", "detail": "too long"}]})
+    sent_back = await runs_client.post(
+        f"/v1/runs/{run_id}/steps/draft/decision",
+        json={"escalation": first, "outcome": "send_back", "findings": [{"check": "tone", "detail": "too long"}]},
+    )
     assert sent_back.status_code == 202
     settle(controller)
     second = (await runs_client.get(f"/v1/runs/{run_id}")).json()
     assert second["status"] == "WAITING_AT_GATE" and second["escalation"] != first
     assert seen == [None, [{"check": "tone", "detail": "too long"}]]
     # An approval of the revision the reviewer never saw is refused, naming the open escalation.
-    stale = await runs_client.post(f"/v1/runs/{run_id}/steps/draft/decision",
-                                   json={"escalation": first, "outcome": "approve"})
+    stale = await runs_client.post(
+        f"/v1/runs/{run_id}/steps/draft/decision", json={"escalation": first, "outcome": "approve"}
+    )
     assert stale.status_code == 409 and stale.json()["error"]["details"] == {"escalation": second["escalation"]}
     assert (await runs_client.get(f"/v1/runs/{run_id}")).json()["status"] == "WAITING_AT_GATE"
 
 
 async def test_a_gate_naming_an_approver_role_the_hub_does_not_resolve_is_refused(runs_client):
-    submitted = await runs_client.post("/v1/runs", json={"steps": [
-        {"name": "draft", "cog": "echo", "entry_point": "run", "input": {"text": "hi"},
-         "gate": {"escalate": "always", "approvers": ["owner", "reviewer"]}}]})
+    submitted = await runs_client.post(
+        "/v1/runs",
+        json={
+            "steps": [
+                {
+                    "name": "draft",
+                    "cog": "echo",
+                    "entry_point": "run",
+                    "input": {"text": "hi"},
+                    "gate": {"escalate": "always", "approvers": ["owner", "reviewer"]},
+                }
+            ]
+        },
+    )
     assert submitted.status_code == 422, submitted.text
     assert "reviewer" in submitted.text and "owner, member, operator" in submitted.text
 
 
 async def test_who_may_decide_is_the_gates_approvers_and_without_a_role_model_the_submitter(
-        runs_client, controller, monkeypatch):
+    runs_client, controller, monkeypatch
+):
     run_id = (await runs_client.post("/v1/runs", json=GATED)).json()["id"]
     settle(controller)
     escalation = (await runs_client.get(f"/v1/runs/{run_id}")).json()["escalation"]
     # Dev auth resolves no roles, so the submitter decides; another member of the organization does not.
     monkeypatch.setenv("DEV_AUTH_USER", "bob")
-    refused = await runs_client.post(f"/v1/runs/{run_id}/steps/draft/decision",
-                                     json={"escalation": escalation, "outcome": "approve"})
+    refused = await runs_client.post(
+        f"/v1/runs/{run_id}/steps/draft/decision", json={"escalation": escalation, "outcome": "approve"}
+    )
     assert refused.status_code == 403 and refused.json()["error"]["code"] == "not_an_approver"
     assert refused.json()["error"]["details"] == {"approvers": ["owner", "operator"]}
     monkeypatch.setenv("DEV_AUTH_USER", "dev-user")
-    assert (await runs_client.post(f"/v1/runs/{run_id}/steps/draft/decision",
-                                   json={"escalation": escalation, "outcome": "reject"})).status_code == 202
+    assert (
+        await runs_client.post(
+            f"/v1/runs/{run_id}/steps/draft/decision", json={"escalation": escalation, "outcome": "reject"}
+        )
+    ).status_code == 202
     settle(controller)
     assert (await runs_client.get(f"/v1/runs/{run_id}")).json()["status"] == "REJECTED"
     # A run that ended is decided no more, and a member of another organization never sees it.
     monkeypatch.setenv("DEV_AUTH_ORG", "other-org")
-    assert (await runs_client.post(f"/v1/runs/{run_id}/steps/draft/decision",
-                                   json={"escalation": escalation, "outcome": "approve"})).status_code == 404
+    assert (
+        await runs_client.post(
+            f"/v1/runs/{run_id}/steps/draft/decision", json={"escalation": escalation, "outcome": "approve"}
+        )
+    ).status_code == 404
     assert (await runs_client.get(f"/v1/runs/{run_id}/steps/draft/payload")).status_code == 404
 
 
 async def test_a_failed_run_is_retried_as_a_new_attempt_and_an_interrupted_one_resumes_its_attempt(
-        runs_client, runs_config):
+    runs_client, runs_config
+):
     calls = {"n": 0}
 
     def flaky(entry_point, value, **feedback):
@@ -836,8 +1011,9 @@ async def test_a_failed_run_is_retried_as_a_new_attempt_and_an_interrupted_one_r
         return ResultEnvelope.success({"try": calls["n"]})
 
     track = _track_of(runs_config)
-    controller = RunController(LifecycleRunner(executor=InMemoryCogExecutor({"echo": flaky}), track=track),
-                               poll_interval=0.01)
+    controller = RunController(
+        LifecycleRunner(executor=InMemoryCogExecutor({"echo": flaky}), track=track), poll_interval=0.01
+    )
     run_id = (await runs_client.post("/v1/runs", json=ECHO)).json()["id"]
     settle(controller)
     assert (await runs_client.get(f"/v1/runs/{run_id}")).json()["status"] == "FAILED"
@@ -859,18 +1035,24 @@ async def test_a_failed_run_is_retried_as_a_new_attempt_and_an_interrupted_one_r
     # first controller's step never answers, as a dead host's would not: a host that answered after
     # another interrupted its run would write onto an ended Track, which the keyed claim (#104) prevents.
     never = threading.Event()
-    one = RunController(LifecycleRunner(executor=InMemoryCogExecutor({"slow": lambda e, v, **f: never.wait(30),
-                                                                       "echo": flaky}), track=track),
-                        poll_interval=0.01)
+    one = RunController(
+        LifecycleRunner(
+            executor=InMemoryCogExecutor({"slow": lambda e, v, **f: never.wait(30), "echo": flaky}), track=track
+        ),
+        poll_interval=0.01,
+    )
     run_id = (await runs_client.post("/v1/runs", json=SLOW)).json()["id"]
     one.tick()
     for _ in range(200):
         if (await runs_client.get(f"/v1/runs/{run_id}")).json()["steps"][0]["state"] == "running":
             break
         threading.Event().wait(0.01)
-    two = RunController(LifecycleRunner(executor=InMemoryCogExecutor({"slow": lambda e, v, **f: {"slept": 1},
-                                                                       "echo": flaky}), track=track),
-                        poll_interval=0.01)
+    two = RunController(
+        LifecycleRunner(
+            executor=InMemoryCogExecutor({"slow": lambda e, v, **f: {"slept": 1}, "echo": flaky}), track=track
+        ),
+        poll_interval=0.01,
+    )
     assert two.start() == (run_id,)  # a new host over the Track: the run it found in flight is interrupted
     assert (await runs_client.get(f"/v1/runs/{run_id}")).json()["status"] == "INTERRUPTED"
     assert (await runs_client.post(f"/v1/runs/{run_id}/retry")).status_code == 202

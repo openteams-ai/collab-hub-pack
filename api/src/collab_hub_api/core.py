@@ -294,9 +294,7 @@ def make_app(config: BaseConfig) -> FastAPI:
     # Pulls through the Hub (issue #179), when cogs.serve.enabled: the /v2/
     # surface and the registry sources it reads from, built on every replica
     # that serves it and independent of whether this process indexes.
-    cog_registry_serving = build_cog_registry_serving(
-        config, cog_catalog_store, postgres_pools, cog_publish_store
-    )
+    cog_registry_serving = build_cog_registry_serving(config, cog_catalog_store, postgres_pools, cog_publish_store)
     # The run API (/v1/runs): its Track is runs.track_path, else the hub's own database, else none
     # (the routes answer 503). Its router is the one module of the API that imports the execution
     # package, which writes intent and reads runs and never constructs an executor.
@@ -382,9 +380,7 @@ def make_app(config: BaseConfig) -> FastAPI:
             # Created once here, where the sizing config is in hand and we're
             # already inside the event loop — so the route needs no lazy
             # get-or-create dance and its no-await-between invariant disappears.
-            app.state.github_api_get_semaphore = asyncio.Semaphore(
-                config.connectors.github.api_get_max_concurrency
-            )
+            app.state.github_api_get_semaphore = asyncio.Semaphore(config.connectors.github.api_get_max_concurrency)
             # Observe-only gauge of how many requests are in the acquire phase
             # (queued for a permit). A plain int is safe here: asyncio is
             # single-threaded and the route never awaits between reading and

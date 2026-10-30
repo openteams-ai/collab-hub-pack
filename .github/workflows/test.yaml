@@ -133,6 +133,10 @@ jobs:
         working-directory: api
         run: uv run --only-group lint ruff check src tests
 
+      - name: ruff format
+        working-directory: api
+        run: uv run --only-group lint ruff format --check src tests
+
   admin-ui:
     # The admin panel's own suite. Separate job rather than a step on the
     # Python one: the two share no toolchain, and a Node failure should read as

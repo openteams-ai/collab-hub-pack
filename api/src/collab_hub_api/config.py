@@ -135,13 +135,11 @@ class ServerConfig(BaseModel):
     def _root_path_is_a_prefix(cls, value: str) -> str:
         if value and not value.startswith("/"):
             raise ValueError(
-                'root_path must start with "/": use "" to serve at the root of the host, '
-                'or a prefix such as "/hub"'
+                'root_path must start with "/": use "" to serve at the root of the host, or a prefix such as "/hub"'
             )
         if value.endswith("/"):
             raise ValueError(
-                'root_path must not end with "/": use "" to serve at the root of the host, '
-                'or a prefix such as "/hub"'
+                'root_path must not end with "/": use "" to serve at the root of the host, or a prefix such as "/hub"'
             )
         return value
 
@@ -706,6 +704,7 @@ class FramesInvitationsConfig(BaseModel):
     friction rather than assurance.
     """
 
+
 class FramesConfig(BaseModel):
     storage_backend: str = "local"
     s3: FramesS3Config = Field(default_factory=FramesS3Config)
@@ -939,9 +938,7 @@ class CogServeConfig(BaseModel):
         default=300, ge=COGS_SERVE_TOKEN_TTL_MIN_SECONDS, le=COGS_SERVE_TOKEN_TTL_MAX_SECONDS
     )
     max_blob_bytes: int = Field(default=1024 * 1024 * 1024, ge=1)
-    max_blob_seconds: int = Field(
-        default=900, ge=COGS_SERVE_MAX_BLOB_SECONDS_MIN, le=COGS_SERVE_MAX_BLOB_SECONDS_MAX
-    )
+    max_blob_seconds: int = Field(default=900, ge=COGS_SERVE_MAX_BLOB_SECONDS_MIN, le=COGS_SERVE_MAX_BLOB_SECONDS_MAX)
 
     @field_validator("public_url", mode="before")
     @classmethod
@@ -1258,9 +1255,11 @@ appears: set in the environment or the chart, it stops startup; passed to
 instead of silently reading as off.
 """
 
-RETIRED_FEATURE_FLAGS: frozenset[str] = frozenset({
-    "cog_runs",  # the run API (/v1/runs) is always served since the hub ships the execution package
-})
+RETIRED_FEATURE_FLAGS: frozenset[str] = frozenset(
+    {
+        "cog_runs",  # the run API (/v1/runs) is always served since the hub ships the execution package
+    }
+)
 """Flags that have been removed but that deployments may still set.
 
 When a flag's feature ships, move its name here from :data:`FEATURE_FLAGS`.

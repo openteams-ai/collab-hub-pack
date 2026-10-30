@@ -602,8 +602,11 @@ def test_postgres_create_token_is_one_statement_with_the_liveness_check():
     # Push is decided where the credential is read: the repositories asked for, and only for a publish credential.
     assert "CASE WHEN c.scope = 'publish' THEN %s::text[] ELSE '{}'::text[] END" in insert[0]
     pushing, conn = _fake(
-        {"INSERT INTO collab_cog_registry_tokens": [{**TOKEN_ROW, "repositories": ["cogs/a", "cogs/b"],
-                                                     "push_repositories": ["cogs/a"]}]}
+        {
+            "INSERT INTO collab_cog_registry_tokens": [
+                {**TOKEN_ROW, "repositories": ["cogs/a", "cogs/b"], "push_repositories": ["cogs/a"]}
+            ]
+        }
     )
     granted = pushing.create_token(
         token_hash="t",

@@ -2,9 +2,9 @@
 
 The switch would be theatre if it only changed what the admin screen printed.
 What makes it real is that ``get_connectors_config`` -- the single dependency
-every connector route already takes -- hands those routes a configuration with
-the disabled connector's credentials blanked, so it is indistinguishable from
-one that was never set up.
+every connector route already takes -- refuses every route of a disabled
+connector with a 404 that says it is switched off, and hands the list route a
+configuration with that connector's credentials blanked.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ class FakeApp:
 class FakeRequest:
     def __init__(self, state):
         self.app = FakeApp(state)
+        self.scope = {}
 
 
 class Store:
@@ -247,18 +248,84 @@ async def test_the_connector_list_leaves_out_what_is_switched_off(hub):
     assert [item["id"] for item in everything.json()] == ALL_STATUS_ROUTES
 
 
-async def test_other_routes_of_a_switched_off_connector_refuse_as_unconfigured(hub):
-    """Only status changed: a read still answers what an unconfigured one does."""
+# One search per connector key, each with a body its route accepts.
+SEARCHES = {
+    "google": ("/v1/connectors/google-drive/search", {"query": "anything"}),
+    "slack": ("/v1/connectors/slack/search", {"query": "anything", "limit": 5}),
+    "github": ("/v1/connectors/github/search", {"query": "anything"}),
+}
 
+
+async def _search(app, name):
+    path, body = SEARCHES[name]
+    async with _client(app) as client:
+        return await client.post(path, headers=_auth_header(), json=body)
+
+
+@pytest.mark.parametrize("name", sorted(SEARCHES))
+async def test_search_of_a_switched_off_connector_says_it_is_switched_off(hub, name):
+    """Not "not configured": that sends an operator after configuration that is not missing."""
+
+    response = await _search(hub(Store(disabled={name})), name)
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": f"The {name} connector is switched off on this hub"}
+
+
+@pytest.mark.parametrize("store", [None, Store(), Store(raises=True)], ids=["no-store", "nothing-off", "unreachable"])
+@pytest.mark.parametrize("name", sorted(SEARCHES))
+async def test_search_of_an_unconfigured_connector_nobody_switched_still_says_not_configured(hub, name, store):
+    response = await _search(hub(store, token=""), name)
+
+    assert response.status_code == 409
+    assert "not configured" in response.json()["detail"]
+    assert "switched off" not in response.json()["detail"]
+
+
+@pytest.mark.parametrize("name", sorted(SEARCHES))
+async def test_search_of_an_enabled_connector_reaches_the_provider(hub, name):
+    """Switching another connector off leaves this one's search alone."""
+
+    others = set(CONNECTOR_KEYS) - {name}
+    response = await _search(hub(Store(disabled=others)), name)
+
+    # The fixture's upstream answers 500 to everything: the request got that far.
+    assert response.status_code == 502
+
+
+@pytest.mark.parametrize("name", sorted(SEARCHES))
+async def test_switching_back_on_restores_what_search_answered(hub, name):
+    store = SwitchableStore()
+    app = hub(store)
+    before = await _search(app, name)
+
+    store.set_enabled(name, False)
+    assert (await _search(app, name)).status_code == 404
+    store.set_enabled(name, True)
+
+    after = await _search(app, name)
+    assert (after.status_code, after.json()) == (before.status_code, before.json())
+
+
+async def test_a_switched_off_search_is_logged_where_an_operator_sees_it(hub, caplog):
+    with caplog.at_level(logging.INFO, logger="frames_server.connectors"):
+        await _search(hub(Store(disabled={"slack"})), "slack")
+
+    (record,) = [r for r in caplog.records if r.getMessage() == "connector_route_switched_off"]
+    assert record.connector == "slack"
+    assert record.route == "/v1/connectors/slack/search"
+    assert record.levelno == logging.INFO
+
+
+async def test_a_switched_off_search_still_asks_for_sign_in_first(hub):
     app = hub(Store(disabled={"slack"}))
 
     async with _client(app) as client:
-        response = await client.post(
-            "/v1/connectors/slack/search", headers=_auth_header(), json={"query": "anything", "limit": 5}
-        )
+        switched_off = await client.post("/v1/connectors/slack/search", json={"query": "anything"})
+        switched_on = await client.post("/v1/connectors/github/search", json={"query": "anything"})
 
-    assert response.status_code == 409
-    assert response.json() == {"detail": "Slack connector token broker is not configured"}
+    assert switched_off.status_code == switched_on.status_code == 401
+    assert switched_off.json() == switched_on.json()
 
 
 async def test_a_switched_off_status_is_told_apart_from_a_path_nothing_serves(hub, caplog):
@@ -296,7 +363,7 @@ _NOT_SWITCHABLE = {"notion"}
 
 
 async def test_every_status_route_the_router_serves_honours_the_switch(hub):
-    """The 404 is wired per route, so a new connector's status route could forget it.
+    """A new connector's status route must not answer ``not_connected`` while switched off.
 
     The routes are read from the router rather than listed here: a status route
     added later is checked without anyone remembering to add it to a test.
@@ -318,3 +385,44 @@ async def test_every_status_route_the_router_serves_honours_the_switch(hub):
             answered[connector] = response.status_code
 
     assert answered == {connector: 200 if connector in _NOT_SWITCHABLE else 404 for connector in served}
+
+
+def _connector_routes():
+    """Every route the connector router serves under a connector's own path."""
+
+    for route in connectors_router.routes:
+        match = re.fullmatch(r"/connectors/([^/{}]+)/.+", route.path)
+        if match:
+            for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
+                yield method, match.group(1), route.path
+
+
+_PROVIDER_OF = {"google-drive": "google", "gmail": "google", "google-calendar": "google"}
+
+
+async def test_every_route_the_router_serves_honours_the_switch(hub):
+    """Search, read, list, status: no route of a switched-off connector reaches its handler.
+
+    Read from the router, so a route added later is checked without anyone
+    remembering to add it here. Bodies are deliberately empty: the switch
+    answers before the body is validated, so this needs no per-route fixture.
+    """
+
+    routes = list(_connector_routes())
+    assert len(routes) > len(ALL_STATUS_ROUTES), "the router's routes were not found"
+
+    app = hub(Store(disabled=set(CONNECTOR_KEYS)))
+    answered = {}
+    async with _client(app) as client:
+        for method, _segment, path in routes:
+            url = "/v1" + re.sub(r"\{[^}]+\}", "1", path)
+            response = await client.request(method, url, headers=_auth_header(), json={} if method == "POST" else None)
+            answered[(method, path)] = (response.status_code, response.json())
+
+    for (method, path), (code, body) in answered.items():
+        segment = path.split("/")[2]
+        if segment in _NOT_SWITCHABLE:
+            assert code != 404, (method, path)
+            continue
+        name = _PROVIDER_OF.get(segment, segment)
+        assert (code, body) == (404, {"detail": f"The {name} connector is switched off on this hub"}), (method, path)

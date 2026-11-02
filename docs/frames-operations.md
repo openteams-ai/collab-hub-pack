@@ -810,28 +810,29 @@ connector that has no credentials leaves it unusable.
 `POST /admin/api/connectors/{connector}` with `{"enabled": true | false}`
 writes the row and a `connector.enable` or `connector.disable` audit row in
 the same transaction. The connector routes read the table on every request,
-with no cache, and blank the credential fields of a switched-off connector, so
-its search and read routes answer exactly as an unconfigured one's do from the
-next request. Without a database the endpoint answers 503
+with no cache. Without a database the endpoint answers 503
 `connector_switch_unavailable`, and a database that has not yet applied
 version 10 reads as nothing switched off. If the table cannot be read on a
 request, that request treats every connector as switched on and logs
 `connector_state_unavailable`.
 
-The status routes are the exception, because `not_connected` tells a client
-to offer the user a connection that cannot succeed. While a connector is
-switched off, its status routes answer 404 with
-`{"detail": "The <connector> connector is switched off on this hub"}` and
-`GET /v1/connectors` leaves its entries out (see
+While a connector is switched off, every one of its routes -- status, search,
+read and the rest -- answers 404 with
+`{"detail": "The <connector> connector is switched off on this hub"}` from the
+next request, and `GET /v1/connectors` leaves its entries out (see
 [connector discovery](connector-discovery.md)), so a client shows it as not
-offered here rather than as broken. `google` covers
-`/v1/connectors/google-drive/status`, `/v1/connectors/gmail/status` and
-`/v1/connectors/google-calendar/status`. A connector that was never switched
-and merely has no credentials still answers 200 `not_connected`. Each such 404
-logs `connector_status_switched_off` with the connector's key at debug level
-(not info, because clients poll these routes). The 404's `detail` ("The
-`<key>` connector is switched off on this hub") tells it apart from a 404 for
-a path nothing serves; with debug logging on, so does that log line. This is the
+offered here rather than as broken. `google` covers every route under
+`/v1/connectors/google-drive/`, `/v1/connectors/gmail/` and
+`/v1/connectors/google-calendar/`. A connector that was never switched and
+merely has no credentials answers as before: 200 `not_connected` on status and
+409 "... not configured" on search and read. The 404 comes after sign-in, so a
+caller who has not signed in gets the same 401 either way. The 404's `detail`
+tells it apart from a 404 for a path nothing serves, and so does a log line
+with the connector's key: `connector_status_switched_off` at debug level on a
+status route (not info, because clients poll these routes), and
+`connector_route_switched_off`, with the route, at info level on any other
+route (a caller reaching search or read has skipped status: an agent or a Cog,
+say). This is the
 switch to use while a provider's OAuth app is not yet usable by this
 deployment's users — still in the provider's verification process, say —
 and to flip back when it is.

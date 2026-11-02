@@ -83,7 +83,9 @@ re-asks when told to.
 
 ## What this route does not change
 
-The per-connector status, search and read routes answer as before.
+The per-connector routes of a provider an operator switched off answer `404`
+(see [Frames operations](frames-operations.md)); otherwise they answer as
+before.
 
 A connector missing from this list therefore gets one of two answers on its
 own status route, depending on why it is missing: `404` if an operator switched

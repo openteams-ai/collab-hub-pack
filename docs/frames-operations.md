@@ -825,7 +825,9 @@ offered here rather than as broken. `google` covers every route under
 `/v1/connectors/google-drive/`, `/v1/connectors/gmail/` and
 `/v1/connectors/google-calendar/`. A connector that was never switched and
 merely has no credentials answers as before: 200 `not_connected` on status and
-409 "... not configured" on search and read. The 404 comes after sign-in, so a
+409 "... not configured" on search and read (except where a route has its
+own gate that answers first, such as the 403 from `github/api/get` while
+`api_get_enabled` is off). The 404 comes after sign-in, so a
 caller who has not signed in gets the same 401 either way. The 404's `detail`
 tells it apart from a 404 for a path nothing serves, and so does a log line
 with the connector's key: `connector_status_switched_off` at debug level on a

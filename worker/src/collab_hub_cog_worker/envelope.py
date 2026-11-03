@@ -17,17 +17,19 @@ ENVELOPE_VERSION = 1
 
 ERROR_CODES = frozenset({
     "binding-invalid", "invalid-input", "model-unavailable", "model-call-failed", "model-response-malformed",
-    "context-exhausted",
+    "context-exhausted", "outcome-unknown", "hub-unavailable",
 })
 
 # Over HTTP, the status a worker answers each code with.
 STATUS_FOR_CODE: Mapping[str, int] = {
     "invalid-input": 422,
     "context-exhausted": 422,
+    "outcome-unknown": 409,
     "model-call-failed": 502,
     "model-response-malformed": 502,
     "model-unavailable": 503,
     "binding-invalid": 503,
+    "hub-unavailable": 503,
 }
 
 SEVERITIES = ("error", "warn")

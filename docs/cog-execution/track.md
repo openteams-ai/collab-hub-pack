@@ -74,6 +74,13 @@ the run's owner no longer holds its id, it also names `taken_over_by` and
 `from_controller`. `worker_started` at the remote location carries the
 workloads' `name` and `namespace`, by which a later controller reaps a pod.
 
+`outcome_reconciled` (`step`, `actor`, `note`) is a person's record that they
+settled what a lost worker did, after the step's attempt ended
+`outcome-unknown` under the keyed claim ([runs.md](runs.md#the-keyed-claim)):
+written with `append_if` only while the run has ended on that step's unknown
+outcome. It moves nothing; a retry asked after it runs the step as a new
+attempt.
+
 `retry_asked` (`actor`) is a client's request that an ended run run again,
 written with `append_if` only while the run has ended in a state the run
 machine retries from and holds no request yet. A controller takes it: the
@@ -110,7 +117,7 @@ no `controller`: such a run belongs to the first controller to start
 | `step_started` | `step`, `cog`, `digest`, `attempt` |
 | `interaction_usage` | `step`, `attempt`, `usage` — what one interaction spent, `null` when unknown |
 | `step_completed` | `step`, `attempt`, `cog`, `digest`, `binding`, `problems`, `usage`, `frames`, `escalation` (when an approval completed it), and the result: `payload` inline, or `payload_ref` naming where it is kept |
-| `step_failed` | `step`, `attempt`, `key` (the idempotency key), `cog`, `digest`, `error` (the envelope's code, or the exception's class), `message` (bounded to 1024 characters), `problems` and `binding` when the failure carried them, and `teardown_error` when the worker could not be torn down either — the step's own failure is kept, not replaced |
+| `step_failed` | `step`, `attempt`, `key` (the idempotency key), `cog`, `digest`, `error` (the envelope's code, or the exception's class; `outcome-unknown` when the key was reserved by a worker lost before it committed), `message` (bounded to 1024 characters), `problems` and `binding` when the failure carried them, and `teardown_error` when the worker could not be torn down either — the step's own failure is kept, not replaced |
 
 `step_completed` alone answers "what produced this": the Cog and its digest,
 the binding, the problems the Cog reported, the usage it spent, and the Frames
@@ -201,6 +208,13 @@ suite (`execution/tests/test_track_conformance.py`) runs against all of them:
 Every store assigns sequences, refuses a duplicate `event_id`, and refuses a
 second `op_submitted` for a run (`OneSubmissionPerRun`), so two callers can
 never both start it.
+
+The keyed claim's stores (`collab_hub_execution.claims`) have the same shape
+beside each Track store: in memory, in the SQLite Track's own file, and
+`collab_claims` on Postgres from migration 17, under one conformance suite
+(`execution/tests/test_claims_conformance.py`). A claim is kept for thirty
+days after it last changed; the API prunes older ones as the claim routes are
+used.
 
 **A stream never skips an event.** A reader follows a run with a cursor: the
 last sequence it saw. On Postgres a sequence is drawn when a row is inserted

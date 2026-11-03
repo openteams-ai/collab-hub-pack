@@ -16,6 +16,7 @@ from collab_hub_execution import (
     ResultEnvelope,
     RunBudget,
     RunState,
+    intents,
 )
 from collab_hub_execution.envelope import CODE_FOR_STATUS, STATUS_FOR_CODE
 from collab_hub_execution.kubernetes import _KubernetesWorker
@@ -179,6 +180,11 @@ def test_each_error_code_fails_the_step_and_keeps_the_code(code):
     assert failed.payload["step"] == "s0"
     # the failed call's spending is on the Track, and counts on retry
     assert events(track, "env", "interaction_usage")[-1].payload["usage"] == {"tokens": 7}
+    if code == "outcome-unknown":
+        # The one failure a retry never runs again on its own: a person settles what the lost worker did first.
+        with pytest.raises(ValueError, match="reconciled explicitly"):
+            engine.retry("env")
+        intents.reconcile_outcome(track, "env", step="s0", actor="ops")
     assert engine.retry("env") is RunState.COMPLETED
     assert engine.budget_tracker(track.replay("env")).tokens == 8
 

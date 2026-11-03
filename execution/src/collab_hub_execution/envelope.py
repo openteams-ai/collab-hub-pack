@@ -19,22 +19,25 @@ ENVELOPE_VERSION = 1
 # the Track's ``failed`` event, so a client can act on it without parsing text.
 ERROR_CODES = frozenset({
     "binding-invalid", "invalid-input", "model-unavailable", "model-call-failed", "model-response-malformed",
-    "context-exhausted",
+    "context-exhausted", "outcome-unknown", "hub-unavailable",
 })
 
 # Over HTTP, the status a worker uses for each code (result-envelope.md, "error").
 STATUS_FOR_CODE: Mapping[str, int] = {
     "invalid-input": 422,
     "context-exhausted": 422,
+    "outcome-unknown": 409,
     "model-call-failed": 502,
     "model-response-malformed": 502,
     "model-unavailable": 503,
+    "hub-unavailable": 503,
     "binding-invalid": 503,
 }
 
 # ...and the code the client assumes when one of those statuses arrives without
 # a parseable envelope body (a proxy's 502 page, a crashed worker's 503).
-CODE_FOR_STATUS: Mapping[int, str] = {422: "invalid-input", 502: "model-call-failed", 503: "model-unavailable"}
+CODE_FOR_STATUS: Mapping[int, str] = {
+    409: "outcome-unknown", 422: "invalid-input", 502: "model-call-failed", 503: "model-unavailable"}
 
 SEVERITIES = ("error", "warn")
 

@@ -835,7 +835,7 @@ Needs only the run API, Phases 12 and 18, so it lands before the worker becomes 
 The same runner, backend and Cog; the worker becomes a pod. Then the rest of the lifecycle a production hub needs: the artifact, install, the Cog's own `resolve`, budgets.
 
 #### Phase 22 — The `remote` location: workers in pods, and least-privilege RBAC
-**Issue** #6 · **Branch** `feat/cog-remote-location-6` · **Depends on** Phases 9, 11 · **Size** M · **Status** in review, #252, on Phase 18's #251
+**Issue** #6 · **Branch** `feat/cog-remote-location-6` · **Depends on** Phases 9, 11 · **Size** M · **Status** merged, #252; the workers' namespace, #253, merged PR_253
 
 Same runner, same `none`, same Hermes Cog — the worker becomes a pod. The only identity able to create workloads is the controller, never the public API.
 
@@ -844,6 +844,7 @@ Same runner, same `none`, same Hermes Cog — the worker becomes a pod. The only
 - It passes Phase 9's location conformance suite, whose controller-death case is written per location rather than one rule for both — the way the durability suite already differs per backend. `local`: the worker dies with its controller, because Phase 9's launcher kills it when the controller's pipe closes. `remote`: the pod survives the controller, and the next controller start reaps it; the suite asserts the reap, and that no run advances and no claim is acted on in between. Neither location leaves a worker serving an orphaned run indefinitely, and orphan cleanup and claim reconciliation both precede any retry that could act again.
 - The controller's id in the chart is stable across its restarts, and a run whose owner's id never starts again is ended by a live controller (#223), so a replaced pod leaves no run waiting on an id that is gone.
 - Chart: the controller moves out of the API's pod (Phase 13) into a Deployment of its own, with a ServiceAccount and a namespace-scoped Role and RoleBinding for the controller only, over the kinds actually materialized and the verbs used; `values.yaml` and `values.schema.json` change together; the API pod holds no workload permissions; `automountServiceAccountToken: false` on workers.
+- A namespace of the workers' own (#253): the chart makes `runs.controller.workerNamespace` (or is pointed at one), the Role and RoleBinding are there and `--namespace` names it, so the controller's identity holds nothing in the release namespace, the hub's Secrets included; each worker's NetworkPolicy admits the controller's pods from the release namespace (`--allow-ingress-from-namespace`). The render test asserts the identity holds no grant in the release namespace; the kind E2E runs the driver in one namespace and its workers in another.
 - The run token and the binding reach the pod the way they reach a child process — environment and a mounted file — so the SDK does not know its location.
 - That reap is the `remote` half of Phase 11's start-up sweep; a `local` worker seldom needs it, the launcher having killed it, and the pid record covers a survivor.
 

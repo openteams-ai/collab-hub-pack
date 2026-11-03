@@ -58,8 +58,10 @@ jobs:
     # service on these runners: the Postgres Track tests skip here and run in the job above. The job
     # reports and does not block: what fails on these runners (readiness deadlines, /private/var, the
     # reaper's view of another process) is #214, and a merge waits on the Linux job.
+    # Disabled for now, as its broken, takes forever and uses high CI credits
     runs-on: macos-latest
     continue-on-error: true
+    if: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

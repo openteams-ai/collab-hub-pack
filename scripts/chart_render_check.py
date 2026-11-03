@@ -59,10 +59,14 @@ class Rendered:
     def __init__(self, docs: list[dict]) -> None:
         self.docs = docs
         deployments = {d["metadata"]["labels"][COMPONENT_LABEL]: d for d in docs if d.get("kind") == "Deployment"}
-        assert set(deployments) <= {"api", "indexer", "run-controller"}, sorted(deployments)
+        assert set(deployments) <= {"api", "indexer", "run-controller", "web"}, sorted(deployments)
         self.api = Workload(deployments["api"])
         self.indexer = Workload(deployments["indexer"]) if "indexer" in deployments else None
         self.controller = Workload(deployments["run-controller"]) if "run-controller" in deployments else None
+        self.web = Workload(deployments["web"]) if "web" in deployments else None
+        self.nebariapps = {
+            d["metadata"]["labels"][COMPONENT_LABEL]: d for d in docs if d.get("kind") == "NebariApp"
+        }
         self.roles = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "Role"}
         self.bindings = [d for d in docs if d.get("kind") == "RoleBinding"]
         self.service_accounts = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "ServiceAccount"}
@@ -161,6 +165,7 @@ class Rendered:
 
 
 def case_default(r: Rendered) -> None:
+    assert r.web is None and "web" not in r.nebariapps, "the web client rendered without web.enabled"
     assert r.cogs_env == ["COLLAB_HUB_API__COGS__INDEX__ENABLED"], r.cogs_env
     assert not [n for n in r.env if n.startswith("COLLAB_HUB_API__FEATURES__")], "flag vars rendered with no flags set"
     r.api_does_not_sweep()
@@ -441,7 +446,68 @@ def case_run_controller_remote(r: Rendered) -> None:
     assert "run-cache" not in r.volumes and "run-tmp" not in r.volumes  # nothing of a worker's on the API pod
 
 
+def case_web(r: Rendered) -> None:
+    web, app = r.web, r.nebariapps.get("web")
+    assert web is not None and app is not None, "web.enabled rendered no web Deployment or NebariApp"
+    namespace, name = app["metadata"]["namespace"], app["metadata"]["name"]
+    auth = app["spec"]["auth"]
+    # The gateway signs users in, forwards their token, and answers a fetch
+    # without a session with a 401 rather than a redirect it cannot follow.
+    assert app["spec"]["hostname"] == "collab.example.test"
+    assert auth["enforceAtGateway"] is True and auth["forwardAccessToken"] is True, auth
+    assert {"name": "Sec-Fetch-Mode", "value": "cors"} in auth["denyRedirect"], auth.get("denyRedirect")
+    assert "routing" not in app["spec"] or not app["spec"]["routing"].get("publicRoutes"), "nothing may skip sign-in"
+    # The operator names the client "<namespace>-<NebariApp name>"; its tokens
+    # must name it as their audience, which the chat service checks.
+    client_id = f"{namespace}-{name}"
+    mappers = auth["keycloakConfig"]["protocolMappers"]
+    assert [m["config"]["included.client.audience"] for m in mappers if m["protocolMapper"] == "oidc-audience-mapper"] == [
+        client_id
+    ], mappers
+
+    front, chat = web.containers["front"], web.containers["chat"]
+    chat_env = {e["name"]: e for e in chat["env"]}
+    front_env = {e["name"]: e for e in front["env"]}
+    # The chat service is the client: it reads the id and secret from the
+    # Secret the operator writes, "<NebariApp name>-oidc-client".
+    for var, key in (("APOLLO_WEB_OIDC_AUDIENCE", "client-id"), ("APOLLO_WEB_OIDC_CLIENT_SECRET", "client-secret")):
+        assert chat_env[var]["valueFrom"]["secretKeyRef"] == {"name": f"{name}-oidc-client", "key": key}, chat_env[var]
+    # It exchanges for the audience the hub checks, and reaches the hub
+    # in-cluster, as the agents do.
+    assert chat_env["APOLLO_WEB_HUB_AUDIENCE"]["value"] == "apollo-desktop"
+    assert chat_env["APOLLO_WEB_OIDC_ISSUER"]["value"] == "https://keycloak.example.test/realms/nebari"
+    api_url = f"http://{r.api.deployment['metadata']['name']}.{namespace}.svc:80"
+    assert chat_env["APOLLO_WEB_HUB_URL"]["value"] == api_url, chat_env["APOLLO_WEB_HUB_URL"]
+    assert chat_env["RAVNAR_STORAGE__DATABASE__DSN"]["valueFrom"]["secretKeyRef"] == {
+        "name": "web-chat-postgres",
+        "key": "DATABASE_URL",
+    }
+    # The front reaches the chat service inside the pod, and only it is served.
+    port = str(chat_env["RAVNAR_SERVER__PORT"]["value"])
+    assert front_env["CHAT_SERVICE"]["value"] == f"127.0.0.1:{port}", front_env["CHAT_SERVICE"]
+    (service,) = [s for s in r.services if s["spec"]["selector"][COMPONENT_LABEL] == "web"]
+    assert app["spec"]["service"] == {"name": service["metadata"]["name"], "port": service["spec"]["ports"][0]["port"]}
+    assert service["spec"]["ports"][0]["targetPort"] == front["ports"][0]["containerPort"]
+    # One tag pins both images; the chat image is built for amd64 only.
+    assert front["image"].rsplit(":", 1)[1] == chat["image"].rsplit(":", 1)[1] == "sha-abc1234"
+    assert web.pod["nodeSelector"] == {"kubernetes.io/arch": "amd64"}, web.pod.get("nodeSelector")
+    assert web.pod["securityContext"]["runAsNonRoot"] is True
+
+    # One agent per model, reaching the hub and the AI gateway as the user.
+    config = yaml.safe_load(r.configmaps[f"{name}-chat"]["data"]["chat-service.yaml"])
+    assert config["security"]["authenticator"] == "ravnar_apollo.web:GatewayIdentityAuthenticator"
+    assert config["agents"]["dynamic"]["enabled"] is False
+    (agent,) = config["agents"]["static"].values()
+    params = agent["params"]
+    assert agent["cls_or_fn"] == "ravnar_apollo.web.WebChatAgent"
+    assert (params["model_id"], params["display_name"], params["supports_tools"]) == ("qwen", "Qwen", True)
+    assert params["model_base_url"] == "https://llm-internal.example.test/v1"
+    assert params["hub_url"] == "https://example.test"
+    assert params["frames_api_url"] == params["connectors_api_url"] == api_url
+
+
 CASES = {
+    "web": case_web,
     "serve-off": case_serve_off,
     "serve-with-indexer": case_serve_with_indexer,
     "publish-with-indexer": case_publish_with_indexer,

@@ -1,0 +1,245 @@
+{{- if .Values.web.enabled }}
+{{- $component := "web" }}
+{{- $name := include "collab-hub.component-name" (dict "top" . "component" $component) }}
+{{- $bearer := .Values.frames.auth.bearer }}
+{{- $issuer := required "web.oidc.issuer (or frames.auth.bearer.issuer) is required" (.Values.web.oidc.issuer | default $bearer.issuer) }}
+{{- $jwksUrl := .Values.web.oidc.jwksUrl | default $bearer.jwksUrl }}
+{{- $hubAudience := required "web.hubAudience (or frames.auth.bearer.audience) is required: the chat service exchanges for the hub's audience" (.Values.web.hubAudience | default $bearer.audience) }}
+{{- $tag := required "web.image.tag is required" .Values.web.image.tag }}
+{{- $hubApi := printf "http://%s.%s.svc:%v" (include "collab-hub.component-name" (dict "top" . "component" "api")) .Release.Namespace .Values.api.service.port }}
+{{- $hubUrl := required "web.hubUrl is required" .Values.web.hubUrl }}
+{{- $hubHost := (urlParse $hubUrl).host }}
+{{- $chatPort := 8081 }}
+{{- if not .Values.web.models }}
+{{- fail "web.models is required: the chat service has one agent per hub model" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-chat
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+data:
+  # Ravnar's settings (RAVNAR_CONFIG). One agent per hub model, reaching the
+  # hub and the AI gateway as the user whose run it is; there are no tokens
+  # here.
+  chat-service.yaml: |
+    security:
+      authenticator: ravnar_apollo.web:GatewayIdentityAuthenticator
+    agents:
+      dynamic:
+        enabled: false
+      static:
+        {{- range .Values.web.models }}
+        {{ printf "hub:%s:%s" $hubHost .id | quote }}:
+          cls_or_fn: ravnar_apollo.web.WebChatAgent
+          params:
+            model_id: {{ .id | quote }}
+            model_base_url: {{ required "web.llmBaseUrl is required" $.Values.web.llmBaseUrl | quote }}
+            display_name: {{ .displayName | quote }}
+            provider: hub
+            hub_url: {{ $hubUrl | quote }}
+            frames_api_url: {{ $hubApi | quote }}
+            connectors_api_url: {{ $hubApi | quote }}
+            owned_by: self-hosted
+            supports_tools: {{ .supportsTools | default false }}
+        {{- end }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}-files
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.web.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.web.persistence.size }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+spec:
+  # One replica: the uploaded files are on a ReadWriteOnce volume.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "collab-hub.selectorLabels" (dict "top" . "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 8 }}
+      annotations:
+        checksum/chat-config: {{ .Values.web.models | toJson | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.web.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        # The app, and the chat service under the paths the app calls.
+        - name: front
+          image: "{{ .Values.web.image.registry }}/web-front:{{ $tag }}"
+          imagePullPolicy: {{ .Values.web.image.pullPolicy }}
+          env:
+            - name: CHAT_SERVICE
+              value: "127.0.0.1:{{ $chatPort }}"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          {{- with .Values.web.resources.front }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        - name: chat
+          image: "{{ .Values.web.image.registry }}/web-chat:{{ $tag }}"
+          imagePullPolicy: {{ .Values.web.image.pullPolicy }}
+          env:
+            - name: RAVNAR_CONFIG
+              value: /etc/collab-web/chat-service.yaml
+            # Only the front, in this pod, talks to it.
+            - name: RAVNAR_SERVER__HOSTNAME
+              value: "127.0.0.1"
+            - name: RAVNAR_SERVER__PORT
+              value: "{{ $chatPort }}"
+            - name: RAVNAR_STORAGE__FILES__PATH
+              value: /var/lib/collab-web/files
+            - name: RAVNAR_STORAGE__DATABASE__DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "web.database.existingSecret is required" .Values.web.database.existingSecret }}
+                  key: {{ .Values.web.database.databaseUrlKey }}
+            - name: APOLLO_WEB_OIDC_ISSUER
+              value: {{ $issuer | quote }}
+            {{- with $jwksUrl }}
+            - name: APOLLO_WEB_OIDC_JWKS_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.web.oidc.tokenUrl }}
+            - name: APOLLO_WEB_OIDC_TOKEN_URL
+              value: {{ . | quote }}
+            {{- end }}
+            # The client the operator provisions for this host, whose tokens
+            # the gateway forwards: the chat service verifies them for it and
+            # exchanges them as it.
+            - name: APOLLO_WEB_OIDC_AUDIENCE
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $name }}-oidc-client
+                  key: client-id
+            - name: APOLLO_WEB_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $name }}-oidc-client
+                  key: client-secret
+            - name: APOLLO_WEB_HUB_AUDIENCE
+              value: {{ $hubAudience | quote }}
+            - name: APOLLO_WEB_HUB_URL
+              value: {{ $hubApi | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: chat-config
+              mountPath: /etc/collab-web
+              readOnly: true
+            - name: files
+              mountPath: /var/lib/collab-web/files
+            - name: tmp
+              mountPath: /tmp
+          {{- with .Values.web.resources.chat }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: chat-config
+          configMap:
+            name: {{ $name }}-chat
+        - name: files
+          persistentVolumeClaim:
+            claimName: {{ $name }}-files
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "collab-hub.selectorLabels" (dict "top" . "component" $component) | nindent 4 }}
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 8080
+---
+{{- /* Everything behind sign-in: the gateway forwards the user's token, and
+answers a fetch with no session with a 401 instead of a redirect the page
+cannot follow. The client's own tokens name it as their audience, which the
+chat service checks; the operator names it "<namespace>-<NebariApp name>". */}}
+{{- $nebariapp := dict
+    "hostname" (required "web.nebariapp.hostname is required" .Values.web.nebariapp.hostname)
+    "gateway" .Values.web.nebariapp.gateway
+    "landingPage" .Values.web.nebariapp.landingPage
+    "routing" (dict "routes" (list (dict "pathPrefix" "/" "pathType" "PathPrefix")) "tls" (dict "enabled" true))
+    "auth" (dict
+      "enabled" true
+      "provider" "keycloak"
+      "provisionClient" true
+      "enforceAtGateway" true
+      "forwardAccessToken" true
+      "scopes" (list "openid" "profile" "email")
+      "denyRedirect" (list (dict "name" "Sec-Fetch-Mode" "value" "cors"))
+      "keycloakConfig" (dict "protocolMappers" (list (dict
+        "name" "self-audience"
+        "protocolMapper" "oidc-audience-mapper"
+        "config" (dict
+          "included.client.audience" (printf "%s-%s" .Release.Namespace $name)
+          "access.token.claim" "true"
+          "id.token.claim" "false"))))) }}
+{{ include "collab-hub.nebariapp" (dict
+    "top" .
+    "component" $component
+    "service" (dict "name" $name "port" 80)
+    "nebariapp" $nebariapp
+) }}
+{{- end }}

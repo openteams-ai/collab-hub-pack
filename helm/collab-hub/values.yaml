@@ -884,3 +884,64 @@ runs:
           memory: 4Gi
       cacheSizeLimit: 10Gi
       tmpSizeLimit: 2Gi
+
+# The Collab web client (docs/web-client.md): the desktop app's frontend in a
+# browser, on a host of its own behind the gateway, with a chat service that
+# acts as the signed-in user. Its images are built by apollo-desktop.
+web:
+  # -- Whether to deploy the web client.
+  enabled: false
+  image:
+    # -- Where the web-front and web-chat images live.
+    registry: ghcr.io/openteams-ai/apollo-desktop
+    # -- The sha-<short> both images were built at. Required.
+    tag: ""
+    pullPolicy: IfNotPresent
+  nebariapp:
+    # -- The web client's own host. Required.
+    hostname: ""
+    gateway: public
+    landingPage:
+      enabled: true
+      displayName: Collab
+      description: Chat with your Frames and connectors in the browser.
+      category: AI
+      icon: 💬
+      priority: 40
+  # -- The hub address the web client shows and matches its agents by: the
+  # issuer's host without its leading "keycloak." (as the desktop derives it).
+  hubUrl: ""
+  # -- The AI gateway's OpenAI-compatible base URL the agents call as the
+  # user, e.g. https://llm-internal.<domain>/v1.
+  llmBaseUrl: ""
+  # -- The hub's models, one chat agent each: id, displayName, and
+  # supportsTools (whether it may call Frames and connector tools).
+  models: []
+  oidc:
+    # -- The realm's issuer. Empty inherits frames.auth.bearer.issuer.
+    issuer: ""
+    # -- Where the chat service fetches the realm's keys. Empty inherits
+    # frames.auth.bearer.jwksUrl.
+    jwksUrl: ""
+    # -- The realm's token endpoint, for the token exchange. Empty finds it by
+    # discovery from the issuer.
+    tokenUrl: ""
+  # -- The audience of the hub tokens the chat service exchanges for. Empty
+  # inherits frames.auth.bearer.audience, which is what the hub checks.
+  hubAudience: ""
+  database:
+    # -- Secret holding the chat service's Postgres URL
+    # (postgresql://user:password@host/db), e.g. the "<cluster>-app" Secret
+    # CloudNativePG writes, with databaseUrlKey "uri". Required.
+    existingSecret: ""
+    databaseUrlKey: DATABASE_URL
+  persistence:
+    # -- The chat service's uploaded files.
+    size: 10Gi
+    storageClass: ""
+  # -- The chat image is built for amd64 only.
+  nodeSelector:
+    kubernetes.io/arch: amd64
+  resources:
+    front: {}
+    chat: {}

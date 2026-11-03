@@ -24,8 +24,18 @@ reaps any of their ``local`` workers left alive. Under ``dbos`` and
 ``temporal`` the engine takes ownership after pickup (Phases 27 and 33).
 
 **Models.** ``--models FILE`` is the hub's ``models:`` block: the models it
-offers and which Cog talks to which; each worker receives its Cog's model, and
-no other (``binding.ModelsBlock``).
+offers, from which the inventory an installed Cog's ``resolve`` sees is
+generated, and which development package talks to which
+(``binding.ModelsBlock``). A worker of an installed Cog receives that Cog's
+binding record, as a mounted file plus the key it names by reference; a
+worker of a package run by name receives the model the block binds it to.
+
+**Installs.** The controller takes each install asked for through
+``POST /v1/cogs/installs`` (``installer.Installer``): fetch the artifact
+through the registry (``--registry-*``), bind it through its own
+``resolve``, and check it on a worker materialized like any run's; and each
+removal asked for. The install store is the Track's database, or the SQLite
+file beside the Track.
 
 **Health.** With ``--health-port``, ``GET /healthz`` answers 200 while the
 controller is passing over the Track, and ``GET /readyz`` once it has started
@@ -45,13 +55,15 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from . import intents
-from .binding import BindingResolutionError, ModelsBlock
+from . import artifacts, intents
+from .binding import BindingRecord, BindingResolutionError, Delivered, ModelsBlock, inventory
+from .installer import Installer, harnesses_installed
+from .installs import INSTALL_RUN_PREFIX, InstallStore, PostgresInstallStore, SqliteInstallStore
 from .locations import AGENT_LOCATIONS
 from .runner import LifecycleRunner, RetryTaken, RunBusy, RunOwnedElsewhere
 from .states import InvalidTransition, RunState
@@ -62,14 +74,63 @@ _log = logging.getLogger("collab_hub_execution.controller")
 POSTGRES_SCHEMES = ("postgresql://", "postgres://")
 TRACK_TABLES = ("collab_track_events", "collab_track_payloads")
 """The Track's tables on Postgres, both from the hub's migrations: events, and payloads too large to keep inline."""
+INSTALL_TABLES = ("collab_cog_installs", "collab_cog_install_events")
+"""The installs' tables on Postgres, from the hub's migrations (migration 17)."""
+
+
+class BindingDelivery:
+    """What the executor asks for each worker: the binding of the installed Cog a step runs, or the ``models:``
+    block's model for a package run by name, or the binding an install under check is given.
+
+    An installed Cog's step names its install (``OpStep.install``), and the
+    install's record says what to deliver: the binding file, and the key its
+    model names, read from the controller's environment as the worker starts.
+    """
+
+    def __init__(self, track: TrackStore, installs: InstallStore | None, models: ModelsBlock | None,
+                 installer: Installer | None = None, environ: Mapping[str, str] | None = None) -> None:
+        self.views = intents.RunViews(track)
+        self.installs = installs
+        self.models = models
+        self.installer = installer
+        self.environ = environ
+        self._by_name = models.delivery(environ) if models is not None else None
+
+    def __call__(self, cog: str, run_id: str, instance: str) -> Delivered:
+        if run_id.startswith(INSTALL_RUN_PREFIX):
+            delivered = self.installer.delivered(run_id) if self.installer is not None else None
+            return delivered if delivered is not None else Delivered()
+        install_id = self._install_of(cog, run_id)
+        if install_id is not None and self.installs is not None:
+            row = self.installs.get(install_id)
+            if row is None or not row.invokable or row.binding is None:
+                raise BindingResolutionError(f"step of {run_id} runs install {install_id}, which is "
+                                             f"{row.state if row else 'gone'}: only an invokable Cog is materialized")
+            return BindingRecord.from_dict(row.binding).delivery(self.environ)
+        if self._by_name is not None:
+            return Delivered(env=self._by_name(cog, run_id, instance))
+        return Delivered()
+
+    def _install_of(self, cog: str, run_id: str) -> str | None:
+        try:
+            view = self.views.view(run_id)
+        except intents.RunUnreadable:
+            return None
+        if view is None:
+            return None
+        return next((step.install for step in view.op.steps if step.cog == cog and step.install), None)
 
 
 class RunController:
     """Watches a Track and advances what it finds there, on one lifecycle runner."""
 
     def __init__(self, runner: LifecycleRunner, *, poll_interval: float = 0.25, session_grace: float = 30.0,
-                 track_spec: str | None = None, owner_check_interval: float = 30.0) -> None:
+                 track_spec: str | None = None, owner_check_interval: float = 30.0,
+                 installer: Installer | None = None) -> None:
         self.runner = runner
+        self.installer = installer
+        """Takes the installs and removals asked for, on this controller's executor; ``None`` on a host with no
+        install store."""
         self.poll_interval = poll_interval
         self.session_grace = session_grace
         """How long a worker that was invoked may answer a turn "no session" before the turn fails."""
@@ -130,6 +191,11 @@ class RunController:
                 continue
             except Exception:  # noqa: BLE001
                 _log.exception("handling %s failed; the next pass tries again", row.run_id)
+        if self.installer is not None:
+            try:
+                self.installer.tick()
+            except Exception:  # noqa: BLE001 - the installs are read again next pass
+                _log.exception("reading the installs failed")
 
     def _mine(self, view: intents.RunView) -> bool:
         """Whether this controller advances the run: it picked it up, or it is the only one on its Track."""
@@ -349,9 +415,9 @@ class RunController:
             stop.wait(self.poll_interval)
 
     def idle(self) -> bool:
-        """Whether nothing is being advanced or cancelled right now."""
+        """Whether nothing is being advanced, cancelled or installed right now."""
         threads = (*self._advancing.values(), *self._cancelling.values(), *self._turning.values())
-        return not any(thread.is_alive() for thread in threads)
+        return not any(thread.is_alive() for thread in threads) and (self.installer is None or self.installer.idle())
 
     def health(self) -> dict[str, Any]:
         """Liveness and readiness: passing over the Track lately; started, and the last pass read it."""
@@ -430,6 +496,20 @@ def open_track(spec: str) -> tuple[TrackStore, Any]:
     path = Path(spec)
     SqliteTrackStore.ensure_schema(path)
     return SqliteTrackStore(path), None
+
+
+def open_installs(spec: str, keep_open: Any) -> InstallStore:
+    """The install store beside the Track ``spec`` names: the same Postgres (its pool), or the same SQLite file."""
+    if spec.startswith(POSTGRES_SCHEMES):
+        with keep_open.connection(timeout=10) as connection:
+            missing = [table for table in INSTALL_TABLES if connection.execute(
+                "SELECT to_regclass(%s) IS NULL", (table,)).fetchone()[0]]
+        if missing:
+            raise TrackNotReady(f"this Postgres has no install store (missing {', '.join(missing)}): the hub's "
+                                "migrations create its tables")
+        return PostgresInstallStore(keep_open)
+    SqliteInstallStore.ensure_schema(spec)
+    return SqliteInstallStore(spec)
 
 
 def id_held(spec: str, controller: str) -> bool:
@@ -605,6 +685,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         default=number("COLLAB_CONTROLLER_WORKER_START_TIMEOUT", "120", float),
                         help="how long a worker may take to start and answer /healthz, which includes pixi building "
                              "a Cog's environment the first time it is launched")
+    parser.add_argument("--registry-credential-env", default=env("COLLAB_CONTROLLER_REGISTRY_CREDENTIAL_ENV"),
+                        metavar="NAME", help="the variable holding the registry credential (user:secret) a "
+                                             "published Cog is pulled with, through the registry's token endpoint; "
+                                             "what the hub exchanges a session for at /v1/cogs/registry-credentials")
+    parser.add_argument("--registry-token-env", default=env("COLLAB_CONTROLLER_REGISTRY_TOKEN_ENV"), metavar="NAME",
+                        help="the variable holding a bearer token the registry takes as it is, instead")
+    parser.add_argument("--registry-plain-http", default=env("COLLAB_CONTROLLER_REGISTRY_PLAIN_HTTP", ""),
+                        metavar="HOSTS", help="registry hosts reached over plain HTTP, comma-separated (a "
+                                              "cluster-local registry in development)")
+    parser.add_argument("--worker-cache-claim", default=env("COLLAB_CONTROLLER_WORKER_CACHE_CLAIM"), metavar="PVC",
+                        help="at the remote location, the PersistentVolumeClaim every worker pod mounts as its "
+                             "cache, so a second run on the same pixi.lock finds the package and its environment; "
+                             "an emptyDir of each pod's own when unset")
+    parser.add_argument("--worker-cache-path", default=env("COLLAB_CONTROLLER_WORKER_CACHE_PATH"), metavar="DIR",
+                        help="where this controller reaches that cache itself (the claim mounted here), so an "
+                             "uninstall evicts the Cog's package; at the local location, the cache under "
+                             "--work-dir unless given")
     parser.add_argument("--wait", type=float, default=number("COLLAB_CONTROLLER_WAIT", "0", float), metavar="SECONDS",
                         help="how long to wait at start for the Track's tables (the API's migrations create them) "
                              "and for this controller's id (held by the one a rollout replaces); 0 refuses at "
@@ -665,7 +762,7 @@ def main(argv: list[str] | None = None) -> int:
                         datefmt="%H:%M:%S", stream=sys.stderr)
     logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per /healthz poll is noise here
 
-    deliver = None
+    models = None
     if args.models:
         try:
             models = ModelsBlock.load(args.models)
@@ -673,7 +770,15 @@ def main(argv: list[str] | None = None) -> int:
         except BindingResolutionError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
-        deliver = models.delivery()
+    registry_credential = os.environ.get(args.registry_credential_env or "") or None
+    registry_token = os.environ.get(args.registry_token_env or "") or None
+    for option, name in (("--registry-credential-env", args.registry_credential_env),
+                         ("--registry-token-env", args.registry_token_env)):
+        if name and not os.environ.get(name):
+            print(f"error: {option} names {name}, which is not set", file=sys.stderr)
+            return 2
+    plain_http = tuple(host.strip() for host in args.registry_plain_http.split(",") if host.strip())
+    registry = artifacts.RegistryClient(credential=registry_credential, token=registry_token, plain_http=plain_http)
 
     # Health is served from the start: a controller waiting for its Track or its id is alive, and not
     # ready, so a liveness probe leaves it to wait (a readiness probe on it would hold its pod back).
@@ -690,6 +795,8 @@ def main(argv: list[str] | None = None) -> int:
     # Only what may come soon is waited for: a Track misconfigured stops the controller at once.
     track, keep_open = _patiently(lambda: open_track(args.track), TrackNotReady, deadline,
                                   "the Track is not ready", starting)
+    installs = _patiently(lambda: open_installs(args.track, keep_open), TrackNotReady, deadline,
+                          "the install store is not ready", starting)
     try:
         still_held = _patiently(lambda: hold_id(args.track, args.id), IdTaken, deadline,
                                 f"another controller holds the id {args.id!r}", starting)
@@ -697,15 +804,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}: each controller on a Track has its own --id", file=sys.stderr)
         return 1
 
+    cache_path = args.worker_cache_path
     if args.location == "local":
+        cache_path = cache_path or str(Path(args.work_dir) / "artifacts")
         location_settings: dict[str, Any] = {
             "packages": args.packages, "allow": args.allow, "work_dir": args.work_dir,
-            "environment": args.environment}
+            "environment": args.environment, "registry": registry, "artifact_cache": cache_path}
     else:
         location_settings = {
             "image": args.image, "namespace": args.namespace, "controller": args.id,
             "allow_ingress_from": args.allow_ingress_from or None,
-            "insecure_skip_network_policy": bool(args.insecure_skip_network_policy)}
+            "insecure_skip_network_policy": bool(args.insecure_skip_network_policy),
+            "cache_claim": args.worker_cache_claim or None, "registry_credential": registry_credential,
+            "registry_plain_http": plain_http}
         if args.worker_resources:
             try:
                 location_settings["resources"] = json.loads(args.worker_resources)
@@ -717,11 +828,17 @@ def main(argv: list[str] | None = None) -> int:
                                 ("worker_tmp_size_limit", "tmp_size_limit")):
             if getattr(args, option):
                 location_settings[setting] = getattr(args, option)
+    delivery = BindingDelivery(track, installs, models)
     runner = LifecycleRunner(
         track=track, backend=args.backend, location=args.location, controller=args.id,
         location_settings={**location_settings, "interaction_timeout": args.interaction_timeout or None,
-                           "ready_timeout": args.worker_start_timeout, "deliver": deliver})
-    controller = RunController(runner, poll_interval=args.poll_interval, track_spec=args.track)
+                           "ready_timeout": args.worker_start_timeout, "deliver": delivery})
+    packages = runner.executor.source if args.location == "local" else None
+    installer = Installer(
+        installs, runner.executor, controller=args.id, registry=registry, packages=packages, cache=cache_path,
+        inventory=lambda org_id: inventory(models, harnesses_installed(installs, org_id)))
+    delivery.installer = installer
+    controller = RunController(runner, poll_interval=args.poll_interval, track_spec=args.track, installer=installer)
     controller.start()
     starting["controller"] = controller
 

@@ -288,12 +288,16 @@ class Installer:
             except Exception:  # noqa: BLE001 - what could not be swept is logged, and the removal goes on
                 _log.exception("sweeping the workers of install %s failed", install_id)
         if self.cache is not None and artifacts.is_reference(row.reference):
+            # The package and the environment pixi built beside it go when the last install of their lock does;
+            # another install of the same lock (the same reference, or another artifact with the same
+            # environment) keeps them.
             others = [r for r in self.store.list(include_uninstalled=False)
                       if r.id != row.id and r.lock_digest == row.lock_digest]
-            try:
-                artifacts.evict(row.reference, self.cache, keep_lock=bool(others))
-            except Exception:  # noqa: BLE001
-                _log.exception("evicting %s from the cache failed", row.reference)
+            if not others:
+                try:
+                    artifacts.evict(row.reference, self.cache)
+                except Exception:  # noqa: BLE001
+                    _log.exception("evicting %s from the cache failed", row.reference)
         with self._lock:
             self._deliveries.pop(row.run_id, None)
         try:

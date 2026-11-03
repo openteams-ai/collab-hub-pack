@@ -44,7 +44,8 @@ def store(request, tmp_path):
 
         pool = ConnectionPool(TEST_PG, min_size=1, max_size=4, open=True)
         with pool.connection() as conn:
-            for statement in ("DROP TABLE IF EXISTS collab_cog_install_events", "DROP TABLE IF EXISTS collab_cog_installs",
+            for statement in ("DROP TABLE IF EXISTS collab_cog_install_events",
+                              "DROP TABLE IF EXISTS collab_cog_installs",
                               "DROP SEQUENCE IF EXISTS collab_cog_install_event_sequence"):
                 conn.execute(statement)
             PostgresInstallStore.ensure_schema(conn)

@@ -942,6 +942,10 @@ web:
     # -- The chat service's uploaded files.
     size: 10Gi
     storageClass: ""
+  # -- How long one request through the gateway may last. A chat answer is
+  # one request that streams until its run ends (each model read may wait up
+  # to 10 minutes, and tool calls add more), and Envoy's default is 15 s.
+  requestTimeoutSeconds: 1800
   # -- The chat image is built for amd64 only.
   nodeSelector:
     kubernetes.io/arch: amd64

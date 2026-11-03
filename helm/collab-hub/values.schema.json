@@ -1364,6 +1364,10 @@
               "type": "object"
             }
           }
+        },
+        "requestTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 15
         }
       }
     }

@@ -495,6 +495,17 @@ def case_web(r: Rendered) -> None:
     assert web.pod["imagePullSecrets"] == [{"name": "ghcr-pull"}], web.pod.get("imagePullSecrets")
     assert web.pod["securityContext"]["runAsNonRoot"] is True
 
+    # A chat answer streams for as long as the run takes; the operator's route
+    # would cut it at Envoy's 15 s default, so the chart lifts the limit.
+    (policy,) = [
+        d for d in r.docs
+        if d.get("kind") == "BackendTrafficPolicy" and d["metadata"]["labels"][COMPONENT_LABEL] == "web"
+    ]
+    assert policy["spec"]["targetRefs"] == [
+        {"group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": f"{name}-route"}
+    ], policy["spec"]
+    assert policy["spec"]["timeout"] == {"http": {"requestTimeout": "1800s"}}, policy["spec"]
+
     # One agent per model, reaching the hub and the AI gateway as the user.
     config = yaml.safe_load(r.configmaps[f"{name}-chat"]["data"]["chat-service.yaml"])
     assert config["security"]["authenticator"] == "ravnar_apollo.web:GatewayIdentityAuthenticator"

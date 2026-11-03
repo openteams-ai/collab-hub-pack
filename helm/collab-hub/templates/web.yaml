@@ -247,4 +247,27 @@ chat service checks; the operator names it "<namespace>-<NebariApp name>". */}}
     "service" (dict "name" $name "port" 80)
     "nebariapp" $nebariapp
 ) }}
+{{- /* A chat answer streams for as long as its run takes. The HTTPRoute is the
+operator's ("<NebariApp name>-route") and NebariApp has no timeout field, so
+without this the route keeps Envoy's 15 s default and cuts a longer answer
+off mid-stream (as api-cogs-route-timeout.yaml does for /v2). */}}
+{{- if not (.Capabilities.APIVersions.Has "gateway.envoyproxy.io/v1alpha1/BackendTrafficPolicy") }}
+{{- fail "web: this cluster has no gateway.envoyproxy.io/v1alpha1 BackendTrafficPolicy, so chat answers would be cut at Envoy's 15 s default. Install Envoy Gateway's CRDs (an offline helm template needs --api-versions gateway.envoyproxy.io/v1alpha1/BackendTrafficPolicy)." }}
+{{- end }}
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: {{ $name }}-chat-streams
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ $name }}-route
+  timeout:
+    http:
+      requestTimeout: {{ printf "%ds" (int64 .Values.web.requestTimeoutSeconds) | quote }}
 {{- end }}

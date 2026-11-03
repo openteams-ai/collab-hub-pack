@@ -9,6 +9,8 @@ web:
   enabled: true
   image:
     tag: sha-abc1234
+    pullSecrets:
+      - name: ghcr-pull
   nebariapp:
     hostname: collab.example.test
   hubUrl: https://example.test

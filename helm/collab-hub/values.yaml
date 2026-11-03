@@ -897,6 +897,9 @@ web:
     # -- The sha-<short> both images were built at. Required.
     tag: ""
     pullPolicy: IfNotPresent
+    # -- Secrets the pod pulls the images with, e.g. [{name: ghcr-pull}],
+    # when the registry needs credentials.
+    pullSecrets: []
   nebariapp:
     # -- The web client's own host. Required.
     hostname: ""

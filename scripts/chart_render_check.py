@@ -491,6 +491,8 @@ def case_web(r: Rendered) -> None:
     # One tag pins both images; the chat image is built for amd64 only.
     assert front["image"].rsplit(":", 1)[1] == chat["image"].rsplit(":", 1)[1] == "sha-abc1234"
     assert web.pod["nodeSelector"] == {"kubernetes.io/arch": "amd64"}, web.pod.get("nodeSelector")
+    # The images are private: the pod pulls them with the Secret named.
+    assert web.pod["imagePullSecrets"] == [{"name": "ghcr-pull"}], web.pod.get("imagePullSecrets")
     assert web.pod["securityContext"]["runAsNonRoot"] is True
 
     # One agent per model, reaching the hub and the AI gateway as the user.

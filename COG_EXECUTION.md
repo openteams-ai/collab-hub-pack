@@ -835,7 +835,7 @@ Needs only the run API, Phases 12 and 18, so it lands before the worker becomes 
 The same runner, backend and Cog; the worker becomes a pod. Then the rest of the lifecycle a production hub needs: the artifact, install, the Cog's own `resolve`, budgets.
 
 #### Phase 22 — The `remote` location: workers in pods, and least-privilege RBAC
-**Issue** #6 · **Branch** `feat/cog-remote-location-6` · **Depends on** Phases 9, 11 · **Size** M · **Status** merged, #252; the workers' namespace, #253, merged PR_253
+**Issue** #6 · **Branch** `feat/cog-remote-location-6` · **Depends on** Phases 9, 11 · **Size** M · **Status** merged, #252; the workers' namespace, #253, merged #281
 
 Same runner, same `none`, same Hermes Cog — the worker becomes a pod. The only identity able to create workloads is the controller, never the public API.
 

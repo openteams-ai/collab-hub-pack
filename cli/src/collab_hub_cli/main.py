@@ -440,6 +440,164 @@ def cog_show(cog_id: Annotated[str, typer.Argument(help="The Cog's id, <publishe
     ])
 
 
+# --- installing a Cog by digest -----------------------------------------------------------------
+
+INSTALL_SETTLED = ("invokable", "uninstalled")
+INSTALL_WAIT_SECONDS = 1800
+"""How long `cog install --wait` follows an install: a first install builds the Cog's environment."""
+
+
+def _print_install(install: dict) -> None:
+    rows = [["install", install["id"]], ["cog", install.get("cog_id") or install["reference"]],
+            ["reference", install["reference"]], ["state", install["state"]]]
+    if install.get("failed_step"):
+        rows.append(["failed", install.get("failure") or install["failed_step"]])
+    if install.get("binding_id"):
+        rows.append(["binding", install["binding_id"]])
+    binding = install.get("binding") or {}
+    if binding.get("model"):
+        model = binding["model"]
+        rows.append(["model", f"{model.get('id')}  {model.get('endpoint') or ''} {model.get('model') or ''}".strip()])
+    if binding.get("harness"):
+        rows.append(["harness", f"{binding['harness'].get('id')}  {binding['harness'].get('reference') or ''}".strip()])
+    if install.get("picked_up_by"):
+        rows.append(["controller", install["picked_up_by"]])
+    width = max(len(label) for label, _ in rows)
+    for label, value in rows:
+        typer.echo(f"{label.ljust(width)}  {value}")
+    if install.get("events"):
+        typer.echo("")
+        _table(["WHEN", "EVENT", "DETAIL"], [
+            [event["occurred_at"], event["type"],
+             _clip(json.dumps({k: v for k, v in event["payload"].items() if k != "reference"}), 70)]
+            for event in install["events"]])
+
+
+def _follow_install(hub: Hub, install: dict, *, quiet: bool) -> dict:
+    """Ask the hub for the install until it is invokable, stuck at a step, or gone."""
+
+    said = (install["state"], install.get("failed_step"))
+    deadline = time.monotonic() + INSTALL_WAIT_SECONDS
+    while install["state"] not in INSTALL_SETTLED and not install.get("failed_step"):
+        if time.monotonic() > deadline:
+            raise HubError(f"install {install['id']} is still {install['state']} after {INSTALL_WAIT_SECONDS} seconds")
+        time.sleep(POLL_SECONDS)
+        install = hub.get_json(f"/v1/cogs/installs/{install['id']}")
+        now = (install["state"], install.get("failed_step"))
+        if now != said and not quiet:
+            _err(f"{install['id']}: {install['state']}" + (f", {install['failed_step']} failed" if now[1] else ""))
+        said = now
+    return install
+
+
+@cog_app.command("install")
+@handled
+def cog_install(
+    cog: Annotated[str, typer.Argument(help="The Cog to install: its id (<publisher>/<name>, the newest version), "
+                                            "id@sha256:<digest> for one version, or its pinned reference.")],
+    package: Annotated[bool, typer.Option(
+        "--package", help="COG names a package of the hub's directory source (a development hub).")] = False,
+    wait: Annotated[bool, typer.Option(
+        "--wait", help="Follow the install until it is invokable or a step fails, and exit with its outcome.")] = False,
+    as_json: JsonOption = False,
+) -> None:
+    """Install a Cog by digest: pin it from the catalog, fetch it, bind it through its own `resolve`, check it.
+
+    The hub answers at once; a run controller moves the install through
+    fetched, bound and invokable, and `cog installs` shows where it is.
+    """
+
+    if package:
+        body = {"package": cog}
+    elif "@sha256:" in cog and "/" in cog.split("@", 1)[0] and cog.count("/") >= 2:
+        body = {"reference": cog}
+    elif "@sha256:" in cog:
+        cog_id, _, digest = cog.partition("@")
+        body = {"cog_id": cog_id, "digest": digest}
+    else:
+        body = {"cog_id": cog}
+    with Hub(_target()) as hub:
+        install = hub.request_json("POST", "/v1/cogs/installs", json=body)
+        _err(f"Installing {install.get('cog_id') or install['reference']} as {install['id']}: {install['state']}.")
+        if wait:
+            install = _follow_install(hub, install, quiet=False)
+    if as_json:
+        _print_json(install)
+    elif wait:
+        _print_install(install)
+    else:
+        typer.echo(install["id"])
+    if wait and not install["invokable"]:
+        raise typer.Exit(EXIT_HUB)
+
+
+@cog_app.command("installs")
+@handled
+def cog_installs(
+    state: Annotated[str | None, typer.Option("--state", help="Only installs in this state.")] = None,
+    all_installs: Annotated[bool, typer.Option("--all", help="Uninstalled ones too.")] = False,
+    as_json: JsonOption = False,
+) -> None:
+    """List the Cogs installed on the hub, and what each install has reached."""
+
+    params: dict[str, Any] = {}
+    if state:
+        params["state"] = state
+    if all_installs:
+        params["include_uninstalled"] = "true"
+    with Hub(_target()) as hub:
+        installs = list(hub.pages("/v1/cogs/installs", params))
+    if as_json:
+        _print_json(installs)
+        return
+    if not installs:
+        _err("No installs.")
+        return
+    _table(["INSTALL", "COG", "STATE", "FAILED", "BINDING", "DIGEST"], [
+        [i["id"], i.get("cog_id") or i["reference"], i["state"],
+         f"{i['failed_step']}" if i.get("failed_step") else "", i.get("binding_id") or "", i["digest"][:19]]
+        for i in installs])
+
+
+@cog_app.command("show-install")
+@handled
+def cog_show_install(install_id: Annotated[str, typer.Argument(help="The install's id.")],
+                     as_json: JsonOption = False) -> None:
+    """Show one install: its state, its binding, and every move its controller recorded."""
+
+    with Hub(_target()) as hub:
+        install = hub.get_json(f"/v1/cogs/installs/{install_id}")
+    if as_json:
+        _print_json(install)
+    else:
+        _print_install(install)
+
+
+@cog_app.command("uninstall")
+@handled
+def cog_uninstall(
+    install_id: Annotated[str, typer.Argument(help="The install's id, from `cog installs`.")],
+    wait: Annotated[bool, typer.Option("--wait", help="Wait until the controller has removed it.")] = False,
+    as_json: JsonOption = False,
+) -> None:
+    """Uninstall a Cog: the controller removes every runtime resource the install created."""
+
+    with Hub(_target()) as hub:
+        install = hub.request_json("DELETE", f"/v1/cogs/installs/{install_id}")
+        _err(f"Uninstalling {install_id} ({install.get('cog_id') or install['reference']}).")
+        if wait:
+            deadline = time.monotonic() + INSTALL_WAIT_SECONDS
+            while install["state"] != "uninstalled":
+                if time.monotonic() > deadline:
+                    raise HubError(f"install {install_id} is still {install['state']}")
+                time.sleep(POLL_SECONDS)
+                install = hub.get_json(f"/v1/cogs/installs/{install_id}")
+    if as_json:
+        _print_json(install)
+    else:
+        typer.echo(install["state"])
+
+
 # --- launching a Cog, and the runs that makes ---------------------------------------------------
 
 
@@ -507,7 +665,8 @@ def _finish(run: dict, as_json: bool) -> None:
 @cog_app.command("launch")
 @handled
 def cog_launch(
-    name: Annotated[str, typer.Argument(help="The Cog to launch: a package the hub's controller can run.")],
+    name: Annotated[str, typer.Argument(help="The Cog to launch: an installed Cog by its pinned reference, digest "
+                                             "or install id, or a package the hub's controller can run.")],
     entry: Annotated[str, typer.Option("--entry", help="The Cog's entry point to invoke.")] = "run",
     input_json: Annotated[str | None, typer.Option(
         "--input", help="The step's input, as JSON; `-` reads it from stdin.")] = None,
@@ -532,10 +691,15 @@ def cog_launch(
         value = None if raw is None or not raw.strip() else json.loads(raw)
     except ValueError as exc:
         raise config.UsageError(f"--input is not JSON: {exc}") from None
-    step = {"name": name.split("/")[-1], "cog": name, "entry_point": entry, "input": value,
-            "gate": {"escalate": gate}}
-    with Hub(_target()) as hub:
+    if name.startswith("inst-") or name.startswith("sha256:") or "@sha256:" in name:
+        # The run-one-installed-Cog form: the hub names the step after the Cog and runs it under its binding.
+        body = {"cog": name, "entry_point": entry, "input": value, "gate": {"escalate": gate},
+                **({"name": run_name} if run_name else {})}
+    else:
+        step = {"name": name.split("/")[-1], "cog": name, "entry_point": entry, "input": value,
+                "gate": {"escalate": gate}}
         body = {"steps": [step], **({"name": run_name} if run_name else {})}
+    with Hub(_target()) as hub:
         run = hub.request_json("POST", "/v1/runs", json=body)
         called = f" ({run_name})" if run_name else ""
         _err(f"Launched {name} as {run['id']}{called} on the {run['backend']} backend, workers {run['location']}.")

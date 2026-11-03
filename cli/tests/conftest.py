@@ -44,6 +44,8 @@ class Stub:
     revoked: list[dict] = field(default_factory=list)
     publishes_revocation: bool = True
     cogs: list[dict] = field(default_factory=list)
+    installs: list[dict] = field(default_factory=list)  # newest first, as the hub lists them
+    install_progress: dict[str, list[str]] = field(default_factory=dict)  # install id -> states on each later read
     runs: list[dict] = field(default_factory=list)  # newest first, as the hub lists them
     launchable: tuple[str, ...] = ("echo", "slow")
     turns: list[dict] = field(default_factory=list)
@@ -180,6 +182,54 @@ class Stub:
             more = offset + limit < len(items)
             return httpx.Response(200, json={"items": page, "limit": limit, "offset": offset,
                                              "next_offset": offset + limit if more else None})
+        if path == "/v1/cogs/installs" and request.method == "POST":
+            body = json.loads(request.content)
+            cog = next((c for c in self.cogs if c["cog_id"] == body.get("cog_id")
+                        or c["reference"] == body.get("reference")
+                        or (body.get("digest") and c["digest"] == body["digest"])), None)
+            if cog is None and not body.get("package"):
+                return httpx.Response(404, json={"error": {"code": "cog_not_found", "message": "Cog not found"}})
+            install = {"id": f"inst-{len(self.installs) + 1:012x}", "state": "published", "invokable": False,
+                       "reference": cog["reference"] if cog else body["package"],
+                       "digest": cog["digest"] if cog else "sha256:" + "0" * 64,
+                       "cog_id": cog["cog_id"] if cog else body["package"], "failed_step": None, "failure": None,
+                       "binding_id": None, "binding": None, "picked_up_by": None, "requested_by": user,
+                       "uninstall_requested_by": None, "created_at": "2026-10-02T08:00:00+00:00",
+                       "updated_at": "2026-10-02T08:00:00+00:00", "kind": "context", "events": None}
+            self.installs.insert(0, install)
+            return httpx.Response(202, json=install)
+        if path == "/v1/cogs/installs":
+            limit, offset = int(request.url.params["limit"]), int(request.url.params["offset"])
+            wanted = request.url.params.get("state")
+            items = [i for i in self.installs if (wanted is None or i["state"] == wanted)
+                     and (i["state"] != "uninstalled" or request.url.params.get("include_uninstalled") == "true")]
+            page = items[offset:offset + limit]
+            return httpx.Response(200, json={"items": page,
+                                             "next_offset": offset + limit if offset + limit < len(items) else None})
+        if path.startswith("/v1/cogs/installs/"):
+            install_id = path.removeprefix("/v1/cogs/installs/")
+            install = next((i for i in self.installs if i["id"] == install_id), None)
+            if install is None:
+                return httpx.Response(404, json={"error": {"code": "install_not_found",
+                                                            "message": f"No install {install_id}"}})
+            if request.method == "DELETE":
+                install["uninstall_requested_by"] = user
+                self.install_progress[install_id] = ["uninstalled"]
+                return httpx.Response(202, json=install)
+            progress = self.install_progress.get(install_id)
+            if progress:
+                state = progress.pop(0)
+                if state.endswith(" failed"):
+                    install.update(state="bound", failed_step=state.split()[0],
+                                   failure=f"{state.split()[0]}: model-unavailable: 503")
+                else:
+                    install.update(state=state, invokable=state == "invokable",
+                                   binding_id="bnd-0000000000000001" if state in ("bound", "invokable") else None,
+                                   binding={"id": "bnd-0000000000000001", "model": {"id": "model:fake",
+                                            "endpoint": "http://fake/v1", "model": "fake-model"}}
+                                   if state in ("bound", "invokable") else None)
+            return httpx.Response(200, json={**install, "events": [
+                {"type": "install_fetched", "occurred_at": "2026-10-02T08:00:01+00:00", "payload": {}}]})
         if path.startswith("/v1/cogs/"):
             cog_id = path.removeprefix("/v1/cogs/")
             for cog in self.cogs:
@@ -188,6 +238,12 @@ class Stub:
             return httpx.Response(404, json={"error": {"code": "cog_not_found", "message": f"No Cog {cog_id}"}})
         if path == "/v1/runs" and request.method == "POST":
             submitted = json.loads(request.content)
+            if "cog" in submitted:
+                # The run-one-installed-Cog form: the hub names the step after the Cog.
+                name = submitted["cog"].rsplit("/", 1)[-1].split("@", 1)[0]
+                submitted = {**submitted, "steps": [{"name": name, "cog": submitted["cog"],
+                                                     "entry_point": submitted["entry_point"],
+                                                     "input": submitted.get("input"), "gate": submitted.get("gate")}]}
             step = submitted["steps"][0]
             for one in submitted["steps"]:
                 if one["cog"] not in self.launchable:

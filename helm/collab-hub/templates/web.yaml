@@ -32,7 +32,8 @@ data:
         enabled: false
       static:
         {{- range .Values.web.models }}
-        {{ printf "hub:%s:%s" $hubHost .id | quote }}:
+        {{- /* As the desktop keys hub agents: the key is a URL path segment. */}}
+        {{ printf "hub:%s:%s" $hubHost .id | replace "/" "_" | quote }}:
           cls_or_fn: ravnar_apollo.web.WebChatAgent
           params:
             model_id: {{ .id | quote }}

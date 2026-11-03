@@ -17,6 +17,8 @@ web:
     - id: qwen
       displayName: Qwen
       supportsTools: true
+    - id: Org/Model-7B
+      displayName: Model 7B
   database:
     existingSecret: web-chat-postgres
     databaseUrlKey: DATABASE_URL

@@ -497,7 +497,13 @@ def case_web(r: Rendered) -> None:
     config = yaml.safe_load(r.configmaps[f"{name}-chat"]["data"]["chat-service.yaml"])
     assert config["security"]["authenticator"] == "ravnar_apollo.web:GatewayIdentityAuthenticator"
     assert config["agents"]["dynamic"]["enabled"] is False
-    (agent,) = config["agents"]["static"].values()
+    agents = config["agents"]["static"]
+    # Keyed as the desktop keys hub agents; a key is a URL path segment, so a
+    # model id's slashes become underscores.
+    assert sorted(agents) == ["hub:example.test:Org_Model-7B", "hub:example.test:qwen"], sorted(agents)
+    assert agents["hub:example.test:Org_Model-7B"]["params"]["model_id"] == "Org/Model-7B"
+    assert agents["hub:example.test:Org_Model-7B"]["params"]["supports_tools"] is False
+    agent = agents["hub:example.test:qwen"]
     params = agent["params"]
     assert agent["cls_or_fn"] == "ravnar_apollo.web.WebChatAgent"
     assert (params["model_id"], params["display_name"], params["supports_tools"]) == ("qwen", "Qwen", True)

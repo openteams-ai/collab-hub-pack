@@ -299,7 +299,9 @@ def render_page(
     if identity_label is not None and csrf_token is not None:
         account = ""
         if account_url:
-            account = f'<a href="{html.escape(account_url)}" rel="noopener">Account</a> · '
+            # Same-tab navigation, like every other link here; the page-level
+            # no-referrer meta already keeps this origin out of the Referer.
+            account = f'<a href="{html.escape(account_url)}">Account</a> · '
         footer = (
             '<div class="identity">Signed in as '
             f"<strong>{html.escape(identity_label)}</strong> · "

@@ -1107,8 +1107,8 @@
       "properties": {
         "accountPageUrl": {
           "type": "string",
-          "description": "External account page the signed-in navigation links to; empty renders no link. Must be an absolute http(s) URL.",
-          "pattern": "^$|^https?://[^\\s@/?#]+([/?#]\\S*)?$"
+          "description": "External account page the signed-in navigation links to; empty renders no link. Absolute https URL (http only on loopback), no credentials; the API applies the full rule at startup.",
+          "pattern": "^$|^([Hh][Tt][Tt][Pp][Ss]://([A-Za-z0-9._-]+|\\[[0-9A-Fa-f:.]+\\])|[Hh][Tt][Tt][Pp]://([Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|127\\.0\\.0\\.1|\\[::1\\]))(:[0-9]{1,5})?([/?#][^\\s\\x00-\\x1f\\x7f]*)?$"
         }
       },
       "additionalProperties": false

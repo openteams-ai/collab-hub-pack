@@ -85,6 +85,43 @@ def _invalid_port_reason(url: str) -> str | None:
     return None
 
 
+def invalid_link_url_reason(url: str) -> str | None:
+    """Why ``url`` cannot be rendered as a link the surface vouches for, or ``None``.
+
+    The surface writes this value into an ``href`` on every signed-in page,
+    so it is held to the same bar as the realm URL and ``public_base_url``:
+    absolute, ``http(s)``, a real host, a parseable port, no credentials, and
+    plain ``http://`` only on loopback -- a billing page reached over
+    cleartext is a page whose session can be hijacked on the way. Unlike
+    :func:`invalid_realm_url_reason`, a query and fragment are allowed: nothing
+    is appended to a link, so they cannot swallow anything.
+
+    Control and non-printable characters are refused on the exact string
+    that will be rendered, not on ``urlsplit``'s view of it: ``urlsplit``
+    silently drops leading C0 bytes, so a value such as ``"\x00https://..."``
+    parses as a clean URL while the raw bytes land in the attribute.
+    """
+
+    if any(not ch.isprintable() for ch in url):
+        return "it contains a control or non-printable character"
+    if any(ch.isspace() for ch in url):
+        return "it contains whitespace"
+    try:
+        parts = urlsplit(url)
+        parts.port
+    except ValueError:
+        return "its host or port cannot be parsed"
+    if parts.scheme not in ("http", "https"):
+        return "it must start with http:// or https://"
+    if not parts.hostname:
+        return "it names no host"
+    if parts.username is not None or parts.password is not None:
+        return "it must not embed credentials"
+    if parts.scheme == "http" and not _is_loopback(parts.netloc):
+        return "it uses plain http:// to a non-loopback host"
+    return None
+
+
 def insecure_transport_reason(url: str) -> str | None:
     """Why ``url`` may not be reached over plain http, or ``None`` if it may.
 

@@ -516,18 +516,18 @@ def build_web_surface(config: BaseConfig) -> WebSurface:
     )
 
 
-def account_page_url(request: Request) -> str | None:
-    """The configured account link for the app serving ``request``, or ``None``.
+def account_page_url(request: Request) -> str:
+    """The configured account link for the app serving ``request``; ``""`` = none.
 
     Read from the surface the app was built with -- configuration, never
     anything the request carries -- so the one ``href`` every signed-in page
-    renders cannot be steered by a caller. ``None`` when the deployment set
-    nothing (the default) or the surface is not mounted at all.
+    renders cannot be steered by a caller. Empty, the same spelling
+    ``WebConfig`` and ``WebSurface`` use, when the deployment set nothing
+    (the default) or the surface is not mounted at all.
     """
 
     surface = getattr(request.app.state, "web_surface", None)
-    url = getattr(surface, "account_page_url", "") if surface is not None else ""
-    return url or None
+    return surface.account_page_url if surface is not None else ""
 
 
 def _resolve_issuer_url(configured: str) -> str:

@@ -96,6 +96,7 @@ from .frames.usage import (
 )
 from .tasks.store import InMemoryTaskStore, PostgresTaskStore
 from .user_directory import DisabledUserDirectoryClient, KeycloakUserDirectoryClient, UserDirectoryClient
+from .web.oidc import invalid_link_url_reason
 
 
 def interactive_session() -> bool:
@@ -298,21 +299,6 @@ def _check_session_secret(secret: str) -> None:
         )
 
 
-def _unusable_link_reason(url: str) -> str | None:
-    """Why ``url`` cannot be rendered as a link the surface vouches for, or ``None``."""
-
-    if any(ch.isspace() for ch in url):
-        return "it contains whitespace"
-    parts = urlsplit(url)
-    if parts.scheme not in ("http", "https"):
-        return "it must start with http:// or https://"
-    if not parts.netloc:
-        return "it names no host"
-    if "@" in parts.netloc:
-        return "it must not embed credentials"
-    return None
-
-
 class WebConfig(BaseModel):
     """The server-side browser surface (issue #88).
 
@@ -373,10 +359,12 @@ class WebConfig(BaseModel):
     invoices -- belongs to whichever add-on provides it; the Hub only links
     to it, from this value and never from the request (issue #275).
 
-    When set it must be an absolute ``http(s)`` URL naming a host. The value
-    is written into an ``href`` on every signed-in page, so a ``javascript:``
-    or otherwise schemeless value is refused at startup rather than shipped
-    to every browser.
+    When set it is held to the same bar as ``public_base_url``
+    (:func:`~.web.oidc.invalid_link_url_reason`): absolute ``https://`` (plain
+    ``http://`` only on loopback), a real host, a valid port, no credentials,
+    no control characters. The value is written into an ``href`` on every
+    signed-in page, so a ``javascript:`` or cleartext value is refused at
+    startup rather than shipped to every browser.
     """
 
     @field_validator(
@@ -412,10 +400,11 @@ class WebConfig(BaseModel):
         # sets web.client_id and every signed-in page starts carrying it.
         if not value:
             return value
-        reason = _unusable_link_reason(value)
+        reason = invalid_link_url_reason(value)
         if reason:
             raise ValueError(
-                f"web.account_page_url must be an absolute http(s) URL ({reason}), got {value!r}"
+                "web.account_page_url must be an absolute https URL (http only on loopback)"
+                f" ({reason}), got {value!r}"
             )
         return value
 

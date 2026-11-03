@@ -816,6 +816,17 @@ cogs:
     # outage. Publishing again to a pending name is never refused by it.
     maxPendingRepositories: 20
 
+# The browser web surface (docs/web-surface.md). Enabling it -- the OIDC client,
+# its secret, the session secret -- goes through api.deployment.extraEnv, where
+# valueFrom is accepted; only the settings that are safe in a rendered manifest
+# live here.
+web:
+  # -- Where the signed-in navigation's "Account" link points: an external page
+  # (plan, usage, invoices) that an add-on provides. Empty (default) renders no
+  # link and needs no billing configuration. Must be an absolute http(s) URL;
+  # becomes COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL.
+  accountPageUrl: ""
+
 # Feature flags for work in progress that is on main but not yet exposed. Every
 # flag is off until it is listed here and set to true; each entry becomes
 # COLLAB_HUB_API__FEATURES__<NAME>. See docs/feature-flags.md.

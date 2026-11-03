@@ -301,6 +301,7 @@ def invitations_page(
     now: datetime,
     has_more: bool = False,
     notice: Notice | None = None,
+    account_url: str | None = None,
 ) -> str:
     """Render the operator invitation page for this request.
 
@@ -327,4 +328,5 @@ def invitations_page(
         root_path=root_path,
         identity_label=identity,
         csrf_token=session.csrf,
+        account_url=account_url,
     )

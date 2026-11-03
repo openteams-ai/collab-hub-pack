@@ -746,6 +746,10 @@ indexer carries too: a publish source needs it, and a sweep reads it.) */}}
 {{- end }}
 {{- end }}
 {{- end }}
+{{- with .Values.web.accountPageUrl }}
+- name: COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL
+  value: {{ . | quote }}
+{{- end }}
 {{- range $name, $on := .Values.features }}
 - name: {{ printf "COLLAB_HUB_API__FEATURES__%s" ($name | upper) | quote }}
   value: {{ $on | toString | quote }}

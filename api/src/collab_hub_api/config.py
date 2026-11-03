@@ -298,6 +298,21 @@ def _check_session_secret(secret: str) -> None:
         )
 
 
+def _unusable_link_reason(url: str) -> str | None:
+    """Why ``url`` cannot be rendered as a link the surface vouches for, or ``None``."""
+
+    if any(ch.isspace() for ch in url):
+        return "it contains whitespace"
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        return "it must start with http:// or https://"
+    if not parts.netloc:
+        return "it names no host"
+    if "@" in parts.netloc:
+        return "it must not embed credentials"
+    return None
+
+
 class WebConfig(BaseModel):
     """The server-side browser surface (issue #88).
 
@@ -350,6 +365,20 @@ class WebConfig(BaseModel):
     revoked.
     """
 
+    account_page_url: str = ""
+    """Where the signed-in navigation's "Account" link points, if anywhere.
+
+    Empty (the default) renders no link: a Hub install shows nothing and
+    needs no billing configuration. The page itself -- plan, usage,
+    invoices -- belongs to whichever add-on provides it; the Hub only links
+    to it, from this value and never from the request (issue #275).
+
+    When set it must be an absolute ``http(s)`` URL naming a host. The value
+    is written into an ``href`` on every signed-in page, so a ``javascript:``
+    or otherwise schemeless value is refused at startup rather than shipped
+    to every browser.
+    """
+
     @field_validator(
         "client_id",
         "client_secret",
@@ -358,6 +387,7 @@ class WebConfig(BaseModel):
         "public_base_url",
         "admin_ui_dist",
         "admin_group",
+        "account_page_url",
         mode="before",
     )
     @classmethod
@@ -373,6 +403,21 @@ class WebConfig(BaseModel):
         """
 
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("account_page_url", mode="after")
+    @classmethod
+    def _check_account_page_url(cls, value: str) -> str:
+        # Checked whether or not the surface is enabled: a value that cannot
+        # be a link is a configuration error now, not when someone later
+        # sets web.client_id and every signed-in page starts carrying it.
+        if not value:
+            return value
+        reason = _unusable_link_reason(value)
+        if reason:
+            raise ValueError(
+                f"web.account_page_url must be an absolute http(s) URL ({reason}), got {value!r}"
+            )
+        return value
 
     @property
     def enabled(self) -> bool:

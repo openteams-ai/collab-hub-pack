@@ -3716,3 +3716,103 @@ def test_the_surface_stylesheet_shouts_at_nobody():
     from collab_hub_api.web.pages import STYLESHEET
 
     assert "text-transform: uppercase" not in STYLESHEET
+
+
+# --- The optional account link (#275) ---------------------------------------
+
+ACCOUNT_URL = "https://billing.example.com/account?plan=1"
+ACCOUNT_LINK = f'<a href="{html.escape(ACCOUNT_URL)}" rel="noopener">Account</a>'
+
+
+async def test_no_account_link_renders_unless_the_deployment_sets_one(tmp_path, idp):
+    """The default: nothing to see, no billing configuration needed."""
+
+    app = make_web_app(tmp_path, idp)
+    assert app.state.web_surface.account_page_url == ""
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        overview = await client.get("/web")
+    assert overview.status_code == 200
+    assert "Sign out" in overview.text
+    assert "Account" not in overview.text
+
+
+async def test_the_account_link_renders_from_configuration_when_set(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"account_page_url": f"  {ACCOUNT_URL} "})
+    assert app.state.web_surface.account_page_url == ACCOUNT_URL
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        overview = await client.get("/web")
+    assert overview.status_code == 200
+    assert ACCOUNT_LINK in overview.text
+    assert overview.text.count("Account") == 1
+    assert overview.text.index("Account") < overview.text.index("Sign out")
+
+
+async def test_the_account_link_is_never_on_an_anonymous_page(tmp_path, idp):
+    """It lives in the signed-in footer, which anonymous pages do not render."""
+
+    app = make_web_app(tmp_path, idp, web={"account_page_url": ACCOUNT_URL})
+    async with web_client(app) as client:
+        page = await client.get("/web/data-statement")
+    assert page.status_code == 200
+    assert "Account" not in page.text
+
+
+def test_render_page_writes_the_link_only_in_the_signed_in_footer():
+    from collab_hub_api.web.pages import render_page
+
+    signed_in = render_page(
+        title="t", body="", identity_label="Alice", csrf_token="tok", account_url='https://x.example/a?b=1&c="2"'
+    )
+    assert '<a href="https://x.example/a?b=1&amp;c=&quot;2&quot;" rel="noopener">Account</a> · ' in signed_in
+    assert signed_in.index("Account") < signed_in.index("Sign out")
+    for anonymous in (
+        render_page(title="t", body="", account_url="https://x.example/a"),
+        render_page(title="t", body="", identity_label="Alice", csrf_token="tok"),
+        render_page(title="t", body="", identity_label="Alice", csrf_token="tok", account_url=""),
+    ):
+        assert "Account" not in anonymous
+
+
+def test_account_page_url_is_none_without_a_surface_or_a_value():
+    from collab_hub_api.web.surface import WebSurface, account_page_url
+
+    app = FastAPI()
+    request = Request({"type": "http", "app": app, "headers": []})
+    assert account_page_url(request) is None
+    app.state.web_surface = WebSurface(**a_surface())
+    assert account_page_url(request) is None
+    app.state.web_surface = WebSurface(**a_surface(account_page_url=ACCOUNT_URL))
+    assert account_page_url(request) == ACCOUNT_URL
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "javascript:alert(1)",
+        "/account",
+        "billing.example.com/account",
+        "https://",
+        "https://user:pw@billing.example.com/",
+        "https://billing.example.com/a b",
+        "ftp://billing.example.com/",
+    ],
+)
+def test_a_value_that_cannot_be_a_link_is_refused_at_startup(tmp_path, idp, value):
+    from pydantic import ValidationError
+
+    from collab_hub_api.config import WebConfig
+
+    # Whether or not the surface is enabled: the value lands in an href.
+    with pytest.raises(ValidationError, match="web.account_page_url must be an absolute http"):
+        WebConfig(account_page_url=value)
+    with pytest.raises(ValidationError, match="web.account_page_url"):
+        Config.parse(web_values(tmp_path, idp, web={"account_page_url": value}))
+
+
+@pytest.mark.parametrize("value", ["", "   ", "http://localhost:8080/account", ACCOUNT_URL])
+def test_a_usable_or_empty_value_is_accepted(value):
+    from collab_hub_api.config import WebConfig
+
+    assert WebConfig(account_page_url=value).account_page_url == value.strip()

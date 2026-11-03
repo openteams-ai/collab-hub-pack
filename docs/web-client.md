@@ -6,169 +6,165 @@ Frames and connectors), Frames and Groups, the hub pages and usage, with
 nothing installed. It is built from the same frontend as the desktop app, and
 the desktop app is unchanged.
 
-This page covers what a deployment needs. The Helm chart does not template
-the web client yet: the pieces below are deployed alongside it.
+## What the chart deploys
 
-## The pieces
+`web.enabled: true` adds, beside the hub:
 
-| Piece | What it is | Talks to |
-|---|---|---|
-| Web app | Static files: the frontend built with `npm run build:web` | nothing; served by the gateway |
-| Chat service | Ravnar with the Collab agent plugins (`ravnar_apollo`), one replica (below) | Postgres, the hub API, the AI gateway |
-| Postgres | The chat service's threads, runs, messages and file records | |
-| File store | The chat service's uploaded file contents (`storage.files.path`, any fsspec URL) | |
-| Gateway | Signs users in, keeps their session, routes by path | Keycloak, the three upstreams |
-
-All of it sits on **one host**, in the same Keycloak realm as the hub:
-
-| Path | Upstream |
+| Piece | What it is |
 |---|---|
-| `/` | the web app's files (unknown paths answer `index.html`) |
-| `/api/*` | the chat service, prefix kept |
-| `/hub-api/*`, `/frames-api/*`, `/connectors-api/*` | the hub API, prefix stripped |
+| NebariApp | the web client's own host, every path behind sign-in |
+| `front` container | the app's files, and the chat service under the paths the app calls |
+| `chat` container | Ravnar with the Collab agent plugins (`ravnar_apollo.web`) |
+| PersistentVolumeClaim | uploaded files (ReadWriteOnce, so one replica) |
+| ConfigMap | one chat agent per hub model |
 
-## What the gateway must do
+Both images come from the Collab repository's `deploy/web/image`, published
+as `ghcr.io/openteams-ai/apollo-desktop/web-front` and `.../web-chat` at the
+same `sha-<short>` tag. The chat image is built for amd64 only, so the pod
+runs on amd64 nodes.
 
-The browser never holds a bearer token, and a session cookie must not be
-usable from another site. The gateway is what makes that true, so these are
-requirements, not suggestions:
+```yaml
+web:
+  enabled: true
+  image:
+    tag: sha-1234567
+  nebariapp:
+    hostname: collab.example.com
+  hubUrl: https://example.com            # the issuer's host without "keycloak."
+  llmBaseUrl: https://llm-internal.example.com/v1
+  models:
+    - id: qwen
+      displayName: Qwen
+      supportsTools: true
+  database:
+    existingSecret: collab-web-chat-app  # e.g. a CloudNativePG cluster's app Secret
+    databaseUrlKey: uri
+```
 
-1. **Sign the user in and keep the session server-side.** The browser gets a
-   session cookie (`HttpOnly`, `Secure`, `SameSite=Lax`, ideally with the
-   `__Host-` prefix); the tokens stay in the gateway's session store. End the
-   identity provider's session on sign-out, and keep sessions to a working
-   day.
-2. **Drop everything the browser sends that carries or claims an identity**,
-   on every route: `Authorization`, `X-Forwarded-Access-Token`,
-   `X-Forwarded-User`, `X-Forwarded-Email` and all `X-Auth-Request-*`
-   headers.
-3. **Set `Authorization: Bearer <the user's access token>`** on requests to
-   the hub API and the chat service, refreshing the token before it expires.
-4. **Do not forward the browser's cookies** to the hub API or the chat
-   service. The hub reads an `IdToken-*` cookie before the bearer, so a
-   cookie a sibling site planted would decide which account a request acts
-   as.
-5. **Refuse writes from other sites.** Answer any request that is not `GET`,
-   `HEAD` or `OPTIONS` and does not carry `Sec-Fetch-Site: same-origin` with
-   `403`. `SameSite=Lax` does not cover sibling subdomains, which on Nebari
-   include user-run JupyterLab and apps.
-6. **Serve uploaded files as downloads that cannot run script.** On
-   `/api/files/*/content` set `Content-Disposition: attachment` and
-   `Content-Security-Policy: sandbox; default-src 'none'`, after the chat
-   service's own headers. Otherwise a user's HTML or SVG file runs in the
-   app's origin with their session.
-7. **Bound request bodies** (40 MB fits the largest attachment) and rate-limit
-   per user.
-8. Answer a page load without a session with a redirect to sign in, and an
-   API call without one with `401` carrying `X-Collab-Session: none`. The web
-   app sends the browser to sign in on that `401` only; a `401` a service
-   sends itself is shown as its error, so a misconfiguration cannot loop the
-   browser through sign-in.
-9. **Keep the session's details from the page.** If the sign-in component
-   answers with the user's token in response headers (oauth2-proxy does on
-   `/oauth2/auth`, `/oauth2/userinfo` and every path it does not know), let
-   the browser reach only signing in, the callback and signing out (`404`
-   for anything else), strip those headers from its responses, and have the
-   gateway call the session check directly.
-10. **Sign out only from this site**: refuse `/oauth2/sign_out` (or its
-    equivalent) unless `Sec-Fetch-Site` is `same-origin` or `none`.
-11. **Keep Keycloak's admin console off the users' route.**
+The issuer, its keys and the hub's audience come from `frames.auth.bearer`
+unless `web.oidc` and `web.hubAudience` say otherwise; the hub's audience must
+be set (it is what the hub checks). `hubUrl` must be what the web client
+derives from the issuer (`https://keycloak.example.com/realms/x` gives
+`https://example.com`): it lists only agents whose hub matches it.
 
-Pick one audience for the hub's tokens and set it everywhere: on the hub
-(`FRAMES_BEARER_AUDIENCE`; the chart's default is empty, which turns the hub's
-audience check off), on the chat service (`APOLLO_WEB_OIDC_AUDIENCE`), and as
-an audience mapper on the gateway's Keycloak client so its access tokens
-carry it. The hub then accepts the token exactly as it accepts the
-desktop's.
+## How a request flows
 
-On Nebari, check the gateway's OIDC support does all of the above. Where it
-cannot, put [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/)
-behind a reverse proxy that does, with a Redis session store. The reference
-setup below does all of it except the per-user rate limit, the
-`Secure`/`__Host-` cookie (it runs on plain http) and point 11 (it is the
-developer's own Keycloak). `make smoke` there checks points 2, 4, 5, 6, 8, 9
-and 10, and the body limit, against it.
+| Path | Goes to |
+|---|---|
+| `/` | the app's files (unknown paths answer `index.html`) |
+| `/api/*` | the chat service |
+| `/hub-api/*`, `/frames-api/*`, `/connectors-api/*` | the hub, through the chat service |
+
+The gateway signs the user in, keeps the tokens in its encrypted session, and
+forwards the user's access token as `Authorization: Bearer` (the NebariApp's
+`forwardAccessToken`). The browser never holds a token.
+
+That token is issued to the web client's own Keycloak client, which the
+operator names `<namespace>-<NebariApp name>` (the NebariApp is the chart's
+full name plus `-web`, so release `nebari-nexus-pack` in namespace
+`nebari-nexus` gives `nebari-nexus-nebari-nexus-pack-collab-hub-web`), and
+the hub does not accept it: its
+audience is the client's own, not the hub's. The chat service exchanges it at
+Keycloak for a token issued for the hub, for the same user (OAuth 2.0 Token
+Exchange, RFC 8693), and uses that for its agents' Frames, connector and model
+requests and for the browser's hub calls, which it passes on without the
+browser's cookies. Each user's hub token is reused until shortly before it or
+the token it came from expires.
+
+The front, in the same pod, does what the gateway does not:
+
+- Refuses writes from other sites: anything but `GET`, `HEAD` and `OPTIONS`
+  without `Sec-Fetch-Site: same-origin` gets `403`. `SameSite=Lax` does not
+  cover sibling subdomains, which on Nebari include user-run JupyterLab and
+  apps.
+- Serves uploaded files (`/api/files/*/content`) as downloads that cannot run
+  script: `Content-Disposition: attachment` and `Content-Security-Policy:
+  sandbox; default-src 'none'`.
+- Bounds request bodies at 40 MB (the largest attachment, base64-encoded).
+- Drops the browser's cookies on the way to the chat service.
+- Marks every answer it relays (`X-Collab-Served`). A `401` without the mark
+  is the gateway's own (the session ended): the app reloads the page and the
+  gateway starts sign-in. A `401` with it is a service's error, shown as
+  such, so a misconfiguration cannot loop the browser through sign-in. The
+  NebariApp's `denyRedirect` on `Sec-Fetch-Mode: cors` makes the gateway
+  answer the app's requests with that `401` rather than a redirect it cannot
+  follow.
+
+Sign-out is the gateway's `/logout`.
+
+## Before the first install
+
+1. **Keycloak features.** The realm must allow token exchange:
+   `KC_FEATURES=token-exchange,admin-fine-grained-authz:v1`.
+2. **Allow the web client, and only it, to exchange for the hub's audience.**
+   Once the NebariApp has provisioned its client, as a realm admin:
+
+   ```sh
+   kc=/opt/keycloak/bin/kcadm.sh; realm=nebari
+   web=<namespace>-<NebariApp name>          # the web client's id (above)
+   hub=apollo-desktop                         # frames.auth.bearer.audience's client
+   uuid() { $kc get clients -r $realm -q "clientId=$1" --fields id --format csv --noquotes; }
+   perm=$($kc update "clients/$(uuid $hub)/management/permissions" -r $realm -s enabled=true -o |
+     sed -n 's/.*"token-exchange" *: *"\([^"]*\)".*/\1/p')
+   rm=$(uuid realm-management)
+   $kc create "clients/$rm/authz/resource-server/policy/client" -r $realm \
+     -s name="$web-may-exchange" -s logic=POSITIVE -s "clients=[\"$(uuid $web)\"]"
+   policy=$($kc get "clients/$rm/authz/resource-server/policy" -r $realm -q name="$web-may-exchange" \
+     --fields id --format csv --noquotes)
+   $kc get "clients/$rm/authz/resource-server/permission/scope/$perm" -r $realm > /tmp/perm.json
+   $kc update "clients/$rm/authz/resource-server/permission/scope/$perm" -r $realm -f /tmp/perm.json \
+     -s "policies=[\"$policy\"]" -s decisionStrategy=UNANIMOUS
+   ```
+
+   Until this is done every request is refused with `401`, and the chat
+   service logs `web_auth_refused reason=exchange_refused_403` (or `_400`).
+3. **A Postgres database** for the chat service, and a Secret with its URL
+   (`postgresql://user:password@host/db`; the service opens it with psycopg).
+4. **The images' tag**: the `sha-<short>` the Collab repository's "Web client
+   images" workflow reports for the commit to deploy.
 
 ## The chat service
 
-It runs from the `web` environment of the agent runtime's Pixi manifest
-(`internal/intelligencehub/pixi.toml` in the Collab repository), which is the
-desktop's locked environment plus a Postgres driver:
-
-```sh
-RAVNARPATH=<checkout>/internal/intelligencehub \
-RAVNAR_CONFIG=chat-service.yaml \
-pixi run --manifest-path <checkout>/internal/intelligencehub/pixi.toml -e web \
-  python -m ravnar serve
-```
-
 | Setting | Value |
 |---|---|
-| `RAVNAR_SERVER__HOSTNAME`, `RAVNAR_SERVER__PORT` | where it listens; only the gateway may reach it (a NetworkPolicy) |
-| `RAVNAR_STORAGE__DATABASE__DSN` | `postgresql+psycopg://USER:PASSWORD@HOST/DB` |
-| `RAVNAR_STORAGE__FILES__PATH` | where file contents live |
 | `APOLLO_WEB_OIDC_ISSUER` | the realm's issuer, exactly as it appears in tokens |
-| `APOLLO_WEB_OIDC_AUDIENCE` | required: the audience tokens must carry (the hub's) |
-| `APOLLO_WEB_OIDC_JWKS_URL` | optional: the realm's keys at an in-cluster address |
+| `APOLLO_WEB_OIDC_AUDIENCE`, `APOLLO_WEB_OIDC_CLIENT_SECRET` | the web client's id and secret (the operator's `<NebariApp>-oidc-client` Secret) |
+| `APOLLO_WEB_HUB_AUDIENCE` | the audience to exchange for: the hub's |
+| `APOLLO_WEB_HUB_URL` | the hub API, in-cluster |
+| `APOLLO_WEB_OIDC_JWKS_URL`, `APOLLO_WEB_OIDC_TOKEN_URL` | optional: the realm's keys and token endpoint, otherwise found by discovery |
+| `RAVNAR_STORAGE__DATABASE__DSN`, `RAVNAR_STORAGE__FILES__PATH` | its database and file store |
 
-It refuses to start without the issuer and audience. It verifies the
+It refuses to start without any of the required ones. It verifies the
 forwarded token on every request (signature, issuer, audience, expiry) and
 stores each account's threads and files under the same opaque account key the
 desktop uses, so one user can never list or read another's. Users cannot
-register agents. If the realm's keys cannot be fetched it answers `503`, not
-`401`, so an identity provider outage does not sign everyone out.
+register agents. If the realm's keys or token endpoint cannot be reached it
+answers `503`, not `401`, so an identity provider outage does not sign
+everyone out.
 
 **Logs.** Every refused request is logged as `web_auth_refused` with its
 reason (`missing`, `expired`, `wrong_issuer`, `wrong_audience`, `invalid`,
-`keys_unavailable`) and the token's unverified issuer and client, never the
-token. Accepted requests log `web_auth_ok` with the account key and subject at
-debug level, and every run logs `web_run_start` and `web_run_end` with its
-account and outcome (`finished`, `error`, `failed`, `abandoned`), and
+`keys_unavailable`, `exchange_refused_<status>`, `exchange_unavailable`,
+`exchange_unreadable`) and the token's unverified issuer and client, never
+the token. Every run logs `web_run_start` and `web_run_end` with its account
+and outcome (`finished`, `error`, `failed`, `abandoned`), and
 `cleanup_timed_out=true` when a stopped run did not finish closing within 10
 seconds (it may still be working as its user). Values that come from outside
-(a refused token's claims, thread and run ids) are logged double-quoted,
-escaped and cut to 128 characters. Alert on bursts of refusals and on
-`web_run_refused`.
+are logged double-quoted, escaped and cut to 128 characters. Alert on bursts
+of refusals and on `web_run_refused`.
 
 **Limits to plan for.**
 
-- Run one replica. Ravnar creates its tables at startup rather than through
-  migrations, so replicas starting together can race.
-- A run uses the access token it started with. Make the realm's access token
+- One replica: the files are on a ReadWriteOnce volume, and Ravnar creates its
+  tables at startup rather than through migrations.
+- A run uses the hub token it started with. Make the realm's access token
   lifespan longer than the longest run. Each read from the model may wait up
   to 10 minutes, and a run with tool calls makes several requests.
 - Ravnar does not bound thread names, page sizes or concurrent runs per user;
-  the gateway's body limit and rate limit are the bound.
-
-Each hub model is a static agent in `chat-service.yaml`:
-
-```yaml
-security:
-  authenticator: ravnar_apollo.web:GatewayIdentityAuthenticator
-agents:
-  dynamic:
-    enabled: false
-  static:
-    "hub:<hub host>:<model id>":
-      cls_or_fn: ravnar_apollo.web.WebChatAgent
-      params:
-        model_id: <model id>
-        model_base_url: <the AI gateway's OpenAI-compatible URL, in-cluster>
-        display_name: <name shown to users>
-        provider: hub
-        hub_url: https://<hub host>   # the issuer's host without "keycloak.":
-                                      # the web client lists only agents
-                                      # whose hub_url matches it
-        frames_api_url: <the hub API, in-cluster>
-        connectors_api_url: <the hub API, in-cluster>
-        owned_by: self-hosted         # or the provider the gateway proxies to
-        supports_tools: true          # false for a model without tool calling
-```
-
-There are no tokens in this file. Every request a chat run sends (Frames,
-connectors and inference) carries the access token of the user whose run it
-is, so the AI gateway attributes each completion to that user, as it does for
-the desktop.
+  the front's body limit is the only bound. Rate-limit per user at the
+  gateway where it can.
+- The gateway's `/logout` does not check where the navigation came from, so
+  another site can sign a user out (not in).
 
 ## Not in the web client
 
@@ -192,6 +188,8 @@ Not built yet, and left out rather than shown broken:
 ## Running it locally
 
 `deploy/web/dev/` in the Collab repository runs the whole thing on one
-machine against this pack's API and dev realm: `make up`, `make run`, then
-open `http://collab.localhost:9490`; `make smoke` checks the gateway
-requirements above. Its README has the details.
+machine against this pack's API and dev realm, with oauth2-proxy standing in
+for the gateway and the same front configuration the image ships: `make up`,
+`make run`, then open `http://collab.localhost:9490`; `make smoke` checks
+sign-in, the front's rules above and the token exchange. Its README has the
+details.

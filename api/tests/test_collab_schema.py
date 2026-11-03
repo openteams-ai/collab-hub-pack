@@ -459,7 +459,31 @@ def test_migration_creates_the_cog_publishing_schema():
         "org_id text",
     ):
         assert name not in earlier, name
-    assert LATEST_COLLAB_SCHEMA_VERSION == 16
+    assert LATEST_COLLAB_SCHEMA_VERSION == 17
+
+
+def test_migration_creates_the_install_tables():
+    server = FakeServer()
+
+    run_collab_schema_migrations(FakeDatabase(server))
+
+    (installs,) = server.ddl_for("collab_cog_installs")
+    # One row per install (issue #105): its pinned reference and digest, the state its machine reached, the
+    # binding its own resolve produced, and the step that failed when one did.
+    assert "id text PRIMARY KEY" in installs and "reference text NOT NULL" in installs
+    assert "state text NOT NULL" in installs and "binding jsonb," in installs
+    assert "failed_step text," in installs and "uninstall_requested_by text," in installs
+    (events,) = server.ddl_for("collab_cog_install_events")
+    assert "install_id text NOT NULL" in events and "payload jsonb NOT NULL DEFAULT '{}'::jsonb" in events
+    statements = dict(COLLAB_SCHEMA_MIGRATIONS)[17]
+    assert "collab_cog_installs_one_live" in " ".join(statements)  # one live install of a digest per organization
+    assert not any("ALTER" in statement or "DROP" in statement for statement in statements)
+    # Appended as version 17: nothing earlier mentions any of it.
+    earlier = " ".join(
+        statement for version, statements in COLLAB_SCHEMA_MIGRATIONS if version < 17 for statement in statements
+    )
+    for name in ("collab_cog_installs", "collab_cog_install_events", "collab_cog_install_event_sequence"):
+        assert name not in earlier, name
 
 
 def test_migration_creates_the_source_activity_table():
@@ -526,6 +550,7 @@ PINNED_CHECKSUMS = {
     14: "c3ceed5775cd624aabf1b9b9ac90aa23f8909cf93777f90836c7a263f72a2494",
     15: "94c87d3dc97dfc138ea1ee78bdb067ba114163995f4ef27d44398a930690d84d",
     16: "b2140ce96b42c4e7e9daabbac44b8ee6828d3ce9b39cccd37ca7f818747ca33f",
+    17: "7b58a1999dbbe5c7828a6e9dce8a33aa7e9cfede23b0a5e6672a31a3c179d8aa",
 }
 
 

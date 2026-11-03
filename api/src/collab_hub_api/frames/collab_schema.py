@@ -1021,6 +1021,58 @@ COLLAB_SCHEMA_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        17,
+        (
+            # The installs (issue #105): each Cog pinned by digest on this
+            # hub, what its install has reached (`published`, `fetched`,
+            # `bound`, `invokable`, `uninstalled`: the install machine of
+            # `collab_hub_execution.states.install`), the binding its own
+            # `resolve` produced, and the step that failed when one did. The
+            # API records that an install or its removal was asked for; the
+            # run controller moves it, and appends each move to the install's
+            # own event log. Appended to `PostgresInstallStore._SCHEMA` too;
+            # execution/tests/test_installs.py holds them equal. One live
+            # install of a digest per organization; an uninstalled row stays,
+            # so the log it names stays readable.
+            """
+            CREATE TABLE IF NOT EXISTS collab_cog_installs (
+                id                     text PRIMARY KEY,
+                org_id                 text,
+                reference              text NOT NULL,
+                digest                 text NOT NULL,
+                cog_id                 text,
+                card                   jsonb NOT NULL DEFAULT '{}'::jsonb,
+                state                  text NOT NULL,
+                controller             text,
+                lock_digest            text,
+                binding_id             text,
+                binding                jsonb,
+                failure                text,
+                failed_step            text,
+                requested_by           text,
+                uninstall_requested_by text,
+                created_at             timestamptz NOT NULL DEFAULT now(),
+                updated_at             timestamptz NOT NULL DEFAULT now()
+            )
+            """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS collab_cog_installs_one_live "
+            "ON collab_cog_installs (org_id, digest) WHERE state <> 'uninstalled'",
+            "CREATE INDEX IF NOT EXISTS collab_cog_installs_state ON collab_cog_installs (state)",
+            "CREATE SEQUENCE IF NOT EXISTS collab_cog_install_event_sequence",
+            """
+            CREATE TABLE IF NOT EXISTS collab_cog_install_events (
+                sequence    bigint PRIMARY KEY DEFAULT nextval('collab_cog_install_event_sequence'),
+                install_id  text NOT NULL,
+                event_type  text NOT NULL,
+                payload     jsonb NOT NULL DEFAULT '{}'::jsonb,
+                occurred_at timestamptz NOT NULL DEFAULT now()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS collab_cog_install_events_install "
+            "ON collab_cog_install_events (install_id, sequence)",
+        ),
+    ),
 )
 
 

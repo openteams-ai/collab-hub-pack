@@ -122,6 +122,17 @@ def _recorded(envelope: ResultEnvelope) -> dict[str, Any]:
     return extra
 
 
+def _bound_to(step: OpStep) -> dict[str, Any]:
+    """The install and the binding a step runs under, when it runs an installed Cog: on every event of the step,
+    so the Track names the binding that produced each result (ADR-0001 D8)."""
+    named: dict[str, Any] = {}
+    if step.install:
+        named["install"] = step.install
+    if step.binding:
+        named["binding_id"] = step.binding
+    return named
+
+
 def _validate_usage(raw: Any, budget: RunBudget | None) -> dict[str, Any] | None:
     if raw is not None and not isinstance(raw, Mapping):
         raise UsageUnavailable("usage must be an object")
@@ -352,7 +363,7 @@ class LifecycleRunner(WorkflowEngine):
         record: dict[str, Any] = {
             "step": step.name, "attempt": attempt, "cog": step.cog, "digest": step.digest, "usage": usage,
             "frames": [{"id": frame.id, "digest": frame.digest} for frame in step.frames],
-            **_recorded(envelope), **result,
+            **_bound_to(step), **_recorded(envelope), **result,
         }
         if escalation is not None:
             record["escalation"] = escalation
@@ -363,7 +374,7 @@ class LifecycleRunner(WorkflowEngine):
         """A ``step_failed`` payload: the attempt, its key, the worker, the code and a bounded message."""
         record: dict[str, Any] = {
             "step": step.name, "attempt": attempt, "key": key, "cog": step.cog, "digest": step.digest,
-            "error": error, "message": _bound(message) or "",
+            "error": error, "message": _bound(message) or "", **_bound_to(step),
         }
         if envelope is not None:
             record.update(_recorded(envelope))
@@ -1019,7 +1030,8 @@ class LifecycleRunner(WorkflowEngine):
         number = run.escalations.get(step.name, 0) + retries
         instance = f"{_key_component(step.name)}:{number}"
         attempt = Attempt(step=step, number=number, instance=instance, key=f"{_key_component(op.run_id)}:{instance}")
-        now.append("step_started", {"step": step.name, "cog": step.cog, "digest": step.digest, "attempt": number})
+        now.append("step_started", {"step": step.name, "cog": step.cog, "digest": step.digest, "attempt": number,
+                                    **_bound_to(step)})
         return attempt
 
     @step_function
@@ -1032,7 +1044,7 @@ class LifecycleRunner(WorkflowEngine):
         if token_digest is not None:
             # Where the worker is, and the hash of its run token: the token itself is never recorded.
             now.append("worker_started", {
-                "step": step.name, "attempt": attempt.number, "instance": attempt.instance,
+                "step": step.name, "attempt": attempt.number, "instance": attempt.instance, **_bound_to(step),
                 **getattr(attempt.worker, "details", {}), "run_token_sha256": token_digest})
             attempt.started = True
         attempt.cog_worker = now.record(attempt.cog_worker.ready())

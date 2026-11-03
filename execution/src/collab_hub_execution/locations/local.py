@@ -10,8 +10,14 @@ worker up, says where it is, and tears it down.
 What a worker gets from the controller is its environment and nothing else: a
 short allowlist of the controller's variables that a process needs to run at
 all, the seam's variables (where to listen, its Cog, its run, its run token),
-and what the binding delivers. Its output goes to a directory per run, never to
-the Track.
+and what the binding delivers: variables, and the binding file, written beside
+the run's output and named by ``COLLAB_BINDING_FILE``. Its output goes to a
+directory per run, never to the Track.
+
+A Cog named by its pinned reference is materialized from its artifact, as a
+``remote`` worker is: pulled into a cache under the work directory, keyed by
+the digest of its lock, and run from there; a Cog named by a package name
+comes from the directory source.
 """
 
 from __future__ import annotations
@@ -34,7 +40,8 @@ from typing import Any
 
 import httpx
 
-from .. import run_tokens
+from .. import artifacts, run_tokens
+from ..binding import BINDING_FILE_ENV, as_delivered
 from ..kubernetes import TurnRefused, _KubernetesWorker
 from .packages import CogPackage, DirectoryPackageSource
 
@@ -66,8 +73,9 @@ def _segment(value: str) -> str:
     return f"{prefix}-{hashlib.sha256(value.encode()).hexdigest()[:16]}"
 
 
-Delivery = Callable[[str, str, str], Mapping[str, str]]
-"""What the binding delivers to one worker: called with the Cog, the run and the instance."""
+Delivery = Callable[[str, str, str], Any]
+"""What the binding delivers to one worker: called with the Cog, the run and the instance; a mapping of variables,
+or a ``Delivered`` with files beside them."""
 
 
 def _runs(pid: int, run_id: str) -> bool:
@@ -157,11 +165,17 @@ class LocalProcessCogExecutor:
         poll_interval: float = 0.1,
         interaction_timeout: float | None = 60.0,
         grace: float = 3.0,
+        registry: artifacts.RegistryClient | None = None,
+        artifact_cache: str | Path | None = None,
     ) -> None:
         if environment not in ENVIRONMENTS:
             raise ValueError(f"unknown worker environment {environment!r}; it is one of {', '.join(ENVIRONMENTS)}")
         self.source = source
         self.work_dir = Path(work_dir)
+        self.registry = registry
+        """What a Cog named by a pinned reference is pulled through; ``None`` refuses every such Cog."""
+        self.artifact_cache = Path(artifact_cache) if artifact_cache is not None else self.work_dir / "artifacts"
+        """Where pulled artifacts and the environments pixi builds for them live, keyed by the lock's digest."""
         self.environment = environment
         self.pixi = pixi
         self.deliver = deliver
@@ -203,16 +217,36 @@ class LocalProcessCogExecutor:
         raise WorkerStartFailed("no free loopback port for a worker")
 
     def _environment(self, package: CogPackage, run_id: str, instance: str, port: int,
-                     token: str) -> dict[str, str]:
+                     token: str, logs: Path) -> dict[str, str]:
         env = {name: os.environ[name] for name in INHERITED if name in os.environ}
         if self.deliver is not None:
-            env.update(self.deliver(package.name, run_id, instance))
+            delivered = as_delivered(self.deliver(package.name, run_id, instance))
+            env.update(delivered.env)
+            for name, content in delivered.files.items():
+                # The binding file, beside the run's output and readable by its owner only; the key it names by
+                # reference is in the environment above, never in the file.
+                path = logs / name
+                path.write_text(content)
+                path.chmod(0o600)
+                if name == "binding.json":
+                    env[BINDING_FILE_ENV] = str(path)
         env.update({HOST_ENV: LOOPBACK, PORT_ENV: str(port), COG_ENV: package.name, RUN_ENV: run_id,
                     run_tokens.RUN_TOKEN_ENV: token})
         return env
 
+    def _package(self, cog: str) -> CogPackage:
+        """The package to run: from its artifact when ``cog`` is a pinned reference, else the directory source."""
+        if not artifacts.is_reference(cog):
+            return self.source.resolve(cog)
+        if self.registry is None:
+            raise WorkerStartFailed(f"{cog} is a published Cog, and this controller reaches no registry to pull "
+                                    "it through")
+        materialized = artifacts.materialize(cog, self.artifact_cache, self.registry)
+        return CogPackage(name=cog, directory=materialized.directory, serve=materialized.serve,
+                          digest=materialized.reference.digest)
+
     def materialize(self, cog: str, run_id: str, instance: str = "") -> _LocalWorker:
-        package = self.source.resolve(cog)
+        package = self._package(cog)
         command = self._command(package)
         logs = self.work_dir / _segment(run_id) / _segment(instance or cog)
         logs.mkdir(parents=True, exist_ok=True)
@@ -232,7 +266,7 @@ class LocalProcessCogExecutor:
                  "--stdout", str(logs / "stdout.log"), "--stderr", str(logs / "stderr.log"),
                  "--cwd", str(package.directory), "--grace", str(self.grace), "--", *command],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=launcher_log,
-                env=self._environment(package, run_id, instance, port, token), start_new_session=True,
+                env=self._environment(package, run_id, instance, port, token, logs), start_new_session=True,
             )
 
     def _hand_over(self, cog: str, run_id: str, instance: str, package: CogPackage, logs: Path, port: int,
@@ -247,6 +281,8 @@ class LocalProcessCogExecutor:
                 "location": "local", "package": {"name": package.name, "digest": package.digest},
                 "pid": started["pid"], "pgid": started["pgid"], "logs": str(logs),
             }
+            if artifacts.is_reference(cog):
+                details["artifact"] = cog
             worker = _LocalWorker(cog, f"{run_id}:{instance}", url, self._http, launcher=launcher, details=details,
                                   run_token=token)
             self._wait_ready(worker, logs)

@@ -28,14 +28,19 @@ shapes are still experimental.
 """
 
 from . import intents
+from .artifacts import ArtifactReference, PullError, is_reference
 from .backends import DURABILITY_BACKENDS, BackendNotImplemented, DurabilityBackend
 from .binding import (
+    BindingRecord,
     BindingResolutionError,
-    CapabilityRequirement,
-    ContextCog,
-    DeclaredCapabilityResolver,
-    ModelBinding,
+    Delivered,
+    InventoryFilter,
     ModelCog,
+    ModelsBlock,
+    Satisfier,
+    inventory,
+    no_filter,
+    refuse_literal_secrets,
 )
 from .envelope import (
     ENVELOPE_VERSION,
@@ -46,6 +51,15 @@ from .envelope import (
     ResultEnvelope,
 )
 from .gates import DEFAULT_APPROVERS, Gate, GateOutcome, envelope_digest, escalation_id
+from .installs import (
+    InMemoryInstallStore,
+    InstallEvent,
+    InstallExists,
+    InstallRow,
+    InstallStore,
+    PostgresInstallStore,
+    SqliteInstallStore,
+)
 from .kubernetes import KubernetesCogExecutor, cog_slug, label_value, resource_name
 from .lifecycle import (
     BudgetExceeded,
@@ -81,10 +95,25 @@ from .track import (
 )
 
 __all__ = [
+    "ArtifactReference",
+    "BindingRecord",
     "BindingResolutionError",
-    "CapabilityRequirement",
-    "ContextCog",
-    "DeclaredCapabilityResolver",
+    "Delivered",
+    "InMemoryInstallStore",
+    "InstallEvent",
+    "InstallExists",
+    "InstallRow",
+    "InstallStore",
+    "InventoryFilter",
+    "ModelsBlock",
+    "PostgresInstallStore",
+    "PullError",
+    "Satisfier",
+    "SqliteInstallStore",
+    "inventory",
+    "is_reference",
+    "no_filter",
+    "refuse_literal_secrets",
     "BudgetExceeded",
     "BudgetTracker",
     "InMemoryTrackStore",
@@ -108,7 +137,6 @@ __all__ = [
     "TrackEvent",
     "TrackStore",
     "derive_run_status",
-    "ModelBinding",
     "ModelCog",
     "AGENT_LOCATIONS",
     "intents",

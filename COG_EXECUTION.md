@@ -1344,6 +1344,7 @@ stateDiagram-v2
     BOUND --> INVOKABLE: check passed
     FETCHED --> FETCHED: no binding admitted, recorded
     BOUND --> BOUND: check failed, recorded
+    PUBLISHED --> UNINSTALLED: uninstall, before anything was fetched
     FETCHED --> UNINSTALLED: uninstall
     BOUND --> UNINSTALLED: uninstall
     INVOKABLE --> UNINSTALLED: uninstall
@@ -1415,7 +1416,7 @@ stateDiagram-v2
 | `FETCHED` | the Cog | Install has pulled the package and provisioned its environment. Not invokable. A binding that cannot be admitted leaves it here, recorded. | glossary, *Install*; Phase 24 |
 | `BOUND` | the Cog | Its requirements are resolved and the binding admitted — from the `models:` stopgap, then from the Cog's own `resolve`. A failing `check` leaves it here, with the failing step recorded. | Phases 24, 25 |
 | `INVOKABLE` | the Cog | `check` passed against the delivered binding and the catalog card is recorded; a run may name the digest. Installing starts no worker. | glossary, *Install*; ADR-0001 D5 |
-| `UNINSTALLED` | the Cog | The install and every runtime resource it created are removed, its warm pool drained. Reachable from every state in which the install holds something on the hub — `FETCHED`, `BOUND`, `INVOKABLE` — so an install stuck before `INVOKABLE` can be removed; a `PUBLISHED` Cog has nothing to remove. | Phases 24, 26 |
+| `UNINSTALLED` | the Cog | The install and every runtime resource it created are removed, its warm pool drained. Reachable from every state the install can be asked to leave, `PUBLISHED` included, so an install removed before a controller fetched anything ends honestly and one stuck before `INVOKABLE` can be removed. | Phases 24, 26 |
 | `MATERIALIZED` | a worker | The executor has brought up the package's `serve` — a child process at `local`, a pod at `remote` — and minted its run token; it is not answering yet. | `LifecycleState.MATERIALIZED`; glossary, *Materialize / worker* |
 | `READY` | a worker | `/healthz` answers; the worker can take an `/invoke`. | `LifecycleState.READY` |
 | `INTERACTING` | a worker | An `/invoke` is in flight: the Harness adapter is driving the harness. Cancellation and the duration deadline act here. | `LifecycleState.INTERACTING` |

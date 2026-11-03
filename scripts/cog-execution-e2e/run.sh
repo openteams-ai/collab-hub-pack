@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Kind end-to-end for Cog execution: materialize real Cog worker pods and run a
-# gated multi-step Op via the KubernetesCogExecutor. Separate from the app code
-# (api/); it builds the app's execution module into an image and runs it.
+# Kind end-to-end for Cog execution: publish a fake Cog to a registry in the cluster, install it by digest
+# (fetch, bind through its own resolve, check), run it once from its artifact with its delivered binding,
+# run it again and assert the environment was found in the cache, then run a gated two-step Op on it, all
+# through the KubernetesCogExecutor. Separate from the app code (api/); it builds the execution package into
+# an image and runs it.
 #
 #   scripts/cog-execution-e2e/run.sh          # create/reuse kind, build, run, assert
 #   KEEP=1 scripts/cog-execution-e2e/run.sh   # leave the cluster up afterward
@@ -21,12 +23,23 @@ echo "== build + load the E2E image (context: repo root)"
 docker build --pull -t "$IMAGE" -f "$HERE/Dockerfile" "$ROOT"
 kind load docker-image "$IMAGE" --name "$CLUSTER"
 
-echo "== apply namespace, RBAC, and the driver Job"
+echo "== lock the fake Cog's environment (pixi.lock is what the cache is keyed by)"
+if [ ! -f "$HERE/cog/pixi.lock" ]; then
+  docker run --rm -v "$HERE/cog:/cog" -w /cog ghcr.io/prefix-dev/pixi:0.83.0-bookworm-slim pixi lock
+fi
+
+echo "== apply namespace, RBAC, the registry, the cache, the fake Cog's files, and the driver Job"
+kubectl --context "$CTX" delete job op-driver -n cogs-e2e --ignore-not-found >/dev/null 2>&1 || true
+kubectl --context "$CTX" apply -f "$HERE/k8s.yaml"
+kubectl --context "$CTX" -n cogs-e2e create configmap e2e-cog \
+  --from-file=pixi.toml="$HERE/cog/pixi.toml" --from-file=pixi.lock="$HERE/cog/pixi.lock" \
+  --from-file=COG.md="$HERE/cog/COG.md" --from-file=serve.py="$HERE/cog/serve.py" \
+  --dry-run=client -o yaml | kubectl --context "$CTX" apply -f -
 kubectl --context "$CTX" delete job op-driver -n cogs-e2e --ignore-not-found >/dev/null 2>&1 || true
 kubectl --context "$CTX" apply -f "$HERE/k8s.yaml"
 
-echo "== wait for the driver Job (materializes cog pods, runs the gated Op)"
-deadline=$(( SECONDS + 300 ))
+echo "== wait for the driver Job (publishes, installs, materializes cog pods by digest, runs the Ops)"
+deadline=$(( SECONDS + 900 ))
 status=""
 while [ $SECONDS -lt $deadline ]; do
   if kubectl --context "$CTX" -n cogs-e2e get job op-driver -o jsonpath='{.status.succeeded}' | grep -q 1; then status=PASSED; break; fi

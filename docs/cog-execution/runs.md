@@ -39,31 +39,51 @@ and asks the executor to tear it down. An executor holds no lifecycle logic.
 | Location | Setting | Built | A worker is | For |
 |---|---|---|---|---|
 | `local` | `location="local"` | yes | a process on the controller's host: the Cog package's `serve` task, in the package's own pixi environment, on a loopback port | development and the desktop |
-| `remote` | `location="remote"` | yes | a Deployment and a Service on the cluster the controller runs in: the hub's own image running the Cog package's `serve` task, reached over service DNS | a Kubernetes hub, always |
+| `remote` | `location="remote"` | yes | a Deployment and a Service on the cluster the controller runs in: a pod of the hub's image whose init container pulls the Cog's artifact at its pinned digest, running the package's own `serve` task from the cache, reached over service DNS | a Kubernetes hub, always |
 
 The setting is the only switch: nothing imports an executor.
 
 **What a remote worker is.** A pod the run controller makes, of the hub's
-image, which ships the Cog packages under `/opt/collab-hub/cogs` and pixi:
-the package's `serve` task in the environment its lock pins, built on the
-pod's own volumes (materialization from a published artifact, with a cache,
-is #105). It is given what a local worker is given, in its environment:
-`COLLAB_COG_HOST` (`0.0.0.0`) and `COLLAB_COG_PORT`, `COLLAB_COG_ID` and
-`COLLAB_RUN_ID` as literals on the pod template; `COLLAB_RUN_TOKEN` and what
-the binding delivers (a model key) through a Secret of the worker's own,
-owned by its Deployment (made just after it; the pod waits for it) and read
-by `envFrom`, so neither is on a Deployment or ReplicaSet that `get` reads,
-and garbage collection removes the Secret with the Deployment. It carries no ServiceAccount
-token, and a NetworkPolicy per worker admits only the controller's pods to
-its `/invoke`; the controller presents the run token on every request,
-turns included. The pod runs under the executor's securityContext unless
+image, which ships pixi and the artifact puller and no Cog. A step naming an
+installed Cog, by its pinned `<host>/<repository>@<digest>` reference, is
+materialized from its artifact: an init container (`pull`) runs
+`python -m collab_hub_execution.artifacts materialize <reference>`, which
+reads the manifest through the registry's distribution API (the hub's own
+`/v2/` when the hub serves pulls, with a registry credential the controller
+hands the init container through a Secret of its own, which the Cog's
+container never sees), verifies it against the digest and every blob against
+its own, and lands the package in the cache under the digest of its
+`pixi.lock`; the pod's container then runs `artifacts serve <reference>`,
+which is `pixi run --locked ... serve` on that package, in the environment
+pixi builds beside it. The cache is keyed by the lock because the lock names
+the environment: the next pod of any artifact with that lock, on a cache that
+outlives pods (`runs.controller.worker.cacheClaim`, a claim every worker pod
+and the controller mount), finds the package and the environment and pulls
+and solves nothing again, which the init container's log says (`artifact
+cached:` rather than `artifact pulling:`); on an `emptyDir` of the pod's own
+each pod builds its environment. A step naming a package by name runs it
+from the image's packages under `/opt/collab-hub/cogs`, which the chart no
+longer offers at `remote` and the tests keep. It is given what a local worker
+is given, in its environment: `COLLAB_COG_HOST` (`0.0.0.0`) and
+`COLLAB_COG_PORT`, `COLLAB_COG_ID` and `COLLAB_RUN_ID` as literals on the
+pod template; `COLLAB_RUN_TOKEN` and what the binding delivers (the key its
+model names, and the binding file, mounted read-only under
+`/etc/collab-hub/binding` and named by `COLLAB_BINDING_FILE`) through a
+Secret of the worker's own, owned by its Deployment (made just after it; the
+pod waits for it) and read by `envFrom` and a volume that mounts the file
+alone, so none of it is on a Deployment or ReplicaSet that `get` reads, and
+garbage collection removes the Secrets with the Deployment. It carries no
+ServiceAccount token, and a NetworkPolicy per worker admits only the
+controller's pods to its `/invoke`; the controller presents the run token on
+every request, turns included. The pod runs under the executor's securityContext unless
 given another: `runAsNonRoot`, no privilege escalation, every capability
 dropped, the runtime's seccomp profile, which Pod Security `restricted`
 admits; its two emptyDirs, the cache pixi builds on and its `/tmp`, have
 size limits (`cache_size_limit`, `tmp_size_limit`), and `resources` are the
-pod's. `worker_started` records the workloads' `name` and `namespace` and
+pod's. `worker_started` records the workloads' `name` and `namespace`, the
+`artifact` and the `cache` for a Cog materialized from its artifact, and
 the token's sha256. Teardown deletes the Deployment, the Service and the policy
-by name, and the Secret goes with its Deployment. A pod outlives a controller that dies, so the next
+by name, and the Secrets go with their Deployment. A pod outlives a controller that dies, so the next
 controller to find the run, its own on restart or another taking the run
 over, reaps the pod by the name the Track recorded, and `worker_stopped`
 says so. A worker whose controller died while it was starting, before
@@ -75,8 +95,11 @@ when none can be live, and a run's when it takes the run over. The only identity
 the controller's; the API never does (ADR-0002 invariant 3). The controller
 takes `--image`, `--namespace` and `--allow-ingress-from` (the labels of its
 own pods, as JSON), or `--insecure-skip-network-policy` for a trusted
-namespace, and `--worker-resources`, `--worker-cache-size-limit` and
-`--worker-tmp-size-limit` for the pods.
+namespace, `--worker-resources`, `--worker-cache-size-limit` and
+`--worker-tmp-size-limit` for the pods, `--worker-cache-claim` for the shared
+cache and `--worker-cache-path` for where the controller reaches it itself,
+and `--registry-credential-env`, `--registry-token-env` and
+`--registry-plain-http` for how a pull reaches the registry.
 
 **What a local worker is given.** Its environment, and nothing else of its
 controller: `PATH`, `HOME` and the few variables a process needs to run at all;
@@ -105,7 +128,10 @@ that declares a `serve` task and the `pixi.lock` that pins its environment,
 both files of the package itself: a package without its lock, or with a
 symbolic link in place of either, is refused, and pixi runs it `--locked`. It
 is identified on the Track by its name and the sha256 of its manifest and lock, so a development run is never mistaken for a
-published Cog. Resolving a published reference is Phase 23.
+published Cog. A pinned reference at `local` is pulled the way a `remote`
+worker pulls it, into `<work_dir>/artifacts` keyed by the lock's digest, and
+served from there; `worker_started` names the `artifact`. A controller started
+with no registry to pull through refuses such a step.
 
 **The run token.** One per worker, minted when it is materialized. The
 controller presents it as a bearer token on `/invoke`; the worker will present
@@ -225,6 +251,112 @@ no engine client.
 `intents.request_decision` writes a decision; the route that calls it is the
 run API's later phase.
 
+### Installing a Cog, and running it once
+
+A run names a Cog the hub has installed: pinned by digest from the catalog,
+fetched, bound and checked once, not on every run. The API records the ask;
+the controller does the work (`collab_hub_execution.installer`), on the
+executor it alone constructs, and records each move in the install store
+beside the Track (`collab_cog_installs`, with the install's own event log),
+through the install machine of [states.md](states.md).
+
+| Route | What it does |
+|---|---|
+| `POST /v1/cogs/installs` | Ask for an install: `cog_id` (its newest present version, or with `digest`), or `reference`, a pinned `<host>/<repository>@<digest>` the catalog holds; at a development hub, `package`, a package of the directory source. Records the card and answers 202 with the install, `published`. One live install of a digest per organization: a second ask is a 409 naming the first |
+| `GET /v1/cogs/installs` | The organization's installs, newest first; `state` filters, and `include_uninstalled` shows removed ones |
+| `GET /v1/cogs/installs/{id}` | One install: its `state`, `invokable`, the `failed_step` (`fetch`, `bind`, `materialize` or `check`) and `failure` when a step failed, its `binding` record and `binding_id`, the `lock_digest` of its package, which controller took it, and every event its controller recorded |
+| `DELETE /v1/cogs/installs/{id}` | Ask for its removal: answers 202, and the controller sweeps every workload of the install, evicts its package from the cache when no other install shares its lock, and records it `uninstalled` |
+
+What the controller does with an ask, in order, because a Cog's `check` may
+probe what its binding gives it:
+
+1. **fetch** (`PUBLISHED` to `FETCHED`): reads the artifact at its digest
+   through the registry: the manifest verified against the digest, the lock
+   named (its digest is the cache's key), the `serve` task found, the
+   manifest refused if it carries a literal secret. A development install
+   names a package of the directory source, which fetch resolves there. An
+   artifact that cannot be read stays `published`, with `failure` saying why.
+2. **bind** (`FETCHED` to `BOUND`): offers the hub's inventory to the Cog's
+   own `resolve`, below, and admits what it selected as the binding record.
+   A selection the inventory does not hold, a requirement left unsatisfied, a
+   key the controller cannot find, or a literal secret anywhere refuses the
+   binding (`binding_refused`), and the install stays `fetched`.
+3. **check** (`BOUND` to `INVOKABLE`): materializes a worker of the Cog with
+   that binding delivered, as a run would, and invokes the Cog's `check`
+   entry point when its card declares one (readiness alone is the check
+   otherwise). A worker that never comes up fails at `materialize`; a `check`
+   that answers `ok: false` fails at `check`; either leaves the install
+   `bound`, not invokable, with the step and the reason recorded, and the
+   binding it ran against kept.
+
+Only an `invokable` install is materialized by a run. `POST /v1/runs` takes
+the run-one-installed-Cog form, `{"cog": <reference, digest or install id>,
+"entry_point", "input", "gate", "frames"}`, a one-step Op named after the Cog;
+a step of an Op may name an installed Cog the same way. A Cog that is not
+installed is refused with 422 `cog_not_launchable`, one installed but not
+invokable with 409 `cog_not_installed` naming the install and what failed.
+The step carries its `install` and its `binding` id, which every event of the
+step records ([track.md](track.md)); `GET /v1/runs/launchable` lists the
+organization's invokable installs by reference beside the packages.
+
+From a terminal: `collab-hub cog install COG --wait`, `cog installs`,
+`cog show-install ID`, `cog uninstall ID`, and `cog launch <reference>`
+([`cli/README.md`](../../cli/README.md)).
+
+### Resolution: the inventory, the Cog's `resolve`, the binding
+
+The hub offers, the Cog selects, the hub records and delivers (ADR-0001 D3).
+The **inventory** is generated from the `models:` block, one satisfier per
+served model, and from the harness Cogs the organization has installed and
+invokable, one per install:
+
+```json
+{"id": "model:default", "kind": "model", "provides": ["model", "model-endpoint/openai-compatible"],
+ "locality": "in-cluster", "provider": "openai-compatible", "endpoint": "http://llm.svc:8000/v1",
+ "model": "served-model", "transport": "http", "auth_ref": "env:MODEL_KEY",
+ "context_window": 131072, "max_output_tokens": 8192}
+{"id": "harness:inst-3a1f...", "kind": "harness", "provides": ["harness", "harness/acp"], "locality": "in-cluster",
+ "reference": "hub.example/cogs/hermes@sha256:...", "digest": "sha256:...", "cog_id": "openteams/hermes",
+ "install": "inst-3a1f..."}
+```
+
+No credential's value is in it: `auth_ref` names the variable the key is in.
+Before `resolve` sees the inventory it passes through the **inventory
+filter**, the plug point for sensitivity (#10,
+[sensitivity.md](sensitivity.md)); the only filter built admits everything.
+
+The bind step materializes a worker of the Cog with no binding and invokes
+`resolve` with `{"requires": [...the card's requires...], "inventory": [...]}`;
+the worker answers `{"selections": {"<capability>": "<satisfier id>"}}`. The
+worker SDK answers for every Cog built on it, selecting the first satisfier
+of each requirement that provides the capability, runs where the
+requirement's `locality` allows and, when the requirement names the Cogs that
+may satisfy it, is one of them; a Cog registers its own `resolve` to decide
+otherwise. A Cog that requires nothing is bound to nothing.
+
+The **binding record** the hub keeps (`binding` on the install) names the
+model satisfier and the harness satisfier selected, by reference, the
+inventory's digest and the selections, under an id (`bnd-...`). It is
+delivered to every worker of the Cog as a file, `binding.json`, named by
+`COLLAB_BINDING_FILE`:
+
+```json
+{"id": "bnd-7c1e...", "cog": "hub.example/cogs/notes@sha256:...", "resolved_by": "cog",
+ "provider": "openai-compatible", "endpoint": "http://llm.svc:8000/v1", "model": "served-model",
+ "transport": "http", "locality": "in-cluster", "context_window": 131072, "max_output_tokens": 8192,
+ "satisfier": "model:default", "auth_ref": "env:COLLAB_MODEL_API_KEY",
+ "harness": {"satisfier": "harness:inst-3a1f...", "reference": "hub.example/cogs/hermes@sha256:...", "digest": "sha256:...", "cog_id": "openteams/hermes"}}
+```
+
+plus the key, by environment: the controller reads the variable the model's
+`auth_ref` names as the worker starts and puts its value in
+`COLLAB_MODEL_API_KEY` of that worker alone, never in the file, a manifest
+or the Track. The worker SDK reads the file into its `Binding`, hands the
+model's limits to the harness, and carries the binding's `id` and `harness`
+in every envelope's `binding`. A changed `models:` block changes what the
+next install's `resolve` sees; an install keeps the record its own `resolve`
+produced until it is removed and installed again.
+
 ### Configuration, health and models
 
 | | |
@@ -232,7 +364,9 @@ run API's later phase.
 | `--track` | A SQLite file, or a `postgresql://` URL (`collab-hub-execution[postgres]`). On Postgres the Track's tables come from the hub's migrations; the controller refuses a database without them |
 | `--id` | The controller's name, held while it runs, recorded on each run it picks up |
 | `--packages`, `--allow`, `--work-dir`, `--environment` | The `local` location's directory package source, and where workers write their output |
-| `--image`, `--namespace`, `--allow-ingress-from`, `--insecure-skip-network-policy`, `--worker-resources`, `--worker-cache-size-limit`, `--worker-tmp-size-limit` | The `remote` location: the image a worker pod runs, where, which pods may reach it, and the pod's resources and volume limits |
+| `--image`, `--namespace`, `--allow-ingress-from`, `--insecure-skip-network-policy`, `--worker-resources`, `--worker-cache-size-limit`, `--worker-tmp-size-limit`, `--worker-cache-claim` | The `remote` location: the image a worker pod runs, where, which pods may reach it, the pod's resources and volume limits, and the claim every worker pod mounts as its cache |
+| `--worker-cache-path` | Where this controller reaches the cache itself, so an uninstall evicts a package; under `--work-dir` at `local` |
+| `--registry-credential-env`, `--registry-token-env`, `--registry-plain-http` | How a pull reaches the registry: the variable holding a registry credential (`user:secret`, presented to the registry's token endpoint; what `POST /v1/cogs/registry-credentials` exchanges a session for, or the backing registry's own), or one holding a bearer the registry takes as it is; and the hosts reached over plain HTTP |
 | `--backend`, `--location` | The two axes: `none` built; `local` and `remote` built |
 | `--models FILE` | The hub's `models:` block, below |
 | `--health-port`, `--health-host` | `GET /healthz`, 200 while the controller passes over the Track, and `GET /readyz`, 200 once it has started and its last pass read the Track; 503 otherwise, with the reason |
@@ -243,9 +377,9 @@ container: `COLLAB_CONTROLLER_TRACK`, `COLLAB_CONTROLLER_ID`,
 `COLLAB_CONTROLLER_PACKAGES` is a path list (`:`-separated) and
 `COLLAB_CONTROLLER_ALLOW` a comma-separated one. The command line wins.
 
-The **`models:` block** is the models the hub offers and which Cog talks to
-which, in TOML, until a Cog's own binding resolves it (Phase 25, whose
-inventory is generated from it):
+The **`models:` block** is the models the hub offers, in TOML: what the
+inventory an installed Cog's `resolve` sees is generated from, and, through
+`[cogs]`, which development package run by name talks to which:
 
 ```toml
 [models.default]
@@ -253,6 +387,7 @@ provider = "openai-compatible"        # or "anthropic"
 endpoint = "http://127.0.0.1:8090/v1"
 model = "fake-model"
 auth_ref = "env:MODEL_KEY"            # the variable the key is in; never the key
+locality = "in-cluster"               # where it runs: in-cluster, on-prem or external (the default)
 context_window = 131072               # optional
 max_output_tokens = 8192              # optional
 
@@ -260,12 +395,14 @@ max_output_tokens = 8192              # optional
 hermes = "default"
 ```
 
-Each worker of a Cog the block binds receives its model as `COLLAB_MODEL_*`
-variables, and no other Cog's worker does. The key is read from the
-controller's environment when the worker starts, so a rotated secret reaches
-the next worker, and it is never written to the Track or a file. A block that
-names an unknown key, an unknown model, or a key that is not set is refused when
-the controller starts.
+Each worker of a package the block binds by name receives its model as
+`COLLAB_MODEL_*` variables, and no other package's worker does; a worker of an
+installed Cog receives that Cog's binding record instead. The key is read from
+the controller's environment when the worker starts, so a rotated secret
+reaches the next worker, and it is never written to the Track or a file. A
+block that names an unknown key, an unknown model, a locality it does not
+know, a key that is not set, or a key itself where `auth_ref` goes is refused
+when the controller starts.
 
 ## What a restart does under `none`
 

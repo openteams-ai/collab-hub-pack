@@ -1195,7 +1195,7 @@
             "worker": {
               "type": "object",
               "additionalProperties": false,
-              "description": "At the remote location, each worker pod: its resources and the size limits of its cache and /tmp volumes.",
+              "description": "At the remote location, each worker pod: its resources, the size limits of its cache and /tmp volumes, the claim the cache may be, and how the pull reaches the registry.",
               "properties": {
                 "resources": {
                   "type": "object",
@@ -1208,6 +1208,32 @@
                 "tmpSizeLimit": {
                   "type": "string",
                   "description": "The size limit of a worker's /tmp, its HOME."
+                },
+                "cacheClaim": {
+                  "type": "string",
+                  "description": "A PersistentVolumeClaim every worker pod and the controller mount as the artifact and environment cache; an emptyDir per pod when empty."
+                },
+                "registryCredential": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "The Secret holding the registry credential (user:secret) a worker's init container pulls the Cog's artifact with.",
+                  "properties": {
+                    "existingSecret": {
+                      "type": "string"
+                    },
+                    "key": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                "registryPlainHttp": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "description": "Registry hosts reached over plain HTTP, for a cluster-local registry in development."
                 }
               }
             }

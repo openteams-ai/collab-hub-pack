@@ -825,9 +825,10 @@ features: {}
 # is what runs the Cogs launched through it.
 runs:
   controller:
-    # -- Run a run controller, so this hub runs the Cogs launched through /v1/runs, from the Cog packages the
-    # image ships under /opt/collab-hub/cogs. Where each Cog's worker runs is `location`. Needs
-    # frames.postgres, the Track.
+    # -- Run a run controller, so this hub runs the Cogs launched through /v1/runs: at the remote location the
+    # Cogs installed by digest from the catalog (POST /v1/cogs/installs), each worker its own artifact pulled
+    # into a pod; at the local location the Cog packages the image ships under /opt/collab-hub/cogs. Where each
+    # Cog's worker runs is `location`. Needs frames.postgres, the Track and the installs.
     enabled: false
     # -- Where a Cog's worker runs. `remote`: the controller is a Deployment of its own, with a ServiceAccount
     # and a namespace-scoped Role over the workloads it makes, and each worker is a pod of its own, reached
@@ -870,10 +871,24 @@ runs:
     # -- At the remote location, annotations on the controller's ServiceAccount (a cloud identity, say).
     serviceAccountAnnotations: {}
     # -- At the remote location, each worker pod: its resources, and the size limits of its two volumes, the
-    # cache pixi builds the Cog's environment on (Hermes's is several GiB) and its /tmp (its HOME). Past a
-    # limit the kubelet evicts the pod, which the controller records as the step's failure. The pod's
-    # securityContext is the executor's: runAsNonRoot, no privilege escalation, every capability dropped,
-    # the runtime's seccomp profile, which Pod Security `restricted` admits.
+    # cache its Cog's artifact is pulled into and pixi builds the environment on (Hermes's is several GiB)
+    # and its /tmp (its HOME). Past a limit the kubelet evicts the pod, which the controller records as the
+    # step's failure. The pod's securityContext is the executor's: runAsNonRoot, no privilege escalation,
+    # every capability dropped, the runtime's seccomp profile, which Pod Security `restricted` admits.
+    #
+    # A worker is the Cog's own published artifact, pulled by its pinned digest in an init container of the
+    # hub's image, and run with the package's `serve` task in the environment pixi builds from its lock:
+    # nothing of a Cog is baked into the image. With `cacheClaim` naming a PersistentVolumeClaim (ReadWriteMany
+    # where workers may land on several nodes), every worker pod and the controller share the cache, keyed by
+    # the digest of each package's pixi.lock, so a second run on the same lock finds the package and its
+    # environment and solves nothing again, and an uninstall evicts them; empty, each pod has an emptyDir of
+    # its own, bounded by `cacheSizeLimit`, and builds its environment again.
+    #
+    # The pull reaches the registry the install's reference names, the hub's own /v2 when the hub serves pulls
+    # (cogs.serve.enabled), with a registry credential (user:secret, what POST /v1/cogs/registry-credentials
+    # exchanges a session for, or the backing registry's own) read from `registryCredential.existingSecret`,
+    # which the init container alone is given. `registryPlainHttp` names registry hosts reached over plain
+    # HTTP, for a cluster-local one in development.
     worker:
       resources:
         requests:
@@ -884,3 +899,8 @@ runs:
           memory: 4Gi
       cacheSizeLimit: 10Gi
       tmpSizeLimit: 2Gi
+      cacheClaim: ""
+      registryCredential:
+        existingSecret: ""
+        key: credential
+      registryPlainHttp: []

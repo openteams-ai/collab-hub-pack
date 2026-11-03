@@ -81,8 +81,18 @@ if [ "$(checksum)" != "$(checksum --set-string runs.controller.models='[models.o
 else
   fail "run controller: a new models block changes the pod template" "the checksum did not change"
 fi
-check "run controller remote: a Deployment of its own with the only workload Role, the API with none" \
+check "run controller remote: a Deployment of its own with the only workload Role, the API with none, no packages" \
   run-controller-remote -f "$TESTDATA/run-controller-remote.yaml"
+check "run controller remote: the artifact cache claim and the registry credential reach the controller" \
+  run-controller-remote-artifacts -f "$TESTDATA/run-controller-remote-artifacts.yaml"
+# The worker a remote controller makes: from the chart's rendered controller, the Deployment the executor
+# would make for an installed Cog pulls its artifact at a pinned digest in an init container.
+if (cd "$ROOT/execution" && helm_render="$($HELM template t "$CHART" -f "$TESTDATA/run-controller-remote-artifacts.yaml")" \
+    && printf '%s' "$helm_render" | uv run --quiet --with pyyaml python "$ROOT/scripts/worker_pod_render_check.py"); then
+  pass "run controller remote: a worker pod pulls its Cog's artifact by digest in an init container"
+else
+  fail "run controller remote: a worker pod pulls its Cog's artifact by digest in an init container" "see above"
+fi
 refused "run controller: refused without the hub's database" "needs frames.postgres" --set runs.controller.enabled=true
 # Frames on S3, so the chart's own storage rules allow more than one API pod and it is this rule that refuses.
 SHARED_FRAMES='--set frames.storage.backend=s3 --set frames.s3.bucket=frames --set frames.activeState.backend=postgres'

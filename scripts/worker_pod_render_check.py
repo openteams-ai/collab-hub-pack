@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""The worker pod a rendered run controller makes: its Cog pulled by digest in an init container.
+
+    helm template t helm/collab-hub -f <values> | (cd execution && uv run python ../scripts/worker_pod_render_check.py)
+
+The chart renders the controller; the controller makes each worker's
+Deployment at run time (``KubernetesCogExecutor``). This builds that
+Deployment from the rendered controller's environment, the way the
+controller would, for a Cog installed by digest, and asserts what the chart
+promises of it: an init container of the hub's image pulls the artifact at
+its pinned digest into the cache, the main container serves the package
+from there, and the cache is the claim the values name. Needs the execution
+package (run it from ``execution/``) and PyYAML.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+
+import yaml
+
+from collab_hub_execution.kubernetes import KubernetesCogExecutor, resource_name
+
+REFERENCE = "hub.example.com/cogs/notes@sha256:" + "a" * 64
+
+
+def main() -> int:
+    docs = [d for d in yaml.safe_load_all(sys.stdin) if d]
+    controller = next(d for d in docs if d.get("kind") == "Deployment"
+                      and d["metadata"]["labels"].get("app.kubernetes.io/component") == "run-controller")
+    [container] = controller["spec"]["template"]["spec"]["containers"]
+    env = {e["name"]: e.get("value") for e in container["env"]}
+    executor = KubernetesCogExecutor(
+        runner_image=env["COLLAB_CONTROLLER_IMAGE"], namespace=env["COLLAB_CONTROLLER_NAMESPACE"],
+        allow_ingress_from=json.loads(env["COLLAB_CONTROLLER_ALLOW_INGRESS_FROM"]),
+        resources=json.loads(env["COLLAB_CONTROLLER_WORKER_RESOURCES"]),
+        cache_size_limit=env["COLLAB_CONTROLLER_WORKER_CACHE_SIZE_LIMIT"],
+        tmp_size_limit=env["COLLAB_CONTROLLER_WORKER_TMP_SIZE_LIMIT"],
+        cache_claim=env.get("COLLAB_CONTROLLER_WORKER_CACHE_CLAIM"),
+        registry_credential="user:secret" if "COLLAB_CONTROLLER_REGISTRY_CREDENTIAL_ENV" in env else None,
+        registry_plain_http=(env.get("COLLAB_CONTROLLER_REGISTRY_PLAIN_HTTP") or "").split(","),
+    )
+    name = resource_name(REFERENCE, "run-1", "ask:0")
+    deployment, _ = executor._manifests(REFERENCE, "run-1", name, files={"binding.json": "{}"})
+    pod = deployment["spec"]["template"]["spec"]
+    [pull] = pod["initContainers"]
+    assert pull["image"] == env["COLLAB_CONTROLLER_IMAGE"], pull["image"]
+    assert pull["command"][:4] == ["python", "-m", "collab_hub_execution.artifacts", "materialize"], pull["command"]
+    assert pull["command"][4] == REFERENCE and "@sha256:" in pull["command"][4], "the pull is not by digest"
+    assert pull["envFrom"] == [{"secretRef": {"name": f"{name}-pull"}}], "the credential reaches the pull alone"
+    [worker] = pod["containers"]
+    assert worker["command"][:4] == ["python", "-m", "collab_hub_execution.artifacts", "serve"], worker["command"]
+    assert worker["envFrom"] == [{"secretRef": {"name": name}}]
+    assert not [c for c in worker["command"] if "/opt/collab-hub/cogs" in c], "the worker runs from the image"
+    volumes = {v["name"]: v for v in pod["volumes"]}
+    if env.get("COLLAB_CONTROLLER_WORKER_CACHE_CLAIM"):
+        assert volumes["cache"]["persistentVolumeClaim"]["claimName"] == env["COLLAB_CONTROLLER_WORKER_CACHE_CLAIM"]
+    else:
+        assert "emptyDir" in volumes["cache"]
+    assert volumes["binding"]["secret"] == {"secretName": name, "items": [{"key": "binding.json",
+                                                                             "path": "binding.json"}]}
+    worker_env = {e["name"]: e["value"] for e in worker["env"]}
+    assert worker_env["COLLAB_BINDING_FILE"] == "/etc/collab-hub/binding/binding.json"
+    plain = {e["name"]: e["value"] for e in pull["env"]}.get("COLLAB_REGISTRY_PLAIN_HTTP")
+    assert plain == (env.get("COLLAB_CONTROLLER_REGISTRY_PLAIN_HTTP") or None), plain
+    print(f"worker {name}: pulls {REFERENCE} in {pull['name']}, serves it from the cache")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

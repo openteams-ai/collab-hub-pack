@@ -82,6 +82,37 @@ the first form of talking to a running Cog. The [Worker SDK](../../worker/README
 maps a turn onto a harness as one interaction: each turn is one prompt to the
 harness, answered with what it said, and a farewell ends the session.
 
+## Materialization, from the artifact
+
+A Cog the hub runs is its own published package. Installing pins the artifact
+by digest and proves it works once; materializing brings its `serve` up for a
+run, from that artifact, and the hub supplies no harness, model client or
+runtime of its own. At the `remote` location the worker pod's init container
+pulls the artifact at its pinned digest through the registry's distribution
+API (every blob verified against its digest) into a cache keyed by the digest
+of the package's `pixi.lock`, and the pod runs the package's declared `serve`
+task there with pixi, locked to that lock; the next worker of any artifact
+with the same lock finds the package and the environment pixi built beside it.
+At the `local` location the same reference is pulled into a cache under the
+controller's work directory and served the same way. The Cog contains nothing
+that knows which ([runs.md](runs.md#agent-locations)).
+
+## Binding delivery
+
+Resolution is the Cog's: at install, the hub materializes a worker with no
+binding and invokes its `resolve` lifecycle entry point with `{"requires",
+"inventory"}`, the Cog's declared requirements and one descriptor per
+satisfier the hub offers (a served model with its endpoint, model id,
+transport, locality, `auth_ref` and limits; an installed harness Cog by its
+reference), and records the selections it answers as the binding record. The
+record reaches every worker of the Cog as a mounted file,
+`COLLAB_BINDING_FILE`, carrying the model's endpoint, id and limits, the
+harness it resolved to, and its key by reference (`auth_ref`: `env:NAME`),
+plus that one variable in the worker's environment, resolved by the controller
+as the worker starts. Nothing else of the model is anywhere in the pod, and
+no credential's value is in a manifest, a binding or the Track; a worker's
+envelope names the binding by its `id` ([runs.md](runs.md#resolution-the-inventory-the-cogs-resolve-the-binding)).
+
 ## Frames in the task bundle
 
 A task bundle may carry the step's Frame snapshots beside its input:
@@ -128,7 +159,10 @@ identity.
   are installable where the orchestrator can reach them.
 - **The hosting environment:** owns the lifecycle entry points and publishes
   its capability list — the shape a Cog must have to be runnable *there*.
-  Environment-owned, so it needs no universal ratification.
+  Environment-owned, so it needs no universal ratification. This hub invokes
+  `resolve` at install with its inventory, and `check` with the binding it
+  recorded, over the same `/invoke` the usage entry points use; the worker
+  SDK answers both for every Cog built on it.
 - **The registry/catalog:** distribution and discovery; its catalog feeds
   the Op builder's picker.
 

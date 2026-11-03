@@ -107,15 +107,17 @@ no `controller`: such a run belongs to the first controller to start
 
 | Event | Payload |
 |---|---|
-| `step_started` | `step`, `cog`, `digest`, `attempt` |
+| `step_started` | `step`, `cog`, `digest`, `attempt`; for a step running an installed Cog, `install` (the install's id) and `binding_id` (its binding record's) |
 | `interaction_usage` | `step`, `attempt`, `usage` — what one interaction spent, `null` when unknown |
-| `step_completed` | `step`, `attempt`, `cog`, `digest`, `binding`, `problems`, `usage`, `frames`, `escalation` (when an approval completed it), and the result: `payload` inline, or `payload_ref` naming where it is kept |
-| `step_failed` | `step`, `attempt`, `key` (the idempotency key), `cog`, `digest`, `error` (the envelope's code, or the exception's class), `message` (bounded to 1024 characters), `problems` and `binding` when the failure carried them, and `teardown_error` when the worker could not be torn down either — the step's own failure is kept, not replaced |
+| `step_completed` | `step`, `attempt`, `cog`, `digest`, `binding` (the envelope's: the model, its limits, the binding's `id` and the `harness` it resolved to), `install` and `binding_id` for an installed Cog, `problems`, `usage`, `frames`, `escalation` (when an approval completed it), and the result: `payload` inline, or `payload_ref` naming where it is kept |
+| `step_failed` | `step`, `attempt`, `key` (the idempotency key), `cog`, `digest`, `install` and `binding_id` for an installed Cog, `error` (the envelope's code, or the exception's class), `message` (bounded to 1024 characters), `problems` and `binding` when the failure carried them, and `teardown_error` when the worker could not be torn down either — the step's own failure is kept, not replaced |
 
 `step_completed` alone answers "what produced this": the Cog and its digest,
-the binding, the problems the Cog reported, the usage it spent, and the Frames
-it was given (`frames` is empty until Frames are delivered to steps). `label`
-is reserved on step events for sensitivity labels (#13) and is not written yet.
+the binding (by its id, which the install store resolves to the record: the
+model satisfier, its endpoint, the harness, the `auth_ref`, never a key), the
+problems the Cog reported, the usage it spent, and the Frames it was given.
+`label` is reserved on step events for sensitivity labels (#13) and is not
+written yet.
 
 **Payloads by reference.** A result whose JSON is larger than the engine's
 `payload_inline_max_bytes` (64 KiB by default) is kept beside the Track, and
@@ -147,7 +149,7 @@ the runner around the executor's calls:
 
 | Event | Payload |
 |---|---|
-| `worker_started` | `step`, `attempt`, `instance`, `location`, `run_token_sha256`, and where the worker is: at `local`, `package` (`name`, `digest`), `pid`, `pgid` and `logs`, the directory its stdout and stderr go to |
+| `worker_started` | `step`, `attempt`, `instance`, `location`, `run_token_sha256`, `install` and `binding_id` for an installed Cog, and where the worker is: at `local`, `package` (`name`, `digest`), `pid`, `pgid` and `logs`, the directory its stdout and stderr go to; at `remote`, `name` and `namespace`; for a Cog materialized from its artifact, `artifact` (the pinned reference) and, at `remote`, `cache` (`claim:<name>`, or `emptyDir`) |
 | `worker_stopped` | `step`, `attempt`, `instance` — the worker was torn down, and its run token has expired; `reaped` when a starting controller wrote it for a run it interrupted, `true` if it killed a worker left alive |
 
 `run_token_sha256` is the hash of the worker's run token; the token itself is

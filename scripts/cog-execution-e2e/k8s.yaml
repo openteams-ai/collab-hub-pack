@@ -9,8 +9,8 @@ metadata:
   name: cog-executor
   namespace: cogs-e2e
 ---
-# Least-privilege: the executor may manage exactly the workloads it materializes,
-# scoped to its namespace (issue #6).
+# Least-privilege: the executor may manage exactly the workloads it materializes, scoped to its namespace
+# (issue #6), plus reading worker pods' logs, which the driver asserts the second run's cache hit from.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -29,6 +29,9 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -43,6 +46,58 @@ roleRef:
   kind: Role
   name: cog-executor
   apiGroup: rbac.authorization.k8s.io
+---
+# The registry the fake Cog is published to and pulled from: an OCI distribution registry in the cluster,
+# reached over plain HTTP by its Service name, as a cluster-local registry in development is.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: cogs-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: registry
+  template:
+    metadata:
+      labels:
+        app: registry
+    spec:
+      containers:
+        - name: registry
+          image: registry:2.8.3
+          ports:
+            - containerPort: 5000
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: 5000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: cogs-e2e
+spec:
+  selector:
+    app: registry
+  ports:
+    - port: 5000
+      targetPort: 5000
+---
+# The cache every worker pod mounts, shared, keyed by each package's pixi.lock digest: what makes a second run on
+# the same lock find the package and the environment pixi built for it. kind's default storage class.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cog-cache
+  namespace: cogs-e2e
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
 ---
 apiVersion: batch/v1
 kind: Job
@@ -68,3 +123,19 @@ spec:
               value: cogs-e2e
             - name: E2E_RUNNER_IMAGE
               value: collab-hub/cog-e2e:test
+            - name: E2E_REGISTRY
+              value: registry.cogs-e2e.svc.cluster.local:5000
+            - name: E2E_CACHE_CLAIM
+              value: cog-cache
+            # The key the inventory's model names by reference (env:E2E_MODEL_KEY): the controller's to resolve
+            # as a worker starts, and never to put in a manifest, a binding or the Track.
+            - name: E2E_MODEL_KEY
+              value: e2e-model-key-value
+          volumeMounts:
+            - name: cog
+              mountPath: /cog
+              readOnly: true
+      volumes:
+        - name: cog
+          configMap:
+            name: e2e-cog

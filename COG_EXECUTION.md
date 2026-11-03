@@ -65,8 +65,8 @@ The first thing that runs end to end is the primary goal: **the hub launches Her
 | At-least-once across pod replacement | A keyed claim, so a re-invoked step never repeats a side effect | #1 comment |
 | A step event's payload is the raw output; a failure is a class name | Binding identity per step, actor per gate decision, bounded failure records | #5 comment |
 | The Postgres Track creates its own tables | Hub tables through the `collab_schema` migration registry | #84, #42 |
-| The hub's resolver selects the model; the worker only ever gets `COG_ID` | Hub offers inventory, the Cog's `resolve` selects, hub records **and delivers** the binding | #3 comment |
-| A baked runner image | The installed Cog package running its own `serve` entry point | #1 comment |
+| ~~The hub's resolver selects the model; the worker only ever gets `COG_ID`~~ — *Phase 25: the hub offers the inventory, the Cog's `resolve` selects, the hub records and delivers the binding* | Hub offers inventory, the Cog's `resolve` selects, hub records **and delivers** the binding | #3 comment |
+| ~~A baked runner image~~ — *Phase 23: a `remote` worker pulls its artifact at its pinned digest and runs its own `serve`* | The installed Cog package running its own `serve` entry point | #1 comment |
 | `collab_hub_api` does not import `collab_hub_execution` | A run controller and a run API | #1 |
 | Nothing in the desktop calls a run API | Launch, watch and decide from Collab | apollo-desktop#690, #719 |
 | The hub has no model configuration | A minimal `models:` block, generalized by the inventory later | this plan |
@@ -256,10 +256,10 @@ Location and backend are independent: either location runs under any backend, an
 | `test.yaml` · `test-python-floor` | the API suite and `ruff check` on Python 3.13, beside `test` on 3.14 (Phase 1, done) |
 | `dev-env.yaml` · `level-1` (Linux, macOS) | a fake Op completes as a child process under `LOCATION=local`, and a killed controller leaves no worker behind — on macOS too, where process-tree teardown and pixi portability are the risk (9); the same across `make controller` and `make op` as two processes, the run ending `interrupted` when the controller is killed (11); a fake Cog launched over HTTP, listed and cancelled mid-step (12); a fake Cog reserves and commits its claim over HTTP (16); a Gate escalates and a decision advances it over HTTP, and a retry across a controller restart is answered by the claim (17); fake Cogs that break policy or grounding escalate with findings (27); the CLI reports an unauthenticated session and the empty catalog (6), launches a fake Cog and terminates it (15), then submits a fake Op, watches it and decides its Gate, with the documented exit codes (18) |
 | `dev-env.yaml` · `levels-2-3` | the Track schema comes only from migrations (5); two controllers never both start one run (11); a member without an approver role is refused (17); on `dbos`, a killed controller resumes the run, including one waiting at a Gate (26); a run with no bearer in flight reads a fake connector, and a revoked grant fails the next run (29); `collab-hub login` against the realm, with `whoami` naming the `dev` user (6) |
-| `dev-env.yaml` · `level-4-render` | the controller Deployment and a Role limited to materialized kinds render, and the API ServiceAccount has no workload verbs (21); a worker Pod pulls a digest in an init container (22) and carries an egress NetworkPolicy (28) |
+| `dev-env.yaml` · `level-4-render`, `lint.yaml` · render tests | the controller Deployment and a Role limited to materialized kinds render, and the API ServiceAccount has no workload verbs (22); the worker Deployment the rendered controller makes pulls a digest in an init container (23) and carries an egress NetworkPolicy (28) |
 | `test-execution.yaml` | every (state, event) pair of the four state machines, and their agreement with `states.md` (3); the lifecycle and durability suites (8), the location suite (9), the claim conformance suite against SQLite and Postgres (16), budgets (25), `dbos` on SQLite (26), and Temporal through the Temporal CLI's `temporal server start-dev` rather than a cluster image (32) |
 | `test-hermes.yaml` (path-gated, new) | the Hermes harness Cog through the local executor on Linux, against the stdlib fake model — it downloads Hermes' environment, so it stays out of `dev-env.yaml` (14) |
-| `test-execution-e2e.yaml` (kind, path-gated) | the location suite against `remote` (21), materialization of a published fake Cog by digest (22), installing one and running it once (23), a worker configured from its delivered binding (24), and a denied egress connection recorded on the Track on a policy-enforcing CNI (28) |
+| `test-execution-e2e.yaml` (kind, path-gated) | the location suite against `remote` (21), materialization of a published fake Cog by digest and a second run that finds its environment in the cache (23), installing one and running it once (24), a worker configured from its delivered binding (25), and a denied egress connection recorded on the Track on a policy-enforcing CNI (28) |
 
 **The document map** — which reference document each phase keeps current:
 
@@ -317,9 +317,9 @@ The open phases are tracked as workstream issues since 2026-10-26, one per piece
 | 20 | apollo-desktop#825 | Launch and watch hub runs from the desktop | `feat/hub-run-client-690` | 12, 18 | M | not started |
 | 21 | apollo-desktop#719 | Let a human approve, reject, or send back a paused step from the desktop | `feat/run-view-gate-decisions-719` | 4, 20 | M | not started |
 | 22 | #6, with #223 and #165 folded in | The remote location: Cog workers in pods, and least-privilege RBAC for the controller | `feat/cog-remote-location-6` | 9, 11 | M | merged, #252 |
-| 23 | #105, with Phases 24 and 25 | Materialize a Cog worker from its published artifact, running its own `serve` | `feat/cog-materialize-serve` | 15, 22 | L | not started |
-| 24 | #105, with Phases 23 and 25 | Install and uninstall a Cog by digest | `feat/cog-install-by-digest` | 12, 23 | M | not started |
-| 25 | #105, with Phases 23 and 24 | Resolve a Cog's model binding into its worker's connection config | `feat/cog-model-binding-3` | 24 | M | not started |
+| 23 | #105, with Phases 24 and 25 | Materialize a Cog worker from its published artifact, running its own `serve` | `feat/cog-materialize-install-resolve-105` | 15, 22 | L | in review, with Phases 24 and 25 |
+| 24 | #105, with Phases 23 and 25 | Install and uninstall a Cog by digest | `feat/cog-materialize-install-resolve-105` | 12, 23 | M | in review, with Phases 23 and 25 |
+| 25 | #105, with Phases 23 and 24 | Resolve a Cog's model binding into its worker's connection config | `feat/cog-materialize-install-resolve-105` | 24 | M | in review, with Phases 23 and 24 |
 | 26 | #4 | Enforce time and cost limits on every Cog run, and clean up idle workers | `feat/cog-budgets-warm-workers-4` | 8, 25 | M | not started |
 | 27 | #104, with Phase 17 | Add a DBOS durability backend so a restart does not lose a run | `feat/cog-durability-dbos` | 8, 11, 17 | L | not started |
 | 28 | #9 | Check Cog outputs with Guards, not just schema | `feat/cog-guards-9` | 4, 5, 8 | M | not started |
@@ -856,65 +856,64 @@ Same runner, same `none`, same Hermes Cog — the worker becomes a pod. The only
 - [x] `remote` passes the location conformance suite, including its own controller-death expectation: the pod is reaped on the next controller start, and nothing advances or acts on a claim in between.
 
 #### Phase 23 — Workers run the Cog's own `serve`, from its artifact
-**Issue** #105 · **Branch** `feat/cog-materialize-serve` · **Depends on** Phases 15, 22, and the catalog (#84, #85), which has landed · **Size** L
+**Issue** #105 · **Branch** `feat/cog-materialize-install-resolve-105`, one pull request with Phases 24 and 25 · **Depends on** Phases 15, 22, and the catalog (#84, #85), which has landed · **Size** L · **Status** in review
 
 The materialize half of install-versus-materialize: a worker is the Cog package, not a shared image. `local` already runs the package from a directory (Phase 9); this gives `remote` the same package, pulled from its artifact.
 
 *In scope*
-- An init container runs `nebi pull <reference>` into an `emptyDir`; the main container runs the package's declared `serve` task in its own pixi environment. The hub supplies no harness, model client or runtime.
-- The executor takes a pinned `<host>/<repo>@<digest>` reference; until Phase 24, the controller is handed one directly.
-- An environment cache keyed by the `pixi.lock` digest, so a second run does not re-solve. Part of the phase, not a later optimization.
-- The chart stops using the baked runner image; tests keep it.
+- A step whose `cog` is a pinned `<host>/<repo>@<digest>` reference is materialized from its artifact. At `remote`, an init container of the hub's image runs the execution package's own puller (`python -m collab_hub_execution.artifacts materialize`, a synchronous OCI client on httpx: the manifest verified against the digest, every blob against its own, the distribution token flow against the hub's `/v2/` or any registry) into the worker's cache volume, and the main container runs the package's declared `serve` task there with pixi, `--locked`. The hub image ships pixi and the puller, no Cog, no harness, no model client. `nebi pull` produces the same files; the image ships no `nebi`, and the puller is what the pod runs. At `local`, the same reference is pulled into a cache under the controller's work directory and served from there.
+- The cache is keyed by the digest of the package's `pixi.lock`, which names the environment: the package lands under `packages/<lock digest>/`, pixi builds the environment beside it, and the next materialization of any artifact with that lock finds both and pulls and solves nothing. On a hub the cache is a claim every worker pod and the controller mount (`runs.controller.worker.cacheClaim`); each pod has an `emptyDir` of its own otherwise.
+- The chart's `remote` location gives the API no package directory: a run names an installed Cog. The packages the image ships stay for the `local` location, and tests keep the image path.
 
-*Dev and CI* — an optional `registry` compose profile with `make cog-publish COG=` for a fake Cog bundle and for `cogs/hermes`, and a `publish-cogs.yaml` workflow that publishes `cogs/*` with Nebi to the registry the catalog indexes, on a tag; level 1 keeps Phase 9's directory source, and CI enumerates the `registry` profile through #83's `static` source instead of the catalog. CI: `level-4-render` asserts the worker's init container pulls a digest; `test-execution-e2e.yaml` materializes a published fake Cog by digest. *Docs* — `op-cog-seam.md` describes materialization as implemented; the chart values for the cache and the pull.
+*Dev and CI* — a `registry` compose profile (`make registry`, an OCI registry on `127.0.0.1:5050`) and `make api-registry`, level 2 with that registry indexed as a `static` source; `make cog-publish COG=` publishes a fake Cog, `hello` or `cogs/hermes` to it with the execution package's publisher, which produces the artifact `nebi publish` produces; `make controller` pulls from it over plain HTTP. `publish-cogs.yaml` publishes `cogs/*` to GHCR on a tag, pinning the worker SDK at the commit and locking again. CI: `lint.yaml`'s render tests build the worker Deployment the rendered controller would make and assert its init container pulls a digest (`scripts/worker_pod_render_check.py`); `test-execution-e2e.yaml` publishes a fake Cog to a registry in the kind cluster, materializes it by digest on a shared cache claim, and asserts the second run's init container found the package in the cache. *Docs* — `op-cog-seam.md` describes materialization as implemented; `runs.md` the artifact, the cache and the pull; the chart values.
 
 *Acceptance*
-- [ ] A published fake Cog, referenced by digest, materializes a worker running its own `serve`.
-- [ ] Context comes from the artifact at the pinned digest; nothing is baked into a shared image.
-- [ ] A second run on the same `pixi.lock` does not solve the environment again.
-- [ ] The Hermes Cog from Phase 15, published to the registry, completes an Op step in a pod with no change to the Cog.
+- [x] A published fake Cog, referenced by digest, materializes a worker running its own `serve`.
+- [x] Context comes from the artifact at the pinned digest; nothing is baked into a shared image.
+- [x] A second run on the same `pixi.lock` does not solve the environment again.
+- [ ] The Hermes Cog from Phase 15, published to the registry, completes an Op step in a pod with no change to the Cog. (The Cog gained its `COG.md` and `[tool.cog]` profile, so the catalog indexes it and the hub installs it; `publish-cogs.yaml` publishes it; the pod run waits on a kind run with the hub, which no workflow runs.)
 
 *Risk* — solving a pixi environment at pod start is slow; the cache is what makes this usable.
 
 #### Phase 24 — Install and uninstall a Cog by digest
-**Issue** #105, with Phases 23 and 25 (was #106) · **Branch** `feat/cog-install-by-digest` · **Depends on** Phases 12, 23 · **Size** M
+**Issue** #105, with Phases 23 and 25 (was #106) · **Branch** `feat/cog-materialize-install-resolve-105`, one pull request with Phases 23 and 25 · **Depends on** Phases 12, 23 · **Size** M · **Status** in review
 
 Pinning a Cog and proving it works happens once, not on every run.
 
 *In scope*
-- `POST /v1/cogs/installs` pins `<host>/<repo>@<digest>` from the catalog and records the card. An install moves through **fetched → bound → invokable**, in that order, because a Cog's `check` may probe what its binding gives it — a context Cog's `check` that asks its model for health cannot pass before resolution has chosen that model. So: fetch and provision the environment; resolve against the hub's inventory and admit the binding (Phase 25; until then the controller's `models:` stopgap supplies it); *then* run `check` through Phase 23's materialization with that binding delivered. A failing check leaves the install `bound`, not invokable, and says which step failed. `GET` shows the state, so a Cog stuck before `invokable` is visible rather than silently absent.
-- `GET /v1/cogs/installs`; `DELETE /v1/cogs/installs/{id}` removes the install and every runtime resource it created — Phase 26 extends that to its warm pool.
-- `POST /v1/runs` gains the "run one installed Cog once" form: a bundled op on an installed digest. A run on a digest that is not installed is refused.
-- `collab-hub cog install|uninstall` join the CLI's `cog` group (Phase 6), so an install is reachable from a terminal as well as from Collab.
+- `POST /v1/cogs/installs` pins a catalog Cog by its id (the newest version, or a `digest`) or by its pinned reference, records its card, and answers 202 with the install, `published`. The API records the ask in the install store beside the Track (migration 17, `collab_cog_installs` and the install's own event log) and reads state from it; the run controller, which alone constructs an executor, takes the install (`installer.Installer`) through **fetched → bound → invokable**, in that order, because a Cog's `check` may probe what its binding gives it: fetch reads the artifact at its digest through the registry (the manifest verified, the lock named, the `serve` task found); bind offers the inventory to the Cog's own `resolve` and admits the binding (Phase 25); check materializes a worker with that binding delivered and invokes the Cog's `check` when its card declares one, readiness alone otherwise. A failing check leaves the install `bound`, not invokable, and `GET` says which step failed (`failed_step`: `materialize` or `check`) and why; a binding the hub cannot admit leaves it `fetched` with the reason. One live install of a digest per organization.
+- `GET /v1/cogs/installs` and `GET /v1/cogs/installs/{id}`, with the install's events; `DELETE /v1/cogs/installs/{id}` asks for its removal, and the controller sweeps every workload of the install, evicts its package from the cache when no other install shares its lock, and records it `uninstalled`. An install removed before anything was fetched goes from `PUBLISHED` to `UNINSTALLED` directly, a transition the install machine gained.
+- `POST /v1/runs` gains the run-one-installed-Cog form: `cog` (a pinned reference, a digest or an install id), `entry_point`, `input`, `gate` and `frames`, a one-step Op named after the Cog. A step's `cog` may name an installed Cog the same way beside packages; a Cog that is not installed is refused with 422, one installed but not invokable with 409 naming its install and the step that failed. The step carries its `install` and its `binding` id, and `GET /v1/runs/launchable` lists the organization's invokable installs by reference.
+- `collab-hub cog install COG [--wait]`, `cog installs`, `cog show-install ID` and `cog uninstall ID [--wait]`; `cog launch` takes a reference, a digest or an install id and uses the run-one form.
 
-*Dev and CI* — `make cog-install COG=` installs from the `registry` profile at level 2, or from Phase 9's directory source at level 1; `test-execution-e2e.yaml` installs a published fake Cog and runs it once. *Docs* — the protection map gains `/v1/cogs/**`; `runs.md` gains installing, uninstalling and running a Cog once.
+*Dev and CI* — `make cog-install COG=` installs from the `registry` profile at level 2 (`make api-registry`), or a package of the directory source at level 1 (`PACKAGE=1`), and waits until the controller has made it invokable; `test-execution-e2e.yaml` installs the published fake Cog and runs it once. *Docs* — the protection map gains `/v1/cogs/installs/**`; `runs.md` gains installing, uninstalling and running a Cog once; `cli/README.md` the commands.
 
 *Acceptance*
-- [ ] Installing a context Cog makes it invokable with no hand-authored per-Cog deployment.
-- [ ] A Cog whose `check` fails stays `bound`, is not invokable, and says which step failed.
-- [ ] A context Cog with no prior binding and no default model server installs from the host's model configuration alone: it is bound before its `check` runs, and the `check` sees that binding.
-- [ ] Uninstall removes every runtime resource the install created.
+- [x] Installing a context Cog makes it invokable with no hand-authored per-Cog deployment.
+- [x] A Cog whose `check` fails stays `bound`, is not invokable, and says which step failed.
+- [x] A context Cog with no prior binding and no default model server installs from the host's model configuration alone: it is bound before its `check` runs, and the `check` sees that binding.
+- [x] Uninstall removes every runtime resource the install created.
 
 #### Phase 25 — Model binding: inventory, the Cog's `resolve`, delivery
-**Issue** #105, with Phases 23 and 24 (was #3) · **Branch** `feat/cog-model-binding-3` · **Depends on** Phase 24 · **Size** M
+**Issue** #105, with Phases 23 and 24 (was #3) · **Branch** `feat/cog-materialize-install-resolve-105`, one pull request with Phases 23 and 24 · **Depends on** Phase 24 · **Size** M · **Status** in review
 
-The hub offers, the Cog selects, the hub records and delivers — so the hub does not grow a parallel resolver (#3 thread). Since Phase 11 the controller has written the binding file from the hub's `models:` block, and Phase 14's SDK has read it; this phase retires that stopgap: the Cog's `resolve` becomes the producer, and the file the worker reads does not change.
+The hub offers, the Cog selects, the hub records and delivers — so the hub does not grow a parallel resolver (#3 thread). Since Phase 11 the controller has written the binding from the hub's `models:` block, and Phase 14's SDK has read it; this phase makes the Cog's `resolve` the producer for every installed Cog, and the file the worker reads does not change. The block's `[cogs]` table still binds a development package run by name.
 
 *In scope*
-- A satisfier **inventory** generated from the hub's model configuration: one descriptor model Cog per served model, carrying endpoint, model id, transport, locality, `auth_ref`, and its context window and maximum output tokens, which the binding passes on so a harness sizes its turns from them.
-- Resolution invokes the installed Cog's `resolve` lifecycle entry point with that inventory, and the hub records the **binding record**. `DeclaredCapabilityResolver` becomes a test double.
-- The binding is delivered to the worker as a mounted file plus environment; secrets arrive by reference. A check refuses literal secrets in manifests and bindings.
-- The binding id appears on every step event and in the envelope's `binding`.
-- A plug point for #10: the inventory is filtered before `resolve` sees it. No filter is implemented here.
-- The install sequence Phase 24 defines does not change: fetch and provision, bind, then `check`. This phase replaces what supplies the binding at the bind step — the Cog's own `resolve` over the inventory, instead of the controller's `models:` stopgap — so a Cog's `check` still runs against a real binding.
-- Resolution covers `requires: harness` as it covers models: the inventory lists the installed harness Cogs, the Cog's `resolve` selects one, and the binding names it — which is when a context Cog first resolves to the Hermes Cog of Phase 15.
+- The satisfier **inventory** (`binding.inventory`): one descriptor per served model in the `models:` block (`id`, `kind`, `provides`, `endpoint`, `model`, `transport`, `locality`, `auth_ref`, `context_window`, `max_output_tokens`; the block gained `locality`), plus one per harness Cog the organization has installed and invokable, by its pinned reference. No credential's value is in it.
+- Resolution invokes the installed Cog's `resolve` entry point on a worker materialized without a binding, with `{requires, inventory}`, and records what it answered (`{selections: {capability: satisfier id}}`) as the **binding record** (`BindingRecord`: an id, the model and the harness selected, the inventory's digest, the selections). The worker SDK answers `resolve` for every Cog built on it, selecting the first satisfier of each requirement that its locality and its named Cogs admit; a Cog registers its own to replace it. `DeclaredCapabilityResolver` is a test double (`execution/tests/resolver_double.py`).
+- The binding is delivered to every worker of the Cog as a mounted file (`binding.json`, named by `COLLAB_BINDING_FILE`: at `remote` from the worker's own Secret, under `/etc/collab-hub/binding`; at `local` beside the run's output, `0600`) plus environment: the key the model names by `auth_ref` is resolved by the controller as the worker starts and enters `COLLAB_MODEL_API_KEY` of that worker alone. `refuse_literal_secrets` refuses a credential's value in a manifest, a binding or the models block (`auth_ref` is `env:NAME`, the only kind).
+- The binding id is on every event of the step (`step_started`, `worker_started`, `step_completed`, `step_failed`: `binding_id`, with `install`) and in the envelope's `binding` (`id`, and the `harness` selected), which the SDK reads from the file.
+- The plug point for #10: `InventoryFilter`, between the inventory and `resolve`, given the satisfiers and the install being bound; `no_filter` is the only one built.
+- The install sequence of Phase 24 is unchanged; what supplies the binding at its bind step is the Cog's `resolve`. A key the controller cannot find refuses the binding there, so a `check` never runs against a binding that could not be delivered.
+- `requires: harness` resolves like a model: the inventory lists the installed harness Cogs, the Cog's `resolve` selects one, and the binding names it by reference, which is when a context Cog first resolves to the Hermes Cog of Phase 15 (which gained its catalog profile, `kind: harness`, in this PR).
 
-*Dev and CI* — Phase 14's stdlib fake model joins the `fakes` compose profile as `fake-model`, and the dev model configuration generates the inventory from it; `test-execution-e2e.yaml` asserts a worker's connection comes only from its delivered binding. *Docs* — `op-cog-seam.md` gains binding delivery; `values-example.yaml` shows the model configuration; `docs/cog-execution/sensitivity.md` names the inventory filter as #10's plug point.
+*Dev and CI* — the stdlib fake model joins the `fakes` compose profile as `fake-model`, and `make models` writes the block the inventory is generated from, with its `locality`; `test-execution-e2e.yaml` asserts the worker's model endpoint, id and key reach it through the delivered binding alone and that no key is on the Track, in a manifest or in the binding. *Docs* — `op-cog-seam.md` gains binding delivery; `values-example.yaml` shows the model configuration; `docs/cog-execution/sensitivity.md` names the inventory filter as #10's plug point.
 
 *Acceptance*
-- [ ] A worker is configured from its delivered binding alone: no model-connection value is baked into the Cog package, the image or the Deployment spec.
-- [ ] Re-pointing the bound model Cog changes the next run's endpoint with no other change.
-- [ ] Credentials appear only by reference in manifests, bindings and the Track.
+- [x] A worker is configured from its delivered binding alone: no model-connection value is baked into the Cog package, the image or the Deployment spec.
+- [ ] Re-pointing the bound model Cog changes the next run's endpoint with no other change. (A changed `models:` block changes what the next install's `resolve` sees; an existing install keeps the record its `resolve` produced, so re-pointing is an install again. Re-binding an install in place is not built.)
+- [x] Credentials appear only by reference in manifests, bindings and the Track.
 
 #### Phase 26 — Budgets enforced, warm workers, idle teardown
 **Issue** #4 · **Branch** `feat/cog-budgets-warm-workers-4` · **Depends on** Phases 8, 25 · **Size** M

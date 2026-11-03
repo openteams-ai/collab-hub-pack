@@ -191,10 +191,20 @@ serve, check) and *invokes* it by calling its usage entry points.
 Orchestrator code never executes a Cog's internals. (ADR-0001 D2; seam
 note.)
 
-**Install.** Making a Cog invokable: fetch the package, provision its
-environment, run its checks, resolve its requirements, record the binding,
-derive its catalog card. Distinct from materialize — installing does not
-start a worker. (Cog-execution README, "Materialize / worker".)
+**Install.** Making a Cog invokable: fetch the package at its pinned digest,
+resolve its requirements through its own `resolve` over the hub's inventory,
+record the binding, run its `check` with that binding delivered, and keep
+its catalog card. `POST /v1/cogs/installs` asks; the run controller does
+each step and records it (`published`, `fetched`, `bound`, `invokable`).
+Distinct from materialize — installing starts no worker that outlives it.
+(Cog-execution README, "Materialize / worker"; [runs.md](cog-execution/runs.md#installing-a-cog-and-running-it-once).)
+
+**Inventory.** The satisfiers a hosting environment offers a Cog's
+`resolve`: one descriptor per served model, generated from the hub's
+`models:` block, and one per harness Cog installed on the hub, each by its
+reference, with no credential's value among them. Filtered before the Cog
+sees it, the plug point for sensitivity (#10). (ADR-0001 D3;
+[runs.md](cog-execution/runs.md#resolution-the-inventory-the-cogs-resolve-the-binding).)
 
 **Install reference.** The pinned `<host>/<repository>@<digest>` of one
 indexed Cog version — what a client hands to `nebi import`, and what the
@@ -241,18 +251,22 @@ lets go of it or dies. For development and the desktop. (ADR-0002 D12.)
 
 **Materialize / worker.** To materialize a Cog is to bring up a running
 instance of its `serve` entry point where the hub can reach it — on
-Kubernetes, a pod behind a Service. That running instance is a **worker**.
-Materialization happens behind the executor; teardown reclaims it. The
-first invocation of an installed Cog materializes a worker. (ADR-0001 D5;
-cog-execution README.)
+Kubernetes, a pod behind a Service whose init container pulls the Cog's own
+artifact at its pinned digest into a cache keyed by its lock's digest. That
+running instance is a **worker**. Materialization happens behind the
+executor; teardown reclaims it. The first invocation of an installed Cog
+materializes a worker. (ADR-0001 D5; cog-execution README.)
 
 **Nebi.** The package manager for Cogs: `nebi pull` installs a Cog's
 files, `nebi run` executes one of its entry points, and publishing goes
-through Nebi to an OCI registry the hub indexes. (ADR-0001 D6.)
+through Nebi to an OCI registry the hub indexes. The hub's own puller
+(`collab_hub_execution.artifacts`) reads the artifact `nebi publish`
+produces, and its publisher produces the same one, for development and
+tests. (ADR-0001 D6.)
 
 **Remote worker.** A Cog worker at the `remote` agent location: a Deployment
-and a Service the run controller makes on its own cluster, of the hub's image
-running the Cog package's `serve` task, reached over service DNS through the
+and a Service the run controller makes on its own cluster, a pod of the hub's
+image running the Cog package's own `serve` task from its artifact, reached over service DNS through the
 same seam as a local worker, with no ServiceAccount token and a NetworkPolicy
 admitting only the controller. It outlives a controller that dies, and is
 reaped by name by the next controller to find its run. What a Kubernetes hub

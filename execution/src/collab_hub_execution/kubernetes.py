@@ -80,9 +80,10 @@ def cog_slug(cog: str) -> str:
     """Reduce a Cog id's last path segment to a DNS-label-safe token.
 
     Lowercased, restricted to ``[a-z0-9-]`` (non-ASCII/alnum -> ``-``), stripped
-    of leading/trailing hyphens, capped, and never empty.
+    of leading/trailing hyphens, capped, and never empty. A pinned reference's
+    digest is left out: the name's own digest keeps materializations apart.
     """
-    raw = cog.split("/")[-1].lower()
+    raw = cog.split("@", 1)[0].split("/")[-1].lower()
     cleaned = "".join(ch if (ch.isascii() and ch.isalnum()) or ch == "-" else "-" for ch in raw)
     cleaned = cleaned.strip("-")
     return cleaned[:40] or "cog"

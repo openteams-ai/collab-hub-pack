@@ -62,7 +62,13 @@ runs (ADR-0002 D4). It watches a Track, a SQLite file or Postgres (install the
 delivers what was asked of the runs it owns: cancels, turns, and decisions on
 Gates. Several controllers share a Track, each under its own id, and one picks
 up each run. `--models` is the hub's `models:` block (`binding.ModelsBlock`),
-and `--health-port` serves `/healthz` and `/readyz`.
+from which the inventory an installed Cog's `resolve` sees is generated,
+`--registry-*` how a published Cog's artifact is pulled, and `--health-port`
+serves `/healthz` and `/readyz`. The controller also takes each install
+asked for (`installer.Installer`, over `installs.InstallStore`, the
+store beside the Track): fetch the artifact (`artifacts`), bind through the
+Cog's `resolve` (`binding.BindingRecord`), check on a worker with the binding
+delivered.
 `collab_hub_execution.intents` is the other half, used by the hub's API:
 `submit()`, `request_cancel()`, `request_turn()` and `request_decision()`
 record what a client asked for, and `describe()` and `list_runs()` read runs

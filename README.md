@@ -85,11 +85,15 @@ controllers, one picks up each run
   starts again, and continues only when someone retries it. `dbos` (#104) is
   the backend that resumes runs; see
   [`docs/cog-execution/runs.md`](docs/cog-execution/runs.md).
-- **Cogs on a deployed hub run in the API's pod.** Every hub serves the run
-  API (`/v1/runs`) on its own database. With `runs.controller.enabled`, a run
-  controller beside the API runs the Cogs the image ships as processes of that
-  pod, not isolated from the hub: for a development hub. Cogs in pods of their
-  own come later. See
+- **Cogs on a deployed hub run from their artifacts, bound once at install.**
+  Every hub serves the run API (`/v1/runs`) on its own database. With
+  `runs.controller.enabled` and `location: remote`, a run controller of its
+  own installs each Cog by digest from the catalog (`POST /v1/cogs/installs`:
+  fetched, bound by the Cog's own `resolve`, checked) and runs it as a pod
+  pulled from its artifact; with `location: local`, for a development hub,
+  the controller runs the Cogs the image ships as processes of the API's pod,
+  not isolated from the hub. A Cog bound at install keeps that binding until
+  it is installed again. See
   [`docs/standalone-deployment.md`](docs/standalone-deployment.md#running-cogs-beside-the-api)
   and [`examples/cog-local`](examples/cog-local/README.md).
 

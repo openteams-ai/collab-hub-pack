@@ -849,7 +849,11 @@ def main(argv: list[str] | None = None) -> int:
     _log.info("watching %s on the %r backend, workers at %r", where, runner.backend.name, args.location)
     controller.run(stop, still_held=still_held)
     # Stopping: runs still in flight are left as they are, and this controller's next start records them
-    # interrupted.
+    # interrupted. The Track's pool is closed here, while its workers can still be stopped: the installer, the
+    # executor and the delivery hold each other, so the pool would otherwise live until the interpreter's last
+    # collection, when its threads can no longer be joined.
+    if keep_open is not None:
+        keep_open.close(timeout=5)
     return 0 if still_held() else 1
 
 

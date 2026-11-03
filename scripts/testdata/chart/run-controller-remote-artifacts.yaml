@@ -1,0 +1,28 @@
+# The run controller at the remote location with a shared artifact cache and a registry credential: how a hub
+# whose workers land on several nodes, and whose catalog is private, is deployed.
+frames:
+  postgres:
+    existingSecret: hub-db
+    databaseUrlKey: url
+  storage:
+    backend: s3
+  s3:
+    bucket: frames
+  activeState:
+    backend: postgres
+runs:
+  controller:
+    enabled: true
+    location: remote
+    models: |
+      [models.default]
+      provider = "openai-compatible"
+      endpoint = "http://llm.svc:8000/v1"
+      model = "served-model"
+      locality = "in-cluster"
+    worker:
+      cacheClaim: cog-cache
+      registryCredential:
+        existingSecret: hub-registry-pull
+        key: credential
+      registryPlainHttp: ["registry.cogs.svc:5000"]

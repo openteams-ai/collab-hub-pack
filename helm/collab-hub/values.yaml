@@ -725,7 +725,8 @@ cogs:
     # -- ConfigMap holding the CA certificate(s) that signed the registries'
     # gateway-issued certificates (dev clusters run a private CA). Mounted
     # read-only at /etc/collab-hub/cogs-ca and passed to every source that
-    # does not set its own caBundlePath. Empty means system trust only.
+    # does not set its own caBundlePath. Empty means httpx's default: the
+    # certifi Mozilla bundle, or SSL_CERT_FILE / SSL_CERT_DIR when set.
     configMap: ""
     # -- Key in that ConfigMap holding the PEM bundle.
     key: ca.crt

@@ -52,7 +52,7 @@ beside each package that needs it ([`api/admin-ui/`](api/admin-ui/) and
 Dependabot bumps action and image versions, not these.
 
 The admin panel is a Vite and React app in [`api/admin-ui/`](api/admin-ui/)
-with its own Vitest suite. It needs Node 24.22.1 or later (CI pins 24.22.1):
+with its own Vitest suite:
 
 ```sh
 cd api/admin-ui

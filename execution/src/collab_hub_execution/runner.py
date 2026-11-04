@@ -38,9 +38,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .backends import DurabilityBackend, select_backend
+from .claims import key_component
 from .envelope import EnvelopeInvalid, ResultEnvelope
 from .gates import DEFAULT_APPROVERS, Gate, GateOutcome, envelope_digest, escalation_id
-from .intents import retry_ask
+from .intents import outcome_unknown_step, retry_ask
 from .lifecycle import BudgetExceeded, BudgetTracker, RunBudget
 from .locations import select_executor
 from .ops import (
@@ -89,18 +90,6 @@ def _payload_digest(payload: Any) -> str:
     """
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
-
-
-def _key_component(value: str) -> str:
-    """Percent-escape the key delimiter so idempotency keys are injective.
-
-    The key is ``{run_id}:{step}:{attempt}``; without escaping, ``run="a:b"
-    step="c"`` and ``run="a" step="b:c"`` collide. Escaping ``:`` (and ``%``, so
-    the escaping itself round-trips) keeps distinct (run, step) pairs distinct —
-    the contract the exactly-once claim in #1 is built on — while leaving keys
-    readable whenever the ids contain no ``:``.
-    """
-    return value.replace("%", "%25").replace(":", "%3A")
 
 
 class UsageUnavailable(ValueError):
@@ -838,7 +827,10 @@ class LifecycleRunner(WorkflowEngine):
 
         Retry is for failed runs. Exhausted duration/token/cost budgets are not
         reset — the run machine allows it as a new budget epoch, which #4 builds —
-        so start a new run instead. A completed run has no incomplete steps, so
+        so start a new run instead. A run whose step ended ``outcome-unknown`` is
+        not retried either: its worker was lost between its side effect and its
+        result, so a person reconciles it (the claim store's ``reconcile``) before
+        anything acts on that step again. A completed run has no incomplete steps, so
         retrying it would only append a spurious `completed`; that is rejected
         (re-running finished work is a new Op, with its own run id). Unlike a
         crash-recovery resume (which reuses the same idempotency key so a durable
@@ -865,6 +857,12 @@ class LifecycleRunner(WorkflowEngine):
         if not RUN.accepts(state, "retry"):
             done = "completed" if state is RunState.COMPLETED else f"was {state.value}"
             raise ValueError(f"run {run_id!r} {done}; nothing to retry (start a new run instead)")
+        unknown = outcome_unknown_step(events)
+        if unknown is not None:
+            # The worker was lost between its side effect and its result: nothing may act again on
+            # that step until a person settles what happened, and a retry would.
+            raise ValueError(f"step {unknown!r} of run {run_id!r} ended outcome-unknown: its side effect may have "
+                             f"happened, so it is reconciled explicitly, not retried")
         op = self._submitted_definition(run_id, events)
         written: list[TrackEvent] = []
         still_asked = (lambda current: retry_ask(current) is not None) if asked else None
@@ -1017,8 +1015,8 @@ class LifecycleRunner(WorkflowEngine):
         run-scoped, handed to the worker for dedupe.
         """
         number = run.escalations.get(step.name, 0) + retries
-        instance = f"{_key_component(step.name)}:{number}"
-        attempt = Attempt(step=step, number=number, instance=instance, key=f"{_key_component(op.run_id)}:{instance}")
+        instance = f"{key_component(step.name)}:{number}"
+        attempt = Attempt(step=step, number=number, instance=instance, key=f"{key_component(op.run_id)}:{instance}")
         now.append("step_started", {"step": step.name, "cog": step.cog, "digest": step.digest, "attempt": number})
         return attempt
 

@@ -165,7 +165,7 @@ record (#106).
 | `reserve()` | `INVOKED` → `RESERVED` | `claim_reserved` |
 | `commit()` | `RESERVED` → `COMMITTED` | `claim_committed` |
 | `record()` | `COMMITTED` → `RECORDED` | — (the Track's `step_completed` or `step_failed` is the record) |
-| `reconcile(actor)` | `OUTCOME_UNKNOWN` → `RECORDED` | `outcome_reconciled` |
+| `reconcile(actor)` | `OUTCOME_UNKNOWN` → `RECORDED` | `outcome_reconciled` (on the Track too, through `intents.reconcile_outcome`, which is what lets the run retry) |
 
 **A run** — `Run`, created by `Run.submit(run_id, op)`, which records `op_submitted`
 

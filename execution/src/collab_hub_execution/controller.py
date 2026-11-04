@@ -27,6 +27,10 @@ reaps any of their ``local`` workers left alive. Under ``dbos`` and
 offers and which Cog talks to which; each worker receives its Cog's model, and
 no other (``binding.ModelsBlock``).
 
+**The hub.** ``--hub-url`` is where a worker reaches the hub's worker-facing
+endpoints with its run token, the keyed claim (``/v1/claims``) first: handed
+to each worker as ``COLLAB_HUB_URL``. A worker given none claims nothing.
+
 **Health.** With ``--health-port``, ``GET /healthz`` answers 200 while the
 controller is passing over the Track, and ``GET /readyz`` once it has started
 and its last pass read the Track.
@@ -572,6 +576,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--models", default=env("COLLAB_CONTROLLER_MODELS"), metavar="FILE",
                         help="the hub's models: block, in TOML: the models it offers, and which Cog talks to "
                              "which; each worker gets its Cog's model, and no other")
+    parser.add_argument("--hub-url", default=env("COLLAB_CONTROLLER_HUB_URL"), metavar="URL",
+                        help="where a worker reaches the hub's worker-facing endpoints with its run token, the "
+                             "keyed claim (/v1/claims) first: the API this controller advances runs for. Handed "
+                             "to each worker as COLLAB_HUB_URL; without it, workers claim nothing")
     parser.add_argument("--poll-interval", type=float, default=number("COLLAB_CONTROLLER_POLL_INTERVAL", "0.25", float))
     parser.add_argument("--interaction-timeout", type=float, metavar="SECONDS",
                         default=number("COLLAB_CONTROLLER_INTERACTION_TIMEOUT", "60", float),
@@ -720,7 +728,8 @@ def main(argv: list[str] | None = None) -> int:
     runner = LifecycleRunner(
         track=track, backend=args.backend, location=args.location, controller=args.id,
         location_settings={**location_settings, "interaction_timeout": args.interaction_timeout or None,
-                           "ready_timeout": args.worker_start_timeout, "deliver": deliver})
+                           "ready_timeout": args.worker_start_timeout, "deliver": deliver,
+                           "hub_url": args.hub_url or None})
     controller = RunController(runner, poll_interval=args.poll_interval, track_spec=args.track)
     controller.start()
     starting["controller"] = controller

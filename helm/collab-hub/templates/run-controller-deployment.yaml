@@ -83,6 +83,10 @@ spec:
               value: {{ $controller.worker.cacheSizeLimit | quote }}
             - name: COLLAB_CONTROLLER_WORKER_TMP_SIZE_LIMIT
               value: {{ $controller.worker.tmpSizeLimit | quote }}
+            # Where each worker pod reaches the hub's worker-facing endpoints (the keyed claim, /v1/claims) with
+            # its run token: the API's Service, inside the cluster.
+            - name: COLLAB_CONTROLLER_HUB_URL
+              value: "http://{{ include "collab-hub.component-name" (dict "top" . "component" "api") }}.{{ .Release.Namespace }}.svc:{{ .Values.api.service.port }}"
             - name: COLLAB_CONTROLLER_HEALTH_HOST
               value: "0.0.0.0"
             - name: COLLAB_CONTROLLER_HEALTH_PORT

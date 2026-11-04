@@ -430,6 +430,9 @@ _FACTS = frozenset({
     # A retry of an ended run, asked by a client for a controller to take; `retry_requested` records it
     # when a runner takes it, and `retry_refused` when it does not.
     "retry_asked", "retry_refused",
+    # A person settled what a lost worker did, after a step ended `outcome-unknown` (the keyed claim):
+    # the run stays failed, and its retry then runs the step as a new attempt.
+    "outcome_reconciled",
 })
 
 # The payload fields that decide where a replayed event leads; a record and its replay must agree on them.

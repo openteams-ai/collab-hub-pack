@@ -12,6 +12,12 @@ A session entry point holds its ``/invoke`` open and answers turns, each one
 an interaction with the harness, until a farewell or until the run is
 terminated and this process with it. The worker knows nothing of where it
 runs: a process on the controller's host and a pod serve the same seam.
+
+Every task carries an idempotency key, and the worker honours it through the
+keyed claim (``claims.py``): it reserves the key on the hub before an entry
+point acts and commits the envelope after, so an invocation replayed after a
+crash or a retry never acts twice. A worker given no hub (``COLLAB_HUB_URL``)
+claims nothing.
 """
 
 from __future__ import annotations
@@ -29,7 +35,9 @@ from typing import Any
 
 from . import binding as bindings
 from .adapter import HarnessAdapter
-from .envelope import Cancelled, Problem, Stopwatch, WorkerError, envelope, status_for
+from .claims import ClaimClient, ClaimUnavailable
+from .claims import log as claim_log
+from .envelope import STATUS_FOR_CODE, Cancelled, Problem, Stopwatch, WorkerError, envelope, status_for
 from .limits import check_fits
 from .task import Context, Frame, Interaction, Prompt, Signal, Task, Usage, frames_from
 
@@ -109,20 +117,25 @@ class Worker:
     ``harness`` makes the Cog's adapter from the ``Context`` the worker starts
     it with (the binding among it); ``None`` for a Cog whose entry points need
     no harness. ``authenticate`` replaces the run-token check on ``/invoke`` and
-    ``/turn``; the default admits the bearer of ``COLLAB_RUN_TOKEN``.
+    ``/turn``; the default admits the bearer of ``COLLAB_RUN_TOKEN``. ``claims``
+    is the keyed claim's client, made from ``COLLAB_HUB_URL`` and the run token
+    unless given; with none, the worker acts on every invocation.
     """
 
     def __init__(self, cog: str | None = None, version: str = "0.1.0", *,
                  harness: Callable[[Context], HarnessAdapter] | None = None,
                  environ: Mapping[str, str] | None = None, authenticate: Authenticate | None = None,
                  session_start_timeout: float = 300.0, turn_grace: float = 1.0,
-                 farewells: tuple[str, ...] = FAREWELLS, work_dir: str | None = None) -> None:
+                 farewells: tuple[str, ...] = FAREWELLS, work_dir: str | None = None,
+                 claims: ClaimClient | None = None) -> None:
         self.environ = os.environ if environ is None else environ
         self.cog = cog or self.environ.get(COG_ENV, "cog")
         self.version = version
         self.run_id = self.environ.get(RUN_ENV, "")
         self.make_harness = harness
         self.authenticate = authenticate or self._run_token_check
+        self.claims = claims or ClaimClient.from_environment(self.environ)
+        """The keyed claim's client, or ``None`` for a worker given no hub to claim against."""
         self.session_start_timeout = session_start_timeout
         """How long a turn waits for a session that is opening: a harness's first start can take a while."""
         self.turn_grace = turn_grace
@@ -210,7 +223,60 @@ class Worker:
 
     def invoke(self, entry_point: Any, input: Any = None, idempotency_key: Any = None, frames: Any = None,
                signal: Any = None) -> tuple[int, dict[str, Any]]:
-        """``POST /invoke`` in process: the HTTP status and the envelope."""
+        """``POST /invoke`` in process: the HTTP status and the envelope, under the task's keyed claim.
+
+        With a hub to claim against and a key on the task, the key is reserved
+        before the entry point acts: a key committed already is answered with
+        its envelope, and one reserved by a worker that was lost before
+        committing fails the step ``outcome-unknown``, so nothing acts twice. A
+        hub that cannot be reached for the reservation fails the step
+        ``hub-unavailable`` before anything acts. The envelope is committed
+        after; a commit the hub does not take is logged, and the envelope
+        answered all the same, since the controller records it.
+        """
+        key = idempotency_key if isinstance(idempotency_key, str) and idempotency_key and self.claims else None
+        if key:
+            answered = self._reserve(entry_point, key)
+            if answered is not None:
+                return answered
+        status, answer = self._invoke(entry_point, input, idempotency_key, frames, signal)
+        if key:
+            try:
+                self.claims.commit(key, answer)
+            except ClaimUnavailable as exc:
+                claim_log(f"{key}: the envelope could not be committed, and is answered all the same: {exc}")
+        return status, answer
+
+    def _reserve(self, entry_point: Any, key: str) -> tuple[int, dict[str, Any]] | None:
+        """Reserve the key; the answer to give instead of acting, or ``None`` when this worker is to act."""
+        name = entry_point if isinstance(entry_point, str) else None
+        try:
+            claim = self.claims.reserve(key)
+        except ClaimUnavailable as exc:
+            error = WorkerError("hub-unavailable", f"the key {key} could not be reserved, so nothing acted: {exc}")
+            return status_for(error), self._envelope(name, None, Stopwatch(), error=error)
+        if claim.yours:
+            return None
+        if claim.state == "committed" and isinstance(claim.envelope, Mapping):
+            claim_log(f"{key}: committed already; answering with its envelope, and acting on nothing")
+            committed = dict(claim.envelope)
+            return self._status_of(committed), committed
+        error = WorkerError("outcome-unknown", f"the key {key} is {claim.state}: it was reserved by a worker that "
+                                               f"never committed its result, so its side effect may have happened "
+                                               f"and nothing acts on it again until a person reconciles it")
+        return status_for(error), self._envelope(name, None, Stopwatch(), error=error)
+
+    @staticmethod
+    def _status_of(committed: Mapping[str, Any]) -> int:
+        """The HTTP status a committed envelope is answered with: as the worker that committed it answered."""
+        if committed.get("ok"):
+            return 200
+        error = committed.get("error")
+        code = error.get("code") if isinstance(error, Mapping) else None
+        return STATUS_FOR_CODE.get(code, 502)
+
+    def _invoke(self, entry_point: Any, input: Any, idempotency_key: Any, frames: Any,
+                signal: Any) -> tuple[int, dict[str, Any]]:
         clock = Stopwatch()
         harness: Harness | None = None
         try:

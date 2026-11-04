@@ -217,6 +217,11 @@ combination, but not restating the list is the better habit.)
   the organization that launched it, another organization's run being a 404. A
   request without credentials is a 401 there under the hardened map
   ([runs.md](cog-execution/runs.md#the-run-controller-and-the-run-api)).
+- `/v1/claims/**`, the keyed claim's routes for workers, is outside the map
+  altogether, like the registry surface: every request is authenticated by
+  the route itself with a worker's run token, which the hub's bearer auth would
+  refuse before the route saw it, and a request without one is a 401. No map
+  entry can open it ([the seam](cog-execution/op-cog-seam.md#the-keyed-claim)).
 - The API routes under `/v1` need no entry: the default covers them, and each
   also carries its own auth dependency, so a `public` entry does not make
   frames or tasks anonymous. The one exception is the Cog catalog: a `public`
@@ -482,6 +487,14 @@ in the API's pod instead, as a second container of the same image, and it
 runs each Cog launched through the API as a process of that pod, the `local`
 agent location ([runs.md](cog-execution/runs.md#agent-locations)). What
 follows is that shape.
+
+At either location the chart tells the controller where the API is
+(`COLLAB_CONTROLLER_HUB_URL`: the API in the same pod, or its Service inside
+the cluster), and the controller hands it to each worker as `COLLAB_HUB_URL`,
+where the worker reserves and commits its step's keyed claim with its run token
+([runs.md](cog-execution/runs.md#the-keyed-claim)). A worker pod reaches the
+API's Service like any client; the claim routes authenticate it by the run
+token, outside the protection map.
 
 ```yaml
 runs:

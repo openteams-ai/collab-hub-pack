@@ -219,6 +219,7 @@ class KubernetesCogExecutor:
         pod_security_context: Mapping[str, Any] | None = None,
         cache_size_limit: str = DEFAULT_CACHE_SIZE_LIMIT,
         tmp_size_limit: str = DEFAULT_TMP_SIZE_LIMIT,
+        hub_url: str | None = None,
     ) -> None:
         # A worker's /invoke endpoint is unauthenticated, so the network boundary is
         # the control. Force an explicit choice at construction — the secure path
@@ -260,6 +261,8 @@ class KubernetesCogExecutor:
                                      else dict(DEFAULT_POD_SECURITY_CONTEXT))
         self.cache_size_limit = cache_size_limit
         self.tmp_size_limit = tmp_size_limit
+        self.hub_url = hub_url.rstrip("/") if hub_url else None
+        """Where a worker reaches the hub's worker-facing endpoints (the keyed claim), as ``COLLAB_HUB_URL``."""
 
     @property
     def api(self) -> K8sApi:
@@ -297,6 +300,9 @@ class KubernetesCogExecutor:
         """The seam's variables, which name nothing secret: on the pod template as literal values."""
         env = {"COG_ID": cog, "COLLAB_COG_ID": cog, "COLLAB_RUN_ID": run_id, "COLLAB_COG_HOST": "0.0.0.0",
                "COLLAB_COG_PORT": str(RUNNER_PORT), "HOME": TMP_PATH}
+        if self.hub_url:
+            # Where the worker reaches the hub's worker-facing endpoints (the keyed claim) with its run token.
+            env["COLLAB_HUB_URL"] = self.hub_url
         return [{"name": name, "value": value} for name, value in env.items()]
 
     def _delivered(self, cog: str, run_id: str, instance: str, token: str) -> dict[str, str]:

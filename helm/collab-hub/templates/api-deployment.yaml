@@ -123,6 +123,10 @@ spec:
               value: {{ $controller.waitSeconds | quote }}
             - name: COLLAB_CONTROLLER_WORKER_START_TIMEOUT
               value: {{ $controller.workerStartSeconds | quote }}
+            # Where each worker reaches the hub's worker-facing endpoints (the keyed claim, /v1/claims) with its
+            # run token: the API in this pod.
+            - name: COLLAB_CONTROLLER_HUB_URL
+              value: "http://127.0.0.1:{{ .Values.api.service.targetPort }}"
             - name: COLLAB_CONTROLLER_HEALTH_HOST
               value: "0.0.0.0"
             - name: COLLAB_CONTROLLER_HEALTH_PORT

@@ -94,6 +94,42 @@ its harness takes them — embedded resources for an ACP agent that advertises
 and an input that cannot fit the bound model's context window with its Frames
 fails the step `context-exhausted` ([the envelope](result-envelope.md)).
 
+## The keyed claim
+
+Every task bundle carries an `idempotency_key`, stable for one step attempt
+(`{run}:{step}:{attempt}`, each component percent-escaped). A step can be
+invoked again under that key after it already acted: a durable backend
+resuming after a crash, or a person retrying an interrupted run. A worker
+honours the key through the hub's claim routes, with its run token as the
+bearer:
+
+| Route | What it does |
+|---|---|
+| `POST /v1/claims/{key}/reserve` | Before acting. 201 with `yours: true`: the key is this worker's, act and then commit. 200 with `state: committed` and the `envelope`: answer with that envelope, and act on nothing. 200 with `state: outcome_unknown`: another worker reserved the key and never committed it, so its side effect may have happened; answer `ok: false` with `error.code: outcome-unknown` (HTTP 409), and act on nothing |
+| `POST /v1/claims/{key}/commit` | After acting, with `{"envelope": ...}`, the envelope `/invoke` is about to answer with. 200; 409 `claim_refused` for a key this worker does not hold; 422 for a body that is no envelope |
+| `GET /v1/claims/{key}` | What became of a key of the worker's own run; 404 for one never reserved |
+
+A request without a run token, with the token of a stopped worker, or for a
+key of another run is a 401: the hub reads the run from the key and verifies
+the token against the hash its Track recorded, so a worker reaches only its
+own run's keys and never asks the controller. The hub is `COLLAB_HUB_URL` in
+the worker's environment; a worker given none claims nothing and acts on every
+invocation. A hub that cannot be reached for the reservation fails the step
+`hub-unavailable` (HTTP 503) before anything acts; a commit the hub does not
+take is answered with the envelope all the same, since the controller records
+it. The claim narrows the window in which a lost worker's side effect is
+unaccounted for to the gap between reserve and commit, and makes it visible as
+`outcome-unknown`; it does not pretend to close it. Such a step is never
+retried by the run API: a person settles what happened, and records that
+(`outcome_reconciled` on the Track), before the run is retried as a new attempt.
+
+The [Worker SDK](../../worker/README.md) does all of this for every Cog built
+on it, and `dev/cogs/fake_worker.py` is the reference implementation for a
+worker that is not. The hub's side is `collab_hub_execution.claims`: three
+stores, in memory, SQLite beside the SQLite Track and Postgres beside the
+hub's, under one conformance suite, and the step attempt machine of
+[states.md](states.md) deciding every move.
+
 ## The two sides already fit
 
 | Op factory concept | Cog-side implementation |

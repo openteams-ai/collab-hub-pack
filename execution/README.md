@@ -42,9 +42,12 @@ A runner named for a controller (`controller=`) shares its Track with other
 controllers: it picks a run up only if nobody has, moves only the runs it
 picked up, and `start()` interrupts only those, reaping their workers left
 alive. An unnamed runner is a host alone on its Track, and `start()` takes
-every unfinished run as its own. The reference worker does not persist results by key, so
-a retried attempt may repeat a completed side effect until the keyed claim
-(#102) answers for it.
+every unfinished run as its own. A worker honours its attempt's idempotency
+key through the keyed claim (`collab_hub_execution.claims`): it reserves the
+key on the hub before it acts and commits its envelope after, so a retried
+attempt is answered with the envelope it already produced, and one whose
+worker was lost between acting and committing ends `outcome-unknown`, which
+`retry()` refuses until a person reconciles it (`intents.reconcile_outcome`).
 
 `retry()` starts a new attempt for a failed run. Completed runs and runs that
 exhausted their duration, token, or cost budget cannot be retried; start a new
@@ -55,19 +58,22 @@ Token and cost accounting happens after an interaction and can overshoot.
 
 ## The run controller and intents
 
-`collab-hub-run-controller --track FILE_OR_URL --id NAME --packages DIR --work-dir DIR [--models FILE]`
+`collab-hub-run-controller --track FILE_OR_URL --id NAME --packages DIR --work-dir DIR [--models FILE] [--hub-url URL]`
 (or `python -m collab_hub_execution.controller`) is the process that advances
 runs (ADR-0002 D4). It watches a Track, a SQLite file or Postgres (install the
 `postgres` extra), picks up each run that was submitted and not picked up, and
 delivers what was asked of the runs it owns: cancels, turns, and decisions on
 Gates. Several controllers share a Track, each under its own id, and one picks
 up each run. `--models` is the hub's `models:` block (`binding.ModelsBlock`),
-and `--health-port` serves `/healthz` and `/readyz`.
+`--health-port` serves `/healthz` and `/readyz`, and `--hub-url` is where a
+worker reaches the hub's claim routes with its run token (`COLLAB_HUB_URL`).
 `collab_hub_execution.intents` is the other half, used by the hub's API:
-`submit()`, `request_cancel()`, `request_turn()` and `request_decision()`
-record what a client asked for, and `describe()` and `list_runs()` read runs
-back, each step with its state and its output, and the controller that owns
-it. Neither half calls the other; the Track is all they share. See
+`submit()`, `request_cancel()`, `request_turn()`, `request_decision()` and
+`request_retry()` record what a client asked for, `reconcile_outcome()` what a
+person settled of a step that ended `outcome-unknown`, and `describe()` and
+`list_runs()` read runs back, each step with its state and its output, and the
+controller that owns it. The claim stores the API serves (`claims`) are the
+third: in memory, SQLite in the Track's file, Postgres beside the hub's Track. Neither half calls the other; the Track is all they share. See
 [`docs/cog-execution/runs.md`](../docs/cog-execution/runs.md#the-run-controller-and-the-run-api).
 
 ## The lifecycle runner
@@ -272,9 +278,10 @@ LifecycleRunner(track=track, location="local", location_settings={
 A local worker is the package's `serve` task (`pixi.toml`, `[tasks]`), run in
 the package's own pixi environment on a loopback port the executor chooses. It
 is told where to listen (`COLLAB_COG_HOST`, `COLLAB_COG_PORT`), which Cog and
-run it is (`COLLAB_COG_ID`, `COLLAB_RUN_ID`) and its run token
+run it is (`COLLAB_COG_ID`, `COLLAB_RUN_ID`), its run token
 (`COLLAB_RUN_TOKEN`), which the controller presents as a bearer token on
-`/invoke`. What a binding delivers is asked per worker (`deliver`, a function of
+`/invoke`, and where the hub is (`COLLAB_HUB_URL`, from `hub_url`), where it
+reserves and commits its step's keyed claim with that token. What a binding delivers is asked per worker (`deliver`, a function of
 the Cog, the run and the instance) and reaches that worker alone. A package
 needs its `pixi.lock`, and neither it nor the manifest may be a symbolic link.
 It inherits nothing else of the controller's environment, and it is

@@ -28,7 +28,15 @@ D4). The API constructs no executor and never calls the controller.
   may decide is the Gate's approvers, checked here.
 - ``POST /v1/runs/{id}/retry`` -- record that an ended run is to run again; a
   controller takes it, resuming the attempt in flight after an interruption and
-  starting a new one after a failure.
+  starting a new one after a failure. A step that ended ``outcome-unknown`` is
+  not retried: the refusal names it.
+- ``POST /v1/claims/{key}/reserve``, ``POST /v1/claims/{key}/commit`` and
+  ``GET /v1/claims/{key}`` -- the keyed claim, for workers: a worker reserves
+  its step attempt's idempotency key before it acts and commits its envelope
+  after, so a replay of the key never acts twice. Authorized by the worker's
+  run token, verified against the hash the Track recorded, and scoped to that
+  run's own keys. The claims sit beside the Track: in the same SQLite file, or
+  the hub's ``collab_claims`` table.
 
 A step may name Frames: at submit each is checked to exist and be readable by
 the caller, and its body snapshotted by reference on the Track, so the step,
@@ -49,11 +57,14 @@ import asyncio
 import hashlib
 import json
 import logging
+import threading
+import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated, Any, Literal
 
-from collab_hub_execution import intents
+from collab_hub_execution import claims, intents, run_tokens
+from collab_hub_execution.envelope import EnvelopeInvalid, ResultEnvelope
 from collab_hub_execution.gates import POLICIES, Gate
 from collab_hub_execution.locations.packages import DirectoryPackageSource, PackageNotFound, PackageRefused
 from collab_hub_execution.ops import FrameRef, OpDefinition, OpStep
@@ -70,7 +81,11 @@ from .frames import ID_PATTERN as FRAME_ID_PATTERN
 from .frames import StoreDep, error_response, require_readable_frame
 
 router = APIRouter(prefix="/runs", tags=["runs"])
+claims_router = APIRouter(prefix="/claims", tags=["claims"])
 _log = logging.getLogger(__name__)
+
+CLAIM_PRUNE_INTERVAL = 3600.0
+"""Seconds between prunes of claims past their retention, done by the reserve route as it is used."""
 
 RUN_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 
@@ -86,7 +101,7 @@ class RunService:
     """What the run routes need: the Track, the packages that can be launched, and what runs them."""
 
     def __init__(self, track: TrackStore | None, packages: DirectoryPackageSource | None, *, backend: str,
-                 location: str) -> None:
+                 location: str, claim_store: claims.ClaimStore | None = None) -> None:
         self.track = track
         """``None`` on a hub with neither Postgres nor ``runs.track_path``: every route answers 503."""
         # Read incrementally: a page costs what changed, not all history.
@@ -94,8 +109,29 @@ class RunService:
         self.packages = packages
         self.backend = backend
         self.location = location
+        self.claims = claim_store
+        """The keyed claims, beside the Track; ``None`` with no Track."""
 
         self._indexed = False
+        self._pruned_at: float | None = None
+        self._prune_lock = threading.Lock()
+
+    def prune_claims(self) -> None:
+        """Let go of the claims past their retention, at most once per ``CLAIM_PRUNE_INTERVAL``."""
+        if self.claims is None:
+            return
+        with self._prune_lock:
+            now = time.monotonic()
+            if self._pruned_at is not None and now - self._pruned_at < CLAIM_PRUNE_INTERVAL:
+                return
+            self._pruned_at = now
+        try:
+            pruned = self.claims.prune()
+        except Exception as exc:  # noqa: BLE001 - a prune that fails is tried again next interval
+            _log.warning("the claims past their retention could not be pruned: %s", exc)
+            return
+        if pruned:
+            _log.info("pruned %d claims past their retention", pruned)
 
     def ensure_index(self) -> None:
         """Derive the Track's index of runs once, for a Track written before it had one; the store keeps it after.
@@ -147,13 +183,20 @@ def build_run_service(config: RunsConfig, postgres_url: str | None, pools: Postg
             "runs.track_path is for a hub without Postgres: this hub has a database (frames.postgres.url), "
             "which is its Track; unset COLLAB_HUB_API__RUNS__TRACK_PATH")
     track: TrackStore | None = None
+    claim_store: claims.ClaimStore | None = None
     if config.track_path:
         SqliteTrackStore.ensure_schema(config.track_path)
         track = SqliteTrackStore(config.track_path)
+        # The claims sit in the Track's file, so the controller's workers and this API share one path.
+        claims.SqliteClaimStore.ensure_schema(config.track_path)
+        claim_store = claims.SqliteClaimStore(config.track_path)
     elif postgres_url:
-        track = PostgresTrackStore(pools.database(postgres_url))
+        pool = pools.database(postgres_url)
+        track = PostgresTrackStore(pool)
+        claim_store = claims.PostgresClaimStore(pool)
     packages = DirectoryPackageSource(config.packages, config.allow) if config.packages else None
-    service = RunService(track, packages, backend=config.backend, location=config.location)
+    service = RunService(track, packages, backend=config.backend, location=config.location,
+                         claim_store=claim_store)
     service.ensure_index()  # a database that does not answer at start is tried again on the first listing
     return service
 
@@ -373,6 +416,7 @@ SERVED_FIELDS: dict[str, frozenset[str]] = {name: frozenset(fields) for name, fi
     "retry_requested": {"from_status", "attempt", "budget_epoch", "controller"},
     "retry_asked": {"actor"},
     "retry_refused": {"error"},
+    "outcome_reconciled": {"step", "actor", "note"},
     "step_started": _STEP | {"cog", "digest"},
     "interaction_usage": _STEP | {"usage"},
     "step_completed": _STEP | {"cog", "digest", "usage", "frames", "escalation", "payload", "payload_ref"} | _OUTCOME,
@@ -750,3 +794,138 @@ def retry_run(run_id: RunId, auth: AuthDep, service: ServiceDep) -> RunStatus | 
         return error_response(status.HTTP_409_CONFLICT, "run_not_retryable",
                               f"Run {run_id} cannot be retried: {exc.reason}", {"status": exc.state.name})
     return _status(view, service)
+
+
+# --- the keyed claim, for workers ----------------------------------------------------------------
+#
+# A worker reserves its step attempt's idempotency key before it acts and commits its envelope after
+# (docs/cog-execution/op-cog-seam.md, "The keyed claim"). These routes are the worker's side of it,
+# authorized by the run token the controller minted for that worker: the token's hash is on the run's
+# Track (`worker_started`), so the API verifies it there and never asks the controller. The run is
+# read from the key, so a token reaches only its own run's keys; another run's is refused like an
+# unknown token. The routes authenticate themselves, outside the protection map and the hub's
+# bearer auth, and are never public: a request without a run token is 401.
+
+
+class ClaimStatus(BaseModel):
+    key: str
+    run_id: str
+    state: Literal["reserved", "committed", "outcome_unknown", "recorded"]
+    """The step attempt machine's state: ``reserved`` by a worker that has not committed; ``committed`` with
+    the envelope; ``outcome_unknown`` when the worker holding it was replaced before committing;
+    ``recorded`` once a person reconciled an unknown outcome."""
+    yours: bool
+    """Whether the caller holds the reservation: it acts, then commits. False for a committed key (the envelope
+    is the answer) and for an unknown outcome (nothing acts again)."""
+    envelope: dict[str, Any] | None = None
+    """The result envelope committed under the key, when it was."""
+    reserved_at: str
+    committed_at: str | None = None
+
+
+class CommitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    envelope: dict[str, Any]
+    """The result envelope the worker produced, as `POST /invoke` answers it."""
+
+
+def _claim_status(claim: claims.Claim, worker: str) -> ClaimStatus:
+    return ClaimStatus(key=claim.key, run_id=claim.run_id, state=claim.state, yours=claim.held_by(worker),
+                       envelope=dict(claim.envelope) if claim.envelope is not None else None,
+                       reserved_at=claim.reserved_at.isoformat(),
+                       committed_at=claim.committed_at.isoformat() if claim.committed_at else None)
+
+
+def _claim_caller(request: Request, service: RunService, key: str) -> tuple[str, str] | JSONResponse:
+    """The run the key belongs to and the worker presenting a live run token of that run, or the refusal.
+
+    The token is verified against the run's Track: the hash `worker_started`
+    recorded, while that worker has not been stopped and the run has not
+    ended. A key of another run, or of no run, is refused the same way, so the
+    answer never says whether such a run exists.
+    """
+    token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if not token:
+        return error_response(status.HTTP_401_UNAUTHORIZED, "run_token_required",
+                              "The claim routes take a worker's run token as a bearer token")
+    run_id = claims.run_of(key)
+    started = None
+    if run_id is not None:
+        try:
+            started = run_tokens.verify(service.views.events(run_id), token)
+        except intents.RunUnreadable:
+            started = None
+    if started is None:
+        return error_response(status.HTTP_401_UNAUTHORIZED, "run_token_invalid",
+                              "Not the run token of a live worker of this key's run")
+    return run_id, str(started["run_token_sha256"])
+
+
+def _claims_of(service: RunService) -> claims.ClaimStore:
+    if service.claims is None:  # pragma: no cover - a Track without claims is only a service without a Track
+        raise RunsUnavailable("this hub records no claims: it has no Track")
+    return service.claims
+
+
+@claims_router.post("/{key}/reserve", response_model=ClaimStatus,
+                    responses={201: {"model": ClaimStatus}, 200: {"model": ClaimStatus}})
+def reserve_claim(key: Annotated[str, Path(min_length=1, max_length=512)], request: Request,
+                  service: ServiceDep) -> JSONResponse:
+    """Reserve the key before acting: 201 and `yours` when the worker is to act, 200 otherwise.
+
+    200 with `committed` is the envelope to answer with; 200 with
+    `outcome_unknown` is a key another worker reserved and never committed,
+    on which nothing acts again.
+    """
+    caller = _claim_caller(request, service, key)
+    if isinstance(caller, JSONResponse):
+        return caller
+    run_id, worker = caller
+    service.prune_claims()
+    claim, acts = _claims_of(service).reserve(run_id, key, worker=worker)
+    return JSONResponse(status_code=status.HTTP_201_CREATED if acts else status.HTTP_200_OK,
+                        content=_claim_status(claim, worker).model_dump(mode="json"))
+
+
+@claims_router.post("/{key}/commit", response_model=ClaimStatus)
+def commit_claim(key: Annotated[str, Path(min_length=1, max_length=512)], body: CommitRequest, request: Request,
+                 service: ServiceDep) -> ClaimStatus | JSONResponse:
+    """Commit the envelope of a key the worker reserved; a key it does not hold is a 409."""
+    caller = _claim_caller(request, service, key)
+    if isinstance(caller, JSONResponse):
+        return caller
+    run_id, worker = caller
+    try:
+        ResultEnvelope.parse(body.envelope)
+    except EnvelopeInvalid as exc:
+        return error_response(status.HTTP_422_UNPROCESSABLE_CONTENT, "envelope_invalid",
+                              f"The committed envelope is not a result envelope: {exc}")
+    try:
+        claim = _claims_of(service).commit(run_id, key, worker=worker, envelope=body.envelope)
+    except claims.ClaimRefused as exc:
+        return error_response(status.HTTP_409_CONFLICT, "claim_refused", str(exc))
+    return _claim_status(claim, worker)
+
+
+@claims_router.get("/{key}", response_model=ClaimStatus)
+def get_claim(key: Annotated[str, Path(min_length=1, max_length=512)], request: Request,
+              service: ServiceDep) -> ClaimStatus | JSONResponse:
+    """What became of a key of the worker's own run; a key never reserved is a 404."""
+    caller = _claim_caller(request, service, key)
+    if isinstance(caller, JSONResponse):
+        return caller
+    run_id, worker = caller
+    claim = _claims_of(service).get(run_id, key)
+    if claim is None:
+        return error_response(status.HTTP_404_NOT_FOUND, "claim_not_found", f"No claim under {key}")
+    return _claim_status(claim, worker)
+
+
+CLAIMS_PATH_PREFIX = "/v1/claims"
+
+
+def claims_path(path: str) -> bool:
+    """Whether ``path`` belongs to the claim routes, which authenticate every request themselves with the run
+    token, outside the hub's bearer auth and the protection map."""
+    return path == CLAIMS_PATH_PREFIX or path.startswith(CLAIMS_PATH_PREFIX + "/")

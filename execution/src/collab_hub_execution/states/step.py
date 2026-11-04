@@ -1,6 +1,6 @@
 """A step attempt: one invocation under one idempotency key, and its keyed claim.
 
-The claim store (#102) keeps these states; the Track records the attempt's
+The claim store (``claims.py``) keeps these states; the Track records the attempt's
 outcome as ``step_completed`` or ``step_failed``, which is ``RECORDED``.
 """
 

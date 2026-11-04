@@ -144,7 +144,8 @@ The process that accepts runs is not the one that advances them (ADR-0002 D4).
 | `GET /v1/runs/{id}` | One run: its status, each step's state, each completed step's `output`, `picked_up_by`, the controller that advances it, the `frames` each step was given (their ids, names and snapshot digests, which every member of the submitting organization sees on the run whether or not the Frame itself is shared with them; a Frame's name is not a secret), `sequence`, the run's last event, and, while it waits at a Gate, the `escalation` a decision must name, its `approvers`, and the `decision` asked for and not yet delivered; `retry_asked_by` once a retry was asked |
 | `GET /v1/runs/{id}/steps/{step}/payload` | A completed step's output, read back whole even when the Track keeps it by reference, or a failed step's `error` (`code`, `message`); a step still running is a 409 |
 | `POST /v1/runs/{id}/steps/{step}/decision` | Decide the Gate the run waits at: `escalation`, `outcome` (`approve`, `reject`, `send_back`) and `findings`. Records `decision_requested` and answers 202; the controller delivers it. Who may decide is the Gate's `approvers`, matched against the caller's organization and platform roles; on a hub that resolves no roles (claims-sourced auth), the run's submitter decides. An escalation that is not the open one is a 409 `stale_decision` naming the open one; a second, different decision while one waits is a 409 `decision_pending`; the same decision asked again is the one recorded |
-| `POST /v1/runs/{id}/retry` | Ask for an ended run to run again: records `retry_asked` and answers 202; a controller takes it. After an interruption the step in flight resumes under its attempt and key; after a failure it runs again as a new attempt. A completed, rejected or cancelled run, or one that exhausted its budget, is a 409 `run_not_retryable` |
+| `POST /v1/runs/{id}/retry` | Ask for an ended run to run again: records `retry_asked` and answers 202; a controller takes it. After an interruption the step in flight resumes under its attempt and key, so a committed claim answers instead of the work running twice; after a failure it runs again as a new attempt. A completed, rejected or cancelled run, or one that exhausted its budget, is a 409 `run_not_retryable`; so is a run whose step ended `outcome-unknown`, naming the step: it is reconciled by a person, not retried (below) |
+| `POST /v1/claims/{key}/reserve`, `POST /v1/claims/{key}/commit`, `GET /v1/claims/{key}` | The keyed claim, for workers, not clients: authorized by the worker's run token and scoped to its run's keys ([the seam](op-cog-seam.md#the-keyed-claim)) |
 | `GET /v1/runs/{id}/events` | The run's Track: the events after `after` (a sequence), `limit` at a time, with `next_after` when there are more. Asked for `text/event-stream`, a live stream instead: each event as it lands, named by its sequence, then an `end` event with the run's status once it has ended; a client that lost the connection reconnects with `Last-Event-ID` and misses nothing and repeats nothing. Each event's payload carries only the fields named for its type (an allowlist, so a field recorded later is not served until it is named); where a local worker is on the controller's host (`pid`, `pgid`, `logs`) is never among them |
 | `GET /v1/runs/launchable` | The Cog packages a step's `cog` may name |
 | `POST /v1/runs/{id}/turns` | Ask a Cog whose step holds a session something: records `turn_requested` with the caller and answers 202 with the turn, `pending`. A run that has ended is a 409 |
@@ -157,6 +158,28 @@ isolated. A step that was running, or waiting at its Gate, when its run ended
 is reported in the state the run ended in. A run belongs to the organization that submitted it; to any other it
 is a 404. The routes are authenticated, like every route the protection map
 does not open.
+
+### The keyed claim
+
+A step can be invoked again under the same attempt: a retry of an interrupted
+run, or a durable backend resuming. Its side effect must happen once. Every
+interaction carries an idempotency key, `{run}:{step}:{attempt}`, and the
+worker reserves it on the hub before it acts and commits its envelope after
+([the contract](op-cog-seam.md#the-keyed-claim)); the claims sit beside the
+Track, in the same SQLite file at level 1 and on the desktop, in
+`collab_claims` on the hub's Postgres. A replay of a committed key is answered
+with the envelope, which the runner records as the step's result, usage
+included, and the worker acts on nothing. A replay of a key reserved by a
+worker that was lost before committing fails the step `outcome-unknown`: the
+run ends `FAILED` with that code, `POST /v1/runs/{id}/retry` refuses it naming
+the step (409 `run_not_retryable`), and nothing acts on that step again until
+a person has established what the lost worker did and recorded it on the Track
+(`intents.reconcile_outcome`, the `outcome_reconciled` event, with the actor
+and a note); the run is then retried as a new attempt under a new key. The
+controller tells each worker where the hub is (`--hub-url`, `COLLAB_HUB_URL`
+in the worker's environment); a worker given none claims nothing, which is
+what `make op` runs. The claims a run token verifies against are read from the
+Track by the API, which never asks the controller.
 
 ### Pickup and ownership
 
@@ -235,11 +258,12 @@ run API's later phase.
 | `--image`, `--namespace`, `--allow-ingress-from`, `--insecure-skip-network-policy`, `--worker-resources`, `--worker-cache-size-limit`, `--worker-tmp-size-limit` | The `remote` location: the image a worker pod runs, where, which pods may reach it, and the pod's resources and volume limits |
 | `--backend`, `--location` | The two axes: `none` built; `local` and `remote` built |
 | `--models FILE` | The hub's `models:` block, below |
+| `--hub-url URL` | Where a worker reaches the hub's worker-facing endpoints with its run token, the keyed claim first: the API this controller advances runs for, handed to each worker as `COLLAB_HUB_URL`. Without it, workers claim nothing |
 | `--health-port`, `--health-host` | `GET /healthz`, 200 while the controller passes over the Track, and `GET /readyz`, 200 once it has started and its last pass read the Track; 503 otherwise, with the reason |
 
 Each option also reads the `COLLAB_CONTROLLER_*` variable named after it, for a
 container: `COLLAB_CONTROLLER_TRACK`, `COLLAB_CONTROLLER_ID`,
-`COLLAB_CONTROLLER_ENVIRONMENT`, `COLLAB_CONTROLLER_HEALTH_PORT` and so on;
+`COLLAB_CONTROLLER_ENVIRONMENT`, `COLLAB_CONTROLLER_HUB_URL`, `COLLAB_CONTROLLER_HEALTH_PORT` and so on;
 `COLLAB_CONTROLLER_PACKAGES` is a path list (`:`-separated) and
 `COLLAB_CONTROLLER_ALLOW` a comma-separated one. The command line wins.
 
@@ -279,7 +303,7 @@ never correct.
   status. Starting another host interrupts nothing more.
 - **Retrying continues the attempt that was in flight.** `retry()` records
   `retry_requested` with `attempt: same`, so the step runs again under the same
-  idempotency key, and a worker that honours the key — the keyed claim, #102 —
+  idempotency key, and a worker that honours the key — the keyed claim, above —
   answers instead of acting twice. Steps already completed do not run again.
 - **A pause does not survive either.** A run waiting at a Gate when its host
   stopped is interrupted too (decision 3 of the plan); its retry runs the

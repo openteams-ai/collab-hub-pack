@@ -11,6 +11,7 @@ this module used to define is re-exported here for callers that import it from i
 
 from __future__ import annotations
 
+from .claims import key_component as _key_component  # noqa: F401 - re-exported for callers that import it from here
 from .ops import (  # noqa: F401 - re-exported for callers that import them from here
     _NO_SIGNAL,
     CogExecutor,
@@ -28,5 +29,4 @@ from .runner import (  # noqa: F401 - re-exported for callers that import them f
     STEP_FUNCTIONS,
     LifecycleRunner,
     UsageUnavailable,
-    _key_component,
 )

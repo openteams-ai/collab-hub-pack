@@ -131,7 +131,7 @@ call with a bare `403 forbidden`, before any artifact is read:
 
 ```
 GET /api/v2.0/projects/cogs/repositories -> 403
-cog_index_source_failed source=harbor-dev reason="list_repositories: RegistrySourceAuthError: source 'harbor-dev': the registry API refused the configured credential for /projects/cogs/repositories (HTTP 403); the credential is probably missing the project-scoped repository:list permission, or is not scoped to the project at /projects/cogs/repositories"
+cog_index_source_failed source=harbor-dev reason="list_repositories: RegistrySourceAuthError: source 'harbor-dev': the registry API refused the configured credential for /projects/cogs/repositories (HTTP 403); the credential is probably missing the project-scoped repository:list permission, or the credential does not have access to the configured project"
 ```
 
 | Kind | Grant the credential | Why |

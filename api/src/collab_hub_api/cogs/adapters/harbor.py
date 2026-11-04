@@ -258,7 +258,7 @@ class HarborRegistrySource:
                 missing = _permission_for(path)
                 if missing:
                     message += f"; the credential is probably missing the project-scoped {missing} permission"
-                    message += f", or is not scoped to the project at {path}"
+                    message += ", or the credential does not have access to the configured project"
             raise RegistrySourceAuthError(message)
         if status == 404:
             kind = RegistryRepositoryNotFound if path.endswith("/artifacts") else RegistrySourceError

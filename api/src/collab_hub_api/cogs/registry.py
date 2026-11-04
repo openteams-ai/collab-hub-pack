@@ -209,7 +209,10 @@ def parse_timestamp(value: object) -> datetime | None:
 
 
 def http_verify(ca_bundle_path: str) -> ssl.SSLContext | bool:
-    """``verify=`` for an httpx client: the deployment's CA bundle when configured, else system trust.
+    """``verify=`` for an httpx client: the deployment's CA bundle when configured, else httpx's default.
+
+    httpx's default is certifi's Mozilla bundle, or ``SSL_CERT_FILE`` /
+    ``SSL_CERT_DIR`` when either is set; it is not the OS trust store.
 
     Dev clusters front the registry with a gateway-issued certificate from a
     private CA, so the bundle is a file path from values. httpx 0.28 wants an

@@ -6,4 +6,4 @@
 # uv's own config discovery (uv reads a uv.toml from a project's directory and
 # its parents only): an enforced required-version in a project would stop
 # Dependabot, whose updater runs an older uv (see dependabot.yml).
-required-version = "==0.13.4"
+required-version = "==0.13.7"

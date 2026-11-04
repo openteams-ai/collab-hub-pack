@@ -37,6 +37,12 @@ concurrency:
 permissions:
   contents: read
 
+# uv uses only uv-managed CPython builds here, never the runner's system
+# Python: a system 3.14 (ubuntu-26.04 ships 3.14.4) would satisfy a 3.14
+# request without CPython's ssl eMudhra denylist (#285).
+env:
+  UV_PYTHON_PREFERENCE: only-managed
+
 jobs:
   cog-local:
     name: examples/cog-local (Hermes, Toad's path over ACP)
@@ -59,6 +65,16 @@ jobs:
         with:
           pixi-version: ${{ steps.pixi.outputs.version }}
           run-install: false
+
+      # Every Cog lock must still satisfy its manifest (the Python floor that
+      # keeps the eMudhra-hardened 3.12.16, #285, among the rest): `pixi
+      # install` below would otherwise re-solve a stale lock quietly.
+      - name: Cog locks match their manifests
+        run: |
+          for manifest in cogs/hermes/pixi.toml dev/cogs/*/pixi.toml examples/cog-local/cogs/hello/pixi.toml; do
+            echo "pixi lock --check --manifest-path $manifest"
+            pixi lock --check --manifest-path "$manifest"
+          done
 
       - name: Hermes's environment
         run: pixi install --manifest-path cogs/hermes/pixi.toml

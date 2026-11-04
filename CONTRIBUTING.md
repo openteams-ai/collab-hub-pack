@@ -23,9 +23,29 @@ setup each connector needs. CI exercises all four —
 
 The API itself lives in [`api/`](api/) and uses
 [uv](https://docs.astral.sh/uv/), if you would rather drive it directly. Use
-uv 0.13.4 or later: earlier releases still trust the compromised eMudhra CA
-chain, so upgrade with `uv self update` (standalone installer) or your package
-manager before running anything that reaches the network:
+uv 0.13.6 or later: 0.13.5 is the first to reject the compromised eMudhra
+intermediates itself, and 0.13.6 the first to install CPython builds (3.11.18,
+3.12.16, 3.13.18, 3.14.10, 3.15.2) whose `ssl` module refuses them too (#285).
+Upgrade with `uv self update` (standalone installer) or your package manager,
+then move uv's managed Pythons to those builds, before running anything that
+reaches the network:
+
+```sh
+uv python upgrade           # move managed Pythons to the latest patch release
+uv run --directory api python -V   # expect 3.14.10 or later
+```
+
+A virtual environment uv created on a managed Python follows the upgrade on
+its own. One on a system Python (Homebrew, python.org, a distro), or created
+before uv could upgrade, keeps the interpreter it was made with, and
+`uv python upgrade` leaves a system Python alone. If `python -V` reports an
+older version, recreate the environment on a uv-managed build:
+
+```sh
+uv venv --directory api --clear --managed-python --python 3.14
+```
+
+Then:
 
 ```sh
 cd api

@@ -136,7 +136,8 @@ The chart mounts it read-only at `/etc/collab-hub/cogs-ca/<key>` (the API
 container runs with a read-only root filesystem, so this is a volume, not a
 file written at startup) and passes that path as `ca_bundle_path` to every
 source that does not set its own `caBundlePath`. Leave `configMap` empty to
-use system trust only.
+use httpx's default trust: certifi's Mozilla bundle, or `SSL_CERT_FILE` /
+`SSL_CERT_DIR` when either is set in the API's environment.
 
 ## Indexer
 

@@ -6,10 +6,11 @@ import json
 from datetime import datetime
 
 import httpx
+import pytest
 from httpx import ASGITransport, AsyncClient, Response
 
 from collab_hub_api.config import Config
-from collab_hub_api.connectors.calendar_client import _event_metadata
+from collab_hub_api.connectors.calendar_client import _SEARCH_ATTENDEE_PREVIEW, _event_metadata
 from collab_hub_api.connectors.connector_text import sanitize_connector_text
 from collab_hub_api.connectors.gmail_client import GmailClient, _recipient_headers
 from collab_hub_api.connectors.models import CalendarSearchRequest
@@ -524,6 +525,37 @@ async def test_calendar_search_caps_attendees_and_read_keeps_them(tmp_path, monk
     assert detail["attendee_details"][150]["self"] is True
     assert [a["display_name"] for a in detail["attendee_details"] if a["response_status"] == "declined"] == ["Dana"]
     assert detail["self_response_status"] == "tentative"
+
+
+@pytest.mark.parametrize(
+    ("count", "partial"),
+    [(_SEARCH_ATTENDEE_PREVIEW, False), (_SEARCH_ATTENDEE_PREVIEW + 1, True)],
+)
+def test_calendar_search_attendee_cap_boundary(count: int, partial: bool) -> None:
+    payload = {
+        "id": "boundary",
+        "start": {"dateTime": "2026-07-10T14:00:00-04:00"},
+        "end": {"dateTime": "2026-07-10T15:00:00-04:00"},
+        "attendees": [
+            {"displayName": f"Person {index}", "email": f"person-{index}@example.com", "responseStatus": "accepted"}
+            for index in range(count)
+        ],
+    }
+
+    event, _ = _event_metadata(
+        payload,
+        calendar_id="primary",
+        calendar_name="Work",
+        max_description_chars=2000,
+        include_attendee_aliases=False,
+        max_attendee_details=_SEARCH_ATTENDEE_PREVIEW,
+    )
+
+    assert event.attendee_details_partial is partial
+    assert [attendee.display_name for attendee in event.attendee_details] == [
+        f"Person {index}" for index in range(_SEARCH_ATTENDEE_PREVIEW)
+    ]
+    assert event.attendee_count == count
 
 
 async def test_google_connector_status_requires_new_service_scope(tmp_path, monkeypatch):

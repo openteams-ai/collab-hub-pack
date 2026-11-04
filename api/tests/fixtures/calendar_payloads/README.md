@@ -4,8 +4,10 @@ Public-safe HTTP response bodies from the Google Calendar connector, for the
 Apollo model-contract eval to compare answers before and after the search
 payload change. Every name and address is synthetic.
 
-- `before/`: the code on `main` before #138.
-- `after/`: the code with #138 applied.
+- `before/`: a frozen record of the code on `main` before #138 (commit
+  `20b290a`). Nothing checks it, and it is not regenerated.
+- `after/`: the code with #138 applied. `tests/test_calendar_payload_snapshots.py`
+  fails when the search or read shape changes and this folder is not refreshed.
 
 Each folder holds:
 
@@ -22,6 +24,5 @@ Regenerate from `api/` with:
 uv run python tests/snapshot_calendar_payloads.py tests/fixtures/calendar_payloads/after
 ```
 
-Run the same command with the pre-change code checked out, writing to `before`,
-to refresh the baseline. Payload sizes over a full 156-event month come from
+Payload sizes over a full 156-event month come from
 `tests/measure_calendar_payloads.py`, not from these snapshots.

@@ -238,7 +238,7 @@ class SweepSummary:
     """Another sweeper held the sweep lock; nothing was done."""
     duration_seconds: float = 0.0
     errors: list[str] = field(default_factory=list)
-    """Source-level (not per-artifact) failures: stage + exception class, never URLs."""
+    """Source-level (not per-artifact) failures: class name, plus message for OCI/auth errors, never URLs/creds."""
 
     def as_log_fields(self) -> dict[str, object]:
         fields = asdict(self)

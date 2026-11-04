@@ -16,7 +16,8 @@ next to this script, so mounting the scripts directory is enough), or if it find
 all. With ``--require-hardened-python``, it also fails unless this interpreter is at least the first
 release of its minor version whose ``ssl`` module refuses the compromised intermediates whatever the
 store holds (HARDENED_PYTHON, #285); a minor version not listed there fails too, until it is added.
-Standard library only, so it runs in any image with a Python.
+Standard library only, so it runs in any image with a Python. Its own refusals are tested in
+tests/test_check_emudhra_trust.py, next to this script.
 """
 
 from __future__ import annotations
@@ -92,14 +93,14 @@ def python_failure(version: tuple[int, int, int]) -> str | None:
     return None
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--require-hardened-python",
         action="store_true",
         help="also fail unless this interpreter carries CPython's eMudhra denylist",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     fingerprints = load_fingerprints(FIXTURE)
     failures = []

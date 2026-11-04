@@ -27,6 +27,7 @@ on:
       # The trust-store check run on the built image, before it is pushed.
       - "scripts/check_emudhra_trust.py"
       - "scripts/testdata/emudhra-incident-roots.txt"
+      - "scripts/tests/test_check_emudhra_trust.py"
       - ".github/workflows/build-images.yaml"
   pull_request:
     paths:
@@ -37,6 +38,7 @@ on:
       - "examples/cog-local/cogs/hello/**"
       - "scripts/check_emudhra_trust.py"
       - "scripts/testdata/emudhra-incident-roots.txt"
+      - "scripts/tests/test_check_emudhra_trust.py"
       - ".github/workflows/build-images.yaml"
   workflow_dispatch:
 
@@ -69,6 +71,12 @@ jobs:
           tags: |
             type=sha,prefix=sha-,format=short
             type=raw,value=latest,enable={{is_default_branch}}
+
+      # The check's own refusals (an incident root in any store, a malformed or
+      # empty fixture, no certificates at all, an interpreter below its floor),
+      # on synthetic stores, so a regression can't pass the image check below.
+      - name: Test the trust-store check
+        run: python3 -m unittest discover --start-directory scripts/tests --verbose
 
       # Built once into the local Docker engine and checked before anything is
       # pushed; the push below rebuilds from this builder's cache.
@@ -108,8 +116,10 @@ jobs:
           build-contexts: |
             projectroot=.
           # Same inputs as Build, so its layers normally come from Build's cache.
-          # pull re-resolves the base tags, though: a base republished in the
-          # minutes since Build would be pushed without having been checked.
+          # BuildKit re-resolves the base tags against the registry here, with
+          # or without pull, so a base republished in the minutes since Build
+          # would be pushed without having been checked. Closing that would
+          # need a push of the checked image itself; pull stays for parity.
           pull: true
           push: true
           tags: ${{ steps.meta.outputs.tags }}

@@ -109,9 +109,9 @@ query ProjectRead($login: String!, $number: Int!, $first: Int!, $after: String, 
 """
 
 # Project reads auto-paginate server-side: GitHub's GraphQL caps a page at 100,
-# so we walk up to _MAX_PROJECT_PAGES pages and set truncated=True when the
-# matching items exceed what we returned. The default request asks for far
-# fewer (see GitHubProjectReadRequest.max_items).
+# so we walk up to _MAX_PROJECT_PAGES pages and set truncated=True when a
+# cursor remains to continue from. The default request asks for far fewer
+# (see GitHubProjectReadRequest.max_items).
 _PROJECT_PAGE_SIZE = 100
 _MAX_PROJECT_ITEMS = 500
 _MAX_PROJECT_PAGES = _MAX_PROJECT_ITEMS // _PROJECT_PAGE_SIZE

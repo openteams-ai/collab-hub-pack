@@ -109,8 +109,8 @@ that issue/PR. The item read excludes archived items (`archived_policy:
 "excluded"` on `counts`).
 
 By default the read returns one small page (`max_items: 50`) rather than the
-whole board (earlier versions returned up to 500 items by default; callers that
-relied on that should pass `max_items` explicitly). `truncated: true` means
+whole board (see the compatibility note at the end of this section if you
+relied on the earlier whole-board default). `truncated: true` means
 more matching items remain after the ones returned, and `next_cursor` says
 where: send it back as `after` (with the same owner, number and `query`) to get
 the next items without re-downloading the first page. `next_cursor` is `null`
@@ -145,6 +145,26 @@ when present, is always the exact board-wide breakdown. `by_status` +
 `no_status` and `by_type` are each independent partitions of `total` and should
 not be cross-added; `by_state` covers only linked issues/PRs so it need not sum
 to `total`.
+
+**Compatibility note for `projects/{number}/read` callers.** This response
+changed shape in one release:
+
+- `counts` is now nullable. Earlier versions always returned a `counts` object,
+  substituting a sampled breakdown when the exact one was unavailable. Check
+  for `null` before reading any of its fields.
+- `counts.authoritative` and `counts.counted_items` are gone. Both existed to
+  qualify the sampled fallback; with no fallback, a present `counts` is always
+  exact, so the flags carried no information. A caller that branched on
+  `authoritative` can treat `counts != null` as the equivalent.
+- `max_items` defaults to 50 instead of 500, so an unparameterised read no
+  longer returns a whole board. Pass `max_items` explicitly (or page with
+  `after`) to keep the old behaviour.
+- New fields `query`, `matched_count` and `next_cursor` are additive; existing
+  fields `project`, `items`, `total_count` and `truncated` keep their names
+  and types. `truncated` now means "more matching items remain after this
+  response" (equivalently, `next_cursor` is non-null) rather than
+  "`total_count` exceeds the items returned" — the same answer on an
+  unfiltered, uncontinued read, which is all earlier versions supported.
 
 `search` runs against GitHub's issue-and-PR search (`/search/issues`, which
 returns both issues and pull requests) and is **page/`per_page`-paginated with a

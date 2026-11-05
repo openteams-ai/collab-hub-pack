@@ -86,7 +86,16 @@ class RegistryRepositoryNotFound(RegistrySourceError):
 
 
 class RegistrySourceAuthError(RegistrySourceError):
-    """The registry's listing API refused the configured credential."""
+    """The registry's listing API refused the configured credential.
+
+    Message contract: the text names only the source id, the API path, the
+    HTTP status and, where the adapter can tell, the permission the route
+    needs. It never carries the credential, a full URL, or the registry's
+    response body. The indexer relies on this and keeps the message in its
+    sweep summary and logs (see ``indexer._describe``), where other
+    :class:`RegistrySourceError` subclasses are recorded by class name only;
+    an adapter that cannot keep the contract must raise a sibling class.
+    """
 
 
 class RegistrySourceProtocolError(RegistrySourceError):

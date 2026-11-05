@@ -64,8 +64,14 @@ publisher writes into ``COG.md`` or the profile lands in the catalog as-is.
 The guarantee this module makes is narrower and absolute: *configured
 registry credentials* never reach cards, ``read_errors``, or logs.
 ``read_errors`` and log lines therefore carry exception class names -- plus
-the message only for the OCI hierarchy, whose contract is that messages name
-neither URLs nor headers -- never raw URLs, tokens, or exception chains.
+the message only where its contract keeps it safe: the OCI hierarchy, whose
+messages name neither URLs nor headers, and
+:class:`~collab_hub_api.cogs.registry.RegistrySourceAuthError`, whose
+message an adapter builds from the source id, the API path, the status and
+the permission that path needs -- never the host, the credential or the
+response body. That message is the one thing that tells an operator which
+permission a robot account lacks, so it is kept. Everything else is class
+name alone: never raw URLs, tokens, or exception chains.
 
 Fairness under bounds: enumeration is complete (or the source is marked
 failed), while *fetching* is budgeted per sweep. Already-known digests cost
@@ -125,7 +131,7 @@ from .oci import (
     select_bundle_layers,
 )
 from .profile import PIXI_MANIFEST, PROFILE_PARSED
-from .registry import ArtifactRef, RegistryRepositoryNotFound, RegistrySource
+from .registry import ArtifactRef, RegistryRepositoryNotFound, RegistrySource, RegistrySourceAuthError
 
 logger = logging.getLogger("frames_server.cogs.indexer")
 
@@ -232,7 +238,7 @@ class SweepSummary:
     """Another sweeper held the sweep lock; nothing was done."""
     duration_seconds: float = 0.0
     errors: list[str] = field(default_factory=list)
-    """Source-level (not per-artifact) failures: stage + exception class, never URLs."""
+    """Source-level (not per-artifact) failures: class name, plus message for OCI/auth errors, never URLs/creds."""
 
     def as_log_fields(self) -> dict[str, object]:
         fields = asdict(self)
@@ -1071,12 +1077,16 @@ def _describe(exc: BaseException) -> str:
     """One failure as ``read_errors``/log text: class name, plus the message only when it is known safe.
 
     The OCI hierarchy's contract is that messages carry neither URLs nor
-    headers, so those messages are diagnostic and kept. Anything else --
+    headers, so those messages are diagnostic and kept. So is
+    :class:`RegistrySourceAuthError`: its contract is that messages name only
+    the source id, the API path and the HTTP status -- never the credential or
+    the registry's response body -- and an operator whose robot account lacks
+    a permission can only learn which one from that message. Anything else --
     adapter errors whose text may quote a configured URL, unexpected
     exceptions whose text may quote anything -- is recorded by class alone.
     """
 
-    if isinstance(exc, OCIError):
+    if isinstance(exc, (OCIError, RegistrySourceAuthError)):
         message = str(exc)
         return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
     return type(exc).__name__

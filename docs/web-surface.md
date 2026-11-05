@@ -69,8 +69,8 @@ than dead-ending a signed-in operator.
 | `COLLAB_HUB_API__WEB__SCOPE` | Default `openid email profile`; must include `openid`. |
 | `COLLAB_HUB_API__WEB__PUBLIC_BASE_URL` | External origin the surface builds its absolute URLs from, the OIDC redirect URI among them. **Required** when the surface is enabled on a membership-resolving deployment — startup refuses without it, because those origins must never be derived from a forgeable request `Host` (see below). Also what makes the redirect URI correct behind a proxy whose forwarded headers are not trusted. Same https/loopback rule as the issuer. |
 | `COLLAB_HUB_API__WEB__ADMIN_UI_DIST` | Directory holding the built admin panel. The image sets it to `/var/collab-hub-api/admin-ui-dist`. Empty, or a directory with no `index.html`, mounts no panel routes (the second case logs `admin_ui_dist_missing_index`). The panel and its `/admin/api/*` endpoints mount only on a membership-resolving deployment (`orgSource` `membership` or `single`). |
-| `COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL` | Optional. An external account page (plan, usage, invoices) the signed-in navigation links to as "Account". Empty (default) renders no link. Same https/loopback rule as the issuer, plus a real host, a valid port, no credentials and no control characters, checked at startup. Chart value `web.accountPageUrl`. See [the account link](#the-account-link-an-optional-extension-point). |
 | `COLLAB_HUB_API__WEB__ADMIN_GROUP` | Identity-provider group whose members hold the operator role, reconciled at each sign-in from the ID token's `groups` claim. Matches with or without a leading slash. Empty (default) turns sync off. Needs a groups mapper on the client so the ID token carries the claim; see [frames-operations.md](frames-operations.md#where-operator-rows-come-from-source-and-sign-in-sync). |
+| `COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL` | Optional. An external account page (plan, usage, invoices) the signed-in navigation links to as "Account". Empty (default) renders no link. Same https/loopback rule as the issuer, plus a real host, a valid port, no credentials and no control characters, checked at startup. Chart value `web.accountPageUrl`. See [the account link](#the-account-link-an-optional-extension-point). |
 
 The realm's JWKS endpoint is derived from the issuer URL — there is no
 separate JWKS setting to point somewhere else.
@@ -607,8 +607,8 @@ still kept:
   it appears (a signed-in page, and the value is set) and a page cannot grow
   a second copy with another.
 - **Checked at startup, to the surface's usual bar.** `WebConfig` runs the
-  value through `web.oidc.invalid_link_url_reason`, which shares its pieces
-  with the realm-URL check: absolute `https://` (plain `http://` only on
+  value through `web.oidc.invalid_link_url_reason`, which follows the same rules
+  as the realm-URL check: absolute `https://` (plain `http://` only on
   loopback, the same exact-match host set), a real host, a parseable port, no
   credentials, and no control or non-printable character — checked on the
   raw string, because `urlsplit` quietly drops a leading NUL that would

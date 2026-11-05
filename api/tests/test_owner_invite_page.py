@@ -563,6 +563,19 @@ async def test_issuing_targets_the_callers_own_organization(tmp_path, idp):
     assert notice_text(NOTICE_ISSUED_SENT, INVITEE) in response.text
 
 
+async def test_the_page_carries_the_account_link_when_the_deployment_sets_one(tmp_path, idp):
+    # The footer is rendered by pages.render_page, but this route is what
+    # hands it the value (#275): a dropped `account_url=` here fails here.
+    url = "https://billing.example.com/account"
+    app, _, _ = build_app(tmp_path, idp, web={"account_page_url": url})
+    async with web_client(app) as client:
+        await signed_in(client, idp)
+        page = await client.get(ORG_INVITATIONS_PATH)
+    assert page.status_code == 200
+    assert page.text.count(f'<a href="{url}">Account</a>') == 1
+    assert page.text.index(">Account</a>") < page.text.index("Sign out")
+
+
 async def test_the_page_offers_no_way_to_name_an_organization(tmp_path, idp):
     """No org input exists, and a smuggled org field changes nothing."""
 

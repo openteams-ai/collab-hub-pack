@@ -1419,6 +1419,36 @@ def test_an_insecure_public_base_url_is_refused(tmp_path, idp):
         make_web_app(tmp_path, idp, web={"public_base_url": "http://frames.example.com"})
 
 
+# A leading NUL parses away: urlsplit("\x00https://h/") is a clean https URL,
+# while the raw bytes ride into every derived endpoint and redirect. Each URL
+# check refuses it on the raw string, the same way the account link does.
+HIDDEN_CHARACTER_URLS = [
+    "\x00https://auth.example.com/realms/nebari",
+    "https://auth.example.com/realms/nebari\x7f",
+    "https://auth.example.com/realms/\u200bnebari",
+    "https://auth.example.com/realms/nebari\r\nSet-Cookie: a=b",
+    "https://auth.example.com/realms/ nebari",
+]
+
+
+@pytest.mark.parametrize("url", HIDDEN_CHARACTER_URLS, ids=repr)
+def test_an_issuer_with_a_hidden_character_fails_the_rollout(tmp_path, idp, url):
+    from collab_hub_api.web.oidc import invalid_realm_url_reason
+
+    assert invalid_realm_url_reason(url) in (
+        "it contains a control or non-printable character",
+        "it contains whitespace",
+    )
+    with pytest.raises(RuntimeError, match="realm URL is unusable \\(it contains"):
+        make_web_app(tmp_path, idp, web={"issuer_url": url})
+
+
+@pytest.mark.parametrize("url", [u.replace("/realms/nebari", "") for u in HIDDEN_CHARACTER_URLS], ids=repr)
+def test_a_public_base_url_with_a_hidden_character_is_refused(tmp_path, idp, url):
+    with pytest.raises(RuntimeError, match="public_base_url is unusable \\(it contains"):
+        make_web_app(tmp_path, idp, web={"public_base_url": url})
+
+
 # --- codex round 2: fail-closed routing, headers, lifetime, resolver -------------
 
 
@@ -3753,14 +3783,10 @@ async def test_the_account_link_renders_from_configuration_when_set(tmp_path, id
     assert 'name="referrer" content="no-referrer"' in overview.text
 
 
-async def test_the_account_link_is_never_on_an_anonymous_page(tmp_path, idp):
-    """It lives in the signed-in footer, which anonymous pages do not render."""
-
-    app = make_web_app(tmp_path, idp, web={"account_page_url": ACCOUNT_URL})
-    async with web_client(app) as client:
-        page = await client.get("/web/data-statement")
-    assert page.status_code == 200
-    assert "Account" not in page.text
+# The anonymous case lives in test_acceptance_page.py: /invite/accept is the
+# one public page that renders the footer when signed in, so signed out with
+# the value set is the case that exercises the rule. /web/data-statement never
+# shows a footer and would pass either way.
 
 
 def test_render_page_writes_the_link_only_in_the_signed_in_footer():
@@ -3846,8 +3872,10 @@ def test_a_value_that_cannot_be_a_link_is_refused_at_startup(tmp_path, idp, valu
 
     assert reason in (invalid_link_url_reason(value) or "")
     # Through the model, whether or not the surface is enabled: the value lands in an href.
-    with pytest.raises(ValidationError, match="web.account_page_url must be an absolute https URL"):
+    # Reason first, as public_base_url does, so an operator reads why before what.
+    with pytest.raises(ValidationError, match="web.account_page_url is unusable \\(") as refused:
         WebConfig(account_page_url=value)
+    assert reason in str(refused.value)
     with pytest.raises(ValidationError, match="web.account_page_url"):
         Config.parse(web_values(tmp_path, idp, web={"account_page_url": value}))
 

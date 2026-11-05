@@ -823,8 +823,9 @@ cogs:
 web:
   # -- Where the signed-in navigation's "Account" link points: an external page
   # (plan, usage, invoices) that an add-on provides. Empty (default) renders no
-  # link and needs no billing configuration. Must be an absolute http(s) URL;
-  # becomes COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL.
+  # link and needs no billing configuration. Must be an absolute https URL
+  # (http only on loopback) with no credentials; the API applies the full rule
+  # at startup. Becomes COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL on the API only.
   accountPageUrl: ""
 
 # Feature flags for work in progress that is on main but not yet exposed. Every

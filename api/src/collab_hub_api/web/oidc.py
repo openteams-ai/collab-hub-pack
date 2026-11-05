@@ -85,6 +85,23 @@ def _invalid_port_reason(url: str) -> str | None:
     return None
 
 
+def _unrenderable_character_reason(url: str) -> str | None:
+    """Why ``url`` holds a character no URL may carry, checked on the raw string.
+
+    ``urlsplit`` silently drops leading C0 bytes, so a value such as
+    ``"\x00https://..."`` parses as a clean URL while the raw bytes land
+    wherever the string is written -- an ``href``, a redirect, an endpoint.
+    Every URL check in this module therefore refuses control, non-printable
+    and whitespace characters here, before anything is parsed.
+    """
+
+    if any(not ch.isprintable() for ch in url):
+        return "it contains a control or non-printable character"
+    if any(ch.isspace() for ch in url):
+        return "it contains whitespace"
+    return None
+
+
 def invalid_link_url_reason(url: str) -> str | None:
     """Why ``url`` cannot be rendered as a link the surface vouches for, or ``None``.
 
@@ -97,15 +114,13 @@ def invalid_link_url_reason(url: str) -> str | None:
     is appended to a link, so they cannot swallow anything.
 
     Control and non-printable characters are refused on the exact string
-    that will be rendered, not on ``urlsplit``'s view of it: ``urlsplit``
-    silently drops leading C0 bytes, so a value such as ``"\x00https://..."``
-    parses as a clean URL while the raw bytes land in the attribute.
+    that will be rendered, not on ``urlsplit``'s view of it
+    (:func:`_unrenderable_character_reason`).
     """
 
-    if any(not ch.isprintable() for ch in url):
-        return "it contains a control or non-printable character"
-    if any(ch.isspace() for ch in url):
-        return "it contains whitespace"
+    character_reason = _unrenderable_character_reason(url)
+    if character_reason:
+        return character_reason
     try:
         parts = urlsplit(url)
         parts.port
@@ -157,8 +172,14 @@ def invalid_realm_url_reason(url: str) -> str | None:
     appended endpoint path.
 
     Transport is part of "usable": see :func:`insecure_transport_reason`.
+    Control characters are refused on the raw string first, for the reason
+    :func:`_unrenderable_character_reason` records: a leading NUL would
+    otherwise parse away and ride into every derived endpoint.
     """
 
+    character_reason = _unrenderable_character_reason(url)
+    if character_reason:
+        return character_reason
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https"):
         return "it must start with http:// or https://"

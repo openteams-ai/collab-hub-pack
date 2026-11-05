@@ -403,8 +403,8 @@ class WebConfig(BaseModel):
         reason = invalid_link_url_reason(value)
         if reason:
             raise ValueError(
-                "web.account_page_url must be an absolute https URL (http only on loopback)"
-                f" ({reason}), got {value!r}"
+                f"web.account_page_url is unusable ({reason}), got {value!r}: set it to an"
+                " absolute https URL (http only on loopback), e.g. https://billing.example.com/account"
             )
         return value
 

@@ -9,6 +9,7 @@ on:
     paths:
       - "helm/**"
       - ".github/workflows/lint.yaml"
+      - "scripts/ci/**"
   pull_request: {}   # runs on every PR so it can be a required status check
   merge_group: {}    # and on each merge-queue group; a required check that never reports there blocks the queue
 
@@ -18,20 +19,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Helm
-        uses: azure/setup-helm@v5
-        with:
-          # Pinned: when the latest-release lookup fails the action falls back to
-          # Helm 3, whose schema errors the negative render tests do not expect.
-          version: v4.3.0
+      - name: Install Helm
+        # Pinned version and sha256, in the one script every workflow shares;
+        # the why, and where the hash comes from on upgrade, are in there (#205).
+        run: scripts/ci/install_helm.sh
 
       - name: helm lint
         run: helm lint helm/collab-hub
 
       - name: Install kubeconform
-        run: |
-          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | \
-            sudo tar -xz -C /usr/local/bin kubeconform
+        # Pinned version and sha256, same shape as the Helm install (#205).
+        run: scripts/ci/install_kubeconform.sh
 
       - name: Validate rendered manifests
         run: helm template helm/collab-hub | kubeconform -strict -ignore-missing-schemas -

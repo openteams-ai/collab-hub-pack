@@ -86,7 +86,16 @@ class RegistryRepositoryNotFound(RegistrySourceError):
 
 
 class RegistrySourceAuthError(RegistrySourceError):
-    """The registry's listing API refused the configured credential."""
+    """The registry's listing API refused the configured credential.
+
+    Message contract: the text names only the source id, the API path, the
+    HTTP status and, where the adapter can tell, the permission the route
+    needs. It never carries the credential, a full URL, or the registry's
+    response body. The indexer relies on this and keeps the message in its
+    sweep summary and logs (see ``indexer._describe``), where other
+    :class:`RegistrySourceError` subclasses are recorded by class name only;
+    an adapter that cannot keep the contract must raise a sibling class.
+    """
 
 
 class RegistrySourceProtocolError(RegistrySourceError):
@@ -209,7 +218,10 @@ def parse_timestamp(value: object) -> datetime | None:
 
 
 def http_verify(ca_bundle_path: str) -> ssl.SSLContext | bool:
-    """``verify=`` for an httpx client: the deployment's CA bundle when configured, else system trust.
+    """``verify=`` for an httpx client: the deployment's CA bundle when configured, else httpx's default.
+
+    httpx's default is certifi's Mozilla bundle, or ``SSL_CERT_FILE`` /
+    ``SSL_CERT_DIR`` when either is set; it is not the OS trust store.
 
     Dev clusters front the registry with a gateway-issued certificate from a
     private CA, so the bundle is a file path from values. httpx 0.28 wants an

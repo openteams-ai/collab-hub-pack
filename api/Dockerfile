@@ -1,6 +1,8 @@
-FROM python:3.14.9-slim-trixie AS python
-FROM ghcr.io/astral-sh/uv:0.13.5 AS uv
-FROM node:24.22.1-bookworm-slim AS node
+# At least 3.14.10: the first 3.14 whose ssl module refuses the compromised eMudhra intermediates
+# whatever trust store it is handed (#285).
+FROM python:3.14.10-slim-trixie AS python
+FROM ghcr.io/astral-sh/uv:0.13.7 AS uv
+FROM node:26.13.0-bookworm-slim AS node
 # At least 0.82.1: the first pixi whose bundled roots exclude the compromised eMudhra chain, which
 # cogs/hermes/pixi.toml requires (requires-pixi).
 FROM ghcr.io/prefix-dev/pixi:0.83.0-bookworm-slim AS pixi

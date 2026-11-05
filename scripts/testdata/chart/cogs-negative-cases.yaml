@@ -1079,7 +1079,7 @@ cases:
     settings: {}
     why_chart_only: >-
       The bundle is mounted by the chart; the API receives only a file path
-      per source, and a source with no path uses system trust.
+      per source, and a source with no path uses httpx's default trust.
 
   - name: extraEnv may not set a cogs setting
     layers: [template]

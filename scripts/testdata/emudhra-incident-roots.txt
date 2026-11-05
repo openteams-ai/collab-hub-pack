@@ -1,0 +1,9 @@
+# SHA-256 fingerprints (of the DER certificate) of the roots implicated in the
+# eMudhra intermediate CA compromise, from https://emudhra.we-have-a-problem.com/
+# (roots.json). scripts/check_emudhra_trust.py fails if a trust store it reads
+# holds any of them (#285). One fingerprint per line; the rest of the line is a
+# label.
+86A1ECBA089C4A8D3BBE2734C612BA341D813E043CF9E8A862CD5C57A36BBE6B emSign ECC Root CA - G3
+D7A7A0FB5D7E2731D771E9484EBCDEF71D5F0C3E0A2948782BC83EE0EA699EF4 AAA Certificate Services
+7DD78D5F4F13459A83DFF9ABBBA62EDBAF6F2D102BF257FD712F4D9F2746ED8D emSign Root TLS CA - G3
+F2EDAAFF3D9B701FB4D14C9F285F8C0BAD90FC3BCC1FA07D47F4718EDABA34A5 emSign Root CS CA - G3

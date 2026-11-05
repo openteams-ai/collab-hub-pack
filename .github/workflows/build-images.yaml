@@ -2,15 +2,16 @@ name: Build Docker Images
 
 # Builds the Collab Hub API image and publishes it to GHCR (GHCR-only; no quay,
 # no ECR). Uses the built-in GITHUB_TOKEN — no external registry creds. On PRs
-# it builds without pushing (a CI check); on main / manual dispatch it pushes.
+# it builds and checks without pushing (a CI check); on main / manual dispatch
+# it pushes once the check passes.
 #
 # semantic-release.yml dispatches this from each collab-hub-<version> tag, so
 # the image a release pins (sha-<short> of the release commit) is built from
 # that same commit.
 #
 # A dev server deploys a commit of main by its image, sha-<short>: every push to
-# main that touches api/, execution/ or this file builds one, and the summary of that run
-# names the tag. For a commit that touched neither, run this workflow by hand
+# main that touches one of the paths below builds one, and the summary of that run
+# names the tag. For a commit that touched none of them, run this workflow by hand
 # on main (workflow_dispatch).
 
 on:
@@ -23,6 +24,10 @@ on:
       - "cogs/hermes/**"
       - "worker/**"
       - "examples/cog-local/cogs/hello/**"
+      # The trust-store check run on the built image, before it is pushed.
+      - "scripts/check_emudhra_trust.py"
+      - "scripts/testdata/emudhra-incident-roots.txt"
+      - "scripts/tests/test_check_emudhra_trust.py"
       - ".github/workflows/build-images.yaml"
   pull_request:
     paths:
@@ -31,6 +36,10 @@ on:
       - "cogs/hermes/**"
       - "worker/**"
       - "examples/cog-local/cogs/hello/**"
+      - "scripts/check_emudhra_trust.py"
+      - "scripts/testdata/emudhra-incident-roots.txt"
+      - "scripts/tests/test_check_emudhra_trust.py"
+      - ".github/workflows/build-images.yaml"
   workflow_dispatch:
 
 jobs:
@@ -63,15 +72,56 @@ jobs:
             type=sha,prefix=sha-,format=short
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      # The check's own refusals (an incident root in any store, a malformed or
+      # empty fixture, no certificates at all, an interpreter below its floor),
+      # on synthetic stores, so a regression can't pass the image check below.
+      - name: Test the trust-store check
+        run: python3 -m unittest discover --start-directory scripts/tests --verbose
+
+      # Built once into the local Docker engine and checked before anything is
+      # pushed; the push below rebuilds from this builder's cache.
+      - name: Build
+        id: build
+        uses: docker/build-push-action@v7
         with:
           context: api
           # The Dockerfile binds the repo-root LICENSE via this named context,
           # so no Dockerfile change is needed for a GHCR-only custom build.
           build-contexts: |
             projectroot=.
-          push: ${{ github.event_name != 'pull_request' }}
+          # Always re-resolve the base images, so a rebuild picks up a base
+          # image republished under the same tag (a ca-certificates fix, say)
+          # rather than a stale local layer.
+          pull: true
+          load: true
+          push: false
+          # A local name for the check below to run, rather than the image ID,
+          # whose form depends on the engine's image store.
+          tags: collab-hub-api:check
+
+      # The image's own Python, as its runtime user, must trust none of the
+      # roots from the eMudhra compromise (OS store and certifi alike) and be
+      # new enough to refuse the compromised intermediates outright (#285).
+      - name: Check the image's trust store
+        run: >-
+          docker run --rm -v "$PWD/scripts:/checks:ro" --entrypoint python
+          collab-hub-api:check
+          /checks/check_emudhra_trust.py --require-hardened-python
+
+      - name: Push
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: api
+          build-contexts: |
+            projectroot=.
+          # Same inputs as Build, so its layers normally come from Build's cache.
+          # BuildKit re-resolves the base tags against the registry here, with
+          # or without pull, so a base republished in the minutes since Build
+          # would be pushed without having been checked. Closing that would
+          # need a push of the checked image itself; pull stays for parity.
+          pull: true
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
 
       - name: Show deploy tag

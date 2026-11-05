@@ -911,6 +911,14 @@ def _list_node():
     }
 
 
+def _with_more_pages(node: dict) -> dict:
+    """Mark the node's `items` page as not the last one, the way GitHub does
+    whenever totalCount exceeds the nodes returned. `truncated` follows
+    pageInfo (is there a cursor to continue from?), not totalCount."""
+    node["projectV2"]["items"]["pageInfo"] = {"hasNextPage": True, "endCursor": "cursor-page-2"}
+    return node
+
+
 def _read_node():
     return {
         "projectV2": {
@@ -1008,7 +1016,7 @@ async def test_github_read_project_items_link_prs_for_chaining(tmp_path, monkeyp
 async def test_github_read_project_flags_truncation(tmp_path, monkeypatch):
     # Board reports 91 items but only a page came back -> truncated=True and
     # total_count reflects the real size, so the caller knows it's partial.
-    node = _read_node()
+    node = _with_more_pages(_read_node())
     node["projectV2"]["items"]["totalCount"] = 91
     _install_mock_client(monkeypatch, _graphql_handler(org=node, user=None))
     app = make_app(_config(tmp_path))
@@ -1016,11 +1024,12 @@ async def test_github_read_project_flags_truncation(tmp_path, monkeypatch):
         response = await client.post(
             "/v1/connectors/github/projects/1/read",
             headers=_auth_header(),
-            json={"owner": "openteams-ai"},
+            json={"owner": "openteams-ai", "max_items": 2},
         )
     body = response.json()
     assert body["total_count"] == 91
     assert body["truncated"] is True
+    assert body["next_cursor"] is not None
 
 
 async def test_github_read_project_auto_paginates(tmp_path, monkeypatch):
@@ -1112,14 +1121,14 @@ async def test_github_read_project_filtered_totals_stay_board_wide(tmp_path, mon
     # board size must still come back as project.items_count / total_count so
     # the two totals the caller sees don't silently change meaning. The filtered
     # count is reported separately as matched_count and drives `truncated`.
-    node = _board_node(board_total=40, matched=7)  # 2 of the 7 matches returned
+    node = _with_more_pages(_board_node(board_total=40, matched=7))  # 2 of the 7 matches returned
     _install_mock_client(monkeypatch, _counts_handler(read_node=node, aggregates={"total": 40}))
     app = make_app(_config(tmp_path))
     async with _client(app) as client:
         response = await client.post(
             "/v1/connectors/github/projects/1/read",
             headers=_auth_header(),
-            json={"owner": "openteams-ai", "query": "is:open"},
+            json={"owner": "openteams-ai", "query": "is:open", "max_items": 2},
         )
     body = response.json()
     assert body["project"]["items_count"] == 40
@@ -1582,7 +1591,7 @@ async def test_github_read_project_counts_null_when_count_dsl_rejected(tmp_path,
     # The count DSL is rejected -> counts is null; the read and its exact
     # total_count / matched_count / truncated are unaffected, and no sampled
     # breakdown is invented from the page in hand.
-    node = _read_node_states()
+    node = _with_more_pages(_read_node_states())
     node["projectV2"]["items"]["totalCount"] = 91
     handler = _counts_handler(
         read_node=node, options=[], aggregates={}, status_counts=[], fail_dsl=True
@@ -1593,7 +1602,7 @@ async def test_github_read_project_counts_null_when_count_dsl_rejected(tmp_path,
         response = await client.post(
             "/v1/connectors/github/projects/1/read",
             headers=_auth_header(),
-            json={"owner": "openteams-ai"},
+            json={"owner": "openteams-ai", "max_items": 3},
         )
     body = response.json()
     assert response.status_code == 200
@@ -3097,7 +3106,12 @@ async def test_github_read_project_pages_with_next_cursor(tmp_path, monkeypatch)
         ("ProjectRead", 3, "6"),
     ]
     assert len(second.json()["items"]) == 3 and second.json()["next_cursor"].endswith(".6")
+    assert second.json()["truncated"] is True
+    # The final page: nothing remains, so truncated is False even though this
+    # response holds 1 of the 7 matched items.
     assert len(third.json()["items"]) == 1 and third.json()["next_cursor"] is None
+    assert third.json()["truncated"] is False
+    assert third.json()["matched_count"] == 7
 
 
 async def test_github_read_project_rejects_cursor_from_other_query(tmp_path, monkeypatch):

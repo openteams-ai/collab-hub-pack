@@ -280,6 +280,7 @@ class GitHubProjectRead:
     """One board read. project.items_count is always the whole board size;
     matched is how many items the request filter selected (== items_count
     with no filter); items is the page(s) actually returned, at most max_items.
+    truncated means more matching items remain after `items` (see cursor).
     counts is filled by read_project_with_counts and is board-wide; None when
     the server-side count queries failed (the read itself still succeeded)."""
 
@@ -293,7 +294,11 @@ class GitHubProjectRead:
 
     @property
     def truncated(self) -> bool:
-        return self.matched > len(self.items)
+        # "More matching items exist beyond this response", i.e. there is a
+        # cursor to continue from. Not `matched > len(items)`: on a continued
+        # (`after`) read `items` is one page of the listing while `matched` is
+        # the whole of it, so that comparison would stay True on the final page.
+        return self.cursor is not None
 
 
 @dataclass
@@ -323,18 +328,6 @@ class GitHubUpstreamError(RuntimeError):
         if message:
             detail = f"{detail}: {message}"
         super().__init__(detail)
-
-    @property
-    def rate_limited(self) -> bool:
-        # _raise_for_github_status normalises the REST primary/secondary limits,
-        # and _graphql the GraphQL RATE_LIMITED error, to 429.
-        return self.status_code == 429
-
-    @property
-    def transient(self) -> bool:
-        """A limit, a timeout-like 5xx, or any shape where retrying the same
-        token right now is unlikely to do better."""
-        return self.rate_limited or (self.status_code is not None and self.status_code >= 500)
 
 
 class GitHubSearchError(ValueError):
@@ -613,7 +606,6 @@ class GitHubClient:
             cap=max_items,
             after=_unwrap_project_cursor(after, fingerprint),
             operation="project read",
-            not_found_status=404,
         )
         return GitHubProjectRead(
             project=_project(walk.project),
@@ -630,14 +622,10 @@ class GitHubClient:
         cap: int,
         after: str | None = None,
         operation: str,
-        not_found_status: int | None,
     ) -> _ItemsWalk:
         """Page through a project items connection from `after`, asking for
         no more than `cap` items in total (never a full 100-item page when
-        fewer are wanted). `not_found_status` is the status a null projectV2
-        maps to: 404 for the read itself; None for a walk that runs after the
-        project was already read, where a null node is an upstream oddity, not
-        "project not found"."""
+        fewer are wanted). A null projectV2 node is "project not found" (404)."""
         cap = min(max(cap, 1), _MAX_PROJECT_ITEMS)
         project: dict = {}
         collected: list[GitHubProjectItem] = []
@@ -646,7 +634,7 @@ class GitHubClient:
             first = min(_PROJECT_PAGE_SIZE, cap - len(collected))
             data = await self._graphql(document, {**variables, "first": first, "after": cursor}, operation=operation)
             project = _owner_project(
-                data, operation=operation, status_code=not_found_status, message="project not found"
+                data, operation=operation, status_code=404, message="project not found"
             )
             items_field = project.get("items") or {}
             collected.extend(_project_item(item) for item in (items_field.get("nodes") or []) if isinstance(item, dict))

@@ -635,10 +635,12 @@ class GitHubProjectReadResponse(UntrustedConnectorResponse):
     # which items/matched_count refer to. total_count is ALWAYS the board's full
     # size (same scalar as project.items_count and counts.total); matched_count
     # is how many items the query selects (== total_count with no query).
-    # truncated is set when matched_count exceeds the items returned here, so a
-    # partial listing is never mistaken for the whole -- and a filter that
-    # matches nothing shows as matched_count=0 against a non-zero total_count,
-    # distinguishable from an empty board.
+    # truncated is set when more matching items remain after the ones returned
+    # here (equivalently: next_cursor is non-null), so a partial listing is
+    # never mistaken for the whole -- on a continued (`after`) read it refers
+    # to the rest of the listing, not to the pages already fetched. A filter
+    # that matches nothing shows as matched_count=0 against a non-zero
+    # total_count, distinguishable from an empty board.
     query: str = ""
     total_count: int = 0
     matched_count: int = 0

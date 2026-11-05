@@ -782,10 +782,11 @@ async def read_github_project(
     except httpx.HTTPError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "GitHub project read failed") from exc
     # total_count stays the board size (same scalar as project.items_count and
-    # counts.total); matched_count is what the query selected and drives
-    # truncated, so a filter that matched nothing on a non-empty board reads as
-    # matched_count=0 < total_count rather than as an empty board. The API
-    # stays data-only: what that reading means is the tool description's job.
+    # counts.total); matched_count is what the query selected, so a filter that
+    # matched nothing on a non-empty board reads as matched_count=0 < total_count
+    # rather than as an empty board. truncated means more matching items remain
+    # after this response (next_cursor is set). The API stays data-only: what
+    # that reading means is the tool description's job.
     return GitHubProjectReadResponse(
         project=read.project,
         items=read.items,

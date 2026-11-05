@@ -1443,6 +1443,21 @@ def test_an_issuer_with_a_hidden_character_fails_the_rollout(tmp_path, idp, url)
         make_web_app(tmp_path, idp, web={"issuer_url": url})
 
 
+@pytest.mark.parametrize(
+    "url",
+    ["https://auth.example.com:0/realms/nebari", "http://localhost:0/realms/nebari"],
+)
+def test_an_issuer_on_port_0_fails_the_rollout(tmp_path, idp, url):
+    # Parses, but no browser will follow a redirect to it and nothing listens.
+    with pytest.raises(RuntimeError, match="realm URL is unusable \\(its port is 0"):
+        make_web_app(tmp_path, idp, web={"issuer_url": url})
+
+
+def test_a_public_base_url_on_port_0_is_refused(tmp_path, idp):
+    with pytest.raises(RuntimeError, match="public_base_url is unusable \\(its port is 0"):
+        make_web_app(tmp_path, idp, web={"public_base_url": "https://frames.example.com:0"})
+
+
 @pytest.mark.parametrize("url", [u.replace("/realms/nebari", "") for u in HIDDEN_CHARACTER_URLS], ids=repr)
 def test_a_public_base_url_with_a_hidden_character_is_refused(tmp_path, idp, url):
     with pytest.raises(RuntimeError, match="public_base_url is unusable \\(it contains"):
@@ -3850,6 +3865,7 @@ UNUSABLE_LINKS = [
     # Port
     ("https://billing.example.com:abc/", "port"),
     ("https://billing.example.com:99999/", "port"),
+    ("https://billing.example.com:0/", "port is 0"),
     # Malformed authority
     ("https://[::1", "parsed"),
     # Whitespace and control characters, on the raw string

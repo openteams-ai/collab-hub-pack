@@ -609,7 +609,7 @@ still kept:
 - **Checked at startup, to the surface's usual bar.** `WebConfig` runs the
   value through `web.oidc.invalid_link_url_reason`, which follows the same rules
   as the realm-URL check: absolute `https://` (plain `http://` only on
-  loopback, the same exact-match host set), a real host, a parseable port, no
+  loopback, the same exact-match host set), a real host, a usable port (not 0), no
   credentials, and no control or non-printable character — checked on the
   raw string, because `urlsplit` quietly drops a leading NUL that would
   otherwise land in the attribute. A query and fragment are allowed, since
@@ -618,7 +618,11 @@ still kept:
   `javascript:`, a bare path or a cleartext host is a rollout failure, not
   something shipped to browsers. The chart's values schema applies a coarse
   version of the same shape before the render; the API's check is the
-  authoritative one. The link is a same-tab navigation like every other link
+  authoritative one, and the two differ at the edges. The schema lets
+  through a port above 65535, port 0, a non-breaking space and a zero-width
+  character, each of which the API then refuses at startup; it refuses an
+  international domain name and an empty port (`https://host:/`), which the
+  API would accept. A value that renders is not yet a value that starts. The link is a same-tab navigation like every other link
   on the surface, and the page-level `no-referrer` policy keeps this origin
   out of the billing site's logs.
 

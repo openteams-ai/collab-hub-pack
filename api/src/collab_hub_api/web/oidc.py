@@ -79,9 +79,13 @@ def _invalid_port_reason(url: str) -> str | None:
     """
 
     try:
-        urlsplit(url).port
+        port = urlsplit(url).port
     except ValueError:
         return "its port is not a number"
+    if port == 0:
+        # Parses, but browsers refuse to connect to it and nothing listens on
+        # it: a URL that can never be reached is a misconfiguration.
+        return "its port is 0"
     return None
 
 
@@ -107,7 +111,7 @@ def invalid_link_url_reason(url: str) -> str | None:
 
     The surface writes this value into an ``href`` on every signed-in page,
     so it is held to the same bar as the realm URL and ``public_base_url``:
-    absolute, ``http(s)``, a real host, a parseable port, no credentials, and
+    absolute, ``http(s)``, a real host, a usable port (not 0), no credentials, and
     plain ``http://`` only on loopback -- a billing page reached over
     cleartext is a page whose session can be hijacked on the way. Unlike
     :func:`invalid_realm_url_reason`, a query and fragment are allowed: nothing
@@ -126,6 +130,9 @@ def invalid_link_url_reason(url: str) -> str | None:
         parts.port
     except ValueError:
         return "its host or port cannot be parsed"
+    port_reason = _invalid_port_reason(url)
+    if port_reason:
+        return port_reason
     if parts.scheme not in ("http", "https"):
         return "it must start with http:// or https://"
     if not parts.hostname:

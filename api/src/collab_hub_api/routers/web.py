@@ -246,9 +246,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         return response
 
     @app.exception_handler(WebAuthorizationUnavailable)
-    async def _authorization_unavailable(
-        request: Request, exc: WebAuthorizationUnavailable
-    ) -> Response:
+    async def _authorization_unavailable(request: Request, exc: WebAuthorizationUnavailable) -> Response:
         # Error level, and a 503 rather than a 403: this is a deployment that
         # cannot decide operator authority at all, which would otherwise look
         # exactly like a correct refusal and lock every operator out silently.
@@ -461,9 +459,7 @@ def make_router(
         """
 
         transient_value = request.cookies.get(TRANSIENT_COOKIE)
-        transient = (
-            surface.codec.decode(TRANSIENT_PURPOSE, transient_value) if transient_value else None
-        )
+        transient = surface.codec.decode(TRANSIENT_PURPOSE, transient_value) if transient_value else None
         if transient is None:
             return _failed_sign_in(request, "missing or invalid transient state cookie")
         if request.query_params.get("error"):
@@ -548,9 +544,7 @@ def make_router(
         return response
 
     @router.get(LANDING_PATH)
-    async def overview(
-        request: Request, session: WebSession = Depends(require_web_session)
-    ) -> Response:
+    async def overview(request: Request, session: WebSession = Depends(require_web_session)) -> Response:
         """The signed-in overview: proves the session and hosts the sign-out form.
 
         The operator invitation page (#91) is linked unconditionally rather

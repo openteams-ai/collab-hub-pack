@@ -307,9 +307,7 @@ def catalog_row(repo: str, digest: str, *, tags=("latest",), source_id="backing"
     )
 
 
-def settings(
-    tmp_path, *, serve: dict | None = None, security: dict | None = None, publish: dict | None = None
-) -> dict:
+def settings(tmp_path, *, serve: dict | None = None, security: dict | None = None, publish: dict | None = None) -> dict:
     result: dict = {
         "storage": {"frames_path": str(tmp_path / "frames")},
         "frames": {"mcp_session_manager_enabled": False},
@@ -1176,9 +1174,7 @@ async def test_serving_is_off_by_default_and_changes_nothing(make_hub):
     # References keep naming the backing registry, and the answer has no new keys.
     listing = (await hub.get("/v1/cogs", headers=ALICE)).json()
     assert listing["items"][0]["reference"].startswith(f"{BACKING_HOST}/")
-    answer = (
-        await hub.get(f"/v1/cogs/example/cog-alpha/versions/{ALPHA.digest}/reference", headers=ALICE)
-    ).json()
+    answer = (await hub.get(f"/v1/cogs/example/cog-alpha/versions/{ALPHA.digest}/reference", headers=ALICE)).json()
     assert sorted(answer) == ["digest", "locations", "present", "reference", "repository", "source_id"]
     assert sorted(answer["locations"][0]) == ["pushed_at", "reference", "removed_at", "repository", "source_id"]
     assert answer["reference"].startswith(f"{BACKING_HOST}/")

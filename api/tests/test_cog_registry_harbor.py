@@ -266,10 +266,7 @@ async def test_rest_refused_credential_is_a_clear_error_without_the_secret(
 
     message = str(excinfo.value)
 
-    assert (
-        f"refused the configured credential for "
-        f"/projects/cogs/repositories (HTTP {status})"
-    ) in message
+    assert (f"refused the configured credential for /projects/cogs/repositories (HTTP {status})") in message
 
     assert CREDENTIALS["password"] not in message
     assert "unauthorized" not in message

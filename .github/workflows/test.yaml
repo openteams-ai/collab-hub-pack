@@ -139,6 +139,13 @@ jobs:
         working-directory: api
         run: uv run --only-group lint ruff check src tests
 
+      # Runs even when `ruff check` fails, so a PR with both lint and format
+      # problems hears about both in one push.
+      - name: ruff format
+        if: ${{ !cancelled() }}
+        working-directory: api
+        run: uv run --only-group lint ruff format --check src tests
+
   admin-ui:
     # The admin panel's own suite. Separate job rather than a step on the
     # Python one: the two share no toolchain, and a Node failure should read as

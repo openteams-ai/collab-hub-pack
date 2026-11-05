@@ -478,8 +478,7 @@ def test_deferred_json_value_limit_bounds_every_tracking_map(monkeypatch) -> Non
     assert len(scan.deferred_strings) == 3
     assert len(scan.deferred_counts) == 3
     assert scan.errors == [
-        "jsonb scan: more than 3 distinct candidate strings; "
-        "by-value matches beyond that point were not tracked"
+        "jsonb scan: more than 3 distinct candidate strings; by-value matches beyond that point were not tracked"
     ]
 
 
@@ -507,18 +506,25 @@ def test_history_actor_is_scanned_from_a_fake_read_only_session(index: Directory
     from collab_hub_api.identity_inventory.scan import scan_history
 
     scan = ScanResult()
-    scan_history(scan, FakeDatabase({"frames_server_history": [
-        {
-            "id": "h1",
-            "org_id": "org",
-            "workspace_id": "default",
-            "entity_type": "frame",
-            "entity_id": "f1",
-            "event": "owners_changed",
-            "actor": "alice@example.com",
-            "detail": {"added": ["bob@example.com"], "removed": []},
-        }
-    ]}))
+    scan_history(
+        scan,
+        FakeDatabase(
+            {
+                "frames_server_history": [
+                    {
+                        "id": "h1",
+                        "org_id": "org",
+                        "workspace_id": "default",
+                        "entity_type": "frame",
+                        "entity_id": "f1",
+                        "event": "owners_changed",
+                        "actor": "alice@example.com",
+                        "detail": {"added": ["bob@example.com"], "removed": []},
+                    }
+                ]
+            }
+        ),
+    )
     carriers = {item.carrier for item in scan.occurrences}
     assert carriers == {"history.actor", "history.detail"}
     assert {item.principal for item in scan.occurrences} == {"alice@example.com", "bob@example.com"}
@@ -621,9 +627,7 @@ def test_reassignment_check_uses_the_earliest_record(index: DirectoryIndex) -> N
 def test_local_scan_reads_sidecars_without_creating_anything(tmp_path: Path, index: DirectoryIndex) -> None:
     root = tmp_path / "frames"
     (root / "aaa").mkdir(parents=True)
-    (root / "aaa" / "metadata.json").write_text(
-        json.dumps(sidecar("aaa", owners=[ALICE.sub])), encoding="utf-8"
-    )
+    (root / "aaa" / "metadata.json").write_text(json.dumps(sidecar("aaa", owners=[ALICE.sub])), encoding="utf-8")
     scan = ScanResult()
     scan_local_frames(scan, ReadOnlyLocalFrames(root))
     assert [frame.frame_id for frame in scan.frames] == ["aaa"]
@@ -715,9 +719,7 @@ def test_sql_guard_refuses_the_two_ways_a_prefix_check_is_walked_past() -> None:
     with pytest.raises(ReadOnlyViolationError):
         _require_select("SELECT 1; DELETE FROM frames_server_groups")
     with pytest.raises(ReadOnlyViolationError):
-        _require_select(
-            "SELECT * FROM (WITH d AS (DELETE FROM frames_server_groups RETURNING *) SELECT * FROM d) q"
-        )
+        _require_select("SELECT * FROM (WITH d AS (DELETE FROM frames_server_groups RETURNING *) SELECT * FROM d) q")
     # A single trailing semicolon is still one statement.
     _require_select("SELECT 1;")
 
@@ -1160,7 +1162,7 @@ def test_scan_and_read_only_enforcement_against_a_real_database() -> None:
         setup.execute(
             "INSERT INTO frames_server_history (id, org_id, workspace_id, entity_type, entity_id, event, actor, detail)"
             " VALUES ('h1','org','default','frame','f1','owners_changed','alice@example.com',"
-            " '{\"added\":[\"bob@example.com\"],\"removed\":[],\"note\":\"retired@example.com\"}'::jsonb)"
+            ' \'{"added":["bob@example.com"],"removed":[],"note":"retired@example.com"}\'::jsonb)'
         )
         setup.execute(
             "INSERT INTO frames_server_active_frames (org_id, workspace_id, user_id, frame_ids)"
@@ -1184,13 +1186,13 @@ def test_scan_and_read_only_enforcement_against_a_real_database() -> None:
         setup.execute(
             "INSERT INTO nexus_task_state (org_id, workspace_id, owner_id, payload)"
             " VALUES ('org','default','alice@example.com',"
-            " '{\"tasks\":[{\"id\":\"t1\",\"owner_id\":\"alice@example.com\"}]}'::jsonb)"
+            ' \'{"tasks":[{"id":"t1","owner_id":"alice@example.com"}]}\'::jsonb)'
         )
         setup.execute(
             "INSERT INTO nexus_task_devices"
             " (org_id, workspace_id, user_id, device_id, payload, last_seen_at, expires_at)"
             " VALUES ('org','default','bob','d1',"
-            " '{\"device_id\":\"d1\",\"user_id\":\"bob\",\"org_id\":\"org\"}'::jsonb,"
+            ' \'{"device_id":"d1","user_id":"bob","org_id":"org"}\'::jsonb,'
             " now(), now() + interval '1 day')"
         )
 
@@ -1200,8 +1202,10 @@ def test_scan_and_read_only_enforcement_against_a_real_database() -> None:
         scan_postgres(scan, db)
         # The server itself refuses the write, bypassing this tool's own guard.
         with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
-            db.connection.execute("INSERT INTO frames_server_usage_events (id, org_id, workspace_id, user_id, event)"
-                                  " VALUES ('e2','org','default','x','y')")
+            db.connection.execute(
+                "INSERT INTO frames_server_usage_events (id, org_id, workspace_id, user_id, event)"
+                " VALUES ('e2','org','default','x','y')"
+            )
 
     found = {item.carrier for item in scan.occurrences}
     assert {

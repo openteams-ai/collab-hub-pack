@@ -85,10 +85,7 @@ TERMS_OF_SERVICE_TEXT: tuple[Section, ...] = (
     ),
     (
         "Contact",
-        (
-            "Questions about these terms go to"
-            f" {DATA_STATEMENT_CONTACT}.",
-        ),
+        (f"Questions about these terms go to {DATA_STATEMENT_CONTACT}.",),
     ),
 )
 """The document, as one constant: a tuple of ``(heading, paragraphs)``.

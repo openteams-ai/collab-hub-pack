@@ -270,9 +270,7 @@ async def start_signin(client: AsyncClient, idp: _StubIdp, next_path: str = "/we
 
 async def sign_in(client: AsyncClient, idp: _StubIdp, next_path: str = "/web"):
     params = await start_signin(client, idp, next_path)
-    return await client.get(
-        "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-    )
+    return await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
 
 
 # --- session and transient cookie codec ------------------------------------
@@ -381,16 +379,12 @@ async def test_a_next_naming_the_signin_route_does_not_loop(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as client:
         await sign_in(client, idp)
-        response = await client.get(
-            "/web/signin", params={"renew": "1", "next": "/web/signin?renew=1"}
-        )
+        response = await client.get("/web/signin", params={"renew": "1", "next": "/web/signin?renew=1"})
         assert response.status_code == 303
         assert response.headers["location"].startswith(idp.issuer)
         params = authorize_params(response.headers["location"])
         idp.nonce = params["nonce"]
-        callback = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-        )
+        callback = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
     assert callback.status_code == 303
     assert callback.headers["location"] == "/web"
 
@@ -484,9 +478,7 @@ async def test_signin_register_flag_starts_the_flow_on_the_registration_form(tmp
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as client:
         plain = await client.get("/web/signin", params={"next": "/web"})
-        register = await client.get(
-            "/web/signin", params={"next": "/web", "register": "1"}
-        )
+        register = await client.get("/web/signin", params={"next": "/web", "register": "1"})
     plain_params = authorize_params(plain.headers["location"])
     register_params = authorize_params(register.headers["location"])
     assert "prompt" not in plain_params
@@ -545,9 +537,7 @@ async def test_callback_refuses_a_wrong_state(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as client:
         await start_signin(client, idp)
-        response = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": "forged-state"}
-        )
+        response = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": "forged-state"})
         assert response.status_code == 400
         assert idp.token_requests == []
         # No session was minted anywhere along the way.
@@ -558,9 +548,7 @@ async def test_callback_refuses_a_wrong_state(tmp_path, idp):
 async def test_callback_without_a_started_flow_is_refused(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as client:
-        response = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": "whatever"}
-        )
+        response = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": "whatever"})
         assert response.status_code == 400
         assert idp.token_requests == []
 
@@ -571,13 +559,9 @@ async def test_callback_cannot_be_replayed(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as client:
         params = await start_signin(client, idp)
-        first = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-        )
+        first = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
         assert first.status_code == 303
-        replay = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-        )
+        replay = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
         assert replay.status_code == 400
         assert len(idp.token_requests) == 1
 
@@ -648,9 +632,7 @@ async def test_a_wrong_nonce_is_refused(tmp_path, idp):
     async with web_client(app) as client:
         params = await start_signin(client, idp)
         idp.nonce = "a-nonce-from-some-other-flow"
-        response = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-        )
+        response = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
         assert response.status_code == 400
 
 
@@ -659,9 +641,7 @@ async def test_a_missing_nonce_is_refused(tmp_path, idp):
     async with web_client(app) as client:
         params = await start_signin(client, idp)
         idp.nonce = None
-        response = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-        )
+        response = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
         assert response.status_code == 400
 
 
@@ -712,9 +692,11 @@ async def test_an_api_idtoken_cookie_is_not_a_web_session(tmp_path, idp, monkeyp
     monkeypatch.setenv("FRAMES_IDTOKEN_ALLOW_UNSIGNED", "true")
     app = make_web_app(tmp_path, idp)
     header = urlsafe_b64encode(json.dumps({"alg": "none"}).encode()).decode().rstrip("=")
-    payload = urlsafe_b64encode(
-        json.dumps({"preferred_username": "alice", "org_id": "o", "workspace_id": "w"}).encode()
-    ).decode().rstrip("=")
+    payload = (
+        urlsafe_b64encode(json.dumps({"preferred_username": "alice", "org_id": "o", "workspace_id": "w"}).encode())
+        .decode()
+        .rstrip("=")
+    )
     async with web_client(app) as client:
         client.cookies.set("IdToken-test", f"{header}.{payload}.", domain="web.test", path="/")
         response = await client.get("/web")
@@ -769,9 +751,7 @@ async def test_signout_with_the_rendered_csrf_token_ends_the_session(tmp_path, i
         ("?next=/web/signin", "/web/signin"),
     ],
 )
-async def test_signing_in_again_returns_to_where_the_person_signed_out_from(
-    tmp_path, idp, query, expected_href
-):
+async def test_signing_in_again_returns_to_where_the_person_signed_out_from(tmp_path, idp, query, expected_href):
     """The signed-out page passes a safe ``next`` on to sign-in, so leaving the
     admin panel and signing in again lands back on the panel. Anything the
     sign-in redirect would refuse is dropped here too."""
@@ -801,9 +781,7 @@ async def test_a_csrf_token_from_another_session_is_refused(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as first:
         await sign_in(first, idp)
-        first_token = re.search(
-            r'name="csrf_token" value="([^"]+)"', (await first.get("/web")).text
-        ).group(1)
+        first_token = re.search(r'name="csrf_token" value="([^"]+)"', (await first.get("/web")).text).group(1)
     async with web_client(app) as second:
         await sign_in(second, idp)
         response = await second.post("/web/signout", data={"csrf_token": first_token})
@@ -1006,9 +984,7 @@ async def test_a_type_that_only_begins_like_a_form_is_not_read_as_one(tmp_path, 
             pulled += 1
             yield f"csrf_token={token}".encode()
 
-        response = await client.post(
-            "/web/signout", content=form_shaped_body(), headers={"Content-Type": content_type}
-        )
+        response = await client.post("/web/signout", content=form_shaped_body(), headers={"Content-Type": content_type})
         assert response.status_code == 403
         assert pulled == 0
         # A refused sign-out signs nothing out.
@@ -1034,9 +1010,7 @@ async def test_a_padded_form_under_the_cap_still_signs_out(tmp_path, idp):
         await sign_in(client, idp)
         page = (await client.get("/web")).text
         token = re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
-        response = await client.post(
-            "/web/signout", data={"csrf_token": token, "padding": "p" * 3000}
-        )
+        response = await client.post("/web/signout", data={"csrf_token": token, "padding": "p" * 3000})
         assert response.status_code == 303
         assert response.headers["location"] == "/web/signed-out"
 
@@ -1133,7 +1107,7 @@ async def test_operator_pages_admit_operators_and_refuse_others(tmp_path, idp):
     # The issue #87 seam: a resolver installed on app.state. The session
     # principal follows the deployment's identity policy (user_from_claims):
     # unpinned here, so it is the preferred_username, exactly as on the API.
-    app.state.platform_role_resolver = lambda user: ("operator" if user == "alice" else None)
+    app.state.platform_role_resolver = lambda user: "operator" if user == "alice" else None
     async with web_client(app) as client:
         await sign_in(client, idp)
         response = await client.get("/web/test/operator-only")
@@ -1314,9 +1288,7 @@ async def test_a_non_ascii_nonce_claim_is_refused_not_crashed(tmp_path, idp):
     async with web_client(app) as client:
         params = await start_signin(client, idp)
         idp.claims_override = {"nonce": "жетон"}
-        response = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-        )
+        response = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
         assert response.status_code == 400
 
 
@@ -1533,9 +1505,7 @@ def test_the_session_lifetime_ceiling_is_enforced(tmp_path, idp):
         Config.parse(web_values(tmp_path, idp, web={"session_lifetime_seconds": 7 * 24 * 3600}))
     with pytest.raises(Exception, match="session_lifetime_seconds"):
         Config.parse(
-            web_values(
-                tmp_path, idp, web={"session_lifetime_seconds": WEB_SESSION_LIFETIME_CEILING_SECONDS + 1}
-            )
+            web_values(tmp_path, idp, web={"session_lifetime_seconds": WEB_SESSION_LIFETIME_CEILING_SECONDS + 1})
         )
     lowered = Config.parse(web_values(tmp_path, idp, web={"session_lifetime_seconds": 900}))
     assert lowered.web.session_lifetime_seconds == 900
@@ -1545,9 +1515,7 @@ async def test_the_session_cookie_expires_at_the_configured_lifetime(tmp_path, i
     app = make_web_app(tmp_path, idp, web={"session_lifetime_seconds": 900})
     async with web_client(app) as client:
         response = await sign_in(client, idp)
-    session_cookie = next(
-        value for value in response.headers.get_list("set-cookie") if SESSION_COOKIE in value
-    )
+    session_cookie = next(value for value in response.headers.get_list("set-cookie") if SESSION_COOKIE in value)
     assert "Max-Age=900" in session_cookie
 
 
@@ -1822,9 +1790,7 @@ async def test_no_session_cookie_can_outlive_the_ceiling(tmp_path, idp):
     object.__setattr__(app.state.web_surface, "session_lifetime_seconds", 7 * 24 * 3600)
     async with web_client(app) as client:
         response = await sign_in(client, idp)
-        session_cookie = next(
-            value for value in response.headers.get_list("set-cookie") if SESSION_COOKIE in value
-        )
+        session_cookie = next(value for value in response.headers.get_list("set-cookie") if SESSION_COOKIE in value)
         assert f"Max-Age={WEB_SESSION_LIFETIME_CEILING_SECONDS}" in session_cookie
         # And the signed exp agrees with the cookie's Max-Age.
         decoded = SessionCodec(SESSION_SECRET).decode_session(dict(client.cookies)[SESSION_COOKIE])
@@ -2175,9 +2141,7 @@ async def test_the_mint_path_does_not_call_through_an_overridable_accessor(tmp_p
     object.__setattr__(surface, "session_lifetime_seconds", 7 * 24 * 3600)
     async with web_client(app) as client:
         response = await sign_in(client, idp)
-    session_cookie = next(
-        value for value in response.headers.get_list("set-cookie") if SESSION_COOKIE in value
-    )
+    session_cookie = next(value for value in response.headers.get_list("set-cookie") if SESSION_COOKIE in value)
     assert f"Max-Age={WEB_SESSION_LIFETIME_CEILING_SECONDS}" in session_cookie
 
 
@@ -2213,9 +2177,7 @@ def forged_route_object():
 
     route = Route("/web/forged", endpoint=endpoint)
     # The forgery: claim a dependency tree naming the real session dependency.
-    route.dependant = SimpleNamespace(
-        dependencies=[SimpleNamespace(call=require_web_session, dependencies=[])]
-    )
+    route.dependant = SimpleNamespace(dependencies=[SimpleNamespace(call=require_web_session, dependencies=[])])
     return route
 
 
@@ -2355,12 +2317,8 @@ def test_placeholder_copy_is_labelled_as_placeholder() -> None:
     # Unreviewed legal text is linked from a real consent gate, so it must say
     # so on its face. The banner is driven by each document's own flag, and
     # clearing that flag is the act that asserts counsel has seen the copy.
-    assert TERMS_OF_SERVICE_IS_PLACEHOLDER is (
-        html.escape(PLACEHOLDER_NOTICE) in terms_of_service_page()
-    )
-    assert PRIVACY_STATEMENT_IS_PLACEHOLDER is (
-        html.escape(PLACEHOLDER_NOTICE) in privacy_statement_page()
-    )
+    assert TERMS_OF_SERVICE_IS_PLACEHOLDER is (html.escape(PLACEHOLDER_NOTICE) in terms_of_service_page())
+    assert PRIVACY_STATEMENT_IS_PLACEHOLDER is (html.escape(PLACEHOLDER_NOTICE) in privacy_statement_page())
 
 
 def test_the_documents_publish_the_data_statement_contact() -> None:
@@ -2422,9 +2380,7 @@ async def test_the_guard_preserves_the_next_target_including_query(tmp_path, idp
     async with web_client(app) as client:
         response = await client.get("/admin/invitations", params={"page": "2"})
         assert response.status_code == 303
-        assert response.headers["location"] == (
-            "/web/signin?next=%2Fadmin%2Finvitations%3Fpage%3D2"
-        )
+        assert response.headers["location"] == ("/web/signin?next=%2Fadmin%2Finvitations%3Fpage%3D2")
 
 
 async def test_the_guard_does_not_touch_paths_off_the_surface(tmp_path, idp):
@@ -2459,8 +2415,7 @@ async def test_guard_denials_are_observable(tmp_path, idp, caplog):
     assert response.status_code == 303
     assert "x-request-id" in response.headers
     assert any(
-        record.name == "frames_server.access"
-        and getattr(record, "path", None) == "/web/future-page"
+        record.name == "frames_server.access" and getattr(record, "path", None) == "/web/future-page"
         for record in caplog.records
     )
 
@@ -2717,9 +2672,7 @@ async def test_websocket_refusals_carry_a_request_id_and_a_metric(tmp_path, idp,
     from collab_hub_api.frames.observability import REQUEST_COUNT, UNMATCHED_PATH_LABEL
 
     def refusal_count() -> float:
-        return REQUEST_COUNT.labels(
-            method="WEBSOCKET", path=UNMATCHED_PATH_LABEL, status="1008"
-        )._value.get()
+        return REQUEST_COUNT.labels(method="WEBSOCKET", path=UNMATCHED_PATH_LABEL, status="1008")._value.get()
 
     before = refusal_count()
     app = make_web_app(tmp_path, idp)
@@ -2873,9 +2826,7 @@ async def test_the_access_log_still_records_the_real_refused_path(tmp_path, idp,
     with caplog.at_level("INFO", logger="frames_server.access"):
         async with web_client(app) as client:
             await client.get("/web/some-invented-path")
-    assert any(
-        getattr(record, "path", None) == "/web/some-invented-path" for record in caplog.records
-    )
+    assert any(getattr(record, "path", None) == "/web/some-invented-path" for record in caplog.records)
 
 
 async def test_an_inbound_request_id_does_not_become_the_correlation_id(tmp_path, idp, caplog):
@@ -2890,9 +2841,7 @@ async def test_an_inbound_request_id_does_not_become_the_correlation_id(tmp_path
         add_anonymous_websocket(app)
         with caplog.at_level("INFO"):
             with pytest.raises(WebSocketDisconnect):
-                with client.websocket_connect(
-                    "/web/live", headers={"x-request-id": "victim-correlation-id"}
-                ) as socket:
+                with client.websocket_connect("/web/live", headers={"x-request-id": "victim-correlation-id"}) as socket:
                     socket.receive_text()
     records = [
         record
@@ -3186,9 +3135,7 @@ def test_signout_is_the_only_state_changing_route_and_it_is_gated(tmp_path, idp)
     mutating = [
         route
         for route in app.routes
-        if isinstance(route, APIRoute)
-        and route.path.startswith("/web")
-        and route_unsafe_methods(route)
+        if isinstance(route, APIRoute) and route.path.startswith("/web") and route_unsafe_methods(route)
     ]
     assert [route.path for route in mutating] == ["/web/signout"]
     assert route_enforces_csrf(mutating[0])
@@ -3268,9 +3215,7 @@ def test_a_guarded_prefix_with_no_routes_asks_nothing_of_the_map(tmp_path, idp):
     security = hardened_map()
     app = make_web_app(tmp_path, idp, security=security)
     config = Config.parse(web_values(tmp_path, idp, security=security))
-    assert not any(
-        isinstance(route, APIRoute) and route.path.startswith("/org") for route in app.routes
-    )
+    assert not any(isinstance(route, APIRoute) and route.path.startswith("/org") for route in app.routes)
     enforce_web_surface_map_access(app.routes, config)
 
 
@@ -3304,9 +3249,7 @@ def test_a_legacy_identity_deployment_warns_rather_than_refusing(tmp_path, idp, 
     assert "web_identity_not_pinned_to_sub" in caplog.text
     # And it still serves: the surface is usable for everything that does not
     # need operator authority.
-    assert any(
-        isinstance(route, APIRoute) and route.path == "/web/signin" for route in app.routes
-    )
+    assert any(isinstance(route, APIRoute) and route.path == "/web/signin" for route in app.routes)
 
 
 def test_a_pinned_deployment_is_silent(tmp_path, idp, monkeypatch, caplog):
@@ -3566,9 +3509,7 @@ def test_an_exemption_on_a_route_with_no_unsafe_method_fails_the_rollout(tmp_pat
     # /web is a GET-only page; exempting it claims something untrue.
     surface_module.CSRF_ENFORCED_IN_ROUTE = original | {"/web"}
     try:
-        assert stale_csrf_exemptions(app.routes) == [
-            "/web answers no state-changing method, so it needs no exemption"
-        ]
+        assert stale_csrf_exemptions(app.routes) == ["/web answers no state-changing method, so it needs no exemption"]
     finally:
         surface_module.CSRF_ENFORCED_IN_ROUTE = original
 
@@ -3645,9 +3586,7 @@ def test_the_shipped_admin_entries_lead_their_routes_without_failing(tmp_path, i
     from collab_hub_api.web.surface import CSRF_ENFORCED_IN_ROUTE
 
     app = make_web_app(tmp_path, idp)
-    mounted_paths = {
-        route.path for route in app.routes if isinstance(route, APIRoute)
-    }
+    mounted_paths = {route.path for route in app.routes if isinstance(route, APIRoute)}
     unmounted = {path for path in CSRF_ENFORCED_IN_ROUTE if path not in mounted_paths}
     assert unmounted == {
         "/admin/invitations",
@@ -3674,7 +3613,6 @@ def test_the_admin_entries_will_cover_the_routes_when_they_arrive(tmp_path, idp)
     assert unprotected_web_routes(app.routes) == []
     assert stale_csrf_exemptions(app.routes) == []
     verify_web_route_protection(app.routes)
-
 
 
 # ---------------------------------------------------------------------------

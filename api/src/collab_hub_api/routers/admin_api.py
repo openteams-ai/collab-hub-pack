@@ -134,6 +134,7 @@ class ModelAccessChange(BaseModel):
     action: Literal["grant", "revoke"]
     user_label: str | None = Field(default=None, max_length=256)
 
+
 __all__ = ["make_router"]
 
 
@@ -314,8 +315,7 @@ def make_router() -> APIRouter:
         access = getattr(request.app.state, "model_access", None)
         return {
             "models": [
-                {"id": model.id, "owned_by": model.owned_by, "group_path": groups.get(model.id)}
-                for model in models
+                {"id": model.id, "owned_by": model.owned_by, "group_path": groups.get(model.id)} for model in models
             ],
             "catalog_error": None,
             "manageable": access is not None,
@@ -337,10 +337,7 @@ def make_router() -> APIRouter:
             return JSONResponse({"error": "group_unavailable", "detail": str(exc)}, status_code=502)
         return {
             "group_path": group_path,
-            "members": [
-                {"id": member.id, "username": member.username, "email": member.email}
-                for member in members
-            ],
+            "members": [{"id": member.id, "username": member.username, "email": member.email} for member in members],
         }
 
     @router.post("/model-access")
@@ -540,8 +537,7 @@ def make_router() -> APIRouter:
             "events_total": summary.events_total,
             "events": [{"event": event, "count": count} for event, count in summary.events],
             "organizations": [
-                {"org_id": org.org_id, "users": org.users, "events": org.events}
-                for org in summary.organizations
+                {"org_id": org.org_id, "users": org.users, "events": org.events} for org in summary.organizations
             ],
         }
 
@@ -565,9 +561,7 @@ def make_router() -> APIRouter:
         """
 
         try:
-            page = audit_log.list_events(
-                limit=limit, before_id=before_id, actor=actor, action=action
-            )
+            page = audit_log.list_events(limit=limit, before_id=before_id, actor=actor, action=action)
         except AuditLogUnavailableError:
             return JSONResponse({"error": "audit_log_unavailable"}, status_code=503)
 

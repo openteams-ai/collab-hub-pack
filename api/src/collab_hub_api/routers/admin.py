@@ -209,9 +209,7 @@ def issue_invitation(
 
 
 @requires_platform_role(PLATFORM_ROLE_OPERATOR)
-def revoke_invitation(
-    auth: AuthContext, service: InvitationService, *, invitation_id: str
-) -> Invitation:
+def revoke_invitation(auth: AuthContext, service: InvitationService, *, invitation_id: str) -> Invitation:
     """Revoke any invitation on the deployment, recorded as ``invitation.revoke``.
 
     ``expect_org_id`` is left unset, which is hub scope: an operator's revoke

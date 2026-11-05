@@ -85,8 +85,9 @@ RUNS_UNAVAILABLE = "runs_unavailable"
 class RunService:
     """What the run routes need: the Track, the packages that can be launched, and what runs them."""
 
-    def __init__(self, track: TrackStore | None, packages: DirectoryPackageSource | None, *, backend: str,
-                 location: str) -> None:
+    def __init__(
+        self, track: TrackStore | None, packages: DirectoryPackageSource | None, *, backend: str, location: str
+    ) -> None:
         self.track = track
         """``None`` on a hub with neither Postgres nor ``runs.track_path``: every route answers 503."""
         # Read incrementally: a page costs what changed, not all history.
@@ -145,7 +146,8 @@ def build_run_service(config: RunsConfig, postgres_url: str | None, pools: Postg
         # A pod-local SQLite file would win over the hub's database, and vanish with the pod.
         raise RuntimeError(
             "runs.track_path is for a hub without Postgres: this hub has a database (frames.postgres.url), "
-            "which is its Track; unset COLLAB_HUB_API__RUNS__TRACK_PATH")
+            "which is its Track; unset COLLAB_HUB_API__RUNS__TRACK_PATH"
+        )
     track: TrackStore | None = None
     if config.track_path:
         SqliteTrackStore.ensure_schema(config.track_path)
@@ -161,8 +163,9 @@ def build_run_service(config: RunsConfig, postgres_url: str | None, pools: Postg
 def get_run_service(request: Request) -> RunService:
     service: RunService = request.app.state.run_service
     if service.track is None:
-        raise RunsUnavailable("this hub records no runs: it has no database (frames.postgres.url) and no "
-                              "runs.track_path")
+        raise RunsUnavailable(
+            "this hub records no runs: it has no database (frames.postgres.url) and no runs.track_path"
+        )
     return service
 
 
@@ -182,8 +185,10 @@ class GateRequest(BaseModel):
     def _known_roles(cls, value: list[str]) -> list[str]:
         unknown = [role for role in value if role not in KNOWN_ROLES]
         if unknown:
-            raise ValueError(f"approvers are roles the hub resolves, {', '.join(KNOWN_ROLES)}; not "
-                             f"{', '.join(unknown)}: a Gate nobody can decide would hold the run until cancelled")
+            raise ValueError(
+                f"approvers are roles the hub resolves, {', '.join(KNOWN_ROLES)}; not "
+                f"{', '.join(unknown)}: a Gate nobody can decide would hold the run until cancelled"
+            )
         return value
 
     @field_validator("escalate")
@@ -205,8 +210,9 @@ class StepRequest(BaseModel):
     entry_point: str = Field(min_length=1, max_length=128)
     input: Any = None
     gate: GateRequest = Field(default_factory=GateRequest)
-    frames: list[Annotated[str, Field(pattern=FRAME_ID_PATTERN)]] = Field(default_factory=list,
-                                                                          max_length=MAX_FRAMES_PER_STEP)
+    frames: list[Annotated[str, Field(pattern=FRAME_ID_PATTERN)]] = Field(
+        default_factory=list, max_length=MAX_FRAMES_PER_STEP
+    )
     """Frames the step is grounded in, by id: snapshotted at submit and placed beside the input."""
 
 
@@ -232,8 +238,17 @@ class StepStatus(BaseModel):
     name: str
     cog: str
     entry_point: str
-    state: Literal["pending", "running", "completed", "failed", "waiting_at_gate", "cancelled", "interrupted",
-                   "budget_exceeded", "rejected"]
+    state: Literal[
+        "pending",
+        "running",
+        "completed",
+        "failed",
+        "waiting_at_gate",
+        "cancelled",
+        "interrupted",
+        "budget_exceeded",
+        "rejected",
+    ]
     attempt: int | None = None
     error: str | None = None
     output: Any = None
@@ -359,69 +374,119 @@ class RunEventPage(BaseModel):
 # empty payload.
 _STEP = {"step", "attempt"}
 _OUTCOME = {"problems", "binding"}
-SERVED_FIELDS: dict[str, frozenset[str]] = {name: frozenset(fields) for name, fields in {
-    "op_submitted": {"op", "submitted_by", "name"},
-    "run_picked_up": {"controller"},
-    "gate_escalated": _STEP | {"reason", "escalation", "envelope", "usage", "approvers", "gate"},
-    "gate_decided": {"step", "outcome", "escalation", "actor", "value", "envelope_digest"},
-    "completed": set(),
-    "failed": {"step", "error", "reason", "worker_error", "revise_limit", "escalation", "actor", "value",
-               "envelope_digest"} | _OUTCOME,
-    "budget_exceeded": {"step", "dimension", "reason"},
-    "cancelled": {"actor"},
-    "interrupted": {"backend"},
-    "retry_requested": {"from_status", "attempt", "budget_epoch", "controller"},
-    "retry_asked": {"actor"},
-    "retry_refused": {"error"},
-    "step_started": _STEP | {"cog", "digest"},
-    "interaction_usage": _STEP | {"usage"},
-    "step_completed": _STEP | {"cog", "digest", "usage", "frames", "escalation", "payload", "payload_ref"} | _OUTCOME,
-    "step_failed": _STEP | {"key", "cog", "digest", "error", "message", "teardown_error"} | _OUTCOME,
-    "worker_started": _STEP | {"instance", "location", "package", "run_token_sha256"},
-    "worker_stopped": _STEP | {"instance", "reaped"},
-    "materialized": {"cog", "digest"},
-    "ready": {"cog"},
-    "interaction_started": {"step", "entry_point"},
-    "idle": {"step"},
-    "teardown_started": {"step", "reason"},
-    "teardown_failed": {"step", "error"},
-    "cancel_requested": {"actor"},
-    "turn_requested": {"turn", "text", "actor"},
-    "turn_answered": {"turn", "text"},
-    "turn_failed": {"turn", "error"},
-    "decision_requested": {"escalation", "outcome", "actor", "findings"},
-    "decision_refused": {"escalation", "error"},
-}.items()}
+SERVED_FIELDS: dict[str, frozenset[str]] = {
+    name: frozenset(fields)
+    for name, fields in {
+        "op_submitted": {"op", "submitted_by", "name"},
+        "run_picked_up": {"controller"},
+        "gate_escalated": _STEP | {"reason", "escalation", "envelope", "usage", "approvers", "gate"},
+        "gate_decided": {"step", "outcome", "escalation", "actor", "value", "envelope_digest"},
+        "completed": set(),
+        "failed": {
+            "step",
+            "error",
+            "reason",
+            "worker_error",
+            "revise_limit",
+            "escalation",
+            "actor",
+            "value",
+            "envelope_digest",
+        }
+        | _OUTCOME,
+        "budget_exceeded": {"step", "dimension", "reason"},
+        "cancelled": {"actor"},
+        "interrupted": {"backend"},
+        "retry_requested": {"from_status", "attempt", "budget_epoch", "controller"},
+        "retry_asked": {"actor"},
+        "retry_refused": {"error"},
+        "step_started": _STEP | {"cog", "digest"},
+        "interaction_usage": _STEP | {"usage"},
+        "step_completed": _STEP
+        | {"cog", "digest", "usage", "frames", "escalation", "payload", "payload_ref"}
+        | _OUTCOME,
+        "step_failed": _STEP | {"key", "cog", "digest", "error", "message", "teardown_error"} | _OUTCOME,
+        "worker_started": _STEP | {"instance", "location", "package", "run_token_sha256"},
+        "worker_stopped": _STEP | {"instance", "reaped"},
+        "materialized": {"cog", "digest"},
+        "ready": {"cog"},
+        "interaction_started": {"step", "entry_point"},
+        "idle": {"step"},
+        "teardown_started": {"step", "reason"},
+        "teardown_failed": {"step", "error"},
+        "cancel_requested": {"actor"},
+        "turn_requested": {"turn", "text", "actor"},
+        "turn_answered": {"turn", "text"},
+        "turn_failed": {"turn", "error"},
+        "decision_requested": {"escalation", "outcome", "actor", "findings"},
+        "decision_refused": {"escalation", "error"},
+    }.items()
+}
 STREAM_POLL_SECONDS = 0.5
 STREAM_KEEPALIVE_SECONDS = 15.0
 
 
 def _event(event: TrackEvent) -> RunEvent:
     event = upgrade(event)
-    return RunEvent(sequence=event.sequence or 0, type=event.event_type, occurred_at=event.occurred_at.isoformat(),
-                    payload={key: value for key, value in event.payload.items()
-                             if key in SERVED_FIELDS.get(event.event_type, frozenset())})
+    return RunEvent(
+        sequence=event.sequence or 0,
+        type=event.event_type,
+        occurred_at=event.occurred_at.isoformat(),
+        payload={
+            key: value
+            for key, value in event.payload.items()
+            if key in SERVED_FIELDS.get(event.event_type, frozenset())
+        },
+    )
 
 
 def _status(view: intents.RunView, service: RunService, *, outputs: bool = False) -> RunStatus:
     entry_points = {step.name: step.entry_point for step in view.op.steps}
     decision = view.decision
     return RunStatus(
-        id=view.run_id, status=view.status, ended=view.state.ended,
-        steps=[StepStatus(name=step.name, cog=step.cog, entry_point=entry_points[step.name], state=step.state,
-                          attempt=step.attempt, error=step.error,
-                          output=step.output if outputs else None, output_ref=step.output_ref if outputs else None)
-               for step in view.steps],
-        name=view.name, submitted_by=view.submitted_by.get("user"), submitted_by_name=view.submitted_by.get("name"),
-        submitted_at=view.submitted_at.isoformat(), updated_at=view.updated_at.isoformat(),
-        cancel_requested_by=view.cancel_requested_by, picked_up_by=view.controller, error=view.error,
-        reason=view.reason, backend=service.backend, location=service.location,
-        escalation=view.escalation, approvers=list(view.approvers),
-        decision=DecisionStatus(escalation=str(decision.get("escalation")), outcome=str(decision.get("outcome")),
-                                actor=str(decision.get("actor"))) if decision else None,
-        retry_asked_by=view.retry_asked_by, sequence=view.sequence,
-        frames={step.name: [StepFrame(id=frame.id, name=frame.name, digest=frame.digest) for frame in step.frames]
-                for step in view.op.steps if step.frames},
+        id=view.run_id,
+        status=view.status,
+        ended=view.state.ended,
+        steps=[
+            StepStatus(
+                name=step.name,
+                cog=step.cog,
+                entry_point=entry_points[step.name],
+                state=step.state,
+                attempt=step.attempt,
+                error=step.error,
+                output=step.output if outputs else None,
+                output_ref=step.output_ref if outputs else None,
+            )
+            for step in view.steps
+        ],
+        name=view.name,
+        submitted_by=view.submitted_by.get("user"),
+        submitted_by_name=view.submitted_by.get("name"),
+        submitted_at=view.submitted_at.isoformat(),
+        updated_at=view.updated_at.isoformat(),
+        cancel_requested_by=view.cancel_requested_by,
+        picked_up_by=view.controller,
+        error=view.error,
+        reason=view.reason,
+        backend=service.backend,
+        location=service.location,
+        escalation=view.escalation,
+        approvers=list(view.approvers),
+        decision=DecisionStatus(
+            escalation=str(decision.get("escalation")),
+            outcome=str(decision.get("outcome")),
+            actor=str(decision.get("actor")),
+        )
+        if decision
+        else None,
+        retry_asked_by=view.retry_asked_by,
+        sequence=view.sequence,
+        frames={
+            step.name: [StepFrame(id=frame.id, name=frame.name, digest=frame.digest) for frame in step.frames]
+            for step in view.op.steps
+            if step.frames
+        },
     )
 
 
@@ -445,8 +510,9 @@ ServiceDep = Annotated[RunService, Depends(get_run_service)]
 RunId = Annotated[str, Path(pattern=RUN_ID_PATTERN)]
 
 
-def _snapshot_frames(body: RunRequest, run_id: str, auth: AuthContext, store: Any,
-                     service: RunService) -> dict[str, FrameRef] | JSONResponse:
+def _snapshot_frames(
+    body: RunRequest, run_id: str, auth: AuthContext, store: Any, service: RunService
+) -> dict[str, FrameRef] | JSONResponse:
     """Each Frame the steps name, checked and snapshotted once: its body kept by reference on the Track.
 
     A Frame that does not exist, or that the caller cannot read, is a 404 naming
@@ -460,15 +526,20 @@ def _snapshot_frames(body: RunRequest, run_id: str, auth: AuthContext, store: An
             try:
                 frame = require_readable_frame(store.get_frame(frame_id), auth)
             except FrameNotFoundError:
-                return error_response(status.HTTP_404_NOT_FOUND, "frame_not_found",
-                                      f"No Frame {frame_id}, named by step {step.name}",
-                                      {"frame": frame_id, "step": step.name})
+                return error_response(
+                    status.HTTP_404_NOT_FOUND,
+                    "frame_not_found",
+                    f"No Frame {frame_id}, named by step {step.name}",
+                    {"frame": frame_id, "step": step.name},
+                )
             digest = hashlib.sha256(frame.body.encode()).hexdigest()
             ref = f"frame:{run_id}:{frame_id}"
-            service.track.put_payload(run_id, ref, json.dumps(
-                {"id": frame_id, "name": frame.name, "digest": digest, "text": frame.body}))
-            snapshots[frame_id] = FrameRef(id=frame_id, name=frame.name, digest=digest, ref=ref,
-                                           uri=f"frame:{frame_id}")
+            service.track.put_payload(
+                run_id, ref, json.dumps({"id": frame_id, "name": frame.name, "digest": digest, "text": frame.body})
+            )
+            snapshots[frame_id] = FrameRef(
+                id=frame_id, name=frame.name, digest=digest, ref=ref, uri=f"frame:{frame_id}"
+            )
     return snapshots
 
 
@@ -477,19 +548,30 @@ def submit_run(body: RunRequest, auth: AuthDep, service: ServiceDep, store: Stor
     refused = {step.cog: reason for step in body.steps if (reason := service.refusal(step.cog)) is not None}
     if refused:
         return error_response(
-            status.HTTP_422_UNPROCESSABLE_CONTENT, "cog_not_launchable",
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "cog_not_launchable",
             f"Cannot launch {', '.join(sorted(refused))}; the Cogs this hub launches are: "
             f"{', '.join(service.launchable()) or 'none'}",
-            {"refused": refused, "launchable": list(service.launchable())})
+            {"refused": refused, "launchable": list(service.launchable())},
+        )
     run_id = f"run-{uuid.uuid4().hex[:12]}"
     snapshots = _snapshot_frames(body, run_id, auth, store, service)
     if isinstance(snapshots, JSONResponse):
         return snapshots
-    op = OpDefinition(run_id, tuple(
-        OpStep(name=step.name, cog=step.cog, entry_point=step.entry_point, input=step.input,
-               gate=Gate(escalate=step.gate.escalate, approvers=tuple(step.gate.approvers)),
-               frames=tuple(snapshots[frame_id] for frame_id in step.frames))
-        for step in body.steps))
+    op = OpDefinition(
+        run_id,
+        tuple(
+            OpStep(
+                name=step.name,
+                cog=step.cog,
+                entry_point=step.entry_point,
+                input=step.input,
+                gate=Gate(escalate=step.gate.escalate, approvers=tuple(step.gate.approvers)),
+                frames=tuple(snapshots[frame_id] for frame_id in step.frames),
+            )
+            for step in body.steps
+        ),
+    )
     # `user` is the principal the run is scoped and checked by; `name` is only for showing who it was.
     by = {"user": auth.user, "org_id": auth.org_id, "workspace_id": auth.workspace_id}
     if auth.display.name or auth.display.email:
@@ -500,15 +582,17 @@ def submit_run(body: RunRequest, auth: AuthDep, service: ServiceDep, store: Stor
 
 @router.get("", response_model=RunPage)
 def list_runs(
-    auth: AuthDep, service: ServiceDep,
+    auth: AuthDep,
+    service: ServiceDep,
     run_status: Annotated[str | None, Query(alias="status", description="Only runs in this status.")] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> RunPage:
     # One indexed query for the page, plus one read per run on it; one more row says whether there is a next page.
     service.ensure_index()
-    rows = service.track.runs(org_id=auth.org_id, status=run_status.upper() if run_status else None,
-                              limit=limit + 1, offset=offset)
+    rows = service.track.runs(
+        org_id=auth.org_id, status=run_status.upper() if run_status else None, limit=limit + 1, offset=offset
+    )
     items = []
     for row in rows[:limit]:
         try:
@@ -531,10 +615,12 @@ def get_run(run_id: RunId, auth: AuthDep, service: ServiceDep) -> RunStatus | JS
     return _not_found(run_id) if view is None else _status(view, service, outputs=True)
 
 
-@router.get("/{run_id}/events", response_model=RunEventPage,
-            responses={200: {"content": {"text/event-stream": {}}}})
+@router.get("/{run_id}/events", response_model=RunEventPage, responses={200: {"content": {"text/event-stream": {}}}})
 async def run_events(
-    run_id: RunId, request: Request, auth: AuthDep, service: ServiceDep,
+    run_id: RunId,
+    request: Request,
+    auth: AuthDep,
+    service: ServiceDep,
     after: Annotated[int, Query(ge=0, description="Only the events after this sequence.")] = 0,
     limit: Annotated[int, Query(ge=1, le=1000)] = 500,
     last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
@@ -550,13 +636,17 @@ async def run_events(
         return _not_found(run_id)
     if "text/event-stream" in request.headers.get("accept", ""):
         start = int(last_event_id) if last_event_id and last_event_id.isdigit() else after
-        return StreamingResponse(_stream(service, run_id, start, request), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+        return StreamingResponse(
+            _stream(service, run_id, start, request),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
     # One more than the page holds: whether there is a next page, without reading the rest.
     events = await asyncio.to_thread(service.track.replay, run_id, after_sequence=after, limit=limit + 1)
     page = events[:limit]
-    return RunEventPage(items=[_event(event) for event in page],
-                        next_after=(page[-1].sequence if len(events) > limit else None))
+    return RunEventPage(
+        items=[_event(event) for event in page], next_after=(page[-1].sequence if len(events) > limit else None)
+    )
 
 
 async def _stream(service: RunService, run_id: str, after: int, request: Request) -> AsyncIterator[str]:
@@ -592,14 +682,14 @@ def cancel_run(run_id: RunId, auth: AuthDep, service: ServiceDep) -> RunStatus |
     try:
         view = intents.request_cancel(service.track, run_id, actor=auth.user)
     except intents.RunEnded as exc:
-        return error_response(status.HTTP_409_CONFLICT, "run_ended",
-                              f"Run {run_id} cannot be cancelled: {exc.reason}")
+        return error_response(status.HTTP_409_CONFLICT, "run_ended", f"Run {run_id} cannot be cancelled: {exc.reason}")
     return _status(view, service)
 
 
 def _turn(view: intents.TurnView) -> TurnStatus:
-    return TurnStatus(turn=view.turn, text=view.text, state=view.state, answer=view.answer, error=view.error,
-                      asked_by=view.actor)
+    return TurnStatus(
+        turn=view.turn, text=view.text, state=view.state, answer=view.answer, error=view.error, asked_by=view.actor
+    )
 
 
 @router.post("/{run_id}/turns", status_code=status.HTTP_202_ACCEPTED, response_model=TurnStatus)
@@ -617,8 +707,9 @@ def ask_turn(run_id: RunId, body: TurnRequest, auth: AuthDep, service: ServiceDe
 
 
 @router.get("/{run_id}/turns/{turn}", response_model=TurnStatus)
-def get_turn(run_id: RunId, turn: Annotated[str, Path(pattern=r"^[0-9a-f]{12}$")], auth: AuthDep,
-             service: ServiceDep) -> TurnStatus | JSONResponse:
+def get_turn(
+    run_id: RunId, turn: Annotated[str, Path(pattern=r"^[0-9a-f]{12}$")], auth: AuthDep, service: ServiceDep
+) -> TurnStatus | JSONResponse:
     if _visible(service, run_id, auth) is None:
         return _not_found(run_id)
     view = service.views.turns(run_id).get(turn)
@@ -637,8 +728,9 @@ def _step_error(service: RunService, run_id: str, step: str) -> dict[str, Any] |
 
 
 @router.get("/{run_id}/steps/{step}/payload", response_model=StepPayload)
-def step_payload(run_id: RunId, step: Annotated[str, Path(min_length=1, max_length=128)], auth: AuthDep,
-                 service: ServiceDep) -> StepPayload | JSONResponse:
+def step_payload(
+    run_id: RunId, step: Annotated[str, Path(min_length=1, max_length=128)], auth: AuthDep, service: ServiceDep
+) -> StepPayload | JSONResponse:
     """A completed step's output, or a failed step's error, under the run's own authorization."""
     view = _visible(service, run_id, auth)
     if view is None:
@@ -652,21 +744,32 @@ def step_payload(run_id: RunId, step: Annotated[str, Path(min_length=1, max_leng
             try:
                 payload = service.track.get_payload(found.output_ref)
             except KeyError:
-                return error_response(status.HTTP_404_NOT_FOUND, "payload_not_found",
-                                      f"The output of step {step} ({found.output_ref}) is not on the Track")
+                return error_response(
+                    status.HTTP_404_NOT_FOUND,
+                    "payload_not_found",
+                    f"The output of step {step} ({found.output_ref}) is not on the Track",
+                )
         return StepPayload(step=step, state=found.state, payload=payload)
     if found.state == "failed":
         return StepPayload(step=step, state=found.state, error=_step_error(service, run_id, step))
-    return error_response(status.HTTP_409_CONFLICT, "step_not_finished",
-                          f"Step {step} of run {run_id} is {found.state}: it has no output yet", {"state": found.state})
+    return error_response(
+        status.HTTP_409_CONFLICT,
+        "step_not_finished",
+        f"Step {step} of run {run_id} is {found.state}: it has no output yet",
+        {"state": found.state},
+    )
 
 
 def _already_decided(service: RunService, run_id: str, step: str, body: DecisionRequest, actor: str) -> bool:
     """Whether this very decision was recorded on the Track already: the same escalation, outcome and actor."""
     for event in service.views.events(run_id):
-        if event.event_type == "gate_decided" and event.payload.get("step") == step \
-                and event.payload.get("escalation") == body.escalation \
-                and event.payload.get("outcome") == body.outcome and event.payload.get("actor") == actor:
+        if (
+            event.event_type == "gate_decided"
+            and event.payload.get("step") == step
+            and event.payload.get("escalation") == body.escalation
+            and event.payload.get("outcome") == body.outcome
+            and event.payload.get("actor") == actor
+        ):
             return True
     return False
 
@@ -683,13 +786,22 @@ def _may_decide(view: intents.RunView, auth: AuthContext) -> bool:
     roles = {role for role in (auth.org_role, auth.platform_role) if role}
     if roles & set(view.approvers):
         return True
-    return not roles and auth.org_role is None and auth.platform_role is None \
+    return (
+        not roles
+        and auth.org_role is None
+        and auth.platform_role is None
         and view.submitted_by.get("user") == auth.user
+    )
 
 
 @router.post("/{run_id}/steps/{step}/decision", status_code=status.HTTP_202_ACCEPTED, response_model=RunStatus)
-def decide_step(run_id: RunId, step: Annotated[str, Path(min_length=1, max_length=128)], body: DecisionRequest,
-                auth: AuthDep, service: ServiceDep) -> RunStatus | JSONResponse:
+def decide_step(
+    run_id: RunId,
+    step: Annotated[str, Path(min_length=1, max_length=128)],
+    body: DecisionRequest,
+    auth: AuthDep,
+    service: ServiceDep,
+) -> RunStatus | JSONResponse:
     """Decide the escalation a run waits on: the controller delivers it, and the run moves."""
     view = _visible(service, run_id, auth)
     if view is None:
@@ -700,37 +812,60 @@ def decide_step(run_id: RunId, step: Annotated[str, Path(min_length=1, max_lengt
         return error_response(status.HTTP_409_CONFLICT, "run_ended", f"Run {run_id} has ended {view.status}")
     waiting = next((s for s in view.steps if s.state == "waiting_at_gate"), None)
     if view.escalation is None or waiting is None:
-        return error_response(status.HTTP_409_CONFLICT, "run_not_waiting",
-                              f"Run {run_id} is {view.status}, and waits on no decision")
+        return error_response(
+            status.HTTP_409_CONFLICT, "run_not_waiting", f"Run {run_id} is {view.status}, and waits on no decision"
+        )
     if waiting.name != step:
-        return error_response(status.HTTP_409_CONFLICT, "step_not_waiting",
-                              f"Step {step} is not the one waiting at a Gate; {waiting.name} is",
-                              {"waiting": waiting.name, "escalation": view.escalation})
+        return error_response(
+            status.HTTP_409_CONFLICT,
+            "step_not_waiting",
+            f"Step {step} is not the one waiting at a Gate; {waiting.name} is",
+            {"waiting": waiting.name, "escalation": view.escalation},
+        )
     if body.escalation != view.escalation:
-        return error_response(status.HTTP_409_CONFLICT, "stale_decision",
-                              f"Escalation {body.escalation} is not the one run {run_id} waits on; "
-                              f"{view.escalation} is", {"escalation": view.escalation})
+        return error_response(
+            status.HTTP_409_CONFLICT,
+            "stale_decision",
+            f"Escalation {body.escalation} is not the one run {run_id} waits on; {view.escalation} is",
+            {"escalation": view.escalation},
+        )
     if not _may_decide(view, auth):
-        return error_response(status.HTTP_403_FORBIDDEN, "not_an_approver",
-                              f"Deciding this Gate takes one of the roles {', '.join(view.approvers)}",
-                              {"approvers": list(view.approvers)})
+        return error_response(
+            status.HTTP_403_FORBIDDEN,
+            "not_an_approver",
+            f"Deciding this Gate takes one of the roles {', '.join(view.approvers)}",
+            {"approvers": list(view.approvers)},
+        )
     pending = view.decision or {}
     if pending and (pending.get("escalation"), pending.get("outcome"), pending.get("actor")) == (
-            body.escalation, body.outcome, auth.user):
+        body.escalation,
+        body.outcome,
+        auth.user,
+    ):
         return _status(view, service)  # the same decision, asked again: already recorded, not a conflict
     try:
-        view = intents.request_decision(service.track, run_id, escalation=body.escalation, outcome=body.outcome,
-                                        actor=auth.user, findings=body.findings)
+        view = intents.request_decision(
+            service.track,
+            run_id,
+            escalation=body.escalation,
+            outcome=body.outcome,
+            actor=auth.user,
+            findings=body.findings,
+        )
     except intents.RunEnded as exc:
         return error_response(status.HTTP_409_CONFLICT, "run_ended", f"Run {run_id} has ended: {exc.reason}")
     except intents.PendingDecision:
-        return error_response(status.HTTP_409_CONFLICT, "decision_pending",
-                              f"A decision on run {run_id} is already waiting to be delivered",
-                              {"escalation": body.escalation})
+        return error_response(
+            status.HTTP_409_CONFLICT,
+            "decision_pending",
+            f"A decision on run {run_id} is already waiting to be delivered",
+            {"escalation": body.escalation},
+        )
     except intents.StaleDecision as exc:
         fresh = _visible(service, run_id, auth)
-        return error_response(status.HTTP_409_CONFLICT, "stale_decision", str(exc),
-                              {"escalation": fresh.escalation if fresh else None})
+        return error_response(
+            status.HTTP_409_CONFLICT, "stale_decision", str(exc), {"escalation": fresh.escalation if fresh else None}
+        )
     return _status(view, service)
 
 
@@ -747,6 +882,10 @@ def retry_run(run_id: RunId, auth: AuthDep, service: ServiceDep) -> RunStatus | 
     try:
         view = intents.request_retry(service.track, run_id, actor=auth.user)
     except intents.NotRetryable as exc:
-        return error_response(status.HTTP_409_CONFLICT, "run_not_retryable",
-                              f"Run {run_id} cannot be retried: {exc.reason}", {"status": exc.state.name})
+        return error_response(
+            status.HTTP_409_CONFLICT,
+            "run_not_retryable",
+            f"Run {run_id} cannot be retried: {exc.reason}",
+            {"status": exc.state.name},
+        )
     return _status(view, service)

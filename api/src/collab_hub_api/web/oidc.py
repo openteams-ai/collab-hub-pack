@@ -297,8 +297,6 @@ def verify_id_token(
     # Bytes, not str: compare_digest raises TypeError on non-ASCII strings,
     # and this value arrives inside a token — a failed comparison must be a
     # refusal, never an exception.
-    if not isinstance(token_nonce, str) or not secrets.compare_digest(
-        token_nonce.encode(), nonce.encode()
-    ):
+    if not isinstance(token_nonce, str) or not secrets.compare_digest(token_nonce.encode(), nonce.encode()):
         raise OidcFlowError("id_token nonce mismatch")
     return claims

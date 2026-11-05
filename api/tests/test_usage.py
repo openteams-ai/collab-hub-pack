@@ -303,8 +303,6 @@ async def test_root_home_links_to_usage_dashboard(client):
 
 
 async def test_a_summary_window_without_a_timezone_is_refused(client):
-    response = await client.get(
-        "/v1/usage/summary?since=2026-09-01T00:00:00", cookies=auth_cookie("alice")
-    )
+    response = await client.get("/v1/usage/summary?since=2026-09-01T00:00:00", cookies=auth_cookie("alice"))
 
     assert response.status_code == 422

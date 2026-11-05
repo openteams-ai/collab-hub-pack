@@ -671,9 +671,7 @@ def _resolve_publisher(request: Request, grant: TokenGrant) -> Publisher:
 
     if org_source_resolves_membership():
         try:
-            context = auth_context_from_membership(
-                {PINNED_IDENTITY_CLAIM: grant.user_id}, request.app.state.org_store
-            )
+            context = auth_context_from_membership({PINNED_IDENTITY_CLAIM: grant.user_id}, request.app.state.org_store)
         except NoOrganizationError:
             raise _denied("this account is not part of an organization") from None
         return Publisher(

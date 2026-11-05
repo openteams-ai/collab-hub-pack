@@ -447,9 +447,7 @@ class PostgresRegistryCredentialStore(RegistryCredentialStore):
             if self._sweep_thread is not None and self._sweep_thread.is_alive():
                 return
             self._last_sweep = now
-            self._sweep_thread = threading.Thread(
-                target=self._sweep, name="cog-registry-credential-sweep", daemon=True
-            )
+            self._sweep_thread = threading.Thread(target=self._sweep, name="cog-registry-credential-sweep", daemon=True)
             self._sweep_thread.start()
 
     def _sweep(self) -> None:

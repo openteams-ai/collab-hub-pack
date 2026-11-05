@@ -397,8 +397,7 @@ _SECTIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         OUTCOME_ACCEPTED,
         "You are in",
         (
-            "Your invitation has been accepted and your account now belongs to an"
-            " organization on this deployment.",
+            "Your invitation has been accepted and your account now belongs to an organization on this deployment.",
             "Open the Collab desktop app and sign in with this same account to"
             " get started. You do not need this page again.",
         ),
@@ -410,8 +409,7 @@ _SECTIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "The code in your link does not match any invitation. The most common"
             " cause is a link that was cut short — check that you copied all of"
             " it, including everything after the '#'.",
-            "If it still does not work, ask whoever invited you to send a new"
-            " invitation.",
+            "If it still does not work, ask whoever invited you to send a new invitation.",
         ),
     ),
     (
@@ -500,8 +498,7 @@ _SECTIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             " deployment hosts a single organization, so it cannot be"
             " accepted. Nothing has changed about your account, and your"
             " invitation has not been used.",
-            "Ask whoever invited you to send a new invitation into the"
-            " existing organization.",
+            "Ask whoever invited you to send a new invitation into the existing organization.",
         ),
     ),
     (
@@ -518,10 +515,8 @@ _SECTIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         OUTCOME_ERROR,
         "Something went wrong",
         (
-            "We could not finish accepting your invitation. Your invitation has"
-            " not been used.",
-            "Reload this page to try again, and tell whoever invited you if it"
-            " keeps happening.",
+            "We could not finish accepting your invitation. Your invitation has not been used.",
+            "Reload this page to try again, and tell whoever invited you if it keeps happening.",
         ),
     ),
 )
@@ -614,7 +609,6 @@ def _validate_overrides() -> None:
         _with_overrides(states[state], overrides)
 
 
-
 PAGE_STATES: tuple[str, ...] = tuple(name for name, _, _ in _SECTIONS)
 """Every state the page can render, in document order.
 
@@ -654,10 +648,7 @@ def _section(name: str, heading: str, paragraphs: tuple[str, ...], extra: str = 
     """
 
     body = "".join(f"<p>{escape(paragraph)}</p>" for paragraph in paragraphs)
-    return (
-        f'<section data-state="{escape(name)}" hidden>'
-        f"<h1>{escape(heading)}</h1>{body}{extra}</section>"
-    )
+    return f'<section data-state="{escape(name)}" hidden><h1>{escape(heading)}</h1>{body}{extra}</section>'
 
 
 def signin_link(root_path: str, *, renew: bool = False, register: bool = False) -> str:
@@ -747,12 +738,8 @@ def acceptance_page(
         f'<p class="data-statement">{escape(DATA_STATEMENT_TEXT)}</p>'
         f'<p><a href="{escape(root_path)}{DATA_STATEMENT_PATH}">Read the data statement</a></p>'
     )
-    button = (
-        f'<p><button type="button" {ACCEPT_BUTTON_ATTRIBUTE}>Accept invitation</button></p>'
-    )
-    renew = (
-        f'<p><a href="{escape(signin_link(root_path, renew=True))}">Continue</a></p>'
-    )
+    button = f'<p><button type="button" {ACCEPT_BUTTON_ATTRIBUTE}>Accept invitation</button></p>'
+    renew = f'<p><a href="{escape(signin_link(root_path, renew=True))}">Continue</a></p>'
     extras = {
         CLIENT_STATE_SIGNIN: link,
         CLIENT_STATE_READY: statement + button,

@@ -17,8 +17,8 @@ CHANNEL = {
 DM = {"id": "D0001", "is_im": True, "user": "U0002"}
 GROUP_DM = {"id": "G0002", "name": "mpdm-alice--bob", "is_mpim": True}
 CHANNEL_MESSAGES = [
-    # Carries a Slack link entity and a plain URL to prove link sanitization end to
-    # end (apollo-desktop#365): the read response must come back link-free.
+    # Carries a Slack link entity and a plain URL to prove link handling end to end
+    # (#143): the read keeps both http(s) targets exactly, as "label (url)" and bare.
     {
         "ts": "1783041900.111000",
         "user": "U0002",

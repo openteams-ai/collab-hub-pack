@@ -81,6 +81,9 @@ if [ "$(checksum)" != "$(checksum --set-string runs.controller.models='[models.o
 else
   fail "run controller: a new models block changes the pod template" "the checksum did not change"
 fi
+check "web client: its own host, the operator's client, the hub's audience, amd64 nodes" \
+  web -f "$TESTDATA/web.yaml" --api-versions gateway.envoyproxy.io/v1alpha1/BackendTrafficPolicy
+
 check "run controller remote: a Deployment of its own with the only workload Role, the API with none" \
   run-controller-remote -f "$TESTDATA/run-controller-remote.yaml"
 refused "run controller: refused without the hub's database" "needs frames.postgres" --set runs.controller.enabled=true

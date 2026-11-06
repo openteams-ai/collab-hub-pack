@@ -126,6 +126,9 @@ jobs:
       - name: Validate rendered manifests (run controller as a Deployment of its own, workers in pods)
         run: helm template helm/collab-hub -f scripts/testdata/chart/run-controller-remote.yaml | kubeconform -strict -ignore-missing-schemas -
 
+      - name: Validate rendered manifests (web client)
+        run: helm template helm/collab-hub -f scripts/testdata/chart/web.yaml --api-versions gateway.envoyproxy.io/v1alpha1/BackendTrafficPolicy | kubeconform -strict -ignore-missing-schemas -
+
       - name: Install PyYAML for the render assertions
         run: python3 -m pip install --quiet pyyaml
 

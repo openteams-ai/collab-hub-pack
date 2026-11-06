@@ -448,6 +448,8 @@ class WebSurface:
     codec: SessionCodec
     session_lifetime_seconds: int
     public_base_url: str
+    account_page_url: str = ""
+    """The external account page the signed-in navigation links to; empty = no link."""
 
     def __post_init__(self) -> None:
         if self.session_lifetime_seconds <= 0:
@@ -510,7 +512,22 @@ def build_web_surface(config: BaseConfig) -> WebSurface:
         codec=SessionCodec(web.session_secret),
         session_lifetime_seconds=web.session_lifetime_seconds,
         public_base_url=web.public_base_url.strip(),
+        account_page_url=web.account_page_url,
     )
+
+
+def account_page_url(request: Request) -> str:
+    """The configured account link for the app serving ``request``; ``""`` = none.
+
+    Read from the surface the app was built with -- configuration, never
+    anything the request carries -- so the one ``href`` every signed-in page
+    renders cannot be steered by a caller. Empty, the same spelling
+    ``WebConfig`` and ``WebSurface`` use, when the deployment set nothing
+    (the default) or the surface is not mounted at all.
+    """
+
+    surface = getattr(request.app.state, "web_surface", None)
+    return surface.account_page_url if surface is not None else ""
 
 
 def _resolve_issuer_url(configured: str) -> str:

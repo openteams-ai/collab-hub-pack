@@ -80,6 +80,7 @@ from ..web.surface import (
     TERMS_PATH,
     WEB_LOGO_PATH,
     WebSurface,
+    account_page_url,
     answers_json,
     clamped_session_lifetime,
 )
@@ -581,6 +582,7 @@ def make_router(
                 root_path=_root_path(request),
                 identity_label=identity,
                 csrf_token=session.csrf,
+                account_url=account_page_url(request),
             )
         )
 

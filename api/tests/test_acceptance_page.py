@@ -224,8 +224,10 @@ forgeable request ``Host``. These tests run in membership mode, so startup
 refuses without it."""
 
 
-def build_app(tmp_path, idp, *, raises: Exception | None = None) -> tuple[object, FakeInvitationService]:
-    app = make_web_app(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL})
+def build_app(
+    tmp_path, idp, *, raises: Exception | None = None, web: dict | None = None
+) -> tuple[object, FakeInvitationService]:
+    app = make_web_app(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL, **(web or {})})
     service = FakeInvitationService(raises=raises)
     # The lifespan is what normally installs this; these tests drive the ASGI
     # app directly, so the state is installed here instead.
@@ -403,6 +405,36 @@ async def test_an_invitee_with_no_account_sees_the_page(tmp_path, idp):
     assert f"/web/signin?next={encoded_next}&amp;register=1" in page.text
     assert "Create your account" in page.text
     assert "Already have an account? Sign in" in page.text
+
+
+ACCOUNT_URL = "https://billing.example.com/account"
+ACCOUNT_LINK = f'<a href="{ACCOUNT_URL}">Account</a>'
+
+
+async def test_the_signed_in_page_carries_the_account_link_when_set(tmp_path, idp):
+    # The footer is rendered by pages.render_page, but this route is what
+    # hands it the value (#275): a dropped `account_url=` here fails here.
+    app, _ = build_app(tmp_path, idp, web={"account_page_url": ACCOUNT_URL})
+    async with web_client(app) as client:
+        await signed_in(client, idp)
+        page = await client.get(ACCEPT_PAGE_PATH)
+    assert page.status_code == 200
+    assert page.text.count(ACCOUNT_LINK) == 1
+    # Beside the sign-out button in the footer; the page body also says
+    # "Sign out" in its own copy, so compare against the button.
+    assert page.text.index(">Account</a>") < page.text.index('class="link">Sign out</button>')
+
+
+async def test_the_anonymous_page_never_carries_the_account_link(tmp_path, idp):
+    # This is the one public page that renders the signed-in footer, so it is
+    # the page where "set, but signed out" can actually go wrong.
+    app, _ = build_app(tmp_path, idp, web={"account_page_url": ACCOUNT_URL})
+    async with web_client(app) as client:
+        page = await client.get(ACCEPT_PAGE_PATH)
+    assert page.status_code == 200
+    assert 'class="identity"' not in page.text
+    assert ACCOUNT_URL not in page.text
+    assert ">Account</a>" not in page.text
 
 
 async def test_an_anonymous_redemption_is_refused_by_the_guard(tmp_path, idp):

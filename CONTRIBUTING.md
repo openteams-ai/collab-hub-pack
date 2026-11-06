@@ -87,15 +87,6 @@ the version the image runs, and CI runs the suite on 3.13 as well
 `UV_PYTHON=3.13`. Keep code valid on 3.13: ruff targets `py313` and reports
 newer syntax.
 
-Lint and format the API with the ruff version `uv.lock` pins. The `Ruff` CI
-check runs `ruff check` and `ruff format --check`:
-
-```bash
-cd api
-uv run --only-group lint ruff check src tests
-uv run --only-group lint ruff format src tests
-```
-
 Running it by hand needs **all three** dev-auth switches —
 `FRAMES_UNSAFE_AUTH_ENABLED=true`, `DEV_AUTH_ENABLED=true` and
 `DEV_AUTH_USER=<name>`. Setting only `DEV_AUTH_USER` authenticates nothing and
@@ -106,6 +97,24 @@ The Helm chart is in [`helm/collab-hub/`](helm/collab-hub/):
 ```sh
 helm lint helm/collab-hub
 helm template helm/collab-hub | kubeconform -strict -ignore-missing-schemas -
+```
+
+Lint and format the API with the ruff version `uv.lock` pins. The `Ruff` CI
+check runs `ruff check` and `ruff format --check`:
+
+```sh
+cd api
+uv run --only-group lint ruff check src tests
+uv run --only-group lint ruff format src tests
+```
+
+Bulk reformatting commits like the one that introduced `ruff format` are listed
+in [`.git-blame-ignore-revs`](.git-blame-ignore-revs). GitHub's blame view skips
+them automatically; to have `git blame` do the same locally, run once in your
+clone:
+
+```sh
+git config blame.ignoreRevsFile .git-blame-ignore-revs
 ```
 
 ## Pull requests

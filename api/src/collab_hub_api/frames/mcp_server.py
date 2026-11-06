@@ -18,8 +18,7 @@ def create_mcp_server(
         "frames",
         host="0.0.0.0",
         instructions=(
-            "Expose Frames for deterministic model-context injection. "
-            "Tools are read-only and never call a model."
+            "Expose Frames for deterministic model-context injection. Tools are read-only and never call a model."
         ),
     )
 

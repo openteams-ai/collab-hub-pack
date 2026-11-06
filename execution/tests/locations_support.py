@@ -49,6 +49,7 @@ def packages(tmp_path: Path) -> Path:
 def local_executor(tmp_path: Path, **settings):
     settings.setdefault("environment", "host")
     settings.setdefault("grace", 1.0)
+    settings.setdefault("ready_timeout", 30.0)  # a worker's start is slower on a shared macOS runner
     return select_executor("local", packages=[packages(tmp_path)], work_dir=tmp_path / "runs", **settings)
 
 
@@ -76,7 +77,16 @@ def alive(pid: int) -> bool:
         with open(f"/proc/{pid}/stat") as stat:
             return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
     except OSError:
+        pass
+    # No /proc (macOS): ps says whether the process is a zombie.
+    import subprocess
+
+    try:
+        state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+                               timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
         return True
+    return bool(state) and not state.startswith("Z")
 
 
 def gone(pid: int, within: float = 10.0) -> bool:

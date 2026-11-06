@@ -160,8 +160,7 @@ NOTICES: dict[str, str] = {
     ),
     NOTICE_REVOKED: "Invitation for {address} revoked. Its link no longer works.",
     NOTICE_NOT_FOUND: (
-        "That invitation no longer exists or does not belong to your"
-        " organization, so nothing was revoked."
+        "That invitation no longer exists or does not belong to your organization, so nothing was revoked."
     ),
     NOTICE_REVOKE_REFUSED: (
         "That invitation has already been accepted and can no longer be revoked."
@@ -177,10 +176,7 @@ NOTICES: dict[str, str] = {
         " nothing was created and nothing was sent. Name it below first, so the"
         " organization you are inviting people into is one you have identified."
     ),
-    NOTICE_NAMED: (
-        "Your organization is now called {address}. You can invite people to it"
-        " below."
-    ),
+    NOTICE_NAMED: ("Your organization is now called {address}. You can invite people to it below."),
     NOTICE_ALREADY_NAMED: (
         "Your organization already has a name, so nothing changed. This page"
         " names an organization once; ask an administrator if it needs to"
@@ -216,9 +212,7 @@ class Notice:
 def request_refused_page(*, root_path: str = "", status_code: int) -> str:
     """The refused-body page, pointed back at this page's own path."""
 
-    return refused_form_page(
-        root_path=root_path, status_code=status_code, back_path=ORG_INVITATIONS_PATH
-    )
+    return refused_form_page(root_path=root_path, status_code=status_code, back_path=ORG_INVITATIONS_PATH)
 
 
 def _timestamp(value: datetime) -> str:
@@ -240,7 +234,7 @@ def _issue_form(root_path: str, csrf_token: str) -> str:
         f'<input id="invite-email" type="email" name="{EMAIL_FIELD}" required'
         f' maxlength="{MAX_EMAIL_LENGTH}" autocomplete="off" spellcheck="false"'
         ' inputmode="email" placeholder="person@example.com">'
-        "<button type=\"submit\">Create invitation</button>"
+        '<button type="submit">Create invitation</button>'
         "</form>"
     )
 
@@ -269,20 +263,14 @@ def _revoke_form(root_path: str, csrf_token: str, invitation_id: str) -> str:
     )
 
 
-def _rows(
-    invitations: Sequence[Invitation], now: datetime, root_path: str, csrf_token: str
-) -> str:
+def _rows(invitations: Sequence[Invitation], now: datetime, root_path: str, csrf_token: str) -> str:
     # No "Joins" column: every row of `list_for_org` joins this organization
     # by construction (org-creating invitations belong to no organization and
     # appear in no organization's list), so the column would print one value.
     rows = []
     for invitation in invitations:
         status = effective_status(invitation, now)
-        action = (
-            _revoke_form(root_path, csrf_token, invitation.id)
-            if status in REVOCABLE_STATUSES
-            else ""
-        )
+        action = _revoke_form(root_path, csrf_token, invitation.id) if status in REVOCABLE_STATUSES else ""
         rows.append(
             "<tr>"
             f"<td>{escape(invitation.email)}</td>"
@@ -306,10 +294,7 @@ def _listing(
     if not invitations:
         return "<p>Your organization has no invitations yet.</p>"
     more = (
-        "<p>Only the most recent invitations are shown. Older ones are still"
-        " listed by the API.</p>"
-        if has_more
-        else ""
+        "<p>Only the most recent invitations are shown. Older ones are still listed by the API.</p>" if has_more else ""
     )
     return (
         "<table><thead><tr>"
@@ -356,9 +341,7 @@ def invitations_page(
     if organization_named:
         intro = escape(
             "Invite someone to join {org}. They will receive an email with an"
-            " acceptance link; they become a member when they accept.".format(
-                org=organization_name
-            )
+            " acceptance link; they become a member when they accept.".format(org=organization_name)
             + (
                 ""
                 if email_configured

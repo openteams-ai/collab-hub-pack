@@ -1,0 +1,33 @@
+# The run controller as a Deployment of its own, each Cog's worker a pod: how a hub is deployed.
+frames:
+  postgres:
+    existingSecret: hub-db
+    databaseUrlKey: url
+  # Frames on S3, so more than one API pod is allowed: the controller is not in the API's pod here.
+  storage:
+    backend: s3
+  s3:
+    bucket: frames
+  activeState:
+    backend: postgres
+api:
+  deployment:
+    replicaCount: 2
+runs:
+  controller:
+    enabled: true
+    location: remote
+    models: |
+      [models.default]
+      provider = "anthropic"
+      model = "claude-opus-5-5"
+      auth_ref = "env:ANTHROPIC_API_KEY"
+
+      [cogs]
+      hermes = "default"
+    extraEnv:
+      - name: ANTHROPIC_API_KEY
+        valueFrom:
+          secretKeyRef:
+            name: claude
+            key: api-key

@@ -129,6 +129,7 @@ from ..web.acceptance import (
     acceptance_page,
 )
 from ..web.authz import WebForbidden, get_web_session, require_csrf, require_web_session
+from ..web.forms import media_type
 from ..web.pages import page_response
 from ..web.request_limits import bounded_body, connection_close_headers, declares_oversize
 from ..web.session import WebSession, verified_claims_are_current
@@ -309,14 +310,10 @@ def _sends_json(request: Request) -> bool:
     the content type, which is this route's own business.)
     """
 
-    return request.headers.get("content-type", "").split(";", 1)[0].strip().lower() == (
-        JSON_CONTENT_TYPE
-    )
+    return media_type(request) == JSON_CONTENT_TYPE
 
 
-def make_routers(
-    *, memberships_enabled: bool, require_verified_email: bool
-) -> tuple[APIRouter, APIRouter]:
+def make_routers(*, memberships_enabled: bool, require_verified_email: bool) -> tuple[APIRouter, APIRouter]:
     """Build the acceptance page's ``(public_router, session_gated_router)``.
 
     ``memberships_enabled`` is ``org_source_resolves_membership()``, resolved once
@@ -399,9 +396,7 @@ def make_routers(
         """
 
         if not memberships_enabled:
-            return _outcome_response(
-                OUTCOME_UNAVAILABLE, status.HTTP_503_SERVICE_UNAVAILABLE, body_consumed=False
-            )
+            return _outcome_response(OUTCOME_UNAVAILABLE, status.HTTP_503_SERVICE_UNAVAILABLE, body_consumed=False)
         if not verified_claims_are_current(session):
             # The session asserts a verified address, but that assertion is a
             # fact about the account at the IdP and the IdP can withdraw it.
@@ -450,9 +445,7 @@ def make_routers(
                 "web_invitation_accept_csrf_refused",
                 extra={"user": session.user, "reason": str(refusal)},
             )
-            return _outcome_response(
-                OUTCOME_ERROR, status.HTTP_403_FORBIDDEN, body_consumed=False
-            )
+            return _outcome_response(OUTCOME_ERROR, status.HTTP_403_FORBIDDEN, body_consumed=False)
         if _declares_oversize(request):
             return _outcome_response(OUTCOME_ERROR, REQUEST_TOO_LARGE, body_consumed=False)
         raw = await _bounded_body(request)
@@ -466,9 +459,7 @@ def make_routers(
             # Same answer as a token that resolves to nothing, because to the
             # person holding a mangled link it is the same situation and the
             # copy already tells them what to do about it.
-            return _outcome_response(
-                OUTCOME_NOT_FOUND, status.HTTP_404_NOT_FOUND, body_consumed=True
-            )
+            return _outcome_response(OUTCOME_NOT_FOUND, status.HTTP_404_NOT_FOUND, body_consumed=True)
 
         display = DisplayIdentity(
             name=session.name,

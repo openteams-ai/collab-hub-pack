@@ -576,11 +576,20 @@ async def test_openapi_documents_every_route_and_the_card_schema(api):
         "/v1/cogs/{cog_id}/versions/{digest}",
         "/v1/cogs/{cog_id}/versions/{digest}/cog.md",
         "/v1/cogs/{cog_id}/versions/{digest}/reference",
+        # The exchange for the Hub's own registry surface (issue #179).
+        "/v1/cogs/registry-credentials",
+        "/v1/cogs/registry-credentials/{credential_id}",
     }
     for path, item in paths.items():
-        operation = item["get"]
-        assert operation["summary"] and operation["description"], path
-        assert "503" in operation["responses"], path
+        for method, operation in item.items():
+            assert operation["summary"] and operation["description"], (method, path)
+            assert "503" in operation["responses"], (method, path)
+    assert set(paths["/v1/cogs/registry-credentials"]) == {"post", "delete"}
+    assert set(paths["/v1/cogs/registry-credentials/{credential_id}"]) == {"delete"}
+    issued = spec["components"]["schemas"]["RegistryCredentialResponse"]
+    assert set(issued["required"]) == {"id", "registry", "username", "secret", "scope", "expires_at"}
+    # The registry surface itself is not part of the Hub API document.
+    assert not [path for path in spec["paths"] if path.startswith("/v2")]
     assert "text/markdown" in paths["/v1/cogs/{cog_id}/versions/{digest}/cog.md"]["get"]["responses"]["200"]["content"]
     list_params = {param["name"] for param in paths["/v1/cogs"]["get"]["parameters"]}
     assert list_params == {

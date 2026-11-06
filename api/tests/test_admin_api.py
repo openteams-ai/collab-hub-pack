@@ -53,6 +53,7 @@ def membership_env(monkeypatch):
     monkeypatch.setenv(IDENTITY_CLAIM_ENV, "sub")
     monkeypatch.setenv(ORG_SOURCE_ENV, "membership")
 
+
 ADMIN_SESSION_PATH = "/admin/api/session"
 PUBLIC_BASE_URL = "https://web.test"
 
@@ -236,16 +237,12 @@ async def test_an_organization_with_events_but_no_roster_row_is_still_listed(tmp
 async def test_connectors_are_listed_without_any_secret_reaching_the_browser(tmp_path, idp: _StubIdp):
     app = build_app(tmp_path, idp)
     secret = "slack-static-token-value"
-    app.state.connectors_config = ConnectorsConfig.model_validate(
-        {"slack": {"static_access_token": secret}}
-    )
+    app.state.connectors_config = ConnectorsConfig.model_validate({"slack": {"static_access_token": secret}})
 
     async with app.router.lifespan_context(app), web_client(app) as client:
         grant_operator(app, idp.sub)
         await sign_in(client, idp, next_path="/web")
-        app.state.connectors_config = ConnectorsConfig.model_validate(
-            {"slack": {"static_access_token": secret}}
-        )
+        app.state.connectors_config = ConnectorsConfig.model_validate({"slack": {"static_access_token": secret}})
         response = await client.get("/admin/api/connectors")
 
     assert response.status_code == 200
@@ -719,9 +716,7 @@ async def test_the_panel_can_revoke_an_invitation(tmp_path, idp: _StubIdp):
         app.state.invitation_email_delivery = RecordingDelivery()
         await sign_in(client, idp, next_path="/web")
         csrf = (await client.get(ADMIN_SESSION_PATH)).json()["csrf_token"]
-        response = await client.post(
-            "/admin/api/invitations/inv-1/revoke", headers={"X-CSRF-Token": csrf}
-        )
+        response = await client.post("/admin/api/invitations/inv-1/revoke", headers={"X-CSRF-Token": csrf})
 
     assert response.status_code == 200
     assert service.revoked == ["inv-1"]
@@ -837,10 +832,7 @@ async def test_the_users_listing_reads_every_role_at_once(tmp_path, idp: _StubId
         store.set_platform_role("u-3", "operator", "active", "idp")
         store.set_platform_role("u-4", "operator", "revoked", "idp")
         app.state.user_directory_client = StubDirectory(
-            [
-                UserDirectoryUser(id=user_id, username=user_id, email=None)
-                for user_id in ("u-2", "u-3", "u-4", "u-5")
-            ]
+            [UserDirectoryUser(id=user_id, username=user_id, email=None) for user_id in ("u-2", "u-3", "u-4", "u-5")]
         )
         await sign_in(client, idp, next_path="/web")
 
@@ -933,12 +925,8 @@ async def test_an_operator_can_switch_a_connector_off_and_on(tmp_path, idp: _Stu
         app.state.connector_store = store
         await sign_in(client, idp, next_path="/web")
         csrf = (await client.get(ADMIN_SESSION_PATH)).json()["csrf_token"]
-        off = await client.post(
-            "/admin/api/connectors/slack", json={"enabled": False}, headers={"X-CSRF-Token": csrf}
-        )
-        on = await client.post(
-            "/admin/api/connectors/slack", json={"enabled": True}, headers={"X-CSRF-Token": csrf}
-        )
+        off = await client.post("/admin/api/connectors/slack", json={"enabled": False}, headers={"X-CSRF-Token": csrf})
+        on = await client.post("/admin/api/connectors/slack", json={"enabled": True}, headers={"X-CSRF-Token": csrf})
 
     assert off.status_code == 200 and on.status_code == 200
     assert store.calls == [("slack", False), ("slack", True)]

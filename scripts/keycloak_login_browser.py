@@ -7,7 +7,7 @@ this script lets CI run the real sign-in end to end, with no browser: the
 authorization request, Keycloak's login form, the redirect to the CLI's
 loopback listener, and the code exchange with PKCE::
 
-    BROWSER="python3 scripts/keycloak_login_browser.py %s" collab-hub login --hub http://127.0.0.1:8000
+    BROWSER="python3 scripts/keycloak_login_browser.py %s" collab-hub --hub http://127.0.0.1:8000 login
 
 The user comes from ``KC_USER`` and ``KC_PASS`` (``dev``/``dev``, the dev
 realm's user). Stdlib only, and never for anything but the dev realm.

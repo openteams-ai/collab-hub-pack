@@ -140,7 +140,7 @@ class Bridge:
             self._result(request_id, {"sessionId": session_id, "stopReason": "end_turn"})
             return
         try:
-            turn = self.hub.request("POST", f"/v1/runs/{self.run_id}/turns", json={"text": text}).json()
+            turn = self.hub.request_json("POST", f"/v1/runs/{self.run_id}/turns", json={"text": text})
             deadline = time.monotonic() + self.answer_timeout
             while turn["state"] == "pending" and time.monotonic() < deadline:
                 if session_id in self._cancelled:

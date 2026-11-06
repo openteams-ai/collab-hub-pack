@@ -1,0 +1,85 @@
+{{- if and .Values.api.enabled .Values.cogs.index.enabled }}
+{{- $component := "indexer" }}
+{{- /* The Cog indexer as a workload of its own (issue #148). Same image,
+same settings and same ServiceAccount as the API, with cogs.index.enabled
+rendered true here and false on the API replicas -- so this is the one
+process that sweeps registries. One replica, written here and not a value
+(there is no other legal count), and a Recreate strategy, so a rollout never runs
+two sweepers side by side: single flight is a property of this shape, and
+the store's advisory lock is only the belt under it. No Service, no ingress
+and no NebariApp select it (its component label differs from the API's), and
+its frames-storage mount is an emptyDir rather than the API's claim: the
+process needs the path to start, never the frames, and a ReadWriteOnce claim
+must stay mountable by the API's pods alone. */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "collab-hub.component-name" (dict "top" . "component" $component) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "collab-hub.selectorLabels" (dict "top" . "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "collab-hub.api-service-account-name" . }}
+      {{- with .Values.api.deployment.securityContext.pod }}
+      securityContext:
+        {{- . | toYaml | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: indexer
+          image: "{{ .Values.api.deployment.image.repository }}:{{ .Values.api.deployment.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.api.deployment.image.pullPolicy }}
+          {{- with .Values.api.deployment.securityContext.container }}
+          securityContext:
+            {{- . | toYaml | nindent 12 }}
+          {{- end }}
+          env:
+            {{- include "collab-hub.api-container-env" (dict "top" . "indexer" true) | nindent 12 }}
+          resources:
+            {{- toYaml (.Values.cogs.indexer.resources | default .Values.api.deployment.resources) | nindent 12 }}
+          ports:
+            - containerPort: {{ .Values.api.service.targetPort }}
+          volumeMounts:
+            - name: frames-storage
+              mountPath: {{ .Values.frames.storage.mountPath }}
+            {{- if .Values.cogs.caBundle.configMap }}
+            - name: cogs-ca-bundle
+              mountPath: {{ include "collab-hub.cogs-ca-bundle-mount-path" . }}
+              readOnly: true
+            {{- end }}
+          startupProbe:
+            httpGet:
+              port: {{ .Values.api.service.targetPort }}
+              path: /health
+            periodSeconds: 1
+            timeoutSeconds: 1
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              port: {{ .Values.api.service.targetPort }}
+              path: /health
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+      volumes:
+        - name: frames-storage
+          emptyDir: {}
+        {{- if .Values.cogs.caBundle.configMap }}
+        - name: cogs-ca-bundle
+          configMap:
+            name: {{ .Values.cogs.caBundle.configMap | quote }}
+            items:
+              - key: {{ .Values.cogs.caBundle.key | quote }}
+                path: {{ .Values.cogs.caBundle.key | quote }}
+        {{- end }}
+{{- end }}

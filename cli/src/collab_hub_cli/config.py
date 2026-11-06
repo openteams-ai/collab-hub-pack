@@ -120,7 +120,7 @@ class Target:
         if not self.hub:
             raise UsageError(
                 f"no hub for profile {self.profile!r}: pass --hub URL, set COLLAB_HUB_URL, "
-                "or sign in once with `collab-hub login --hub URL`"
+                "or sign in once with `collab-hub --hub URL login`"
             )
         return self.hub
 

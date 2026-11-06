@@ -1,0 +1,48 @@
+{{- /* Pulls through the Hub (issue #179), behind the Nebari gateway: /v2
+streams blobs for up to cogs.serve.maxBlobSeconds, and the HTTPRoute that
+carries it is the operator's, not this chart's, so the timeout cannot be set
+on a rule the way api-httproute.yaml does. NebariApp has no timeout field.
+Without one the route has Envoy's default request timeout (15 s), and a layer
+that takes longer is cut off mid-body while the app still considers it within
+its limit.
+
+So the timeout is attached to the operator's route from outside, with Envoy
+Gateway's own policy (the Nebari gateway is Envoy Gateway). /v2 is one of the
+NebariApp's publicRoutes when serving is on (api-nebariapp.yaml), and the
+operator puts every public route in one HTTPRoute named
+"<NebariApp name>-public-route"; a policy applies to a whole route, so the
+other public paths (/v1, /mcp, /health) get the same ceiling. The app's own
+timeouts on those paths are unchanged.
+
+A policy on a route replaces, for that route, a BackendTrafficPolicy attached
+to the Gateway rather than merging with it; cogs.serve.routeTimeout=false
+leaves this out for a cluster that manages the route's policy itself.
+
+On a cluster without Envoy Gateway's CRDs the render fails rather than
+skipping the policy: skipping it would leave /v2 on the 15 s default, and
+large pulls would be cut off mid-body with nothing in the manifest to say
+why. Nebari always has the CRDs; Argo CD and `helm install` see them, and an
+offline `helm template` needs
+`--api-versions gateway.envoyproxy.io/v1alpha1/BackendTrafficPolicy`. */ -}}
+{{- if and .Values.api.enabled .Values.api.nebariapp.enabled .Values.cogs.serve.enabled .Values.cogs.serve.routeTimeout }}
+{{- if not (.Capabilities.APIVersions.Has "gateway.envoyproxy.io/v1alpha1/BackendTrafficPolicy") }}
+{{- fail "cogs.serve.routeTimeout: this cluster has no gateway.envoyproxy.io/v1alpha1 BackendTrafficPolicy, so the /v2 request timeout cannot be attached to the NebariApp's public route. Install Envoy Gateway's CRDs, or set cogs.serve.routeTimeout=false and give the route a timeout of at least cogs.serve.maxBlobSeconds yourself." }}
+{{- end }}
+{{- $component := "api" }}
+{{- $name := include "collab-hub.component-name" (dict "top" . "component" $component) }}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: {{ printf "%s-cog-pulls" $name | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ printf "%s-public-route" $name }}
+  timeout:
+    http:
+      requestTimeout: {{ printf "%ds" (add (int64 .Values.cogs.serve.maxBlobSeconds) 30) | quote }}
+{{- end }}

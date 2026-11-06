@@ -41,6 +41,7 @@ EXIT_CANCELLED = 6
 # How a run that was waited for ends the command; a status not listed here is a failure.
 RUN_EXIT = {"COMPLETED": 0, "INTERRUPTED": EXIT_INTERRUPTED, "WAITING_AT_GATE": EXIT_AT_GATE,
             "CANCELLED": EXIT_CANCELLED}
+DECISIONS = ("approve", "reject", "send_back")
 GATE_POLICIES = ("never", "error", "warn", "always")
 POLL_SECONDS = 0.5
 TURN_TIMEOUT_SECONDS = 300.0
@@ -535,7 +536,7 @@ def cog_launch(
             "gate": {"escalate": gate}}
     with Hub(_target()) as hub:
         body = {"steps": [step], **({"name": run_name} if run_name else {})}
-        run = hub.request("POST", "/v1/runs", json=body).json()
+        run = hub.request_json("POST", "/v1/runs", json=body)
         called = f" ({run_name})" if run_name else ""
         _err(f"Launched {name} as {run['id']}{called} on the {run['backend']} backend, workers {run['location']}.")
         if not watch:
@@ -588,14 +589,257 @@ def run_show(run_id: Annotated[str, typer.Argument(help="The run's id.")], as_js
         _print_run(run)
 
 
+def _event_line(sequence: int | None, kind: str, data: Any) -> str:
+    """One event as `run watch` shows it: when, what, and the fields a reader acts on."""
+    payload = (data or {}).get("payload") or {} if isinstance(data, dict) else {}
+    when = (data or {}).get("occurred_at", "")[11:19] if isinstance(data, dict) else ""
+    said = []
+    for key in ("step", "attempt", "controller", "escalation", "outcome", "actor", "error", "reason", "message",
+                "turn", "text"):
+        if key in payload and payload[key] not in (None, "", []):
+            value = payload[key]
+            said.append(f"{key}={json.dumps(value) if not isinstance(value, str) else value}")
+    return f"{sequence if sequence is not None else '':>6}  {when}  {kind:<22} {' '.join(said)}".rstrip()
+
+
+RETRY_TAKEN_POLL = 0.5
+"""Seconds `run retry --watch` waits between looks at an ended run, for a controller to take the retry asked for."""
+RETRY_TAKEN_WAIT = 600.0
+"""Seconds `run retry --watch` waits in all for a controller to take or refuse the ask before giving up."""
+
+
+def _watch(hub: Hub, run_id: str, *, as_json: bool, after: int = 0) -> dict:
+    """Print the run's events as the hub streams them, until the run ends or waits at a Gate; the run after.
+
+    A `gate_escalated` stops the watch only while that escalation is the run's
+    open one: an escalation already decided (replayed from before ``after``, or
+    answered while the stream was down) is history the run moved past.
+    """
+    for sequence, kind, data in hub.events(f"/v1/runs/{run_id}/events", after=after):
+        if kind == "end":
+            break
+        if as_json:
+            typer.echo(json.dumps({"sequence": sequence, "type": kind,
+                                   **(data if isinstance(data, dict) else {"data": data})}))
+        else:
+            typer.echo(_event_line(sequence, kind, data))
+        if kind == "gate_escalated":
+            # The run waits at its Gate for a decision: watching would wait with it. Unless the decision landed
+            # already, in which case the run moved on and the stream will say how.
+            escalation = ((data or {}).get("payload") or {}).get("escalation") if isinstance(data, dict) else None
+            current = hub.get_json(f"/v1/runs/{run_id}")
+            if current.get("escalation") == escalation and current.get("decision") is None:
+                return current
+    return hub.get_json(f"/v1/runs/{run_id}")
+
+
 @run_app.command("watch")
 @handled
 def run_watch(run_id: Annotated[str, typer.Argument(help="The run's id.")], as_json: JsonOption = False) -> None:
-    """Follow a run until it ends or waits at a Gate, and exit with its outcome."""
+    """Follow a run's events as they land until it ends or waits at a Gate, and exit with its outcome.
+
+    The events come from the hub's stream; a dropped connection is reopened
+    from the last event seen, so none is missed or repeated. With --json, one
+    event per line, then the run.
+    """
 
     with Hub(_target()) as hub:
-        run = _follow(hub, hub.get_json(f"/v1/runs/{run_id}"), _settled, quiet=False)
+        run = _watch(hub, run_id, as_json=as_json)
     _finish(run, as_json)
+
+
+def _read_op(path: str) -> dict:
+    """An Op from a file: YAML or JSON, `-` for stdin; its `steps`, and a `name` when it has one."""
+    raw = sys.stdin.read() if path == "-" else Path(path).read_text()
+    try:
+        if path.endswith((".yaml", ".yml")) or not raw.lstrip().startswith("{"):
+            import yaml
+
+            document = yaml.safe_load(raw)
+        else:
+            document = json.loads(raw)
+    except (ValueError, ImportError) as exc:
+        raise config.UsageError(f"{path} is not an Op: {exc}") from None
+    if not isinstance(document, dict) or not isinstance(document.get("steps"), list) or not document["steps"]:
+        raise config.UsageError(f"{path} is not an Op: it needs a list of steps")
+    body = {"steps": []}
+    for step in document["steps"]:
+        if not isinstance(step, dict) or not step.get("cog") or not step.get("name"):
+            raise config.UsageError(f"{path}: each step names its cog and has a name")
+        one = {"name": step["name"], "cog": step["cog"], "entry_point": step.get("entry_point", "run"),
+               "input": step.get("input")}
+        gate = step.get("gate")
+        if isinstance(gate, str):
+            gate = {"escalate": gate}
+        if gate is not None:
+            one["gate"] = gate
+        if step.get("frames"):
+            one["frames"] = list(step["frames"])
+        body["steps"].append(one)
+    if document.get("name"):
+        body["name"] = str(document["name"])
+    return body
+
+
+@run_app.command("submit")
+@handled
+def run_submit(
+    file: Annotated[str, typer.Option("--file", "-f", help="The Op: a YAML or JSON file, or `-` for stdin.")],
+    watch: Annotated[bool, typer.Option(
+        "--watch", help="Follow the run's events until it ends or waits at a Gate; exit with its outcome.")] = False,
+    run_name: Annotated[str | None, typer.Option("--name", help="What to call the run in `run list`.")] = None,
+    as_json: JsonOption = False,
+) -> None:
+    """Submit an Op from a file: several steps, each with its Cog, input, Gate and Frames.
+
+    A step's `frames` are Frame ids: the hub checks each exists and is readable
+    by you, snapshots it at submit, and places it beside the step's input.
+    """
+
+    body = _read_op(file)
+    if run_name:
+        body["name"] = run_name
+    with Hub(_target()) as hub:
+        run = hub.request_json("POST", "/v1/runs", json=body)
+        steps = ", ".join(step["name"] for step in run["steps"])
+        _err(f"Submitted {run['id']}{' (' + run['name'] + ')' if run.get('name') else ''}: {steps}; "
+             f"on the {run['backend']} backend, workers {run['location']}.")
+        if not watch:
+            if as_json:
+                _print_json(run)
+            else:
+                typer.echo(run["id"])
+            return
+        run = _watch(hub, run["id"], as_json=as_json)
+    _finish(run, as_json)
+
+
+@run_app.command("payload")
+@handled
+def run_payload(
+    run_id: Annotated[str, typer.Argument(help="The run's id.")],
+    step: Annotated[str, typer.Argument(help="The step whose output to read.")],
+    as_json: JsonOption = False,
+) -> None:
+    """Print what a completed step's Cog answered with, or why a failed step failed.
+
+    The output is read back whole, even one the hub keeps by reference.
+    """
+
+    with Hub(_target()) as hub:
+        answer = hub.get_json(f"/v1/runs/{run_id}/steps/{step}/payload")
+    if as_json:
+        _print_json(answer)
+    elif answer["state"] == "completed":
+        typer.echo(json.dumps(answer["payload"], indent=2, sort_keys=True))
+    if answer["state"] != "completed":
+        error = answer.get("error") or {}
+        _err(f"error: step {step} {answer['state']}: {error.get('code', '')} {error.get('message', '')}".rstrip())
+        raise typer.Exit(EXIT_HUB)
+
+
+@run_app.command("decide")
+@handled
+def run_decide(
+    run_id: Annotated[str, typer.Argument(help="The run's id.")],
+    approve: Annotated[bool, typer.Option("--approve", help="Accept the result as it is: the step completes.")] = False,
+    reject: Annotated[bool, typer.Option("--reject", help="Refuse it: the run ends REJECTED.")] = False,
+    send_back: Annotated[bool, typer.Option(
+        "--send-back", help="Have the step run again, with the findings as its signal.")] = False,
+    findings: Annotated[list[str] | None, typer.Option(
+        "--finding", help="A finding to send the step back with; repeat for several. JSON, or plain text.")] = None,
+    escalation: Annotated[str | None, typer.Option(
+        "--escalation", help="The escalation this decision answers; the run's open one when omitted. A decision "
+                             "on an escalation that a send back has since closed is refused as stale.")] = None,
+    watch: Annotated[bool, typer.Option(
+        "--watch", help="Follow the run's events after the decision until it ends or waits again.")] = False,
+    as_json: JsonOption = False,
+) -> None:
+    """Decide the Gate a run waits at: approve, reject, or send the step back with findings.
+
+    The hub records the decision for the run's controller, which delivers it;
+    who may decide is the Gate's approvers. The decision names the escalation
+    it answers, so one made on a revision you never saw is refused.
+    """
+
+    choices = (("approve", approve), ("reject", reject), ("send_back", send_back))
+    outcome = [name for name, chosen in choices if chosen]
+    if len(outcome) != 1:
+        raise config.UsageError("one of --approve, --reject or --send-back")
+    if findings and outcome != ["send_back"]:
+        raise config.UsageError("--finding goes with --send-back")
+    parsed = []
+    for finding in findings or ():
+        try:
+            parsed.append(json.loads(finding))
+        except ValueError:
+            parsed.append(finding)
+    with Hub(_target()) as hub:
+        run = hub.get_json(f"/v1/runs/{run_id}")
+        waiting = next((step for step in run["steps"] if step["state"] == "waiting_at_gate"), None)
+        if waiting is None or not run.get("escalation"):
+            _err(f"error: {run_id} is {run['status']}, and waits on no decision")
+            raise typer.Exit(EXIT_HUB)
+        seen = run.get("sequence") or 0  # the events up to here are the escalation; the ones after, its delivery
+        decision = {"escalation": escalation or run["escalation"], "outcome": outcome[0], "findings": parsed}
+        run = hub.request_json("POST", f"/v1/runs/{run_id}/steps/{waiting['name']}/decision", json=decision)
+        _err(f"{run_id}: {outcome[0].replace('_', ' ')} of {waiting['name']} recorded for escalation "
+             f"{decision['escalation']}; the controller delivers it.")
+        if watch:
+            run = _watch(hub, run_id, as_json=as_json, after=seen)
+            _finish(run, as_json)
+    if as_json:
+        _print_json(run)
+    else:
+        typer.echo(run["status"])
+
+
+@run_app.command("retry")
+@handled
+def run_retry(
+    run_id: Annotated[str, typer.Argument(help="The run's id.")],
+    watch: Annotated[bool, typer.Option(
+        "--watch", help="Follow the run's events after the retry until it ends or waits at a Gate; waits up "
+                        "to ten minutes for a controller to take the ask.")] = False,
+    as_json: JsonOption = False,
+) -> None:
+    """Ask for an ended run to run again, and say how it will: resuming its attempt, or as a new one.
+
+    A run that ended INTERRUPTED resumes the step that was in flight under its
+    attempt and key; one that FAILED runs that step again as a new attempt. A
+    completed, rejected or cancelled run has nothing to retry, and one that
+    exhausted its budget is a new run instead.
+    """
+
+    with Hub(_target()) as hub:
+        run = hub.request_json("POST", f"/v1/runs/{run_id}/retry")
+        was = run["status"]
+        how = {"INTERRUPTED": "the step in flight resumes under its attempt and key",
+               "FAILED": "the failed step runs again as a new attempt"}.get(was, "it runs again")
+        _err(f"{run_id}: retry asked for; it ended {was}, so {how}.")
+        if watch:
+            # The run ended, so its stream ends at once. Until a controller answers the ask, with
+            # `retry_requested` (the run runs on, and the stream with it) or `retry_refused`, the stream is
+            # reopened from the last event seen.
+            seen = run.get("sequence") or 0
+            deadline = time.monotonic() + RETRY_TAKEN_WAIT
+            while True:
+                run = _watch(hub, run_id, as_json=as_json, after=seen)
+                seen = run.get("sequence") or seen
+                if not run.get("ended"):
+                    continue  # taken: the run is running again, and the stream ended on a Gate or a drop
+                if not run.get("retry_asked_by"):
+                    break  # refused, or ended again after the retry
+                if time.monotonic() >= deadline:
+                    _err(f"error: no controller took the retry of {run_id} within {RETRY_TAKEN_WAIT:.0f}s; "
+                         "it stays asked for, and `run watch` follows it once one does")
+                    raise typer.Exit(EXIT_HUB)
+                time.sleep(RETRY_TAKEN_POLL)
+            _finish(run, as_json)
+    if as_json:
+        _print_json(run)
+    else:
+        typer.echo(run["status"])
 
 
 @run_app.command("say")
@@ -616,7 +860,7 @@ def run_say(
     """
 
     with Hub(_target()) as hub:
-        turn = hub.request("POST", f"/v1/runs/{run_id}/turns", json={"text": " ".join(text)}).json()
+        turn = hub.request_json("POST", f"/v1/runs/{run_id}/turns", json={"text": " ".join(text)})
         deadline = time.monotonic() + timeout
         while turn["state"] == "pending" and time.monotonic() < deadline:
             time.sleep(POLL_SECONDS)
@@ -666,7 +910,7 @@ def run_terminate(
     """
 
     with Hub(_target()) as hub:
-        run = hub.request("POST", f"/v1/runs/{run_id}/cancel").json()
+        run = hub.request_json("POST", f"/v1/runs/{run_id}/cancel")
         if not no_wait:
             run = _follow(hub, run, lambda current: current["ended"], quiet=True)
     if run["ended"]:

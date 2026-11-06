@@ -208,9 +208,7 @@ class FakeInvitationService:
         )
         if self.raises is not None:
             raise self.raises
-        return InvitationAcceptance(
-            invitation_id="inv-1", org_id="org-a", role="owner", org_created=True
-        )
+        return InvitationAcceptance(invitation_id="inv-1", org_id="org-a", role="owner", org_created=True)
 
     def settle_service_access_grant(self, *, user_id, group_path, granted) -> None:
         self.settled.append((user_id, group_path, granted))
@@ -366,9 +364,7 @@ async def test_a_failing_acceptance_page_answers_with_the_no_script_policy(tmp_p
 
 
 def test_the_policy_exception_is_keyed_on_one_path_and_no_other():
-    assert headers_for_path(ACCEPT_PAGE_PATH)["Content-Security-Policy"] == (
-        ACCEPTANCE_CONTENT_SECURITY_POLICY
-    )
+    assert headers_for_path(ACCEPT_PAGE_PATH)["Content-Security-Policy"] == (ACCEPTANCE_CONTENT_SECURITY_POLICY)
     for path in ("/web", "/web/signin", ACCEPT_REDEEM_PATH, "/invite/accept/", "/admin/invitations"):
         assert headers_for_path(path)["Content-Security-Policy"] == CONTENT_SECURITY_POLICY
 
@@ -455,9 +451,7 @@ def test_a_public_page_router_not_on_the_allowlist_is_refused(tmp_path, idp):
     async def backdoor():
         return {"secret": "invitee data"}
 
-    surface = build_web_surface(
-        Config.parse(web_values(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL}))
-    )
+    surface = build_web_surface(Config.parse(web_values(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL})))
     with pytest.raises(RuntimeError, match="PUBLIC_WEB_PATHS"):
         make_router(surface, public_page_routers=[rogue])
 
@@ -948,14 +942,10 @@ async def test_the_flow_survives_the_sign_in_round_trip(tmp_path, idp):
         href = re.search(r'href="(/web/signin\?[^"]+)"', anonymous.text).group(1)
         start = await client.get(href)
         assert start.status_code == 303
-        params = {
-            key: value[0] for key, value in parse_qs(urlsplit(start.headers["location"]).query).items()
-        }
+        params = {key: value[0] for key, value in parse_qs(urlsplit(start.headers["location"]).query).items()}
         idp.nonce = params["nonce"]
         idp.claims_override = {"email": INVITEE_EMAIL, "email_verified": True}
-        callback = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-        )
+        callback = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
         assert callback.status_code == 303
         # Back where they started, not at the operator overview.
         assert callback.headers["location"] == ACCEPT_PAGE_PATH
@@ -1192,9 +1182,7 @@ async def test_re_authentication_re_reads_the_claims_from_the_idp(tmp_path, idp)
         stale = await client.get(ACCEPT_PAGE_PATH)
 
         # The page's own renew link, followed exactly as a person would.
-        section = re.search(
-            r'<section data-state="reauthentication_required".*?</section>', stale.text, re.S
-        ).group(0)
+        section = re.search(r'<section data-state="reauthentication_required".*?</section>', stale.text, re.S).group(0)
         # Unescaped the way a browser does: the attribute is HTML-escaped, so
         # the raw text carries `&amp;` and an HTTP client would send it
         # literally. Following the escaped form is not what a person does.
@@ -1204,13 +1192,9 @@ async def test_re_authentication_re_reads_the_claims_from_the_idp(tmp_path, idp)
         idp.claims_override = {"email": INVITEE_EMAIL, "email_verified": False}
         start = await client.get(href)
         assert start.status_code == 303, "renew must run the flow, not short-circuit"
-        params = {
-            key: value[0] for key, value in parse_qs(urlsplit(start.headers["location"]).query).items()
-        }
+        params = {key: value[0] for key, value in parse_qs(urlsplit(start.headers["location"]).query).items()}
         idp.nonce = params["nonce"]
-        callback = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-        )
+        callback = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
         assert callback.status_code == 303
         assert callback.headers["location"] == ACCEPT_PAGE_PATH
 
@@ -1254,10 +1238,7 @@ def test_the_documented_worst_case_accounts_for_replica_skew():
     raising the skew allowance moves the documented number with it.
     """
 
-    assert (
-        VERIFIED_CLAIM_WORST_CASE_AGE_SECONDS
-        == VERIFIED_CLAIM_MAX_AGE_SECONDS + CLOCK_SKEW_SECONDS
-    )
+    assert VERIFIED_CLAIM_WORST_CASE_AGE_SECONDS == VERIFIED_CLAIM_MAX_AGE_SECONDS + CLOCK_SKEW_SECONDS
 
     # Demonstrated, not just asserted arithmetically: a session a replica at
     # the skew limit minted is still accepted when its real age is the worst
@@ -1400,7 +1381,7 @@ def test_redemption_waits_for_a_deliberate_click():
 
     document = acceptance_page(root_path="")
     ready = re.search(r'<section data-state="ready".*?</section>', document, re.S).group(0)
-    assert f"<button type=\"button\" {ACCEPT_BUTTON_ATTRIBUTE}>" in ready
+    assert f'<button type="button" {ACCEPT_BUTTON_ATTRIBUTE}>' in ready
     # The fetch is reachable only from the click handler, never from the
     # top-level flow: the last thing the script does on load is `present`.
     assert "button.addEventListener" in ACCEPTANCE_SCRIPT
@@ -1555,15 +1536,103 @@ def _post_body_over_socket(
     return elapsed, received, closed
 
 
+def _read_one_response(sock: socket.socket, buffered: bytes) -> tuple[bytes, bytes] | None:
+    """One ``Content-Length``-framed response off ``sock``, or None at EOF.
+
+    Returns ``(response, leftover)``. None means the server ended the
+    connection before a complete response — end-of-file or a reset — which is
+    what the keep-alive controls must fail on. A socket timeout is raised
+    instead: a server that leaves the connection open and never answers has
+    not closed it, and the failure should say so.
+    """
+
+    data = buffered
+    while b"\r\n\r\n" not in data:
+        try:
+            chunk = sock.recv(65536)
+        except TimeoutError:
+            raise
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        data += chunk
+    head, _, rest = data.partition(b"\r\n\r\n")
+    lengths = [
+        line.split(b":", 1)[1].strip()
+        for line in head.split(b"\r\n")[1:]
+        if line.lower().startswith(b"content-length:")
+    ]
+    # These controls only issue requests whose responses are length-framed; a
+    # chunked answer would need a decoder this helper deliberately lacks.
+    assert len(lengths) == 1, head
+    size = int(lengths[0])
+    while len(rest) < size:
+        try:
+            chunk = sock.recv(65536)
+        except TimeoutError:
+            raise
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        rest += chunk
+    return head + b"\r\n\r\n" + rest[:size], rest[size:]
+
+
+def _requests_over_one_socket(base_url: str, requests: list[bytes]) -> list[bytes]:
+    """Send ``requests`` one after another on **one** raw socket.
+
+    Returns the responses that were served, in order; a list shorter than
+    ``requests`` means the server closed or reset the connection before
+    serving the next one. A server that never answers raises ``TimeoutError``.
+    A raw socket rather than an HTTP client because a client library quietly
+    opens a fresh connection when the server closes one, so "the second
+    request was served" proves nothing about reuse there. Here there is only
+    the one socket: a second response on it *is* the connection kept alive.
+    """
+
+    parts = urlsplit(base_url)
+    served: list[bytes] = []
+    leftover = b""
+    with socket.create_connection((parts.hostname, parts.port), timeout=15) as sock:
+        for raw in requests:
+            try:
+                sock.sendall(raw)
+            except OSError:
+                break
+            result = _read_one_response(sock, leftover)
+            if result is None:
+                break
+            response, leftover = result
+            served.append(response)
+    return served
+
+
+def _raw_post(base_url: str, path: str, *, headers: dict[str, str], body: bytes) -> bytes:
+    """A ``Content-Length``-framed HTTP/1.1 POST, as bytes, with no ``Connection`` header.
+
+    HTTP/1.1's default is persistent, so leaving the header out asks for
+    keep-alive the way an ordinary client does.
+    """
+
+    parts = urlsplit(base_url)
+    lines = [
+        f"POST {path} HTTP/1.1",
+        f"Host: {parts.hostname}:{parts.port}",
+        f"Content-Length: {len(body)}",
+        *(f"{name}: {value}" for name, value in headers.items()),
+    ]
+    return ("\r\n".join(lines) + "\r\n\r\n").encode() + body
+
+
 def _sign_in_over_http(client: _LoopbackBrowser, idp: _StubIdp) -> str:
     start = client.get("/web/signin", params={"next": ACCEPT_PAGE_PATH})
     assert start.status_code == 303
     params = {k: v[0] for k, v in parse_qs(urlsplit(start.headers["location"]).query).items()}
     idp.nonce = params["nonce"]
     idp.claims_override = {"email": INVITEE_EMAIL, "email_verified": True}
-    callback = client.get(
-        "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-    )
+    callback = client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
     assert callback.status_code == 303, callback.text
     return csrf_from(client.get(ACCEPT_PAGE_PATH).text)
 
@@ -1634,18 +1703,14 @@ def test_a_guard_refusal_does_not_hold_a_body_bearing_connection(tmp_path, idp):
 
     app, _ = build_app(tmp_path, idp)
     with running_server(app) as base_url:
-        anonymous = _post_body_over_socket(
-            base_url, headers={"Content-Type": "application/json"}
-        )
+        anonymous = _post_body_over_socket(base_url, headers={"Content-Type": "application/json"})
 
     # A different app: the guard cannot reach the surface's codec, so it
     # serves the documented 503 instead of a sign-in redirect.
     unavailable_app, _ = build_app(tmp_path, idp)
     unavailable_app.state.web_surface = None
     with running_server(unavailable_app) as base_url:
-        undecidable = _post_body_over_socket(
-            base_url, headers={"Content-Type": "application/json"}
-        )
+        undecidable = _post_body_over_socket(base_url, headers={"Content-Type": "application/json"})
 
     for label, status_line, (elapsed, received, closed) in (
         ("sign-in redirect", b"HTTP/1.1 303", anonymous),
@@ -1678,23 +1743,29 @@ def test_the_server_keeps_serving_after_refusing_an_oversize_body(tmp_path, idp)
 def test_a_normal_redemption_over_a_real_connection_keeps_it_alive(tmp_path, idp):
     """The close must be the exception, not the rule.
 
-    Two redemptions on one client: if the successful path closed the
+    Two redemptions on **one socket**: if the successful path closed the
     connection, every acceptance would cost a fresh TCP (and TLS) handshake.
+    Asserted as reuse — the second request is served on the same connection —
+    rather than as the absence of a ``Connection: close`` header, which would
+    still pass if the server dropped the connection for any other reason.
     """
 
     app, service = build_app(tmp_path, idp)
     with running_server(app) as base_url, _LoopbackBrowser(base_url) as client:
         csrf = _sign_in_over_http(client, idp)
-        headers = {"Content-Type": "application/json", "X-CSRF-Token": csrf}
-        first = client.post(
-            ACCEPT_REDEEM_PATH, content=json.dumps({"token": SENTINEL_TOKEN}), headers=headers
+        request = _raw_post(
+            base_url,
+            ACCEPT_REDEEM_PATH,
+            headers={
+                "Content-Type": "application/json",
+                "X-CSRF-Token": csrf,
+                "Cookie": client.cookie_header(),
+            },
+            body=json.dumps({"token": SENTINEL_TOKEN}).encode(),
         )
-        second = client.post(
-            ACCEPT_REDEEM_PATH, content=json.dumps({"token": SENTINEL_TOKEN}), headers=headers
-        )
-    assert first.status_code == 200
-    assert second.status_code == 200
-    assert "connection" not in {name.lower() for name in first.headers}
+        served = _requests_over_one_socket(base_url, [request, request])
+    assert len(served) == 2, "the server closed the connection after a successful redemption"
+    assert all(response.startswith(b"HTTP/1.1 200") for response in served), served
     assert len(service.calls) == 2
 
 
@@ -1800,9 +1871,7 @@ async def test_live_an_invitation_is_redeemed_through_the_browser_page(live_app,
     assert second.json() == {"outcome": OUTCOME_ACCEPTED}
 
     with live_db.connection() as conn:
-        members = conn.execute(
-            "SELECT user_id, role FROM collab_org_members WHERE user_id = %s", (idp.sub,)
-        ).fetchall()
+        members = conn.execute("SELECT user_id, role FROM collab_org_members WHERE user_id = %s", (idp.sub,)).fetchall()
         # By actor, not by action name: this is an org-creating invitation,
         # so #89 records it as `org.create` rather than `invitation.redeem`.
         # The question the replay raises is "did the second POST write
@@ -1814,9 +1883,7 @@ async def test_live_an_invitation_is_redeemed_through_the_browser_page(live_app,
             "SELECT count(*) AS n FROM collab_audit_events WHERE detail::text LIKE %s",
             (f"%{token}%",),
         ).fetchone()["n"]
-        row = conn.execute(
-            "SELECT status FROM collab_invitations WHERE id = %s", (issued.invitation.id,)
-        ).fetchone()
+        row = conn.execute("SELECT status FROM collab_invitations WHERE id = %s", (issued.invitation.id,)).fetchone()
     assert len(members) == 1
     assert row["status"] == "accepted"
     assert redemptions == 1, "the replay must not write a second audit row"
@@ -2008,15 +2075,11 @@ def test_copy_that_does_not_vary_is_stored_once() -> None:
 
     for state, overrides in RELAXED_PARAGRAPHS.items():
         for index, text in overrides.items():
-            assert text != strict_paragraphs[state][index], (
-                f"{state}[{index}] overrides with the same text it replaces"
-            )
+            assert text != strict_paragraphs[state][index], f"{state}[{index}] overrides with the same text it replaces"
     # Headings too: a byte-identical entry would pass every other test and
     # freeze relaxed deployments on wording a later edit moved past.
     for state, heading in RELAXED_HEADINGS.items():
-        assert heading != strict_headings[state], (
-            f"{state} overrides its heading with the same text"
-        )
+        assert heading != strict_headings[state], f"{state} overrides its heading with the same text"
 
 
 @pytest.mark.asyncio
@@ -2051,6 +2114,4 @@ async def test_the_app_renders_the_page_copy_the_configuration_asks_for(tmp_path
             response = await client.get(ACCEPT_PAGE_PATH)
         assert response.status_code == 200
         mentions = "verification" in response.text.lower()
-        assert mentions is expect_verification_copy, (
-            f"require_verified_email={flag} rendered the wrong copy"
-        )
+        assert mentions is expect_verification_copy, f"require_verified_email={flag} rendered the wrong copy"

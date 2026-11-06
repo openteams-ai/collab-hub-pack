@@ -217,9 +217,7 @@ def project_group(group: FrameGroup, store: FrameStore) -> FrameGroup:
     """Return a copy of the group with both derived fields populated."""
 
     all_published, effective_visibility = compute_derived(group, store)
-    return group.model_copy(
-        update={"all_published": all_published, "effective_visibility": effective_visibility}
-    )
+    return group.model_copy(update={"all_published": all_published, "effective_visibility": effective_visibility})
 
 
 class FrameGroupStore(ABC):
@@ -740,5 +738,5 @@ class PostgresFrameGroupStore(FrameGroupStore):
 
     def _connect(self):
         # A transaction-scoped checkout from the shared pool — never a fresh
-        # per-request psycopg.connect (issue #58).
+        # per-request psycopg.connect.
         return self.db.connection()

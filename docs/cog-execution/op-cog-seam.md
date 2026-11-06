@@ -78,8 +78,21 @@ since a worker may be invoked and not yet have opened its session.
 
 Turns come only from the run controller, which takes them from the run's
 Track, so a client never reaches a worker and every turn is recorded. This is
-the first form of talking to a running Cog; how a harness Cog maps turns onto
-its own agent loop is the Worker SDK's to define.
+the first form of talking to a running Cog. The [Worker SDK](../../worker/README.md)
+maps a turn onto a harness as one interaction: each turn is one prompt to the
+harness, answered with what it said, and a farewell ends the session.
+
+## Frames in the task bundle
+
+A task bundle may carry the step's Frame snapshots beside its input:
+`POST /invoke` with `{"entry_point", "input", "idempotency_key", "frames":
+[{"id", "text", "title"?, "uri"?, "digest"?}]}`. The hub snapshots a step's
+Frames when the run is submitted and sends them here; a worker never calls the
+Frames API. A worker on the SDK places them beside the first prompt, the way
+its harness takes them — embedded resources for an ACP agent that advertises
+`embeddedContext`, text otherwise, a context message for a direct model call —
+and an input that cannot fit the bound model's context window with its Frames
+fails the step `context-exhausted` ([the envelope](result-envelope.md)).
 
 ## The two sides already fit
 

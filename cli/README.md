@@ -18,8 +18,10 @@ In the dev environment, `make -C dev cli` installs it and prints the sign-in lin
 ## Signing in
 
 ```sh
-collab-hub login --hub https://hub.example.org
+collab-hub --hub https://hub.example.org login
 ```
+
+`--hub`, like `--profile` and `--insecure`, is an option of `collab-hub` itself, so it comes before the command.
 
 The CLI signs in the way the Collab desktop does, against the same Keycloak realm and the same public client (`apollo-desktop`): the authorization code flow with PKCE (S256) and a loopback redirect (RFC 8252). `login` opens the realm's sign-in page in a browser on this machine, which returns to a listener on `127.0.0.1` and a port the system picks. The hub's URL is all you type: the hub names its issuer and client at `GET /v1/auth/cli`.
 
@@ -28,7 +30,7 @@ The CLI signs in the way the Collab desktop does, against the same Keycloak real
 
   ```sh
   ssh -L 8765:127.0.0.1:8765 remote-host          # on your laptop
-  collab-hub login --no-browser --port 8765        # on the remote host
+  collab-hub --hub https://hub.example.org login --no-browser --port 8765   # on the remote host
   ```
 
   Or use `--with-token`.
@@ -78,6 +80,8 @@ collab-hub cog show acme/reviewer          # one Cog's card and every indexed ve
 
 ## Launching a Cog, and its runs
 
+[`docs/cog-execution.md`](../docs/cog-execution.md) walks through it on a hub, from installing the CLI to stopping the Cog.
+
 ```sh
 collab-hub cog launch hello --input '{"name": "Ada"}' --watch   # launch, and follow the run to its end
 collab-hub cog launch hello --entry run --gate never --input -  # the input from stdin
@@ -103,23 +107,36 @@ toad acp "collab-hub run connect run-c42c387d6e23"       # the same Cog, from an
 
 `run terminate` asks the hub to cancel the run and waits until the controller has ended it; `--no-wait` returns once the request is recorded. A run that has already ended is refused, naming its status.
 
-These commands need a hub with the run API on (the `cog_runs` feature flag). [`examples/cog-local`](../examples/cog-local/README.md) runs all of them against a hub on your own machine.
+### Ops with several steps, Gates and Frames
+
+```sh
+collab-hub run submit --file review.yaml --watch     # an Op from a file (YAML or JSON; `-` for stdin)
+collab-hub run watch run-3eb7ab0eaf43                # its events as they land, until it ends or waits at a Gate
+collab-hub run payload run-3eb7ab0eaf43 draft        # what a completed step answered, or why it failed
+collab-hub run decide run-3eb7ab0eaf43 --approve     # decide the Gate it waits at
+collab-hub run decide run-3eb7ab0eaf43 --send-back --finding "too long" --finding '{"check": "tone", "detail": "stiff"}'
+collab-hub run retry run-3eb7ab0eaf43 --watch        # an ended run, again
+```
+
+An Op file names its `steps`, each with a `cog`, an `entry_point` (`run` by default), an `input`, a `gate` (`never`, `error`, `warn` or `always`, or `{escalate, approvers}`) and `frames`, the ids of Frames the step is grounded in; the hub checks each exists and is readable by you, snapshots it at submit, and places it beside the step's input. `--name` labels the run. `run watch` prints each event from the hub's stream, one line per event, and stops when the run ends or waits at a Gate (an escalation the stream replays that was decided since is history, and the watch reads on); a dropped connection is reopened from the last event seen, after a pause that grows while the hub keeps dropping it, so none is missed or repeated. `run payload` reads a step's output back whole, even one the hub keeps by reference. `run decide` answers the escalation the run waits on, which it reads from the run unless `--escalation` names one; a decision on an escalation that a send back has since closed is refused as stale, naming the open one, and who may decide is the Gate's approvers. `run retry` asks for an ended run to run again and says how: a run that ended `INTERRUPTED` resumes the step in flight under its attempt, one that `FAILED` runs it again as a new attempt; a completed, rejected or cancelled run has nothing to retry. `run retry --watch` waits up to ten minutes for a controller to take the ask (`retry_requested`) or refuse it, then follows the run; `run decide --watch` follows the decision's delivery, from the escalation it answered.
+
+These commands need a hub with Cog packages to launch and a run controller beside it. [`examples/cog-local`](../examples/cog-local/README.md) runs all of them against a hub on your own machine.
 
 ## Output and exit codes
 
-Tables for people by default; `--json`, which every command takes, prints one JSON document for scripts, shaped for `jq`. Results go to stdout, messages to stderr.
+Tables for people by default; `--json`, which every command but `run connect` takes, prints one JSON document for scripts, shaped for `jq` (`run connect`'s stdout carries the ACP protocol and nothing else). Results go to stdout, messages to stderr.
 
 - `login --json`: what `whoami --json` prints, plus `obtained_by` (`browser` or `token`) and `dev_auth`; against a hub running dev auth, `{hub, profile, signed_in: false, dev_auth: true}`.
 - `logout --json`: `{hub, profile, was_signed_in, revoked, warning}`.
 - `whoami --json`: the hub's `GET /v1/me` answer plus `hub`, `profile`, `signed_in` and `token_expires_at`.
 - `cog list --json` and `cog show --json`: the catalog API's items and Cog, as the hub returns them.
 - `run say --json`: the turn, with its `state`, `answer` or `error`. `cog list --launchable --json`: the names.
-- `cog launch --json`, `run show --json`, `run watch --json` and `run terminate --json`: the run, as `GET /v1/runs/{id}` returns it; `run list --json`: the runs.
+- `cog launch --json`, `run submit --json`, `run show --json`, `run decide --json`, `run retry --json` and `run terminate --json`: the run, as `GET /v1/runs/{id}` returns it; `run list --json`: the runs. `run watch --json`: one event per line (`sequence`, `type`, `occurred_at`, `payload`), then the run. `run payload --json`: `{step, state, payload, error}`.
 
 | Code | Meaning |
 |---|---|
 | 0 | success |
-| 1 | the hub or the realm refused or failed the request, or could not be reached; a session is kept. Also a run that was waited for and failed, or ran out of budget |
+| 1 | the hub or the realm refused or failed the request, or could not be reached; a session is kept. Also a run that was waited for and failed, was rejected, or ran out of budget |
 | 2 | a usage error: a bad option, a missing hub |
 | 3 | a run that was waited for (`--watch`, `run watch`) ended `INTERRUPTED` |
 | 4 | a run that was waited for is waiting at a Gate |

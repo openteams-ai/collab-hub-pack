@@ -53,9 +53,7 @@ class ModelCatalogClient:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._client = (
-            httpx.Client(timeout=timeout_seconds, transport=transport) if base_url else None
-        )
+        self._client = httpx.Client(timeout=timeout_seconds, transport=transport) if base_url else None
 
     @property
     def configured(self) -> bool:
@@ -63,9 +61,7 @@ class ModelCatalogClient:
 
     def list_models(self) -> list[CatalogModel]:
         if self._client is None:
-            raise ModelCatalogError(
-                "this deployment has no model catalogue endpoint configured"
-            )
+            raise ModelCatalogError("this deployment has no model catalogue endpoint configured")
         try:
             response = self._client.get(f"{self._base_url}/v1/models")
             response.raise_for_status()
@@ -88,9 +84,7 @@ class ModelCatalogClient:
             if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
                 raise ModelCatalogError("the serving layer returned a model with no id")
             owned_by = entry.get("owned_by")
-            models.append(
-                CatalogModel(id=entry["id"], owned_by=owned_by if isinstance(owned_by, str) else None)
-            )
+            models.append(CatalogModel(id=entry["id"], owned_by=owned_by if isinstance(owned_by, str) else None))
         return models
 
     def close(self) -> None:

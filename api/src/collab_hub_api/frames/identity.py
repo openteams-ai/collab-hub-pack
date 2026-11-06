@@ -60,7 +60,7 @@ refuse the very values the user directory hands the member picker
 (``user_directory.py`` returns Keycloak's raw ``id``). The authoritative check
 is **membership, not syntax** — "is this principal a member of the caller's
 organization" — and it arrives with the scoped member list in
-nebari-dev/collab-hub-pack#99. Until then the only thing rejected is the
+openteams-ai/collab-hub-pack#99. Until then the only thing rejected is the
 mistake S1 names: a value that is an email address.
 
 **Single-issuer assumption (review register R12).** A bare ``sub`` is unique
@@ -215,7 +215,7 @@ def validate_acl_principal(value: str) -> str:
     same deployment writes as an *owner*, and would reject the ids the user
     directory feeds the member picker. Whether a principal is a real person on
     this deployment is a membership question, answered by the scoped member list
-    in nebari-dev/collab-hub-pack#99 — not by syntax.
+    in openteams-ai/collab-hub-pack#99 — not by syntax.
 
     **Request models only.** Stored-record models (``FrameMetadata``,
     ``FrameGroup``) must never call this: pre-pin records legitimately contain

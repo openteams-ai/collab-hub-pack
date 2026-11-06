@@ -50,8 +50,7 @@ SECURITY_HEADERS = {
 intermediary treats the whole surface alike."""
 
 CONTENT_SECURITY_POLICY = (
-    "default-src 'none'; style-src 'self'; img-src 'self'; "
-    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 )
 """No script source at all: the surface serves none, so none may run.
 
@@ -142,6 +141,7 @@ def _script_page_headers() -> dict[str, dict[str, str]]:
 
     return {ACCEPT_PAGE_PATH: ACCEPTANCE_PAGE_HEADERS}
 
+
 STYLESHEET = """\
 :root { color-scheme: light dark; }
 /* The acceptance page ships every outcome as a hidden section and reveals
@@ -209,9 +209,8 @@ class WebSecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Apply the surface's security headers to **every** response it owns.
 
     Per-response headers were not enough, and the gap was not theoretical: a
-    redirect, an asset, a 405 from an unsupported method, and — because the
-    MCP app is mounted at ``/`` and matches whatever the routers did not
-    (issue #86) — any unmatched ``/web/*`` path all produced responses that
+    redirect, an asset, a 405 from an unsupported method, and any unmatched
+    ``/web/*`` path (the router's own 404) all produced responses that
     the route handlers never touched, and so answered without
     ``Referrer-Policy``, without ``no-store``, and without a CSP.
 
@@ -379,10 +378,7 @@ def body_refused_page(*, root_path: str = "", status_code: int) -> str:
         )
     else:
         heading = "That request was too large"
-        detail = (
-            "The form you sent is larger than this page will read, so nothing"
-            " was changed."
-        )
+        detail = "The form you sent is larger than this page will read, so nothing was changed."
     return render_page(
         title=heading,
         body=(

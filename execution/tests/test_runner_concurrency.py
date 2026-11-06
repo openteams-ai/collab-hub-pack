@@ -33,15 +33,32 @@ class _PausingTrack(InMemoryTrackStore):
         self.after = False
         self.reached, self.go = threading.Event(), threading.Event()
 
+        self._conditional = threading.local()
+
     def _hold(self):
         self.reached.set()
         assert self.go.wait(5), "never released"
 
     def append(self, event):
+        if getattr(self._conditional, "on", False):
+            return super().append(event)  # held around append_if instead, outside the store's lock
         hold = event.event_type == self.pause_on and not self.reached.is_set()
         if hold and not self.after:
             self._hold()
         stored = super().append(event)
+        if hold and self.after:
+            self._hold()
+        return stored
+
+    def append_if(self, event, condition):
+        hold = event.event_type == self.pause_on and not self.reached.is_set()
+        if hold and not self.after:
+            self._hold()
+        self._conditional.on = True
+        try:
+            stored = super().append_if(event, condition)
+        finally:
+            self._conditional.on = False
         if hold and self.after:
             self._hold()
         return stored

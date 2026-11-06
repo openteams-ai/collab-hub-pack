@@ -3,6 +3,6 @@
 ```
 docker build \
     --build-context projectroot=.. \
-    --tag ghcr.io/nebari-dev/collab-hub-pack/api:0.1.0 \
+    --tag ghcr.io/openteams-ai/collab-hub-pack/api:0.1.0 \
     .
 ```

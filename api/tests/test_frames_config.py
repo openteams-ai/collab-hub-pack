@@ -188,7 +188,7 @@ def test_build_task_store_uses_shared_postgres_url():
 
 def test_stores_on_the_shared_url_share_one_pool():
     # All relational stores riding frames.postgres must draw from a single
-    # connection pool — that sharing is the point of issue #58.
+    # connection pool — that sharing is the whole point.
     config = Config.parse(
         {
             "frames": {
@@ -340,9 +340,7 @@ def test_the_verified_email_env_var_binds_to_the_field(monkeypatch, raw, expecte
     and the app has to read it as the boolean.
     """
 
-    monkeypatch.setenv(
-        "COLLAB_HUB_API__FRAMES__INVITATIONS__REQUIRE_VERIFIED_EMAIL", raw
-    )
+    monkeypatch.setenv("COLLAB_HUB_API__FRAMES__INVITATIONS__REQUIRE_VERIFIED_EMAIL", raw)
     assert Config().frames.invitations.require_verified_email is expected
 
 
@@ -350,7 +348,5 @@ def test_the_verified_email_default_needs_no_environment(monkeypatch) -> None:
     """Absent means strict, which is what the chart relies on by rendering
     nothing at the default."""
 
-    monkeypatch.delenv(
-        "COLLAB_HUB_API__FRAMES__INVITATIONS__REQUIRE_VERIFIED_EMAIL", raising=False
-    )
+    monkeypatch.delenv("COLLAB_HUB_API__FRAMES__INVITATIONS__REQUIRE_VERIFIED_EMAIL", raising=False)
     assert Config().frames.invitations.require_verified_email is True

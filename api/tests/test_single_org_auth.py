@@ -146,9 +146,7 @@ class ProvisionRecordingOrgStore(InMemoryOrgStore):
                 "display_name": display_name,
             }
         )
-        return super().provision_member(
-            user_id, org_id, org_name, email=email, display_name=display_name
-        )
+        return super().provision_member(user_id, org_id, org_name, email=email, display_name=display_name)
 
 
 def _config(tmp_path, **overrides) -> Config:
@@ -313,9 +311,7 @@ def test_a_declared_sign_in_with_no_row_is_admitted_as_a_member():
 def test_an_undeclared_sign_in_falls_through_to_no_organization(provider):
     store = InMemoryOrgStore()
     with pytest.raises(NoOrganizationError):
-        auth_context_from_membership(
-            claims_for(ALICE, provider=provider), store, auto_admit=DECLARATION
-        )
+        auth_context_from_membership(claims_for(ALICE, provider=provider), store, auto_admit=DECLARATION)
     assert store.get_membership(ALICE) is None
 
 
@@ -355,9 +351,7 @@ def test_an_operator_from_a_declared_source_is_admitted_and_keeps_the_platform_a
 def test_an_operator_from_an_undeclared_source_stays_hub_scoped():
     store = InMemoryOrgStore()
     store.set_platform_role(ALICE)
-    context = auth_context_from_membership(
-        claims_for(ALICE, provider="personal-github"), store, auto_admit=DECLARATION
-    )
+    context = auth_context_from_membership(claims_for(ALICE, provider="personal-github"), store, auto_admit=DECLARATION)
     assert context is not None
     assert context.home_org_id is None
     assert context.platform_role == PLATFORM_ROLE_OPERATOR
@@ -653,9 +647,7 @@ def test_live_provision_admits_creates_the_org_and_respects_removal(migrated_dat
     assert created is True and membership.is_active and membership.role == ROLE_MEMBER
 
     with migrated_database.connection() as conn:
-        org = conn.execute(
-            "SELECT name, created_by FROM collab_orgs WHERE id = %s", (THE_ORG,)
-        ).fetchone()
+        org = conn.execute("SELECT name, created_by FROM collab_orgs WHERE id = %s", (THE_ORG,)).fetchone()
     assert org == {"name": THE_ORG_NAME, "created_by": SINGLE_ORG_CREATED_BY}
 
     # The declared name applies only at creation: a second admission neither
@@ -673,9 +665,7 @@ def test_live_provision_admits_creates_the_org_and_respects_removal(migrated_dat
     # And a removed row stands: no resurrection, exactly as the choke point
     # requires for removal to keep meaning removal.
     with migrated_database.connection() as conn:
-        conn.execute(
-            "UPDATE collab_org_members SET status = 'removed' WHERE user_id = %s", (ALICE,)
-        )
+        conn.execute("UPDATE collab_org_members SET status = 'removed' WHERE user_id = %s", (ALICE,))
     removed, re_admitted = store.provision_member(ALICE, THE_ORG, THE_ORG_NAME)
     assert re_admitted is False and removed.status == MEMBERSHIP_REMOVED
 
@@ -687,9 +677,7 @@ def test_live_provision_admits_creates_the_org_and_respects_removal(migrated_dat
 
 
 @live_postgres
-def test_live_a_preexisting_org_creating_invitation_cannot_mint_a_second_org(
-    migrated_database, monkeypatch
-):
+def test_live_a_preexisting_org_creating_invitation_cannot_mint_a_second_org(migrated_database, monkeypatch):
     """The acceptance-side half of the guard, against the real transaction.
 
     An org-creating invitation issued *before* the deployment flipped to
@@ -713,9 +701,7 @@ def test_live_a_preexisting_org_creating_invitation_cannot_mint_a_second_org(
     def accept():
         return service.accept(
             user_id=BOB,
-            display=DisplayIdentity(
-                name="Invitee", email="invitee@example.test", email_verified=True
-            ),
+            display=DisplayIdentity(name="Invitee", email="invitee@example.test", email_verified=True),
             token_hash=token_hash,
             claim_email="invitee@example.test",
             email_verified=True,

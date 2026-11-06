@@ -62,8 +62,31 @@ normal hub user receives, exactly as for the Google Drive connector — see
 The channel listing and both read endpoints are cursor-paginated. The two read
 endpoints return `has_more` and `next_cursor`; to continue a long history or
 thread, send `next_cursor` back as the `cursor` field on the next `read`
-request until `has_more` is `false`. The channel listing returns `next_cursor`
-likewise and accepts it via the `cursor` query parameter.
+request until `has_more` is no longer `true`. The channel listing returns
+`next_cursor` likewise and accepts it via the `cursor` query parameter.
+
+Payloads are kept small for the model (#139):
+
+- Search hits carry at most the first 500 characters of each message and set
+  `truncated: true` when the text was cut. Read the message by its `ts` for the
+  full text: for a thread reply (the hit has `thread_ts`), use the thread read
+  with the hit's `thread_ts` as `message_ts` (a long thread may take a few
+  pages), since the channel read only returns replies that were also posted to
+  the channel; otherwise use the channel read with `oldest` = `latest` = `ts`.
+- The read endpoints accept `max_chars` (default 12,000, max 50,000). A page
+  stops before the message that would go over it, never cutting a message, and
+  returns `has_more: true` with a `next_cursor` that resumes exactly there
+  (`ts:<ts>`, or `ts:<ts>:<oldest>` for a time-windowed read). A read's time
+  window (`oldest`, `days_back` or `since_date`) is carried in `next_cursor`,
+  so later pages stay inside it; Slack's own cursor is wrapped as
+  `slack:<oldest>:<cursor>` for that. These windowed cursors come only from the
+  channel read; a thread read only hands out `ts:<ts>`. If a request also sends its own `oldest`,
+  that one is used. Treat `next_cursor` as opaque and send it back unchanged; a
+  malformed `ts:` or `slack:` cursor is rejected with a 422.
+- Messages in a read don't repeat `channel_id`; it is set once on the response.
+- Fields that hold their default value (`false`, `""`, `0` or `null`), such as
+  `is_im`, `thread_ts`, `truncated`, `has_more`, `next_cursor` and `next_page`,
+  are left out. `content_trust` and `security_notice` are always sent.
 
 Slack search is invoked with the linked user's token, but Collab Hub drops any
 result Slack marks as `im` or `mpim` before returning the response. The

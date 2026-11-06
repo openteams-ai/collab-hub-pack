@@ -20,6 +20,9 @@ dependencies = [
     "mcp>=1.13.0",
     "prometheus-client>=0.23.0",
     "psycopg[binary,pool]>=3.2.0",
+    # Field(exclude_if=...), used to leave default-valued fields out of Slack
+    # payloads, arrived in 2.12; on 2.11 it is silently ignored.
+    "pydantic>=2.12",
     "pydantic-settings>=2.14.1",
     "pyjwt[crypto]>=2.15.0",
     "pyyaml>=6.0",

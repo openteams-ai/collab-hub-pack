@@ -1,7 +1,15 @@
+# Two namespaces, as the chart deploys a hub (issue #253): the driver (the stand-in
+# run controller) runs in cogs-e2e under a ServiceAccount of that namespace, and
+# its workers are made in cogs-e2e-workers, where its Role and RoleBinding are.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: cogs-e2e
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cogs-e2e-workers
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -10,12 +18,12 @@ metadata:
   namespace: cogs-e2e
 ---
 # Least-privilege: the executor may manage exactly the workloads it materializes,
-# scoped to its namespace (issue #6).
+# in the workers' namespace alone (issues #6, #253); it holds nothing in its own.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: cog-executor
-  namespace: cogs-e2e
+  namespace: cogs-e2e-workers
 rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
@@ -34,7 +42,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: cog-executor
-  namespace: cogs-e2e
+  namespace: cogs-e2e-workers
 subjects:
   - kind: ServiceAccount
     name: cog-executor
@@ -65,6 +73,10 @@ spec:
           command: ["python", "-m", "e2e.driver"]
           env:
             - name: E2E_NAMESPACE
-              value: cogs-e2e
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: E2E_WORKER_NAMESPACE
+              value: cogs-e2e-workers
             - name: E2E_RUNNER_IMAGE
               value: collab-hub/cog-e2e:test

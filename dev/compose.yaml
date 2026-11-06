@@ -19,7 +19,7 @@ services:
   # Without it those endpoints answer 503 rather than failing loudly, so it is
   # the first thing to start when something "works but returns nothing".
   postgres:
-    image: postgres:16.4-alpine
+    image: postgres:18.4-alpine
     environment:
       POSTGRES_USER: collab
       POSTGRES_PASSWORD: collab

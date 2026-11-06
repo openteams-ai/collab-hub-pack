@@ -87,17 +87,10 @@ the version the image runs, and CI runs the suite on 3.13 as well
 `UV_PYTHON=3.13`. Keep code valid on 3.13: ruff targets `py313` and reports
 newer syntax.
 
-Running it by hand needs **all three** dev-auth switches —
+Running the API by hand needs **all three** dev-auth switches —
 `FRAMES_UNSAFE_AUTH_ENABLED=true`, `DEV_AUTH_ENABLED=true` and
 `DEV_AUTH_USER=<name>`. Setting only `DEV_AUTH_USER` authenticates nothing and
 every route answers 401, which is why `make api` is the easier path.
-
-The Helm chart is in [`helm/collab-hub/`](helm/collab-hub/):
-
-```sh
-helm lint helm/collab-hub
-helm template helm/collab-hub | kubeconform -strict -ignore-missing-schemas -
-```
 
 Lint and format the API with the ruff version `uv.lock` pins. The `Ruff` CI
 check runs `ruff check` and `ruff format --check`:
@@ -115,6 +108,13 @@ clone:
 
 ```sh
 git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
+The Helm chart is in [`helm/collab-hub/`](helm/collab-hub/):
+
+```sh
+helm lint helm/collab-hub
+helm template helm/collab-hub | kubeconform -strict -ignore-missing-schemas -
 ```
 
 ## Pull requests

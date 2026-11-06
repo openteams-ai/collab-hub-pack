@@ -649,9 +649,7 @@ class GitHubClient:
         for _page in range(_MAX_PROJECT_PAGES):
             first = min(_PROJECT_PAGE_SIZE, cap - len(collected))
             data = await self._graphql(document, {**variables, "first": first, "after": cursor}, operation=operation)
-            project = _owner_project(
-                data, operation=operation, status_code=404, message="project not found"
-            )
+            project = _owner_project(data, operation=operation, status_code=404, message="project not found")
             items_field = project.get("items") or {}
             collected.extend(_project_item(item) for item in (items_field.get("nodes") or []) if isinstance(item, dict))
             cursor = _next_cursor(items_field.get("pageInfo") or {})

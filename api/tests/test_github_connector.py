@@ -3278,7 +3278,6 @@ async def test_github_read_project_counts_failure_makes_no_extra_requests(tmp_pa
         assert response.json()["total_count"] == 7
 
 
-
 @pytest.mark.parametrize("counts_status", ["graphql-rate-limit", 502, "timeout"])
 async def test_github_read_project_counts_null_when_upstream_is_failing(tmp_path, monkeypatch, counts_status):
     # GraphQL delivers its rate limit as HTTP 200 + errors[].type RATE_LIMITED,
@@ -3298,7 +3297,6 @@ async def test_github_read_project_counts_null_when_upstream_is_failing(tmp_path
     body = response.json()
     assert body["counts"] is None
     assert body["total_count"] == 7 and len(body["items"]) == 3 and body["truncated"] is True
-
 
 
 async def test_github_graphql_rate_limit_error_maps_to_429(tmp_path, monkeypatch):

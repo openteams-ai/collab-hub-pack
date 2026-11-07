@@ -10,8 +10,9 @@ name: Dev Environment
 # levels themselves are meant to be used:
 #
 #   level 1  both macOS and Linux, no containers at all      ~1 min
-#   level 2  Linux, Postgres + the S3 frame store            ~2 min
-#   level 3  Linux, + Keycloak (the one heavy image)         ~3 min
+#   level 2  Linux, Postgres                                 ~2 min
+#   level 3  Linux, + Keycloak (the one heavy image), and    ~4 min
+#            the S3 frame store under `make api-full`
 #   level 4  rendered only -- no cluster, no node image      ~1 min
 #
 # Level 1 is the one that runs on macOS: GitHub's macOS runners have no Docker,
@@ -27,6 +28,8 @@ on:
       - "cli/**"
       - "execution/**"
       - "scripts/smoke_frames_common.sh"
+      - "scripts/smoke_frames_http.py"
+      - "scripts/smoke_frames_mcp.py"
       - "scripts/keycloak_login_browser.py"
       - "helm/**"
       - ".github/workflows/dev-env.yaml"
@@ -440,11 +443,70 @@ jobs:
           make -s -C dev token | $CLI --hub http://127.0.0.1:8000 login --with-token
           $CLI whoami --json | python3 -c 'import json, sys; assert json.load(sys.stdin)["email"] == "dev@example.com"'
 
+      # `make api-full` is the one target that keeps frames in S3, so it is the
+      # only one that runs `make services` (SeaweedFS + the bucket). Postgres and
+      # Keycloak are already up from the steps above.
+      - name: Level 3 -- make api-full keeps frames in the S3 store
+        run: |
+          set -euo pipefail
+          # The previous step's API is stopped by its EXIT trap; wait until it
+          # has let go of the port, so the health poll below cannot reach it.
+          # If it never does, say so here: otherwise api-full fails to bind,
+          # every check below passes against the old local-FS API, and the
+          # step fails at the bucket count, pointing at S3 instead of the port.
+          for _ in $(seq 1 15); do
+            curl -s -m 1 -o /dev/null http://127.0.0.1:8000/health || break
+            sleep 1
+          done
+          if curl -s -m 1 -o /dev/null http://127.0.0.1:8000/health; then
+            echo "the previous step's API still holds :8000"; exit 1
+          fi
+
+          make -C dev api-full > /tmp/api-full.log 2>&1 &
+          trap 'pkill -f "collab_hub_api" || true' EXIT
+
+          for _ in $(seq 1 90); do
+            curl -sf -m 2 -o /dev/null http://127.0.0.1:8000/health && break
+            sleep 2
+          done
+          curl -sf -m 5 -o /dev/null http://127.0.0.1:8000/health \
+            || { echo "API never came up"; tail -60 /tmp/api-full.log; exit 1; }
+
+          # The frames contract over HTTP and MCP, as the kind S3 smoke runs it.
+          # --user is the token's sub: api-full pins FRAMES_AUTH_IDENTITY_CLAIM=sub,
+          # and the smoke lists frames by owner.
+          token=$(make -s -C dev token)
+          sub=$(make -s -C dev sub)
+          (cd api && uv run python ../scripts/smoke_frames_http.py \
+             --base-url http://127.0.0.1:8000 --bearer-token "$token" --user "$sub" \
+             --check-active-state --keep-frame)
+
+          # And the bodies landed in the bucket, not on the local filesystem.
+          objects=$(docker compose -f dev/compose.yaml run --rm --no-deps -T \
+                      --entrypoint aws s3-init --endpoint-url http://s3:9000 \
+                      s3 ls s3://frames --recursive | wc -l)
+          echo "frame objects in the bucket: $objects"
+          [ "$objects" -ge 1 ] || { echo "expected frame objects in the bucket, found $objects"; exit 1; }
+
+          # api-full is also the only target that sets WEB_ENV. An anonymous
+          # sign-in must be sent to the realm's collab-web client, and Keycloak
+          # must accept the callback URL the hub asks it to return to: a
+          # mismatch between the two breaks every browser sign-in.
+          signin=$(curl -s -m 10 -o /dev/null -w '%{http_code} %{redirect_url}' \
+                     http://127.0.0.1:8000/web/signin)
+          case "$signin" in
+            "303 http://localhost:8080/realms/nebari/protocol/openid-connect/auth?"*client_id=collab-web*) ;;
+            *) echo "/web/signin did not start the collab-web sign-in: $signin"; exit 1 ;;
+          esac
+          code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "${signin#303 }")
+          [ "$code" = "200" ] || { echo "Keycloak refused the web sign-in request with $code"; exit 1; }
+
       - name: Logs on failure
         if: failure()
         run: |
           tail -60 /tmp/api-pg.log 2>/dev/null || true
           tail -60 /tmp/api-oidc.log 2>/dev/null || true
+          tail -60 /tmp/api-full.log 2>/dev/null || true
           tail -40 /tmp/controller-one.log /tmp/controller-two.log /tmp/api-pg-runs.log 2>/dev/null || true
           make -C dev ps || true
           timeout 15 make -C dev logs || true

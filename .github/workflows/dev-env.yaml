@@ -451,10 +451,16 @@ jobs:
           set -euo pipefail
           # The previous step's API is stopped by its EXIT trap; wait until it
           # has let go of the port, so the health poll below cannot reach it.
+          # If it never does, say so here: otherwise api-full fails to bind,
+          # every check below passes against the old local-FS API, and the
+          # step fails at the bucket count, pointing at S3 instead of the port.
           for _ in $(seq 1 15); do
             curl -s -m 1 -o /dev/null http://127.0.0.1:8000/health || break
             sleep 1
           done
+          if curl -s -m 1 -o /dev/null http://127.0.0.1:8000/health; then
+            echo "the previous step's API still holds :8000"; exit 1
+          fi
 
           make -C dev api-full > /tmp/api-full.log 2>&1 &
           trap 'pkill -f "collab_hub_api" || true' EXIT
@@ -479,7 +485,21 @@ jobs:
           objects=$(docker compose -f dev/compose.yaml run --rm --no-deps -T \
                       --entrypoint aws s3-init --endpoint-url http://s3:9000 \
                       s3 ls s3://frames --recursive | wc -l)
+          echo "frame objects in the bucket: $objects"
           [ "$objects" -ge 1 ] || { echo "expected frame objects in the bucket, found $objects"; exit 1; }
+
+          # api-full is also the only target that sets WEB_ENV. An anonymous
+          # sign-in must be sent to the realm's collab-web client, and Keycloak
+          # must accept the callback URL the hub asks it to return to: a
+          # mismatch between the two breaks every browser sign-in.
+          signin=$(curl -s -m 10 -o /dev/null -w '%{http_code} %{redirect_url}' \
+                     http://127.0.0.1:8000/web/signin)
+          case "$signin" in
+            "303 http://localhost:8080/realms/nebari/protocol/openid-connect/auth?"*client_id=collab-web*) ;;
+            *) echo "/web/signin did not start the collab-web sign-in: $signin"; exit 1 ;;
+          esac
+          code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "${signin#303 }")
+          [ "$code" = "200" ] || { echo "Keycloak refused the web sign-in request with $code"; exit 1; }
 
       - name: Logs on failure
         if: failure()

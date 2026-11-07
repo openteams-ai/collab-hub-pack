@@ -42,7 +42,7 @@ services:
   # is maintained, Apache-2.0, pullable without an account, and speaks the part of
   # S3 the frame store uses — conditional writes (`If-Match`) included.
   s3:
-    image: chrislusf/seaweedfs:4.47
+    image: chrislusf/seaweedfs:4.50
     # One process serves the master, a volume server, the filer and the S3 API.
     # `-volume.max` has to leave room for the volumes the filer grows on first
     # write; too low and a PUT fails with "no writable volumes".
@@ -64,7 +64,7 @@ services:
   # One-shot: create the bucket the API expects, then exit. The AWS CLI speaks to
   # any S3, so nothing here is tied to the server that serves it.
   s3-init:
-    image: amazon/aws-cli:2.37.3
+    image: amazon/aws-cli:2.39.3
     depends_on:
       s3:
         condition: service_healthy
@@ -86,7 +86,7 @@ services:
   # Google or GitHub identity provider you wire up by hand survives
   # `make down` the same way Postgres rows do; `make destroy` is what resets.
   keycloak:
-    image: quay.io/keycloak/keycloak:26.2
+    image: quay.io/keycloak/keycloak:26.8
     profiles: ["auth"]
     command: ["start-dev", "--import-realm"]
     environment:

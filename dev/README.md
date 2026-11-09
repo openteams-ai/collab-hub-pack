@@ -509,7 +509,7 @@ Other level-3 targets:
 
 | Target | Adds |
 |---|---|
-| `make api-fakes` | Connector routes wired to the fake Google, Slack and GitHub providers |
+| `make api-fakes` | Connector routes wired to the fake Google, Slack, GitHub and Microsoft Graph (SharePoint) providers |
 | `make api-full` | S3 frame storage, the web surface, and Keycloak-brokered connectors |
 | `make api-membership` | Multi-tenant mode: organization resolved from `collab_org_members` |
 | `make api-desktop` | Every origin on one port, so the [Collab client can sign in](#connecting-the-collab-desktop-client) |

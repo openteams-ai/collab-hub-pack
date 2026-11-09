@@ -688,6 +688,7 @@ def acceptance_page(
     session=None,
     claims_current: bool = False,
     require_verified_email: bool = True,
+    account_url: str | None = None,
 ) -> str:
     """Render the acceptance page for this request.
 
@@ -784,6 +785,7 @@ def acceptance_page(
         root_path=root_path,
         identity_label=identity,
         csrf_token=session.csrf if signed_in else None,
+        account_url=account_url,
     )
 
 

@@ -133,6 +133,7 @@ from ..web.forms import media_type
 from ..web.pages import page_response
 from ..web.request_limits import bounded_body, connection_close_headers, declares_oversize
 from ..web.session import WebSession, verified_claims_are_current
+from ..web.surface import account_page_url
 from .invitations import InvitationAcceptRequest, redeem
 
 logger = logging.getLogger("frames_server.web")
@@ -354,6 +355,7 @@ def make_routers(*, memberships_enabled: bool, require_verified_email: bool) -> 
                 # sections it selects are still built per request, for the
                 # reason `acceptance.py` records at the join.
                 require_verified_email=require_verified_email,
+                account_url=account_page_url(request),
             ),
             path=ACCEPT_PAGE_PATH,
         )

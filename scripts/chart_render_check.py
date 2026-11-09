@@ -284,6 +284,15 @@ def case_publish_with_indexer(r: Rendered) -> None:
     assert not [n for n in r.indexer.env if n.startswith("COLLAB_HUB_API__COGS__PUBLISH__")], sorted(r.indexer.env)
 
 
+def case_account_link_with_indexer(r: Rendered) -> None:
+    # The account link (issue #275) is a page footer, and only the API serves
+    # pages: the API replicas carry it, the indexer carries nothing.
+    name = "COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL"
+    assert r.value(name) == "https://billing.example.com/account", r.value(name)
+    assert r.indexer is not None
+    assert name not in r.indexer.env, sorted(r.indexer.env)
+
+
 def case_serve_with_indexer(r: Rendered) -> None:
     # Serving and sweeping both on: /v2 routes to the API replicas only, but
     # the indexer carries the same serve settings. A sweep is held to the
@@ -456,6 +465,7 @@ CASES = {
     "sharepoint": case_sharepoint,
     "serve-off": case_serve_off,
     "serve-with-indexer": case_serve_with_indexer,
+    "account-link-with-indexer": case_account_link_with_indexer,
     "publish-with-indexer": case_publish_with_indexer,
     "serve-nebariapp": case_serve_nebariapp,
     "serve-nebariapp-no-timeout": case_serve_nebariapp_no_timeout,

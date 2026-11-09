@@ -273,6 +273,7 @@ def render_page(
     root_path: str = "",
     identity_label: str | None = None,
     csrf_token: str | None = None,
+    account_url: str | None = None,
 ) -> str:
     """Render one page of the surface into a complete document.
 
@@ -285,13 +286,26 @@ def render_page(
     the signed-in footer with the sign-out form; the CSRF token rides a
     hidden field of that form, which is the pattern every future POST form on
     this surface follows.
+
+    ``account_url`` is the deployment's external account page
+    (``web.account_page_url``, issue #275). It is rendered only in that
+    signed-in footer and only when set; routes read it from configuration
+    through :func:`~.surface.account_page_url`, never from the request. This
+    is the one place the link exists, so a page cannot grow a second copy
+    with a different rule.
     """
 
     footer = ""
     if identity_label is not None and csrf_token is not None:
+        account = ""
+        if account_url:
+            # Same-tab navigation, like every other link here; the page-level
+            # no-referrer meta already keeps this origin out of the Referer.
+            account = f'<a href="{html.escape(account_url)}">Account</a> · '
         footer = (
             '<div class="identity">Signed in as '
             f"<strong>{html.escape(identity_label)}</strong> · "
+            f"{account}"
             f'<form method="post" action="{html.escape(root_path)}/web/signout">'
             f'<input type="hidden" name="csrf_token" value="{html.escape(csrf_token)}">'
             '<button type="submit" class="link">Sign out</button>'

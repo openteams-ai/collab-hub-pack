@@ -1391,6 +1391,51 @@ def test_an_insecure_public_base_url_is_refused(tmp_path, idp):
         make_web_app(tmp_path, idp, web={"public_base_url": "http://frames.example.com"})
 
 
+# A leading NUL parses away: urlsplit("\x00https://h/") is a clean https URL,
+# while the raw bytes ride into every derived endpoint and redirect. Each URL
+# check refuses it on the raw string, the same way the account link does.
+HIDDEN_CHARACTER_URLS = [
+    "\x00https://auth.example.com/realms/nebari",
+    "https://auth.example.com/realms/nebari\x7f",
+    "https://auth.example.com/realms/\u200bnebari",
+    "https://auth.example.com/realms/nebari\r\nSet-Cookie: a=b",
+    "https://auth.example.com/realms/ nebari",
+]
+
+
+@pytest.mark.parametrize("url", HIDDEN_CHARACTER_URLS, ids=repr)
+def test_an_issuer_with_a_hidden_character_fails_the_rollout(tmp_path, idp, url):
+    from collab_hub_api.web.oidc import invalid_realm_url_reason
+
+    assert invalid_realm_url_reason(url) in (
+        "it contains a control or non-printable character",
+        "it contains whitespace",
+    )
+    with pytest.raises(RuntimeError, match="realm URL is unusable \\(it contains"):
+        make_web_app(tmp_path, idp, web={"issuer_url": url})
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://auth.example.com:0/realms/nebari", "http://localhost:0/realms/nebari"],
+)
+def test_an_issuer_on_port_0_fails_the_rollout(tmp_path, idp, url):
+    # Parses, but no browser will follow a redirect to it and nothing listens.
+    with pytest.raises(RuntimeError, match="realm URL is unusable \\(its port is 0"):
+        make_web_app(tmp_path, idp, web={"issuer_url": url})
+
+
+def test_a_public_base_url_on_port_0_is_refused(tmp_path, idp):
+    with pytest.raises(RuntimeError, match="public_base_url is unusable \\(its port is 0"):
+        make_web_app(tmp_path, idp, web={"public_base_url": "https://frames.example.com:0"})
+
+
+@pytest.mark.parametrize("url", [u.replace("/realms/nebari", "") for u in HIDDEN_CHARACTER_URLS], ids=repr)
+def test_a_public_base_url_with_a_hidden_character_is_refused(tmp_path, idp, url):
+    with pytest.raises(RuntimeError, match="public_base_url is unusable \\(it contains"):
+        make_web_app(tmp_path, idp, web={"public_base_url": url})
+
+
 # --- codex round 2: fail-closed routing, headers, lifetime, resolver -------------
 
 
@@ -3654,3 +3699,158 @@ def test_the_surface_stylesheet_shouts_at_nobody():
     from collab_hub_api.web.pages import STYLESHEET
 
     assert "text-transform: uppercase" not in STYLESHEET
+
+
+# --- The optional account link (#275) ---------------------------------------
+
+ACCOUNT_URL = "https://billing.example.com/account?plan=1"
+ACCOUNT_LINK = f'<a href="{html.escape(ACCOUNT_URL)}">Account</a>'
+
+
+async def test_no_account_link_renders_unless_the_deployment_sets_one(tmp_path, idp):
+    """The default: nothing to see, no billing configuration needed."""
+
+    app = make_web_app(tmp_path, idp)
+    assert app.state.web_surface.account_page_url == ""
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        overview = await client.get("/web")
+    assert overview.status_code == 200
+    assert "Sign out" in overview.text
+    assert "Account" not in overview.text
+
+
+async def test_the_account_link_renders_from_configuration_when_set(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"account_page_url": f"  {ACCOUNT_URL} "})
+    assert app.state.web_surface.account_page_url == ACCOUNT_URL
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        overview = await client.get("/web")
+    assert overview.status_code == 200
+    assert ACCOUNT_LINK in overview.text
+    assert overview.text.count("Account") == 1
+    assert overview.text.index("Account") < overview.text.index("Sign out")
+    # A same-tab link like every other on the surface: no window-opening
+    # attributes, and the page-level no-referrer meta covers the Referer.
+    assert "target=" not in overview.text
+    assert 'name="referrer" content="no-referrer"' in overview.text
+
+
+# The anonymous case lives in test_acceptance_page.py: /invite/accept is the
+# one public page that renders the footer when signed in, so signed out with
+# the value set is the case that exercises the rule. /web/data-statement never
+# shows a footer and would pass either way.
+
+
+def test_render_page_writes_the_link_only_in_the_signed_in_footer():
+    from collab_hub_api.web.pages import render_page
+
+    signed_in = render_page(
+        title="t", body="", identity_label="Alice", csrf_token="tok", account_url='https://x.example/a?b=1&c="2"'
+    )
+    assert '<a href="https://x.example/a?b=1&amp;c=&quot;2&quot;">Account</a> · ' in signed_in
+    assert signed_in.index("Account") < signed_in.index("Sign out")
+    for anonymous in (
+        render_page(title="t", body="", account_url="https://x.example/a"),
+        render_page(title="t", body="", identity_label="Alice", csrf_token="tok"),
+        render_page(title="t", body="", identity_label="Alice", csrf_token="tok", account_url=""),
+    ):
+        assert "Account" not in anonymous
+
+
+def test_account_page_url_is_empty_without_a_surface_or_a_value():
+    from collab_hub_api.web.surface import account_page_url
+
+    app = FastAPI()
+    request = Request({"type": "http", "app": app, "headers": []})
+    assert account_page_url(request) == ""
+    app.state.web_surface = WebSurface(**a_surface())
+    assert account_page_url(request) == ""
+    app.state.web_surface = WebSurface(**a_surface(account_page_url=ACCOUNT_URL))
+    assert account_page_url(request) == ACCOUNT_URL
+
+
+# The refusal table draws on the adversarial inputs the surface's own realm-URL
+# tests use, plus the cases a footer href invites: other schemes, credentials,
+# cleartext and loopback lookalikes, and hidden characters. Each row:
+# (value, reason fragment).
+UNUSABLE_LINKS = [
+    # Scheme
+    ("javascript:alert(1)", "http"),
+    ("data:text/html,<script>alert(1)</script>", "http"),
+    ("file:///etc/passwd", "http"),
+    ("FILE:///etc/passwd", "http"),
+    ("ftp://billing.example.com/", "http"),
+    ("myapp://do-something-privileged", "http"),
+    ("mailto:billing@example.com", "http"),
+    # No host, or not absolute
+    ("/account", "http"),
+    ("//billing.example.com/account", "http"),
+    ("billing.example.com/account", "http"),
+    ("https://", "names no host"),
+    ("https:///account", "names no host"),
+    ("https://:443/account", "names no host"),
+    ("https:foo", "names no host"),
+    # Cleartext off loopback, including the lookalikes a suffix rule would pass
+    ("http://billing.example.com/", "plain http"),
+    ("http://93.184.216.34/", "plain http"),
+    ("http://localhost.example.com/", "plain http"),
+    ("http://127.0.0.1.example.com/", "plain http"),
+    ("http://0.0.0.0:9000/", "plain http"),
+    # Credentials
+    ("https://user:pw@billing.example.com/", "credentials"),
+    ("https://user@billing.example.com/", "credentials"),
+    ("http://localhost@evil.example/", "credentials"),
+    # Port
+    ("https://billing.example.com:abc/", "port"),
+    ("https://billing.example.com:99999/", "port"),
+    ("https://billing.example.com:0/", "port is 0"),
+    # Malformed authority
+    ("https://[::1", "parsed"),
+    # Whitespace and control characters, on the raw string
+    ("https://billing.example.com/a b", "whitespace"),
+    ("https://billing.example.com/\u00a0x", "non-printable"),
+    ("https://billing.example.com/\u200bx", "non-printable"),
+    ("\x00https://billing.example.com/", "control"),
+    ("https://billing.example.com/\x7f", "control"),
+    ("https://billing.example.com/x\r\nSet-Cookie: a=b", "control"),
+    ("https://billing.example.com/\tx", "control"),
+]
+
+
+@pytest.mark.parametrize(("value", "reason"), UNUSABLE_LINKS, ids=[repr(v) for v, _ in UNUSABLE_LINKS])
+def test_a_value_that_cannot_be_a_link_is_refused_at_startup(tmp_path, idp, value, reason):
+    from pydantic import ValidationError
+
+    from collab_hub_api.config import WebConfig
+    from collab_hub_api.web.oidc import invalid_link_url_reason
+
+    assert reason in (invalid_link_url_reason(value) or "")
+    # Through the model, whether or not the surface is enabled: the value lands in an href.
+    # Reason first, as public_base_url does, so an operator reads why before what.
+    with pytest.raises(ValidationError, match="web.account_page_url is unusable \\(") as refused:
+        WebConfig(account_page_url=value)
+    assert reason in str(refused.value)
+    with pytest.raises(ValidationError, match="web.account_page_url"):
+        Config.parse(web_values(tmp_path, idp, web={"account_page_url": value}))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "   ",
+        ACCOUNT_URL,
+        "HTTPS://Billing.Example.com:8443/Account",
+        "https://billing.example.com/account#invoices",
+        "https://[2001:db8::1]:8443/account",
+        "http://localhost:3000/account",
+        "http://LOCALHOST/account",
+        "http://127.0.0.1:8080/",
+        "http://[::1]:9000/",
+    ],
+)
+def test_a_usable_or_empty_value_is_accepted(value):
+    from collab_hub_api.config import WebConfig
+
+    assert WebConfig(account_page_url=value).account_page_url == value.strip()

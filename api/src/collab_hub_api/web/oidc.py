@@ -79,9 +79,69 @@ def _invalid_port_reason(url: str) -> str | None:
     """
 
     try:
-        urlsplit(url).port
+        port = urlsplit(url).port
     except ValueError:
         return "its port is not a number"
+    if port == 0:
+        # Parses, but browsers refuse to connect to it and nothing listens on
+        # it: a URL that can never be reached is a misconfiguration.
+        return "its port is 0"
+    return None
+
+
+def _unrenderable_character_reason(url: str) -> str | None:
+    """Why ``url`` holds a character no URL may carry, checked on the raw string.
+
+    ``urlsplit`` silently drops leading C0 bytes, so a value such as
+    ``"\x00https://..."`` parses as a clean URL while the raw bytes land
+    wherever the string is written -- an ``href``, a redirect, an endpoint.
+    Every URL check in this module therefore refuses control, non-printable
+    and whitespace characters here, before anything is parsed.
+    """
+
+    if any(not ch.isprintable() for ch in url):
+        return "it contains a control or non-printable character"
+    if any(ch.isspace() for ch in url):
+        return "it contains whitespace"
+    return None
+
+
+def invalid_link_url_reason(url: str) -> str | None:
+    """Why ``url`` cannot be rendered as a link the surface vouches for, or ``None``.
+
+    The surface writes this value into an ``href`` on every signed-in page,
+    so it follows the same rules as the realm URL and ``public_base_url``,
+    except that a query and fragment are allowed (see below): absolute,
+    ``http(s)``, a real host, a usable port (not 0), no credentials, and
+    plain ``http://`` only on loopback -- a billing page reached over
+    cleartext is a page whose session can be hijacked on the way. Unlike
+    :func:`invalid_realm_url_reason`, a query and fragment are allowed: nothing
+    is appended to a link, so they cannot swallow anything.
+
+    Control and non-printable characters are refused on the exact string
+    that will be rendered, not on ``urlsplit``'s view of it
+    (:func:`_unrenderable_character_reason`).
+    """
+
+    character_reason = _unrenderable_character_reason(url)
+    if character_reason:
+        return character_reason
+    try:
+        parts = urlsplit(url)
+        parts.port
+    except ValueError:
+        return "its host or port cannot be parsed"
+    port_reason = _invalid_port_reason(url)
+    if port_reason:
+        return port_reason
+    if parts.scheme not in ("http", "https"):
+        return "it must start with http:// or https://"
+    if not parts.hostname:
+        return "it names no host"
+    if parts.username is not None or parts.password is not None:
+        return "it must not embed credentials"
+    if parts.scheme == "http" and not _is_loopback(parts.netloc):
+        return "it uses plain http:// to a non-loopback host"
     return None
 
 
@@ -120,8 +180,14 @@ def invalid_realm_url_reason(url: str) -> str | None:
     appended endpoint path.
 
     Transport is part of "usable": see :func:`insecure_transport_reason`.
+    Control characters are refused on the raw string first, for the reason
+    :func:`_unrenderable_character_reason` records: a leading NUL would
+    otherwise parse away and ride into every derived endpoint.
     """
 
+    character_reason = _unrenderable_character_reason(url)
+    if character_reason:
+        return character_reason
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https"):
         return "it must start with http:// or https://"

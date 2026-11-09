@@ -96,6 +96,7 @@ from .frames.usage import (
 )
 from .tasks.store import InMemoryTaskStore, PostgresTaskStore
 from .user_directory import DisabledUserDirectoryClient, KeycloakUserDirectoryClient, UserDirectoryClient
+from .web.oidc import invalid_link_url_reason
 
 
 def interactive_session() -> bool:
@@ -348,6 +349,23 @@ class WebConfig(BaseModel):
     revoked.
     """
 
+    account_page_url: str = ""
+    """Where the signed-in navigation's "Account" link points, if anywhere.
+
+    Empty (the default) renders no link: a Hub install shows nothing and
+    needs no billing configuration. The page itself -- plan, usage,
+    invoices -- belongs to whichever add-on provides it; the Hub only links
+    to it, from this value and never from the request (issue #275).
+
+    When set it follows the same rules as ``public_base_url``, except that a
+    query and fragment are allowed
+    (:func:`~.web.oidc.invalid_link_url_reason`): absolute ``https://`` (plain
+    ``http://`` only on loopback), a real host, a valid port, no credentials,
+    no control characters. The value is written into an ``href`` on every
+    signed-in page, so a ``javascript:`` or cleartext value is refused at
+    startup rather than shipped to every browser.
+    """
+
     @field_validator(
         "client_id",
         "client_secret",
@@ -356,6 +374,7 @@ class WebConfig(BaseModel):
         "public_base_url",
         "admin_ui_dist",
         "admin_group",
+        "account_page_url",
         mode="before",
     )
     @classmethod
@@ -371,6 +390,22 @@ class WebConfig(BaseModel):
         """
 
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("account_page_url", mode="after")
+    @classmethod
+    def _check_account_page_url(cls, value: str) -> str:
+        # Checked whether or not the surface is enabled: a value that cannot
+        # be a link is a configuration error now, not when someone later
+        # sets web.client_id and every signed-in page starts carrying it.
+        if not value:
+            return value
+        reason = invalid_link_url_reason(value)
+        if reason:
+            raise ValueError(
+                f"web.account_page_url is unusable ({reason}), got {value!r}: set it to an"
+                " absolute https URL (http only on loopback), e.g. https://billing.example.com/account"
+            )
+        return value
 
     @property
     def enabled(self) -> bool:

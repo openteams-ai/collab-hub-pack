@@ -685,6 +685,15 @@ class GitHubProjectReadResponse(UntrustedConnectorResponse):
     # matched_count=0 against a non-zero total_count, not as an empty board;
     # the real Status column names are in counts.by_status.)
     counts: GitHubProjectCounts | None = None
+    # Set only when `query` matched nothing on a non-empty board (matched_count
+    # 0 against a non-zero total_count); null on every other read, so the shape
+    # above is unchanged on the happy path. GitHub answers a mistyped or
+    # emoji-mismatched filter (status:"In Progress" on a board whose column is
+    # 'In progress 🏗') with zero items and no error, and in evals a reader then
+    # took counts.by_status for the filter's result; the tool description alone
+    # did not stop that (apollo-desktop#1013). The note says the filter matched
+    # 0 and lists the board's real Status column names to retry with.
+    note: str | None = None
 
 
 class GitHubRepo(BaseModel):

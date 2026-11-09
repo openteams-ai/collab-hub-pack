@@ -1213,7 +1213,79 @@ async def test_github_read_project_filter_matching_nothing_is_not_an_empty_board
     assert body["total_count"] == 40
     assert body["truncated"] is False
     assert body["query"] == "staus:Done"
-    assert "note" not in body  # the API stays data-only; the tool description explains this shape
+    # The one place the response carries prose: evals showed the tool
+    # description alone cannot stop a reader taking counts.by_status for the
+    # filter's result (apollo-desktop#1013), so the API says it here.
+    assert body["note"].startswith("The filter matched 0 of the board's 40 items")
+
+
+async def test_github_read_project_empty_filter_note_names_real_columns(tmp_path, monkeypatch):
+    # GitHub matches status: values ignoring case but not emoji, so
+    # status:"In Progress" selects nothing on a board whose column is
+    # 'In progress 🏗' while counts.by_status still shows the column. The note
+    # must list the real column names so the caller can retry with one.
+    handler = _counts_handler(
+        read_node=_board_node(board_total=21, nodes=[]),
+        options=["Todo", "In progress 🏗", "Done"],
+        aggregates={
+            "total": 21,
+            "issue": 21,
+            "pull_request": 0,
+            "board_draft": 0,
+            "opened": 21,
+            "closed": 0,
+            "no_status": 0,
+        },
+        status_counts=[0, 21, 0],
+    )
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/projects/1/read",
+            headers=_auth_header(),
+            json={"owner": "openteams-ai", "query": 'status:"In Progress"'},
+        )
+    body = response.json()
+    assert body["matched_count"] == 0 and body["total_count"] == 21
+    assert body["counts"]["by_status"][1] == {"name": "In progress 🏗", "count": 21}
+    assert body["note"] == (
+        "The filter matched 0 of the board's 21 items; counts.by_status is board-wide, not what the filter matched."
+        " status: values must match a column name exactly, including any emoji."
+        ' Columns here: "Todo", "In progress 🏗", "Done".'
+    )
+
+
+async def test_github_read_project_empty_filter_note_without_counts(tmp_path, monkeypatch):
+    # counts: null (count queries failed) still gets the note, minus the column list.
+    handler = _counts_handler(read_node=_board_node(board_total=40, nodes=[]), aggregates={}, fail_dsl=True)
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/projects/1/read",
+            headers=_auth_header(),
+            json={"owner": "openteams-ai", "query": "staus:Done"},
+        )
+    body = response.json()
+    assert body["counts"] is None
+    assert body["note"] == (
+        "The filter matched 0 of the board's 40 items; counts.by_status is board-wide, not what the filter matched."
+    )
+
+
+async def test_github_read_project_no_note_when_filter_matches(tmp_path, monkeypatch):
+    node = _board_node(board_total=40, matched=7)
+    _install_mock_client(monkeypatch, _counts_handler(read_node=node, aggregates={"total": 40}))
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/projects/1/read",
+            headers=_auth_header(),
+            json={"owner": "openteams-ai", "query": "is:open"},
+        )
+    body = response.json()
+    assert body["matched_count"] == 7 and body["note"] is None
 
 
 async def test_github_read_project_zero_matches_on_empty_board(tmp_path, monkeypatch):
@@ -1229,6 +1301,7 @@ async def test_github_read_project_zero_matches_on_empty_board(tmp_path, monkeyp
         )
     body = response.json()
     assert body["matched_count"] == 0 and body["total_count"] == 0
+    assert body["note"] is None  # nothing to explain: the board really is empty
 
 
 async def test_github_read_project_unfiltered_matched_equals_total(tmp_path, monkeypatch):
@@ -1242,6 +1315,7 @@ async def test_github_read_project_unfiltered_matched_equals_total(tmp_path, mon
         ).json()
     assert body["query"] == ""
     assert body["matched_count"] == body["total_count"] == 2
+    assert body["note"] is None
 
 
 async def test_github_read_project_rejects_oversized_query(tmp_path, monkeypatch):

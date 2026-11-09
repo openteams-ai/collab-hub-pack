@@ -126,9 +126,11 @@ nothing -- GitHub silently returns zero for an unrecognised filter rather than
 an error -- shows as `matched_count: 0` against a non-zero `total_count`, so it
 can't be mistaken for an empty board. GitHub matches `status:` values ignoring
 case but not emoji, so `status:"In Progress"` finds nothing on a board whose
-column is `In progress 🏗`; the board's real column names are in
-`counts.by_status`. `counts` below stays board-wide regardless of either and is
-never what the filter matched.
+column is `In progress 🏗`. In that one case -- `matched_count: 0` against a
+non-zero `total_count` -- the response also carries a `note` saying the filter
+matched nothing and listing the board's real Status column names to retry with;
+`note` is `null` on every other read. `counts` below stays board-wide regardless
+of either and is never what the filter matched.
 
 The read also returns a `counts` object with the board's aggregate breakdowns: an
 exact non-archived `total` (scope recorded in `archived_policy`), per-status-column
@@ -159,7 +161,7 @@ changed shape in one release:
 - `max_items` defaults to 50 instead of 500, so an unparameterised read no
   longer returns a whole board. Pass `max_items` explicitly (or page with
   `after`) to keep the old behaviour.
-- New fields `query`, `matched_count` and `next_cursor` are additive; existing
+- New fields `query`, `matched_count`, `next_cursor` and `note` are additive; existing
   fields `project`, `items`, `total_count` and `truncated` keep their names
   and types. `truncated` now means "more matching items remain after this
   response" (equivalently, `next_cursor` is non-null) rather than

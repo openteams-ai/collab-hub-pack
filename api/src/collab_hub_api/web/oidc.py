@@ -110,8 +110,9 @@ def invalid_link_url_reason(url: str) -> str | None:
     """Why ``url`` cannot be rendered as a link the surface vouches for, or ``None``.
 
     The surface writes this value into an ``href`` on every signed-in page,
-    so it is held to the same bar as the realm URL and ``public_base_url``:
-    absolute, ``http(s)``, a real host, a usable port (not 0), no credentials, and
+    so it follows the same rules as the realm URL and ``public_base_url``,
+    except that a query and fragment are allowed (see below): absolute,
+    ``http(s)``, a real host, a usable port (not 0), no credentials, and
     plain ``http://`` only on loopback -- a billing page reached over
     cleartext is a page whose session can be hijacked on the way. Unlike
     :func:`invalid_realm_url_reason`, a query and fragment are allowed: nothing

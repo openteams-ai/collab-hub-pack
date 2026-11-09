@@ -359,7 +359,8 @@ class WebConfig(BaseModel):
     invoices -- belongs to whichever add-on provides it; the Hub only links
     to it, from this value and never from the request (issue #275).
 
-    When set it is held to the same bar as ``public_base_url``
+    When set it follows the same rules as ``public_base_url``, except that a
+    query and fragment are allowed
     (:func:`~.web.oidc.invalid_link_url_reason`): absolute ``https://`` (plain
     ``http://`` only on loopback), a real host, a valid port, no credentials,
     no control characters. The value is written into an ``href`` on every

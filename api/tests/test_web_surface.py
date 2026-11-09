@@ -3832,9 +3832,10 @@ def test_account_page_url_is_empty_without_a_surface_or_a_value():
     assert account_page_url(request) == ACCOUNT_URL
 
 
-# The refusal table is the union of the adversarial inputs the surface's own
-# realm-URL tests and apollo-desktop's OpenInBrowser / hub-URL tests use, so the
-# two products hold a link to the same bar. Each row: (value, reason fragment).
+# The refusal table draws on the adversarial inputs the surface's own realm-URL
+# tests use, plus the cases a footer href invites: other schemes, credentials,
+# cleartext and loopback lookalikes, and hidden characters. Each row:
+# (value, reason fragment).
 UNUSABLE_LINKS = [
     # Scheme
     ("javascript:alert(1)", "http"),

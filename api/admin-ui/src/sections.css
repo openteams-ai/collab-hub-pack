@@ -1,198 +1,215 @@
-/* Section chrome: nav buttons, tables, figures and refusal copy.
+/* The pieces the screens are built from: summary cards, tables in a card,
+   badges, filter tabs, fields and buttons, the switch, and the side drawer. */
 
-   Tables and stat cards follow `routers/usage.py` PAGE_STYLE, which is the
-   existing dashboard in this repository: muted uppercase headers, hairline
-   row rules, tabular numerals, and a row of bordered cards for the totals. */
+/* --- Summary cards (Overview) and figures (Hub usage) --------------------- */
 
-.navlink {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  width: 100%;
-  text-align: left;
-  font: inherit;
-  background: none;
-  border: 0;
-  padding: 0.4rem 0.6rem;
-  border-radius: 6px;
-  color: var(--ink);
-  cursor: pointer;
-}
+.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 
-.navlink:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); }
-
-/* The icon follows the label's colour, including when a row is current, so a
-   section never reads as half-selected. */
-.nav svg { flex: none; color: var(--ink-soft); }
-.navlink.current svg { color: var(--accent); }
-.nav a:hover svg, .navlink:hover svg { color: var(--ink); }
-
-.navlink.current {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.main table {
-  border-collapse: collapse;
-  width: 100%;
-  margin: 1.25rem 0 2rem;
-  font-size: 0.9rem;
-}
-
-.main th,
-.main td {
-  text-align: left;
-  padding: 0.5rem 0.6rem 0.5rem 0;
-  border-bottom: 1px solid var(--line);
-}
-
-.main th {
-  font-size: 0.8rem;
-  color: var(--ink-soft);
-  font-weight: 600;
-}
-
-.main td.num, .main th.num { text-align: right; font-variant-numeric: tabular-nums; }
-.main h3 { font-size: 1.05rem; margin: 2rem 0 0.75rem; }
-
-.bad { color: var(--warn); }
-.empty { color: var(--ink-soft); padding: 1rem 0; }
-
-button.link {
-  font: inherit;
-  background: none;
-  border: 0;
-  padding: 0;
-  color: var(--accent);
-  cursor: pointer;
-  text-decoration: underline;
-}
-
-button.link:disabled { color: var(--ink-soft); cursor: default; text-decoration: none; }
-
-.panel {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 1.25rem 1.5rem;
-  max-width: 52rem;
-  margin-top: 1.5rem;
-}
-
-.panel table { margin-bottom: 0; }
-.panel h3 { margin-top: 0; }
-
-/* The totals row, matching the usage dashboard's cards. Fixed type size, so a
-   figure that has not changed does not appear to change when one beside it
-   grows. */
-.figures { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 1.25rem 0 0.5rem; }
-
-.figures div {
-  position: relative;
+.card {
   display: flex;
   flex-direction: column;
+  gap: 10px;
+  padding: 20px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0.75rem 1rem;
-  min-width: 11rem;
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  text-align: left;
+  color: inherit;
 }
 
-/* Top-right, out of the reading path: the number is what this box is for, and
-   the icon is a landmark for finding the right box again. */
-.figure-icon {
-  position: absolute;
-  top: 0.75rem;
-  right: 0.9rem;
+/* The overview cards open their section, so the whole card is the button. */
+button.card { cursor: pointer; }
+button.card:hover { border-color: var(--accent-line); }
+
+.card-head { display: flex; align-items: center; gap: 10px; font-weight: 500; color: var(--ink); }
+
+/* The icon sits on a tile of the brand tint, so a row of cards reads as a set. */
+.tile {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+
+.card-figure { font-size: 14px; line-height: 20px; font-weight: 600; color: var(--ink); }
+.card-detail { font-size: 12px; line-height: 18px; color: var(--ink-soft); }
+
+/* Hub usage: the number is the point, so it is set large under its tile. */
+.card .big { font-size: 24px; line-height: 30px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.figure-card { gap: 8px; padding: 16px; }
+
+/* --- Tables, each in its own card ---------------------------------------- */
+
+.table-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.table-card table { width: 100%; border-collapse: collapse; }
+
+.table-card th {
+  padding: 10px 20px;
+  background: var(--subtle);
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 600;
   color: var(--ink-soft);
 }
 
-.figure { font-size: 1.75rem; font-weight: 600; line-height: 1.15; font-variant-numeric: tabular-nums; }
-.figures span:last-child { color: var(--ink-soft); font-size: 0.85rem; }
-
-/* A mark and its name on one line, aligned on the text rather than the box, so
-   rows of differing name length still read as a column. */
-/* One box for every mark, whatever it is made of: an inline path and a bitmap
-   have different intrinsic sizes, and letting each size itself is what made
-   one logo look smaller than its neighbours. */
-.named { display: inline-flex; align-items: center; gap: 0.6rem; }
-.named > svg,
-.named > .brand-image {
-  flex: none;
-  width: 1.15rem;
-  height: 1.15rem;
-  object-fit: contain;
+.table-card td {
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  vertical-align: middle;
 }
 
-.brand-mark { color: var(--ink); }
+.table-card tr:last-child td { border-bottom: 0; }
+.table-card td.num { font-variant-numeric: tabular-nums; }
+.table-card .action { text-align: right; width: 1%; white-space: nowrap; }
 
-/* Full-colour assets, never recoloured with the surrounding text. */
+/* A person or thing and its name on one line: an avatar or mark, then text. */
+.named { display: inline-flex; align-items: center; gap: 10px; }
+.named > .stack { display: flex; flex-direction: column; }
+.named .sub { font-family: var(--font-mono); font-size: 12px; line-height: 18px; color: var(--ink-soft); }
+
+/* A brand or model mark on a small neutral square, the same size whatever it
+   is made of: an inline path and a bitmap size themselves differently. */
+.mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+}
+
+.mark > svg, .mark > .brand-image { width: 14px; height: 14px; object-fit: contain; }
+.mark.large { width: 36px; height: 36px; border-radius: var(--radius-md); }
+.mark.large > svg, .mark.large > .brand-image { width: 20px; height: 20px; }
+.brand-mark { color: var(--ink); }
 .brand-image { display: block; }
 
-/* Adding somebody: a search over the directory, then one click per person.
-   A free-text id field would let an operator grant access to a subject that
-   does not exist and only find out at the gateway. */
-.grant { margin-top: 1.5rem; max-width: 30rem; }
-.grant label { display: block; font-size: 0.8rem; color: var(--ink-soft); margin-bottom: 0.35rem; }
+.avatar.small { width: 28px; height: 28px; }
 
-.grant input {
-  font: inherit;
-  width: 100%;
-  padding: 0.45rem 0.6rem;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: transparent;
-  color: inherit;
-}
+/* --- Badges -------------------------------------------------------------- */
 
-.candidates { list-style: none; margin: 0.6rem 0 0; padding: 0; }
-
-.candidates li {
-  display: flex;
+/* A state: outlined, never filled, so a column of them does not shout. Blue
+   for what is live, ink for what is settled. */
+.status {
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.35rem 0;
-  border-bottom: 1px solid var(--line);
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-xs);
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--ink);
 }
 
-/* Issuing an invitation: one field and one button, on the same line so the
-   pair reads as a single action. */
-.invite { margin: 1.25rem 0 0.5rem; max-width: 34rem; }
-.invite label { display: block; font-size: 0.8rem; color: var(--ink-soft); margin-bottom: 0.35rem; }
-.invite-row { display: flex; gap: 0.6rem; }
+.status.live { color: var(--accent); background: var(--accent-wash); }
 
-.invite input {
-  font: inherit;
-  flex: 1;
-  padding: 0.45rem 0.6rem;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: transparent;
-  color: inherit;
-}
-
-/* Several fields in one form: each label after a row stands off from it. */
-.invite .invite-row + label { margin-top: 0.9rem; }
-/* The organization picker takes the row; the role picker beside it keeps to
-   its own width. */
-.invite .invite-pick { flex: 1; }
-.invite .invite-pick select { width: 100%; }
-.invite .rolepick select { padding-top: 0.45rem; padding-bottom: 0.45rem; }
-
-/* A heading with its filter on the same line: the list's title on the left,
-   what narrows it on the right. */
-.listing-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: 2rem 0 0.75rem; }
-.listing-head h3 { margin: 0; }
-
-button.primary {
-  font: inherit;
-  background: var(--accent);
-  color: var(--on-accent);
+/* A soft label: which group gates a model, a model a group gates. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+  color: var(--body);
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
   border: 0;
-  border-radius: 6px;
-  padding: 0.45rem 0.9rem;
+  white-space: nowrap;
+}
+
+.pill.brand { background: var(--accent-tint); color: var(--accent); }
+button.pill { cursor: pointer; }
+button.pill:hover { outline: 1px solid var(--accent-line); }
+
+/* --- Filter tabs, search and the toolbar that holds them ---------------- */
+
+.toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.toolbar h3 { margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; color: var(--ink); }
+.toolbar-end { display: flex; align-items: center; gap: 12px; }
+
+.tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-md);
+  background: var(--muted);
+}
+
+.tabs button {
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--body);
   cursor: pointer;
   white-space: nowrap;
+}
+
+.tabs button[aria-pressed="true"] {
+  background: var(--raised);
+  border-color: var(--line-soft);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 320px;
+  max-width: 100%;
+}
+
+.search svg { position: absolute; left: 12px; color: var(--icon); pointer-events: none; }
+.search input { padding-left: 34px; width: 100%; }
+
+/* --- Fields and buttons --------------------------------------------------- */
+
+.field {
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--muted);
+  color: var(--ink);
+}
+
+.field::placeholder { color: var(--faint); }
+.field:focus { outline: none; border-color: var(--accent-line); background: var(--surface); }
+
+.form-label { display: block; font-weight: 500; color: var(--ink); margin-bottom: 8px; }
+.form-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.form-row .grow { flex: 1; min-width: 14rem; }
+
+button.primary, a.primary {
+  height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
 }
 
 /* Explicit colours rather than `opacity`. Fading the whole button also fades
@@ -205,7 +222,48 @@ button.primary:disabled {
   cursor: default;
 }
 
+button.secondary {
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+/* A destructive action on one row: a word and a cross, in the warning colour
+   because it removes something, but without a box so a table of rows does not
+   look like a list of problems. */
+button.danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--warn);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+button.danger:disabled { color: var(--ink-soft); cursor: default; }
+
+button.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+button.link:disabled { color: var(--ink-soft); cursor: default; text-decoration: none; }
+
+.bad { color: var(--warn); }
 .good { color: var(--accent); }
+.empty { color: var(--ink-soft); }
 
 /* A label people can read only with a screen reader. The control beside it is
    understandable on sight; the name is for anyone who cannot see the row. */
@@ -231,25 +289,28 @@ button.primary:disabled {
 .rolepick { position: relative; display: inline-flex; align-items: center; }
 
 .rolepick select {
-  font: inherit;
   appearance: none;
-  padding: 0.35rem 2.1rem 0.35rem 0.7rem;
+  height: 32px;
+  padding: 0 32px 0 12px;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: transparent;
-  color: inherit;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 500;
   cursor: pointer;
 }
+
+.rolepick.field-like select { height: 36px; background: var(--muted); border-color: transparent; font-weight: 400; }
 
 .rolepick::after {
   content: "";
   position: absolute;
-  right: 0.75rem;
-  width: 0.7rem;
-  height: 0.7rem;
+  right: 12px;
+  width: 12px;
+  height: 12px;
   pointer-events: none;
   background-color: currentColor;
-  color: var(--ink-soft);
+  color: var(--icon);
   mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   mask-repeat: no-repeat;
   mask-size: contain;
@@ -258,85 +319,173 @@ button.primary:disabled {
 .rolepick select:hover { border-color: var(--ink-soft); }
 .rolepick select:disabled { color: var(--ink-soft); cursor: default; }
 
+/* --- Connectors ----------------------------------------------------------- */
+
+.rows { border: 1px solid var(--line); border-radius: var(--radius-xl); background: var(--surface); overflow: hidden; }
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.row:last-child { border-bottom: 0; }
+.row-text { flex: 1; display: flex; flex-direction: column; }
+.row-text strong { font-weight: 500; color: var(--ink); }
+.row-text span { color: var(--ink-soft); }
+.row-end { display: flex; align-items: center; gap: 16px; }
+
 /* A switch rather than a link, because the state is the point and a verb makes
    you work out which way it is currently set. `role="switch"` with
    `aria-checked` says the same thing to a screen reader that the track says
    visually. */
 .switch {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.55rem;
-  background: none;
-  border: 0;
-  padding: 0;
-  font: inherit;
-  color: var(--ink-soft);
-  cursor: pointer;
-}
-
-.switch-track {
   position: relative;
-  width: 2.1rem;
-  height: 1.2rem;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--ink) 22%, transparent);
-  transition: background 120ms ease;
   flex: none;
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--line);
+  cursor: pointer;
+  transition: background 120ms ease;
 }
 
-.switch-thumb {
+.switch::after {
+  content: "";
   position: absolute;
-  top: 0.15rem;
-  left: 0.15rem;
-  width: 0.9rem;
-  height: 0.9rem;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  background: var(--page);
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 20%);
   transition: transform 120ms ease;
 }
 
-.switch[aria-checked="true"] .switch-track { background: var(--accent); }
-.switch[aria-checked="true"] .switch-thumb { transform: translateX(0.9rem); }
-.switch[aria-checked="true"] .switch-label { color: var(--ink); }
+.switch[aria-checked="true"] { background: var(--accent); }
+.switch[aria-checked="true"]::after { transform: translateX(16px); }
 .switch:disabled { cursor: default; opacity: 0.6; }
 
 @media (prefers-reduced-motion: reduce) {
-  .switch-track, .switch-thumb { transition: none; }
+  .switch, .switch::after { transition: none; }
 }
 
-/* A badge rather than a link: revoking is a discrete action on one row, and an
-   underlined word in a table reads as navigation. Bordered rather than filled,
-   because it is destructive but not the row's main purpose -- the invitation
-   is. It picks up the warning colour only on hover, so a table of pending
-   invitations does not look like a list of problems. */
-.badge-button {
+/* --- Hub usage ------------------------------------------------------------ */
+
+/* Each organization's share of the actions, as a bar and its percentage. */
+.share { display: flex; align-items: center; gap: 10px; }
+.share-track { width: 160px; height: 6px; border-radius: 999px; background: var(--muted); overflow: hidden; }
+.share-fill { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
+.share span { color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+
+/* --- The group drawer ----------------------------------------------------- */
+
+.scrim {
+  position: fixed;
+  inset: 56px 0 0;
+  background: rgb(0 0 0 / 16%);
+  z-index: 10;
+}
+
+.drawer {
+  position: fixed;
+  top: 56px;
+  right: 0;
+  bottom: 0;
+  width: 460px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 24px;
+  background: var(--surface);
+  border-left: 1px solid var(--line-soft);
+  box-shadow: -8px 0 24px rgb(0 0 0 / 8%);
+  overflow-y: auto;
+  z-index: 11;
+}
+
+.drawer-head { display: flex; align-items: center; gap: 10px; }
+.drawer-head h3 { margin: 0; font-size: 16px; line-height: 24px; font-weight: 600; color: var(--ink); display: flex; align-items: baseline; gap: 6px; }
+.drawer-head h3 .mono { font-weight: 400; }
+.drawer-head .icon-button { margin-left: auto; }
+.drawer p { color: var(--ink-soft); }
+.drawer-section { display: flex; flex-direction: column; gap: 8px; }
+.drawer-label { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--faint); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.drawer .banner { margin-top: auto; }
+
+.member-list { border: 1px solid var(--line); border-radius: var(--radius-lg); }
+.member-list li { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.member-list li:last-child { border-bottom: 0; }
+.member-list li > span:nth-child(2) { flex: 1; }
+.member-list, .options { list-style: none; margin: 0; padding: 0; }
+
+/* Picking people: chosen ones as removable chips inside the field, then a list
+   of matches under it. */
+.combo {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 4px 12px;
+  border-radius: var(--radius-md);
+  background: var(--muted);
+}
+
+.combo > svg { color: var(--icon); flex: none; }
+.combo input { flex: 1; min-width: 8rem; border: 0; background: none; padding: 4px 0; outline: none; }
+.combo input::placeholder { color: var(--faint); }
+
+.chosen {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
-  font: inherit;
-  font-size: 0.8rem;
-  font-weight: 500;
-  line-height: 1;
-  padding: 0.35rem 0.7rem;
-  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
-  border-radius: 999px;
-  /* Filled, not hollow. The first version was muted text on a hairline rule,
-     which reads as a status label rather than something you can press. It
-     carries the warning colour at rest because revoking is destructive and
-     should look like it before you hover, not after. */
-  background: color-mix(in srgb, var(--warn) 14%, transparent);
-  color: var(--warn);
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.chosen button { display: flex; padding: 0; border: 0; background: none; color: var(--icon); cursor: pointer; }
+
+.options { border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 4px 0; }
+
+.options button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: none;
+  text-align: left;
   cursor: pointer;
 }
 
-.badge-button:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--warn) 24%, transparent);
-  border-color: var(--warn);
+.options button:hover { background: var(--subtle); }
+.drawer-actions { display: flex; justify-content: flex-end; }
+
+/* --- Paging --------------------------------------------------------------- */
+
+.pager { display: flex; gap: 12px; justify-content: flex-end; }
+
+/* --- Narrow windows ------------------------------------------------------- */
+
+@media (max-width: 1100px) {
+  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-.badge-button:disabled {
-  cursor: default;
-  color: var(--ink-soft);
-  background: none;
-  border-color: var(--line);
+@media (max-width: 760px) {
+  .cards { grid-template-columns: 1fr; }
+  .toolbar, .page-header { flex-direction: column; align-items: stretch; }
+  .table-card { overflow-x: auto; }
 }

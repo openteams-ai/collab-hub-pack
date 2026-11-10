@@ -1,9 +1,9 @@
 /* Fonts are bundled, not fetched from a font CDN: this page's
    Content-Security-Policy names no external origin, and a hub with no internet
    egress still renders the typeface it was designed in. */
-@import "@fontsource/ibm-plex-sans/400.css";
-@import "@fontsource/ibm-plex-sans/500.css";
-@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
 /* The same colours and typefaces as the admin panel, from the one file both
    import. Every @import must precede any rule, or CSS silently drops it. */
 @import "../src/tokens.css";

@@ -1,24 +1,17 @@
-import {
-  Boxes,
-  ChartColumn,
-  LayoutDashboard,
-  Mail,
-  Plug,
-  ScrollText,
-  Users as UsersIcon,
-} from "lucide-react";
-import { useState } from "react";
+import { Box, ChartNoAxesColumn, FileText, LayoutGrid, Mail, Plug, Users as UsersIcon } from "lucide-react";
+import { useEffect, useState } from "react";
 
 import { SIGNED_OUT_EVENT } from "./api";
 import { Header } from "./Header";
+import { LogoMark } from "./Logo";
+import { Overview } from "./Overview";
 import { Audit, Connectors, Invitations, Models, Usage, Users } from "./Sections";
 import { type SessionResult, loadSession } from "./session";
 import { type Theme, applyTheme, nextTheme, readTheme, storeTheme, systemPrefersDark } from "./theme";
-import { useEffect } from "react";
 
 /**
- * The panel shell: a nav, one section at a time, and the four ways this can
- * refuse.
+ * The panel shell: a grouped nav, one section at a time, and the four ways
+ * this can refuse.
  *
  * Navigation is the URL fragment rather than a routing library. The panel is
  * one screen with tabs, and a fragment gives what actually matters here -- a
@@ -26,29 +19,39 @@ import { useEffect } from "react";
  * three lines instead of a dependency.
  */
 
-type SectionKey = "overview" | "models" | "users" | "connectors" | "invitations" | "usage" | "audit";
+export type SectionKey = "overview" | "models" | "connectors" | "users" | "invitations" | "usage" | "audit";
 
 // Icons are decorative: every entry is labelled in words beside it, so they
 // carry `aria-hidden` and the label remains the accessible name.
-const SECTIONS: { id: SectionKey; label: string; Icon: typeof LayoutDashboard }[] = [
-  { id: "overview", label: "Overview", Icon: LayoutDashboard },
-  { id: "models", label: "Models and access", Icon: Boxes },
-  { id: "users", label: "Users", Icon: UsersIcon },
-  { id: "connectors", label: "Connectors", Icon: Plug },
-  { id: "invitations", label: "Invitations", Icon: Mail },
-  { id: "usage", label: "Hub usage", Icon: ChartColumn },
-  { id: "audit", label: "Audit log", Icon: ScrollText },
+const GROUPS: { label: string; sections: { id: SectionKey; label: string; Icon: typeof LayoutGrid }[] }[] = [
+  {
+    label: "Hub",
+    sections: [
+      { id: "overview", label: "Overview", Icon: LayoutGrid },
+      { id: "models", label: "Models and access", Icon: Box },
+      { id: "connectors", label: "Connectors", Icon: Plug },
+    ],
+  },
+  {
+    label: "People",
+    sections: [
+      { id: "users", label: "Users", Icon: UsersIcon },
+      { id: "invitations", label: "Invitations", Icon: Mail },
+    ],
+  },
+  {
+    label: "Activity",
+    sections: [
+      { id: "usage", label: "Hub usage", Icon: ChartNoAxesColumn },
+      { id: "audit", label: "Audit log", Icon: FileText },
+    ],
+  },
 ];
 
-const TITLES: Record<SectionKey, string> = {
-  overview: "Administration",
-  models: "Models and access",
-  users: "Users",
-  connectors: "Connectors",
-  invitations: "Invitations",
-  usage: "Hub usage",
-  audit: "Audit log",
-};
+const SECTION_IDS = GROUPS.flatMap((group) => group.sections.map((section) => section.id));
+
+/** Where "Sign in again" goes: the sign-in flow, back to this panel. */
+const SIGN_IN_URL = `../web/signin?next=${encodeURIComponent("/admin/")}`;
 
 export function App() {
   const [result, setResult] = useState<SessionResult | null>(null);
@@ -86,6 +89,11 @@ export function App() {
     setTheme(chosen);
   }
 
+  function open(id: SectionKey) {
+    window.location.hash = id;
+    setSection(id);
+  }
+
   useEffect(() => {
     let live = true;
     loadSession().then((answer) => {
@@ -102,7 +110,7 @@ export function App() {
     case "signed-out":
       // The document itself is session-gated, so arriving here means the
       // session expired between loading the page and this call.
-      return <Notice title="Your session ended" body="Reload the page to sign in again." />;
+      return <Notice title="Signed out" body="Your session on this browser has ended." signIn />;
     case "forbidden":
       return (
         <Notice
@@ -130,37 +138,39 @@ export function App() {
     <div className="app">
       <Header session={session} theme={theme} onToggleTheme={toggleTheme} />
       <div className="shell">
-        <nav className="nav">
-          <ul>
-            {SECTIONS.map((entry) => (
-              <li key={entry.id}>
-                <button
-                  type="button"
-                  className={entry.id === section ? "navlink current" : "navlink"}
-                  onClick={() => {
-                    window.location.hash = entry.id;
-                    setSection(entry.id);
-                  }}
-                >
-                  <entry.Icon size={16} strokeWidth={1.75} aria-hidden="true" />
-                  {entry.label}
-                </button>
-              </li>
-            ))}
-          </ul>
-          <footer>
-            <span className="mono">v{session.version}</span>
-          </footer>
+        <nav className="nav" aria-label="Sections">
+          {GROUPS.map((group) => (
+            <div key={group.label}>
+              <div className="nav-group">{group.label}</div>
+              <ul>
+                {group.sections.map((entry) => (
+                  <li key={entry.id}>
+                    <button
+                      type="button"
+                      className={entry.id === section ? "navlink current" : "navlink"}
+                      aria-current={entry.id === section ? "page" : undefined}
+                      onClick={() => open(entry.id)}
+                    >
+                      <entry.Icon size={16} strokeWidth={1.75} aria-hidden="true" />
+                      {entry.label}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+          <footer>v{session.version}</footer>
         </nav>
         <main className="main">
-          <h2>{TITLES[section]}</h2>
-          {section === "overview" && <Overview />}
-          {section === "models" && <Models csrfToken={session.csrf_token} />}
-          {section === "users" && <Users csrfToken={session.csrf_token} />}
-          {section === "connectors" && <Connectors csrfToken={session.csrf_token} />}
-        {section === "invitations" && <Invitations csrfToken={session.csrf_token} />}
-          {section === "usage" && <Usage />}
-          {section === "audit" && <Audit />}
+          <div className="page">
+            {section === "overview" && <Overview onOpen={open} />}
+            {section === "models" && <Models csrfToken={session.csrf_token} />}
+            {section === "connectors" && <Connectors csrfToken={session.csrf_token} />}
+            {section === "users" && <Users csrfToken={session.csrf_token} />}
+            {section === "invitations" && <Invitations csrfToken={session.csrf_token} />}
+            {section === "usage" && <Usage />}
+            {section === "audit" && <Audit />}
+          </div>
         </main>
       </div>
     </div>
@@ -171,34 +181,28 @@ function sectionFromHash(): SectionKey {
   const wanted = window.location.hash.replace(/^#/, "");
   // An unknown fragment falls back rather than rendering nothing: a stale link
   // should land somewhere useful, not on a blank panel.
-  return SECTIONS.some((entry) => entry.id === wanted) ? (wanted as SectionKey) : "overview";
+  return SECTION_IDS.includes(wanted as SectionKey) ? (wanted as SectionKey) : "overview";
 }
 
-function Overview() {
+/** A whole-window notice: the mark on the left, what happened on the right. */
+function Notice({ title, body, bad, signIn }: { title: string; body: string; bad?: boolean; signIn?: boolean }) {
   return (
-    <>
-      <p>
-        This panel manages the hub itself: which models it offers and who may use them, who its
-        users are, and which connectors are switched on.
-      </p>
-      <p>
-        Your administrator access comes from your identity provider group, checked again every time
-        you sign in. Removing you from that group removes this panel at your next sign-in.
-      </p>
-      <p>
-        Everything an administrator changes here is recorded in the audit log, including who made
-        the change and when.
-      </p>
-    </>
-  );
-}
-
-function Notice({ title, body, bad }: { title: string; body: string; bad?: boolean }) {
-  return (
-    <main className="main">
-      <div className={bad ? "notice bad" : "notice"}>
+    <main className="notice-page">
+      <div className="notice-art" aria-hidden="true">
+        <div className="notice-ring">
+          <div>
+            <LogoMark size={48} />
+          </div>
+        </div>
+      </div>
+      <div className="notice-body">
         <h2>{title}</h2>
-        <p>{body}</p>
+        <p className={bad ? "bad" : undefined}>{body}</p>
+        {signIn && (
+          <a className="primary" href={SIGN_IN_URL}>
+            Sign in again
+          </a>
+        )}
       </div>
     </main>
   );

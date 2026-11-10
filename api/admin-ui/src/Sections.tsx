@@ -1,47 +1,15 @@
-import { Activity, Building2, Users as UsersIcon, X } from "lucide-react";
+import { Activity, Building2, Search, UserRound, Users as UsersIcon, X } from "lucide-react";
 import { useState } from "react";
 
 import { ConnectorIcon, ModelIcon } from "./BrandIcon";
 import { postJson } from "./api";
+import type { Resource } from "./api";
 import { invitationNotice, organizationLabel, organizationNotice } from "./invitations";
 import { Pager, useDebounced, usePages } from "./paging";
-import type { Resource } from "./api";
+import { type UsageRange, accessLabel, shares, shortDate, sinceFor, tabLabel } from "./summaries";
+import type { AuditRow, ConnectorRow, HubUsage, InvitationRow, ModelRow, UserRow } from "./types";
+import { Failure, Loading, PageHeader, Person, Tabs } from "./ui";
 import { useResource } from "./useResource";
-
-/** Every failure this panel can show, in words an operator can act on. */
-export function Failure({ resource, subject }: { resource: Resource<unknown>; subject: string }) {
-  if (resource.state === "forbidden") {
-    return <p className="bad">This account is not allowed to see {subject}.</p>;
-  }
-  if (resource.state === "refused") {
-    return <p className="bad">That request was declined ({resource.reason}).</p>;
-  }
-  if (resource.state === "unavailable") {
-    return (
-      <p className="bad">
-        This hub cannot show {subject}: it is not configured for it ({resource.reason}).
-      </p>
-    );
-  }
-  if (resource.state === "upstream-error") {
-    return (
-      <p className="bad">
-        {subject} could not be read because another service did not answer ({resource.reason}).
-      </p>
-    );
-  }
-  return <p className="bad">Could not load {subject}.</p>;
-}
-
-function Loading({ subject }: { subject: string }) {
-  return <p>Loading {subject}…</p>;
-}
-
-interface ModelRow {
-  id: string;
-  owned_by: string | null;
-  group_path: string | null;
-}
 
 export function Models({ csrfToken }: { csrfToken: string }) {
   const [reload, setReload] = useState(0);
@@ -51,71 +19,86 @@ export function Models({ csrfToken }: { csrfToken: string }) {
   );
   const [openGroup, setOpenGroup] = useState<string | null>(null);
 
-  if (resource === null) return <Loading subject="models" />;
-  if (resource.state !== "ok") return <Failure resource={resource} subject="models" />;
+  const header = (
+    <PageHeader title="Models and access">
+      The models this hub serves, read live from the serving layer. Some are limited to a group in your identity
+      provider. Select a group to see who is in it, and to add or remove people.
+    </PageHeader>
+  );
+
+  if (resource === null) return <>{header}<Loading subject="models" /></>;
+  if (resource.state !== "ok") return <>{header}<Failure resource={resource} subject="models" /></>;
 
   const { models, catalog_error: catalogError, manageable } = resource.data;
 
   if (catalogError === "not_configured") {
     return (
-      <p>
-        This hub has no model catalogue endpoint configured, so there is nothing to show here yet.
-      </p>
+      <>
+        {header}
+        <p className="empty">This hub has no model catalogue endpoint configured, so there is nothing to show here yet.</p>
+      </>
     );
   }
   if (catalogError) {
     return (
-      <p className="bad">
-        The serving layer did not answer, so the list of models is unavailable right now. Nothing is
-        wrong with the models themselves, and nothing here has changed them.{" "}
-        <button type="button" className="link" onClick={() => setReload((n) => n + 1)}>
-          Try again
-        </button>
-      </p>
+      <>
+        {header}
+        <p className="bad">
+          The serving layer did not answer, so the list of models is unavailable right now. Nothing is wrong with the
+          models themselves, and nothing here has changed them.{" "}
+          <button type="button" className="link" onClick={() => setReload((n) => n + 1)}>
+            Try again
+          </button>
+        </p>
+      </>
     );
   }
 
   return (
     <>
-      <p>
-        These are the models this hub currently serves, read live from the serving layer.
-      </p>
-      <p>
-        Some models are limited to a group in your identity provider. Select a group to see who is
-        in it, and to add or remove people.
-      </p>
-      <table>
-        <thead>
-          <tr>
-            <th>Model</th>
-            <th>Served by</th>
-            <th>Who can use it</th>
-          </tr>
-        </thead>
-        <tbody>
-          {models.map((model) => (
-            <tr key={model.id}>
-              <td>
-                <span className="named">
-                  <ModelIcon model={model.id} />
-                  <span className="mono">{model.id}</span>
-                </span>
-              </td>
-              <td>{model.owned_by ?? "—"}</td>
-              <td>
-                {model.group_path ? (
-                  <button type="button" className="link" onClick={() => setOpenGroup(model.group_path)}>
-                    People in the <span className="mono">{model.group_path}</span> group
-                  </button>
-                ) : (
-                  "Everyone who can sign in"
-                )}
-              </td>
+      {header}
+      <div className="table-card">
+        <table>
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th>Served by</th>
+              <th>Who can use it</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-      {openGroup && <GroupMembers groupPath={openGroup} csrfToken={csrfToken} manageable={manageable} />}
+          </thead>
+          <tbody>
+            {models.map((model) => (
+              <tr key={model.id}>
+                <td>
+                  <span className="named">
+                    <span className="mark">
+                      <ModelIcon model={model.id} />
+                    </span>
+                    <span className="mono">{model.id}</span>
+                  </span>
+                </td>
+                <td>{model.owned_by ?? "—"}</td>
+                <td>
+                  {model.group_path ? (
+                    <GroupPill groupPath={model.group_path} onOpen={() => setOpenGroup(model.group_path)} />
+                  ) : (
+                    <span className="pill">Everyone who can sign in</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {openGroup && (
+        <GroupDrawer
+          groupPath={openGroup}
+          gates={models.filter((model) => model.group_path === openGroup).map((model) => model.id)}
+          csrfToken={csrfToken}
+          manageable={manageable}
+          onClose={() => setOpenGroup(null)}
+        />
+      )}
     </>
   );
 }
@@ -126,14 +109,33 @@ interface Member {
   email: string | null;
 }
 
-function GroupMembers({
+function people(count: number): string {
+  return `${count} ${count === 1 ? "person" : "people"}`;
+}
+
+/** The group that gates a model, with its size once the directory has answered. */
+function GroupPill({ groupPath, onOpen }: { groupPath: string; onOpen: () => void }) {
+  const members = useResource<{ members: Member[] }>(`api/model-access?group_path=${encodeURIComponent(groupPath)}`);
+  const size = members?.state === "ok" ? ` · ${people(members.data.members.length)}` : "";
+  return (
+    <button type="button" className="pill brand" onClick={onOpen}>
+      {groupPath} group{size}
+    </button>
+  );
+}
+
+function GroupDrawer({
   groupPath,
+  gates,
   csrfToken,
   manageable,
+  onClose,
 }: {
   groupPath: string;
+  gates: string[];
   csrfToken: string;
   manageable: boolean;
+  onClose: () => void;
 }) {
   const [reload, setReload] = useState(0);
   const resource = useResource<{ group_path: string; members: Member[] }>(
@@ -143,121 +145,179 @@ function GroupMembers({
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [chosen, setChosen] = useState<UserRow[]>([]);
   const searched = useDebounced(query.trim(), 300);
   const candidates = useResource<{ users: UserRow[] }>(
     searched.length >= 2 ? `api/users?query=${encodeURIComponent(searched)}` : "",
   );
 
+  const members = resource?.state === "ok" ? resource.data.members : [];
+
   async function change(action: "grant" | "revoke", person: { id: string; email: string | null }) {
-    setBusy(true);
-    setProblem(null);
     const result = await postJson(
       "api/model-access",
       { user_id: person.id, group_path: groupPath, action, user_label: person.email },
       csrfToken,
     );
-    setBusy(false);
-    if (result.state === "ok") {
-      setQuery("");
-      setReload((n) => n + 1);
-    } else {
-      setProblem("That change did not go through. Nothing was altered.");
-    }
+    return result.state === "ok";
   }
 
   async function revoke(member: Member) {
-    await change("revoke", member);
+    setBusy(true);
+    setProblem(null);
+    if (!(await change("revoke", member))) setProblem("That change did not go through. Nothing was altered.");
+    setBusy(false);
+    setReload((n) => n + 1);
   }
 
-  if (resource === null) return <Loading subject={`members of ${groupPath}`} />;
-  if (resource.state !== "ok") return <Failure resource={resource} subject={`members of ${groupPath}`} />;
+  // One request per person, in order, stopping at the first refusal so the
+  // message can say exactly who was and was not added.
+  async function addChosen() {
+    setBusy(true);
+    setProblem(null);
+    const added: string[] = [];
+    for (const person of chosen) {
+      if (!(await change("grant", person))) {
+        const done = added.length ? ` ${added.join(", ")} ${added.length === 1 ? "was" : "were"} added.` : "";
+        setProblem(`Adding ${person.email ?? person.username} did not go through.${done}`);
+        break;
+      }
+      added.push(person.email ?? person.username);
+    }
+    setChosen((current) => current.filter((person) => !added.includes(person.email ?? person.username)));
+    setQuery("");
+    setBusy(false);
+    setReload((n) => n + 1);
+  }
+
+  const options =
+    candidates?.state === "ok"
+      ? candidates.data.users.filter(
+          (person) =>
+            !members.some((member) => member.id === person.id) && !chosen.some((picked) => picked.id === person.id),
+        )
+      : [];
 
   return (
-    <section className="panel">
-      <h3>
-        People in the <span className="mono">{groupPath}</span> group
-      </h3>
-      <p>
-        <span className="mono">{groupPath}</span> is a group in your identity provider (Keycloak).
-        Anyone in it may use the models it gates. Adding or removing somebody here changes that
-        group directly.
-      </p>
-      <p>
-        The model serving gateway enforces it, so a change here takes effect wherever people make
-        requests.
-      </p>
-      {problem && <p className="bad">{problem}</p>}
-      <table>
-        <tbody>
-          {resource.data.members.map((member) => (
-            <tr key={member.id}>
-              <td>{member.email ?? member.username ?? member.id}</td>
-              <td>
-                {manageable && (
+    <>
+      <div className="scrim" onClick={onClose} />
+      <aside className="drawer" aria-label={`The ${groupPath} group`}>
+        <div className="drawer-head">
+          <h3>
+            <span className="mono">{groupPath}</span> group
+          </h3>
+          {resource?.state === "ok" && <span className="status">{people(members.length)}</span>}
+          <button type="button" className="icon-button" onClick={onClose} title="Close" aria-label="Close">
+            <X size={16} strokeWidth={1.75} aria-hidden="true" />
+          </button>
+        </div>
+        <p>
+          A group in your identity provider (Keycloak). Anyone in it may use the models it gates. Adding or removing
+          somebody here changes that group directly, and you can only add people who already have a hub account.
+        </p>
+
+        <div className="drawer-section">
+          <span className="drawer-label">Gates</span>
+          <div className="chips">
+            {gates.map((model) => (
+              <span key={model} className="pill">
+                {model}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {manageable && (
+          <div className="drawer-section">
+            <label className="drawer-label" htmlFor="grant-search">
+              Add people
+            </label>
+            <div className="combo">
+              {chosen.length === 0 && <UserRound size={16} strokeWidth={1.75} aria-hidden="true" />}
+              {chosen.map((person) => (
+                <span key={person.id} className="chosen">
+                  {person.email ?? person.username}
                   <button
                     type="button"
-                    className="badge-button"
-                    disabled={busy}
-                    onClick={() => revoke(member)}
+                    aria-label={`Do not add ${person.email ?? person.username}`}
+                    onClick={() => setChosen((current) => current.filter((picked) => picked.id !== person.id))}
                   >
-                    <X size={13} strokeWidth={2} aria-hidden="true" />
-                    Remove
+                    <X size={12} strokeWidth={2} aria-hidden="true" />
                   </button>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {resource.data.members.length === 0 && <p className="empty">Nobody is in this group yet.</p>}
-
-      {manageable && (
-        <div className="grant">
-          <label htmlFor="grant-search">Give someone access</label>
-          <input
-            id="grant-search"
-            type="search"
-            autoComplete="off"
-            placeholder="Search people by name or address"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-          {candidates?.state === "ok" && (
-            <ul className="candidates">
-              {candidates.data.users
-                .filter((person) => !resource.data.members.some((member) => member.id === person.id))
-                .map((person) => (
+                </span>
+              ))}
+              <input
+                id="grant-search"
+                type="search"
+                autoComplete="off"
+                placeholder={chosen.length ? "" : "Add people by name or address"}
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                disabled={busy}
+              />
+            </div>
+            {query.trim().length >= 2 && options.length > 0 && (
+              <ul className="options">
+                {options.map((person) => (
                   <li key={person.id}>
-                    <span>{person.email ?? person.username}</span>
                     <button
                       type="button"
-                      className="link"
-                      disabled={busy}
-                      onClick={() => change("grant", person)}
+                      onClick={() => {
+                        setChosen((current) => [...current, person]);
+                        setQuery("");
+                      }}
                     >
-                      Add
+                      <Person email={person.email ?? person.username} />
                     </button>
                   </li>
                 ))}
+              </ul>
+            )}
+            {candidates?.state === "unavailable" && (
+              <p className="empty">This hub has no user directory configured, so there is nobody to search.</p>
+            )}
+            {chosen.length > 0 && (
+              <div className="drawer-actions">
+                <button type="button" className="primary" disabled={busy} onClick={() => void addChosen()}>
+                  Add {people(chosen.length)}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {problem && <p className="bad">{problem}</p>}
+
+        <div className="drawer-section">
+          <span className="drawer-label">Members</span>
+          {resource === null && <Loading subject={`members of ${groupPath}`} />}
+          {resource !== null && resource.state !== "ok" && (
+            <Failure resource={resource} subject={`members of ${groupPath}`} />
+          )}
+          {resource?.state === "ok" && members.length === 0 && <p className="empty">Nobody is in this group yet.</p>}
+          {members.length > 0 && (
+            <ul className="member-list">
+              {members.map((member) => (
+                <li key={member.id}>
+                  <Person email={member.email ?? member.username ?? member.id} />
+                  <span />
+                  {manageable && (
+                    <button type="button" className="danger" disabled={busy} onClick={() => void revoke(member)}>
+                      Remove
+                    </button>
+                  )}
+                </li>
+              ))}
             </ul>
           )}
-          {candidates?.state === "unavailable" && (
-            <p className="empty">
-              This hub has no user directory configured, so there is nobody to search.
-            </p>
-          )}
         </div>
-      )}
-    </section>
-  );
-}
 
-interface UserRow {
-  id: string;
-  username: string;
-  email: string | null;
-  role: string | null;
-  role_source: string | null;
+        <p className="banner">
+          The model serving gateway enforces this group, so a change takes effect wherever people make requests.
+        </p>
+      </aside>
+    </>
+  );
 }
 
 // Revokes the server refuses because nobody could administer the hub after.
@@ -267,11 +327,22 @@ const ROLE_REFUSALS: Record<string, string> = {
   not_operator: "That person no longer holds the administrator role, so there was nothing to remove.",
 };
 
+type RoleFilter = "all" | "admins" | "members";
+
 export function Users({ csrfToken }: { csrfToken: string }) {
   const [reload, setReload] = useState(0);
   const pages = usePages();
+  const [query, setQuery] = useState("");
+  const searched = useDebounced(query.trim(), 300);
+  const [filter, setFilter] = useState<RoleFilter>("all");
+  const params = [
+    pages.cursor === null ? "" : `first=${pages.cursor}`,
+    searched ? `query=${encodeURIComponent(searched)}` : "",
+  ]
+    .filter(Boolean)
+    .join("&");
   const resource = useResource<{ users: UserRow[]; manageable: boolean; next_first: number | null }>(
-    pages.cursor === null ? "api/users" : `api/users?first=${pages.cursor}`,
+    params ? `api/users?${params}` : "api/users",
     reload,
   );
   const [busy, setBusy] = useState(false);
@@ -294,149 +365,146 @@ export function Users({ csrfToken }: { csrfToken: string }) {
     setReload((n) => n + 1);
   }
 
-  if (resource === null) return <Loading subject="users" />;
-  if (resource.state !== "ok") return <Failure resource={resource} subject="users" />;
-
-  const { users, manageable } = resource.data;
+  const users = resource?.state === "ok" ? resource.data.users : [];
+  const complete = resource?.state === "ok" && resource.data.next_first === null && !pages.hasNewer;
+  const admins = users.filter((user) => user.role !== null);
+  const shown = filter === "admins" ? admins : filter === "members" ? users.filter((user) => user.role === null) : users;
 
   return (
     <>
-      <p>
-        Everyone this hub knows about, and whether they hold the administrator role here.
-      </p>
-      <p>
-        Administrator access normally comes from your identity provider group, re-checked at every
-        sign-in. A role granted on this screen is recorded as hand-administered, and stays until
-        someone removes it here.
-      </p>
+      <PageHeader title="Users">
+        Everyone this hub knows about, and whether they hold the administrator role. Roles normally come from your
+        identity provider group; one granted here stays until someone removes it. Removing a role that came from your
+        identity provider takes effect immediately. That person holds it again at their next sign-in while the group
+        still lists them.
+      </PageHeader>
+      <div className="toolbar">
+        <label className="search">
+          <Search size={16} strokeWidth={1.75} aria-hidden="true" />
+          <span className="visually-hidden">Search people</span>
+          <input
+            className="field"
+            type="search"
+            autoComplete="off"
+            placeholder="Search people"
+            value={query}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              pages.reset();
+            }}
+          />
+        </label>
+        <Tabs
+          label="Show"
+          value={filter}
+          onChange={setFilter}
+          options={[
+            { value: "all", label: tabLabel("All", users.length, complete) },
+            { value: "admins", label: tabLabel("Administrators", admins.length, complete) },
+            { value: "members", label: tabLabel("Members", users.length - admins.length, complete) },
+          ]}
+        />
+      </div>
       {problem && <p className="bad">{problem}</p>}
-      <table>
-        <thead>
-          <tr>
-            <th>Person</th>
-            <th>Username</th>
-            <th>Granted by</th>
-            <th>Role</th>
-          </tr>
-        </thead>
-        <tbody>
-          {users.map((user) => (
-            <tr key={user.id}>
-              <td>{user.email ?? user.id}</td>
-              <td className="mono">{user.username}</td>
-              <td>{ROLE_SOURCES[user.role_source ?? ""] ?? "Not an administrator"}</td>
-              <td>
-                {manageable ? (
-                  <label className="rolepick">
-                    <span className="visually-hidden">Role for {user.email ?? user.id}</span>
-                    <select
-                      value={user.role ? "operator" : "member"}
-                      disabled={busy}
-                      onChange={(event) =>
-                        changeRole(user, event.target.value === "operator" ? "grant" : "revoke")
-                      }
-                    >
-                      <option value="member">Member</option>
-                      <option value="operator">Administrator</option>
-                    </select>
-                  </label>
-                ) : (
-                  <span className="empty">{user.role ? "Administrator" : "Member"}</span>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <p className="empty">
-        Removing a role that came from your identity provider takes effect immediately. That person
-        holds it again at their next sign-in while the group still lists them.
-      </p>
-      <Pager pages={pages} next={resource.data.next_first} />
+      {resource === null && <Loading subject="users" />}
+      {resource !== null && resource.state !== "ok" && <Failure resource={resource} subject="users" />}
+      {resource?.state === "ok" && (
+        <div className="table-card">
+          <table>
+            <thead>
+              <tr>
+                <th>Person</th>
+                <th>Role</th>
+                <th>Admin access</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((user) => (
+                <tr key={user.id}>
+                  <td>
+                    <Person email={user.email ?? user.id} sub={user.username} />
+                  </td>
+                  <td>
+                    {resource.data.manageable ? (
+                      <label className="rolepick">
+                        <span className="visually-hidden">Role for {user.email ?? user.id}</span>
+                        <select
+                          value={user.role ? "operator" : "member"}
+                          disabled={busy}
+                          onChange={(event) => changeRole(user, event.target.value === "operator" ? "grant" : "revoke")}
+                        >
+                          <option value="member">Member</option>
+                          <option value="operator">Administrator</option>
+                        </select>
+                      </label>
+                    ) : (
+                      <span>{user.role ? "Administrator" : "Member"}</span>
+                    )}
+                  </td>
+                  <td>
+                    {accessLabel(user.role === null ? null : user.role_source) ? (
+                      <span className="status">{accessLabel(user.role_source)}</span>
+                    ) : (
+                      <span className="empty">—</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {shown.length === 0 && <p className="empty row">Nobody matches.</p>}
+        </div>
+      )}
+      {resource?.state === "ok" && <Pager pages={pages} next={resource.data.next_first} />}
     </>
   );
 }
 
-const ROLE_SOURCES: Record<string, string> = {
-  idp: "Identity provider group",
-  manual: "An administrator here",
-};
-
-interface ConnectorRow {
-  key: string;
-  label: string;
-  configured: boolean;
-  credential: string | null;
-  probeable: boolean;
-  enabled: boolean;
+function connectorLine(connector: ConnectorRow): string {
+  if (!connector.configured) return "Not set up in this deployment's configuration";
+  if (connector.credential === "broker") return "Signs in as each person, individually";
+  if (connector.credential === "static") return "Signs in as the hub itself";
+  return "Set up in this deployment's configuration";
 }
 
 export function Connectors({ csrfToken }: { csrfToken: string }) {
   const [reload, setReload] = useState(0);
-  const resource = useResource<{ connectors: ConnectorRow[]; switchable: boolean }>(
-    "api/connectors",
-    reload,
-  );
+  const resource = useResource<{ connectors: ConnectorRow[]; switchable: boolean }>("api/connectors", reload);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
 
   async function setEnabled(connector: ConnectorRow, enabled: boolean) {
     setBusy(true);
     setProblem(null);
-    const result = await postJson(
-      `api/connectors/${encodeURIComponent(connector.key)}`,
-      { enabled },
-      csrfToken,
-    );
+    const result = await postJson(`api/connectors/${encodeURIComponent(connector.key)}`, { enabled }, csrfToken);
     setBusy(false);
     if (result.state !== "ok") setProblem("That change did not go through. Nothing was altered.");
     setReload((n) => n + 1);
   }
 
-  if (resource === null) return <Loading subject="connectors" />;
-  if (resource.state !== "ok") return <Failure resource={resource} subject="connectors" />;
-
-  const { connectors, switchable } = resource.data;
-
   return (
     <>
-      <p>
-        Which outside services this hub can talk to. Most connectors sign in as each person
-        individually, so whether one works is a question per person.
-      </p>
-      <p>
-        Turning one off takes it away from everyone immediately. Credentials live in this
-        deployment's configuration, so this screen switches connectors that are already set up.
-      </p>
+      <PageHeader title="Connectors">
+        Which outside services this hub can talk to. Most sign in as each person individually, so whether one works is
+        a question per person.
+      </PageHeader>
+      <p className="banner">Turning a connector off takes it away from everyone immediately.</p>
       {problem && <p className="bad">{problem}</p>}
-      <table>
-        <thead>
-          <tr>
-            <th>Connector</th>
-            <th>Set up</th>
-            <th>Signs in as</th>
-            <th>Available</th>
-          </tr>
-        </thead>
-        <tbody>
-          {connectors.map((connector) => (
-            <tr key={connector.key}>
-              <td>
-                <span className="named">
-                  <ConnectorIcon connector={connector.key} />
-                  {connector.label}
-                </span>
-              </td>
-              <td>{connector.configured ? "Yes" : "No"}</td>
-              <td>
-                {connector.credential === "broker"
-                  ? "Each person, individually"
-                  : connector.credential === "static"
-                    ? "The hub itself"
-                    : "\u2014"}
-              </td>
-              <td>
-                {switchable && connector.configured ? (
+      {resource === null && <Loading subject="connectors" />}
+      {resource !== null && resource.state !== "ok" && <Failure resource={resource} subject="connectors" />}
+      {resource?.state === "ok" && (
+        <div className="rows">
+          {resource.data.connectors.map((connector) => (
+            <div key={connector.key} className="row">
+              <span className="mark large">
+                <ConnectorIcon connector={connector.key} />
+              </span>
+              <span className="row-text">
+                <strong>{connector.label}</strong>
+                <span>{connectorLine(connector)}</span>
+              </span>
+              <span className="row-end">
+                {resource.data.switchable && connector.configured && (
                   <button
                     type="button"
                     role="switch"
@@ -445,103 +513,111 @@ export function Connectors({ csrfToken }: { csrfToken: string }) {
                     className="switch"
                     disabled={busy}
                     onClick={() => setEnabled(connector, !connector.enabled)}
-                  >
-                    <span className="switch-track">
-                      <span className="switch-thumb" />
-                    </span>
-                    <span className="switch-label">{connector.enabled ? "On" : "Off"}</span>
-                  </button>
-                ) : (
-                  <span className="empty">{connector.configured ? "On" : "Not set up"}</span>
+                  />
                 )}
-              </td>
-            </tr>
+                {!connector.configured ? (
+                  <span className="status">Not set up</span>
+                ) : connector.enabled ? (
+                  <span className="status live">On</span>
+                ) : (
+                  <span className="status">Off</span>
+                )}
+              </span>
+            </div>
           ))}
-        </tbody>
-      </table>
+        </div>
+      )}
     </>
   );
 }
 
-interface HubUsage {
-  users_total: number;
-  events_total: number;
-  events: { event: string; count: number }[];
-  organizations: { org_id: string; users: number; events: number }[];
-}
+const RANGES: { value: UsageRange; label: string }[] = [
+  { value: "all", label: "All time" },
+  { value: "30d", label: "Last 30 days" },
+  { value: "7d", label: "Last 7 days" },
+];
 
 export function Usage() {
-  const resource = useResource<HubUsage>("api/usage");
+  const [range, setRange] = useState<UsageRange>("all");
+  // Fixed when the range is picked, so a re-render does not ask a new question.
+  const [since, setSince] = useState<string | null>(null);
+  const resource = useResource<HubUsage>(since ? `api/usage?since=${encodeURIComponent(since)}` : "api/usage");
 
-  if (resource === null) return <Loading subject="usage" />;
-  if (resource.state !== "ok") return <Failure resource={resource} subject="usage" />;
+  function pick(next: UsageRange) {
+    setRange(next);
+    setSince(sinceFor(next, new Date()));
+  }
+
+  const header = (
+    <PageHeader title="Hub usage" end={<Tabs label="Period" options={RANGES} value={range} onChange={pick} />}>
+      Activity across every organization on this hub.
+    </PageHeader>
+  );
+
+  if (resource === null) return <>{header}<Loading subject="usage" /></>;
+  if (resource.state !== "ok") return <>{header}<Failure resource={resource} subject="usage" /></>;
 
   const { users_total: users, events_total: events, organizations } = resource.data;
+  const percent = shares(organizations);
 
   return (
     <>
-      <p>Activity across every organization on this hub.</p>
-      <p>
-        Someone is counted here once they have used the hub from the desktop app or the API as a
-        member of an organization, and an organization is listed once one of its members has. The
-        Users screen lists every account the identity provider holds, including people who have
-        never used the hub, so it can show a larger number.
-      </p>
-      <div className="figures">
+      {header}
+      <div className="cards">
         <Figure Icon={UsersIcon} value={users} label="people have used this hub" />
         <Figure Icon={Activity} value={events} label="recorded actions" />
         <Figure Icon={Building2} value={organizations.length} label="organizations" />
       </div>
-      <table>
-        <thead>
-          <tr>
-            <th>Organization</th>
-            <th>People</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {organizations.map((org) => (
-            <tr key={org.org_id}>
-              <td className="mono">{org.org_id}</td>
-              <td className="mono">{org.users}</td>
-              <td className="mono">{org.events}</td>
+      <p className="empty">
+        Someone is counted once they have used the hub from the desktop app or the API as a member of an organization.
+        The Users screen lists every account the identity provider holds, so it can show a larger number. The period
+        bounds the actions; the people count is always current.
+      </p>
+      <div className="table-card">
+        <table>
+          <thead>
+            <tr>
+              <th>Organization</th>
+              <th>People</th>
+              <th>Actions</th>
+              <th>Share of actions</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {organizations.map((org, index) => (
+              <tr key={org.org_id}>
+                <td className="mono">{org.org_id}</td>
+                <td className="num">{org.users}</td>
+                <td className="num">{org.events}</td>
+                <td>
+                  <span className="share">
+                    <span className="share-track">
+                      <span className="share-fill" style={{ width: `${percent[index]}%` }} />
+                    </span>
+                    <span>{percent[index]}%</span>
+                  </span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {organizations.length === 0 && <p className="empty row">Nothing recorded in this period.</p>}
+      </div>
     </>
   );
 }
 
-/** One total. The icon is decorative; the label beside it is the real name. */
-function Figure({
-  Icon,
-  value,
-  label,
-}: {
-  Icon: typeof UsersIcon;
-  value: number;
-  label: string;
-}) {
+/** One total. The icon is decorative; the label beneath it is the real name. */
+function Figure({ Icon, value, label }: { Icon: typeof UsersIcon; value: number; label: string }) {
   return (
-    <div>
-      <Icon className="figure-icon" size={16} strokeWidth={1.75} aria-hidden="true" />
-      <span className="figure mono">{value}</span>
-      <span>{label}</span>
+    <div className="card figure-card">
+      <span className="tile">
+        <Icon size={16} strokeWidth={1.75} aria-hidden="true" />
+      </span>
+      <span className="big">{value}</span>
+      <span className="card-detail">{label}</span>
     </div>
   );
-}
-
-interface InvitationRow {
-  id: string;
-  email: string;
-  status: string;
-  created_at: string | null;
-  expires_at: string | null;
-  org_id: string | null;
-  organization: string | null;
-  role: string;
 }
 
 interface OrganizationRow {
@@ -556,14 +632,17 @@ const NOT_CHOSEN = "";
 /** The picker's value that opens the create-an-organization row. */
 const CREATE_ORGANIZATION = "__create__";
 
+type StatusFilter = "all" | "pending" | "revoked";
+
 export function Invitations({ csrfToken }: { csrfToken: string }) {
   const [reload, setReload] = useState(0);
   const [organizationsReload, setOrganizationsReload] = useState(0);
-  const [shown, setShown] = useState("");
+  const [shownOrg, setShownOrg] = useState("");
+  const [status, setStatus] = useState<StatusFilter>("all");
   const pages = usePages();
   const query = [
     pages.cursor === null ? "" : `offset=${pages.cursor}`,
-    shown === "" ? "" : `org_id=${encodeURIComponent(shown)}`,
+    shownOrg === "" ? "" : `org_id=${encodeURIComponent(shownOrg)}`,
   ]
     .filter(Boolean)
     .join("&");
@@ -583,7 +662,8 @@ export function Invitations({ csrfToken }: { csrfToken: string }) {
   const known = organizations?.state === "ok" ? organizations.data.organizations : [];
   // Every invitation names an organization. With none to choose from yet the
   // picker opens on creating one, which is the only thing to do.
-  const picked = target === NOT_CHOSEN && organizations?.state === "ok" && known.length === 0 ? CREATE_ORGANIZATION : target;
+  const picked =
+    target === NOT_CHOSEN && organizations?.state === "ok" && known.length === 0 ? CREATE_ORGANIZATION : target;
   const creating = picked === CREATE_ORGANIZATION;
   const intoExisting = picked !== NOT_CHOSEN && !creating;
 
@@ -632,19 +712,26 @@ export function Invitations({ csrfToken }: { csrfToken: string }) {
     setReload((n) => n + 1);
   }
 
+  const invitations = resource?.state === "ok" ? resource.data.invitations : [];
+  const complete = resource?.state === "ok" && resource.data.next_offset === null && !pages.hasNewer;
+  const count = (wanted: string) => invitations.filter((invitation) => invitation.status === wanted).length;
+  const shown = status === "all" ? invitations : invitations.filter((invitation) => invitation.status === status);
+
   return (
     <>
-      <p>
-        Invite people into an organization: one that exists, or one you create here first. The first
-        person you invite as an owner runs it from then on.
-      </p>
+      <PageHeader title="Invitations">
+        Invite someone into an organization: one that exists, or one you create here first. The first person you
+        invite as an owner runs it from then on.
+      </PageHeader>
 
-      <form className="invite" onSubmit={send}>
-        <label htmlFor="invite-organization">Organization</label>
-        <div className="invite-row">
-          <span className="rolepick invite-pick">
+      <form onSubmit={send}>
+        <label className="form-label" htmlFor="invite-email">
+          Invite someone
+        </label>
+        <div className="form-row">
+          <span className="rolepick field-like">
             <select
-              id="invite-organization"
+              aria-label="Organization"
               value={picked}
               onChange={(event) => setTarget(event.target.value)}
               disabled={busy}
@@ -660,48 +747,17 @@ export function Invitations({ csrfToken }: { csrfToken: string }) {
               <option value={CREATE_ORGANIZATION}>Create an organization…</option>
             </select>
           </span>
-        </div>
-        {organizations?.state === "ok" || organizations === null ? null : (
-          <Failure resource={organizations} subject="the organizations" />
-        )}
-
-        {creating && (
-          <>
-            <label htmlFor="invite-organization-name">Organization name</label>
-            <div className="invite-row">
-              <input
-                id="invite-organization-name"
-                type="text"
-                autoComplete="off"
-                placeholder="Acme Labs"
-                value={newName}
-                onChange={(event) => setNewName(event.target.value)}
-                disabled={busy}
-              />
-              <button
-                type="button"
-                className="primary"
-                disabled={busy || !newName.trim()}
-                onClick={() => void createOrganization()}
-              >
-                Create organization
-              </button>
-            </div>
-          </>
-        )}
-
-        <label htmlFor="invite-email">Email address</label>
-        <div className="invite-row">
           <input
             id="invite-email"
+            className="field grow"
             type="email"
             autoComplete="off"
-            placeholder="person@example.com"
+            placeholder="Enter email address"
             value={email}
             onChange={(event) => setEmail(event.target.value)}
             disabled={busy}
           />
-          <span className="rolepick">
+          <span className="rolepick field-like">
             <select
               aria-label="Role in the organization"
               value={role}
@@ -713,108 +769,156 @@ export function Invitations({ csrfToken }: { csrfToken: string }) {
             </select>
           </span>
           <button type="submit" className="primary" disabled={busy || !intoExisting || !address}>
-            Send invitation
+            Invite
           </button>
         </div>
+        {organizations?.state === "ok" || organizations === null ? null : (
+          <Failure resource={organizations} subject="the organizations" />
+        )}
       </form>
+
+      {creating && (
+        <div>
+          <label className="form-label" htmlFor="invite-organization-name">
+            New organization
+          </label>
+          <div className="form-row">
+            <input
+              id="invite-organization-name"
+              className="field grow"
+              type="text"
+              autoComplete="off"
+              placeholder="Organization name"
+              value={newName}
+              onChange={(event) => setNewName(event.target.value)}
+              disabled={busy}
+            />
+            <button
+              type="button"
+              className="primary"
+              disabled={busy || !newName.trim()}
+              onClick={() => void createOrganization()}
+            >
+              Create organization
+            </button>
+          </div>
+        </div>
+      )}
 
       {notice && <p className={notice.bad ? "bad" : "good"}>{notice.text}</p>}
 
-      <div className="listing-head">
+      <div className="toolbar">
         <h3>Issued invitations</h3>
-        <span className="rolepick">
-          <select
-            aria-label="Show invitations for"
-            value={shown}
-            onChange={(event) => {
-              setShown(event.target.value);
-              pages.reset();
-            }}
-          >
-            <option value="">All organizations</option>
-            {known.map((org) => (
-              <option key={org.id} value={org.id}>
-                {org.name ?? "Unnamed organization"}
-              </option>
-            ))}
-          </select>
-        </span>
+        <div className="toolbar-end">
+          {known.length > 1 && (
+            <span className="rolepick">
+              <select
+                aria-label="Show invitations for"
+                value={shownOrg}
+                onChange={(event) => {
+                  setShownOrg(event.target.value);
+                  pages.reset();
+                }}
+              >
+                <option value="">All organizations</option>
+                {known.map((org) => (
+                  <option key={org.id} value={org.id}>
+                    {org.name ?? "Unnamed organization"}
+                  </option>
+                ))}
+              </select>
+            </span>
+          )}
+          <Tabs
+            label="Show"
+            value={status}
+            onChange={setStatus}
+            options={[
+              { value: "all", label: tabLabel("All", invitations.length, complete) },
+              { value: "pending", label: tabLabel("Pending", count("pending"), complete) },
+              { value: "revoked", label: tabLabel("Revoked", count("revoked"), complete) },
+            ]}
+          />
+        </div>
       </div>
-      <InvitationList resource={resource} busy={busy} onRevoke={revoke} />
+      <InvitationList resource={resource} shown={shown} busy={busy} onRevoke={revoke} />
       {resource?.state === "ok" && <Pager pages={pages} next={resource.data.next_offset} />}
     </>
   );
 }
 
+const STATUS_LABELS: Record<string, string> = {
+  pending: "Pending",
+  accepted: "Accepted",
+  revoked: "Revoked",
+  expired: "Expired",
+};
+
 function InvitationList({
   resource,
+  shown,
   busy,
   onRevoke,
 }: {
   resource: Resource<{ invitations: InvitationRow[]; next_offset: number | null }> | null;
+  shown: InvitationRow[];
   busy: boolean;
   onRevoke: (invitation: InvitationRow) => void;
 }) {
   if (resource === null) return <Loading subject="invitations" />;
   if (resource.state !== "ok") return <Failure resource={resource} subject="invitations" />;
-
-  const { invitations } = resource.data;
-  if (invitations.length === 0) {
+  if (resource.data.invitations.length === 0) {
     return <p className="empty">No invitations have been issued on this deployment yet.</p>;
   }
 
   return (
-    <table>
-      <thead>
-        <tr>
-          <th>Invited</th>
-          <th>Organization</th>
-          <th>Role</th>
-          <th>State</th>
-          <th>Expires</th>
-          <th />
-        </tr>
-      </thead>
-      <tbody>
-        {invitations.map((invitation) => (
-          <tr key={invitation.id}>
-            <td>{invitation.email}</td>
-            <td>
-              {invitation.org_id === null
-                ? "New, created when they accept"
-                : (invitation.organization ?? "Unnamed organization")}
-            </td>
-            <td>{invitation.role}</td>
-            <td>{invitation.status}</td>
-            <td className="mono">{invitation.expires_at?.slice(0, 10) ?? "—"}</td>
-            <td>
-              {invitation.status === "pending" && (
-                <button
-                  type="button"
-                  className="badge-button"
-                  disabled={busy}
-                  onClick={() => onRevoke(invitation)}
-                >
-                  <X size={13} strokeWidth={2} aria-hidden="true" />
-                  Revoke
-                </button>
-              )}
-            </td>
+    <div className="table-card">
+      <table>
+        <thead>
+          <tr>
+            <th>Invited</th>
+            <th>Organization</th>
+            <th>Role</th>
+            <th>State</th>
+            <th>Expires</th>
+            <th className="action">
+              <span className="visually-hidden">Actions</span>
+            </th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {shown.map((invitation) => (
+            <tr key={invitation.id}>
+              <td>
+                <Person email={invitation.email} />
+              </td>
+              <td>
+                {invitation.org_id === null
+                  ? "New, created when they accept"
+                  : (invitation.organization ?? "Unnamed organization")}
+              </td>
+              <td>{invitation.role === "owner" ? "Owner" : "Member"}</td>
+              <td>
+                <span className={invitation.status === "pending" ? "status live" : "status"}>
+                  {STATUS_LABELS[invitation.status] ?? invitation.status}
+                </span>
+              </td>
+              <td>{shortDate(invitation.expires_at)}</td>
+              <td className="action">
+                {invitation.status === "pending" && (
+                  <button type="button" className="danger" disabled={busy} onClick={() => onRevoke(invitation)}>
+                    <X size={14} strokeWidth={2} aria-hidden="true" />
+                    Revoke
+                  </button>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {shown.length === 0 && <p className="empty row">None in this view.</p>}
+    </div>
   );
-}
-
-interface AuditRow {
-  id: number;
-  at: string;
-  actor: string;
-  actor_label: string | null;
-  action: string;
-  target_label: string | null;
-  target_id: string | null;
 }
 
 export function Audit() {
@@ -823,37 +927,52 @@ export function Audit() {
     pages.cursor === null ? "api/audit" : `api/audit?before_id=${pages.cursor}`,
   );
 
-  if (resource === null) return <Loading subject="the audit log" />;
-  if (resource.state !== "ok") return <Failure resource={resource} subject="the audit log" />;
+  const header = (
+    <PageHeader title="Audit log">
+      Every change an administrator has made, newest first. Entries are permanent once written.
+    </PageHeader>
+  );
+
+  if (resource === null) return <>{header}<Loading subject="the audit log" /></>;
+  if (resource.state !== "ok") return <>{header}<Failure resource={resource} subject="the audit log" /></>;
 
   const { entries, next_before_id } = resource.data;
 
   return (
     <>
-      <p>
-        Every change an administrator has made, newest first. Entries are permanent once written.
-      </p>
-      {entries.length === 0 && <p>Nothing has been recorded yet.</p>}
-      <table>
-        <thead>
-          <tr>
-            <th>When</th>
-            <th>Who</th>
-            <th>Did what</th>
-            <th>To whom</th>
-          </tr>
-        </thead>
-        <tbody>
-          {entries.map((entry) => (
-            <tr key={entry.id}>
-              <td className="mono">{entry.at.replace("T", " ").slice(0, 19)}</td>
-              <td>{entry.actor_label ?? entry.actor}</td>
-              <td className="mono">{entry.action}</td>
-              <td>{entry.target_label ?? entry.target_id ?? "—"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      {header}
+      {entries.length === 0 ? (
+        <p className="empty">Nothing has been recorded yet.</p>
+      ) : (
+        <div className="table-card">
+          <table>
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Who</th>
+                <th>Did what</th>
+                <th>To whom</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((entry) => {
+                const whom = entry.target_label ?? entry.target_id;
+                return (
+                  <tr key={entry.id}>
+                    <td className="mono">{entry.at.replace("T", " ").slice(0, 19)}</td>
+                    <td>
+                      <Person email={entry.actor_label ?? entry.actor} />
+                    </td>
+                    <td className="mono">{entry.action}</td>
+                    {/* A person gets their initials; a connector or a group is named plainly. */}
+                    <td>{whom === null ? "—" : whom.includes("@") ? <Person email={whom} /> : whom}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
       <Pager pages={pages} next={next_before_id} />
     </>
   );

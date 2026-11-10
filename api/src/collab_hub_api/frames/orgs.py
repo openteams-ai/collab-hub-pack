@@ -135,6 +135,69 @@ class ResolvedPrincipal:
     being one forgotten ``status`` check away from authority."""
 
 
+@dataclass(frozen=True)
+class OrgMember:
+    """One active member of an organization, as the membership API reports them (issue #270).
+
+    ``email`` and ``display_name`` are the ``collab_org_members`` contact
+    columns, written when the member joined (invitation acceptance, or
+    single-organization admission). They are display fields, never principals,
+    and either may be ``None``: a member is listed whether or not the hub holds
+    a label for them, so a reader of the roster never loses a member to a
+    missing name.
+    """
+
+    user_id: str
+    role: str
+    email: str | None
+    display_name: str | None
+
+
+@dataclass(frozen=True)
+class OrgRoster:
+    """An organization and its **active** members, ordered by ``user_id``.
+
+    Removed rows are not members and are not listed: a removal shows up as the
+    subject's absence from the next read.
+    """
+
+    org_id: str
+    name: str | None
+    members: tuple[OrgMember, ...]
+
+
+def _rosters_from_rows(rows) -> list[OrgRoster]:
+    """Group ``(org_id, name, user_id, role, email, display_name)`` rows, in order.
+
+    One row per active member, or one row with ``user_id`` NULL for an
+    organization with no active member (the LEFT JOIN's empty side): that
+    organization is still reported, with an empty roster, so a caller syncing
+    from the listing sees its last member leave.
+    """
+
+    rosters: list[OrgRoster] = []
+    current: tuple[str, str | None] | None = None
+    members: list[OrgMember] = []
+    for row in rows:
+        key = (row["org_id"], row["name"])
+        if current is not None and key[0] != current[0]:
+            rosters.append(OrgRoster(org_id=current[0], name=current[1], members=tuple(members)))
+            members = []
+        current = key
+        if row["user_id"] is not None:
+            members.append(
+                OrgMember(
+                    user_id=row["user_id"],
+                    role=row["role"],
+                    email=row["email"],
+                    display_name=row["display_name"],
+                )
+            )
+    if current is not None:
+        rosters.append(OrgRoster(org_id=current[0], name=current[1], members=tuple(members)))
+    return rosters
+
+
 class OrgStore(ABC):
     """The organization membership relation, as the auth path needs it."""
 
@@ -203,6 +266,29 @@ class OrgStore(ABC):
 
         raise NotImplementedError
 
+    @abstractmethod
+    def get_roster(self, org_id: str) -> OrgRoster | None:
+        """Return *org_id* and its active members, or ``None`` if no such organization exists.
+
+        The membership API's read (issue #270). Uncached, like every read here,
+        so a removal or role change committed before the call is in its answer.
+        Raises rather than degrading when the backend is unavailable: a roster
+        that silently came back empty would read as "everyone left".
+        """
+
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_rosters(self, *, after: str | None, limit: int) -> list[OrgRoster]:
+        """Return up to *limit* organizations with ids after *after*, in id order, with their active members.
+
+        Keyset pagination for a caller that syncs every organization: *after* is
+        the last ``org_id`` of the previous page, ``None`` for the first.
+        Organizations with no active member are included with an empty roster.
+        """
+
+        raise NotImplementedError
+
 
 class UnavailableOrgStore(OrgStore):
     """Store used when no shared frames Postgres is configured.
@@ -230,6 +316,12 @@ class UnavailableOrgStore(OrgStore):
     ) -> tuple[OrgMembership, bool]:
         raise OrgsUnavailableError("Organization storage is not configured")
 
+    def get_roster(self, org_id: str) -> OrgRoster | None:
+        raise OrgsUnavailableError("Organization storage is not configured")
+
+    def list_rosters(self, *, after: str | None, limit: int) -> list[OrgRoster]:
+        raise OrgsUnavailableError("Organization storage is not configured")
+
 
 class InMemoryOrgStore(OrgStore):
     """Process-local membership, for tests and single-process development.
@@ -241,6 +333,8 @@ class InMemoryOrgStore(OrgStore):
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._memberships: dict[str, OrgMembership] = {}
+        self._contacts: dict[str, tuple[str | None, str | None]] = {}
+        self._org_names: dict[str, str | None] = {}
         self._platform_roles: dict[str, tuple[str, str, str]] = {}
 
     def set_membership(
@@ -249,13 +343,53 @@ class InMemoryOrgStore(OrgStore):
         org_id: str,
         role: str = ROLE_MEMBER,
         status: str = MEMBERSHIP_ACTIVE,
+        *,
+        email: str | None = None,
+        display_name: str | None = None,
     ) -> OrgMembership:
-        """Seed or replace a membership row (dev/test only; no write API exists yet)."""
+        """Seed or replace a membership row (dev/test only; no write API exists yet).
+
+        ``email``/``display_name`` are the row's contact columns. The
+        organization exists from its first member on, as it would in Postgres
+        (where the foreign key requires it); :meth:`set_org` names it.
+        """
 
         membership = OrgMembership(user_id=user_id, org_id=org_id, role=role, status=status)
         with self._lock:
             self._memberships[user_id] = membership
+            self._contacts[user_id] = (email, display_name)
+            self._org_names.setdefault(org_id, None)
         return membership
+
+    def set_org(self, org_id: str, name: str | None = None) -> None:
+        """Seed or rename an organization row, members or not (dev/test only)."""
+
+        with self._lock:
+            self._org_names[org_id] = name
+
+    def _roster_locked(self, org_id: str) -> OrgRoster:
+        members = tuple(
+            OrgMember(
+                user_id=row.user_id,
+                role=row.role,
+                email=self._contacts.get(row.user_id, (None, None))[0],
+                display_name=self._contacts.get(row.user_id, (None, None))[1],
+            )
+            for row in sorted(self._memberships.values(), key=lambda m: m.user_id)
+            if row.org_id == org_id and row.is_active
+        )
+        return OrgRoster(org_id=org_id, name=self._org_names.get(org_id), members=members)
+
+    def get_roster(self, org_id: str) -> OrgRoster | None:
+        with self._lock:
+            if org_id not in self._org_names:
+                return None
+            return self._roster_locked(org_id)
+
+    def list_rosters(self, *, after: str | None, limit: int) -> list[OrgRoster]:
+        with self._lock:
+            page = sorted(org_id for org_id in self._org_names if after is None or org_id > after)[:limit]
+            return [self._roster_locked(org_id) for org_id in page]
 
     def get_membership(self, user_id: str) -> OrgMembership | None:
         with self._lock:
@@ -328,16 +462,17 @@ class InMemoryOrgStore(OrgStore):
         email: str | None = None,
         display_name: str | None = None,
     ) -> tuple[OrgMembership, bool]:
-        # This store has no orgs table and no email/display columns to write —
-        # membership rows are the whole model here, and the contract that
-        # matters (insert-if-absent, never update) is what the lock preserves.
-        del org_name, email, display_name
+        # The contract that matters (insert-if-absent, never update) is what
+        # the lock preserves. The organization's name applies only at its
+        # creation, as on the Postgres store.
         with self._lock:
             existing = self._memberships.get(user_id)
             if existing is not None:
                 return existing, False
             membership = OrgMembership(user_id=user_id, org_id=org_id, role=ROLE_MEMBER, status=MEMBERSHIP_ACTIVE)
             self._memberships[user_id] = membership
+            self._contacts[user_id] = (email, display_name)
+            self._org_names.setdefault(org_id, org_name)
             return membership, True
 
 
@@ -495,6 +630,57 @@ class PostgresOrgStore(OrgStore):
                 extra={"user": user_id, "org": org_id},
             )
         return membership, created
+
+    def get_roster(self, org_id: str) -> OrgRoster | None:
+        import psycopg
+
+        # One statement, so the organization row and its members are one
+        # snapshot. The membership status filter sits in the JOIN, not the
+        # WHERE, so an organization whose members were all removed still comes
+        # back -- with an empty roster -- rather than as "no such organization".
+        try:
+            with self._db.connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT o.id AS org_id, o.name, m.user_id, m.role, m.email, m.display_name
+                    FROM collab_orgs o
+                    LEFT JOIN collab_org_members m ON m.org_id = o.id AND m.status = %s
+                    WHERE o.id = %s
+                    ORDER BY m.user_id
+                    """,
+                    (MEMBERSHIP_ACTIVE, org_id),
+                ).fetchall()
+        except psycopg.errors.UndefinedTable as exc:
+            raise self._missing_schema() from exc
+        rosters = _rosters_from_rows(rows)
+        return rosters[0] if rosters else None
+
+    def list_rosters(self, *, after: str | None, limit: int) -> list[OrgRoster]:
+        import psycopg
+
+        # The page of organizations and their members in one statement: one
+        # snapshot per page. Keyset on the primary key, so a page costs the
+        # same however deep into the listing it is.
+        try:
+            with self._db.connection() as conn:
+                rows = conn.execute(
+                    """
+                    WITH page AS (
+                        SELECT id, name FROM collab_orgs
+                        WHERE %s::text IS NULL OR id > %s::text
+                        ORDER BY id
+                        LIMIT %s
+                    )
+                    SELECT p.id AS org_id, p.name, m.user_id, m.role, m.email, m.display_name
+                    FROM page p
+                    LEFT JOIN collab_org_members m ON m.org_id = p.id AND m.status = %s
+                    ORDER BY p.id, m.user_id
+                    """,
+                    (after, after, limit, MEMBERSHIP_ACTIVE),
+                ).fetchall()
+        except psycopg.errors.UndefinedTable as exc:
+            raise self._missing_schema() from exc
+        return _rosters_from_rows(rows)
 
     def get_platform_role_row(self, user_id: str) -> dict | None:
         """The stored role row, or ``None``.

@@ -651,6 +651,23 @@ include with nindent.
       name: {{ .Values.frames.serviceAccess.keycloak.existingSecret | quote }}
       key: {{ .Values.frames.serviceAccess.keycloak.clientSecretKey | quote }}
 {{- end }}
+{{- if not $indexer }}
+{{- with (dig "membershipApi" "clientIds" list (.Values.frames | default dict)) }}
+{{- /*
+  The membership API for add-on services (issue #270), on the API
+  replicas only: the indexer serves no requests. Rendered only when an
+  add-on is named: the default mounts nothing and must render nothing,
+  so an upgrade leaves an existing deployment unchanged. toJson because
+  pydantic-settings reads a list from the environment as JSON.
+*/}}
+- name: COLLAB_HUB_API__FRAMES__MEMBERSHIP_API__CLIENT_IDS
+  value: {{ . | toJson | quote }}
+{{- with (dig "membershipApi" "audience" "" ($top.Values.frames | default dict)) }}
+- name: COLLAB_HUB_API__FRAMES__MEMBERSHIP_API__AUDIENCE
+  value: {{ . | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if .Values.userDirectory.enabled }}
 - name: COLLAB_HUB_API__USER_DIRECTORY__ENABLED
   value: {{ .Values.userDirectory.enabled | quote }}

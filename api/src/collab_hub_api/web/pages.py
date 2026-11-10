@@ -144,9 +144,9 @@ def headers_for_path(path: str) -> dict[str, str]:
         # ``/admin``: the policy below forbids form submission outright, which
         # the operator invitation page could not live under.
         return ADMIN_PANEL_HEADERS
-    from .surface import ACCOUNT_PATH, HOME_PATH
+    from .surface import ACCOUNT_PATH, BILLING_PATH, HOME_PATH
 
-    if path in (HOME_PATH, ACCOUNT_PATH):
+    if path in (HOME_PATH, ACCOUNT_PATH, BILLING_PATH):
         return HOME_PAGE_HEADERS
     return _script_page_headers().get(path, PAGE_HEADERS)
 

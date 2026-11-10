@@ -41,7 +41,7 @@ from ..web.authz import (
 )
 from ..web.data_statement import data_statement_page
 from ..web.forms import FormRefused
-from ..web.home import COLLAB_MARK_SVG, HOME_STYLESHEET, account_page, home_page
+from ..web.home import COLLAB_MARK_SVG, HOME_STYLESHEET, account_page, billing_page, home_page
 from ..web.pages import (
     SECURITY_HEADERS,
     STYLE_PATH,
@@ -70,6 +70,7 @@ from ..web.session import (
 from ..web.surface import (
     ACCOUNT_PATH,
     ADMIN_INVITATIONS_PATH,
+    BILLING_PATH,
     CALLBACK_PATH,
     DATA_STATEMENT_PATH,
     HOME_ASSETS,
@@ -599,6 +600,15 @@ def make_router(
         return page_response(
             account_page(surface=surface, session=session, root_path=_root_path(request)),
             path=ACCOUNT_PATH,
+        )
+
+    @router.get(BILLING_PATH)
+    async def billing(request: Request, session: WebSession = Depends(require_web_session)) -> Response:
+        """Billing, in the account dashboard. Empty for now."""
+
+        return page_response(
+            billing_page(surface=surface, session=session, root_path=_root_path(request)),
+            path=BILLING_PATH,
         )
 
     @router.post(SIGNOUT_PATH)

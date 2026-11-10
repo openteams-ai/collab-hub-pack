@@ -28,6 +28,7 @@ from urllib.parse import quote, urlsplit
 from .session import WebSession
 from .surface import (
     ACCOUNT_PATH,
+    BILLING_PATH,
     DATA_STATEMENT_PATH,
     HOME_FONT_PATHS,
     HOME_MARK_PATH,
@@ -690,6 +691,16 @@ def _document(*, title: str, chrome: _Chrome, main: str, scripts: tuple[str, ...
 """
 
 
+# A pencil-drawn squiggle under the hero's "knows": one stroke, and a fainter
+# second pass beside it for the grain of a pencil line. Decoration only.
+_SCRIBBLE = (
+    '<svg class="scribble-line" viewBox="0 0 220 24" preserveAspectRatio="none" aria-hidden="true">'
+    '<path pathLength="1" d="M4 15c18-7 33 5 52-1s31-9 50-2 33 6 52-1 31-6 56-2"/>'
+    '<path class="grain" pathLength="1" d="M8 18c20-5 36 3 54-2s33-7 51-1 31 4 50-1 30-4 50 0"/>'
+    "</svg>"
+)
+
+
 def home_page(*, surface: WebSurface, session: WebSession | None, root_path: str = "") -> str:
     chrome = _chrome(surface, session, root_path, HOME_PATH)
     root, domain, web_client, download = chrome.root, chrome.domain, chrome.web_client, chrome.download
@@ -748,7 +759,7 @@ def home_page(*, surface: WebSurface, session: WebSession | None, root_path: str
     )
 
     main = f"""<section class="band hero">
-<h1>AI that already knows<br>how your team works.</h1>
+<h1>AI that already <span class="scribble">knows{_SCRIBBLE}</span><br>how your team works.</h1>
 <p class="lead">Collab is your team's AI workspace. Write your context down once, connect the tools you use,
 and every chat starts informed. It all runs on your organization's own hub.</p>
 <div class="hero-actions">{hero_actions}</div>
@@ -782,32 +793,66 @@ and every chat starts informed. It all runs on your organization's own hub.</p>
     return _document(title="Collab Hub", chrome=chrome, main=main, scripts=(HOME_SCRIPT_PATH,), footer=True)
 
 
+# The account dashboard's sections: path, label, icon, in sidebar order.
+_DASHBOARD = (
+    (ACCOUNT_PATH, "Account", "account"),
+    (BILLING_PATH, "Billing", "card"),
+)
+
+
+def _dashboard(*, surface: WebSurface, session: WebSession, root_path: str, current: str, title: str, body: str) -> str:
+    """The account dashboard: a sidebar of sections beside the one shown."""
+
+    chrome = _chrome(surface, session, root_path, current)
+    links = "".join(
+        f'<a class="dash-link" href="{html.escape(root_path + path)}"'
+        f"{' aria-current="page"' if path == current else ''}>{_icon(icon, 'icon-sm')}{label}</a>"
+        for path, label, icon in _DASHBOARD
+    )
+    main = (
+        '<section class="dash">'
+        f'<nav class="dash-nav" aria-label="Account">{links}</nav>'
+        f'<div class="dash-main">{body}</div>'
+        "</section>"
+    )
+    return _document(title=f"{title} · Collab Hub", chrome=chrome, main=main)
+
+
 def account_page(*, surface: WebSurface, session: WebSession, root_path: str = "") -> str:
     """The signed-in person's account, in the home page's look and theme."""
 
-    chrome = _chrome(surface, session, root_path, ACCOUNT_PATH)
+    domain = hub_domain(surface)
     identity = session.name or session.email or session.user
     rows = [("Name", html.escape(session.name or identity))]
     if session.email:
         rows.append(("Email", html.escape(session.email)))
-    rows.append(("Hub", f'<span class="mono">{html.escape(chrome.domain)}</span>'))
+    rows.append(("Hub", f'<span class="mono">{html.escape(domain)}</span>'))
     details = "".join(f"<div><dt>{label}</dt><dd>{value}</dd></div>" for label, value in rows)
+    body = f"""<div class="acct-head">{_avatar(session.user)}<div><h1>{html.escape(identity)}</h1>
+<p>Your account on {html.escape(domain)}</p></div></div>
+<dl class="acct-list">{details}</dl>
+<div class="acct-actions">
+<a class="btn primary" href="{html.escape(f"https://collab.{domain}/")}">{_mark()}Open Collab</a>
+{_signout_form(html.escape(root_path), session, "btn outline")}
+</div>"""
+    return _dashboard(
+        surface=surface, session=session, root_path=root_path, current=ACCOUNT_PATH, title="Your account", body=body
+    )
+
+
+def billing_page(*, surface: WebSurface, session: WebSession, root_path: str = "") -> str:
+    """Billing, in the account dashboard. Empty for now."""
+
     plan = (
         f'<a class="btn outline" href="{html.escape(surface.account_page_url)}">{_icon("card", "icon-sm")}'
         "Plan and billing</a>"
         if surface.account_page_url
         else ""
     )
-    main = f"""<section class="band account">
-<div class="acct-head">{_avatar(session.user)}<div><h1>{html.escape(identity)}</h1>
-<p>Your account on {html.escape(chrome.domain)}</p></div></div>
-<dl class="acct-list">{details}</dl>
-<div class="acct-actions">
-<a class="btn primary" href="{html.escape(chrome.web_client)}">{_mark()}Open Collab</a>
-{plan}{_signout_form(chrome.root, session, "btn outline")}
-</div>
-</section>"""
-    return _document(title="Your account · Collab Hub", chrome=chrome, main=main)
+    body = f"<h1>Billing</h1>{plan}"
+    return _dashboard(
+        surface=surface, session=session, root_path=root_path, current=BILLING_PATH, title="Billing", body=body
+    )
 
 
 # The Collab mark's four quadrants: shape and colour. The served mark draws
@@ -960,6 +1005,17 @@ h3 { margin: 0 0 6px; font-size: 17px; font-weight: 600; }
   border: 1px solid var(--line); border-radius: 999px; font-family: var(--font-mono); font-size: 13px; color: var(--muted);
 }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); }
+.scribble { position: relative; display: inline-block; white-space: nowrap; }
+.scribble-line {
+  position: absolute; left: -2%; bottom: -0.16em; width: 104%; height: 0.32em; overflow: visible; pointer-events: none;
+}
+.scribble-line path {
+  fill: none; stroke: var(--accent); stroke-width: 3.2px; stroke-linecap: round; stroke-linejoin: round;
+  vector-effect: non-scaling-stroke; stroke-dasharray: 1; stroke-dashoffset: 0;
+  animation: scribble 900ms 450ms cubic-bezier(.4, 0, .2, 1) both;
+}
+.scribble-line .grain { stroke-width: 1.4px; opacity: 0.45; animation-delay: 650ms; }
+@keyframes scribble { from { stroke-dashoffset: 1; } }
 .lead { text-wrap: pretty; margin: 0 auto 36px; max-width: 34em; font-size: 19px; line-height: 1.6; color: var(--muted); }
 .hero-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
 
@@ -1309,7 +1365,19 @@ h3 { margin: 0 0 6px; font-size: 17px; font-weight: 600; }
   .ubar i { animation-name: grow; animation-range: entry 60% entry 100%; }
 }
 
-.account { padding-top: 72px; padding-bottom: 96px; border-bottom: 0; }
+.dash {
+  display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 48px;
+  padding: 48px 64px 96px; align-items: start;
+}
+.dash-nav { position: sticky; top: 88px; display: grid; gap: 2px; }
+.dash-link {
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px;
+  color: var(--text); font-size: 15px; font-weight: 500; text-decoration: none;
+}
+.dash-link:hover { background: var(--panel); }
+.dash-link[aria-current="page"] { background: var(--tile); color: var(--accent); }
+.dash-main { min-width: 0; padding-top: 4px; }
+.dash-main h1 { font-size: 32px; margin: 0 0 24px; }
 .acct-head { display: flex; align-items: center; gap: 20px; margin-bottom: 40px; }
 .acct-head .avatar { width: 64px; height: 64px; }
 .acct-head h1 { margin: 0; font-size: 36px; }
@@ -1400,6 +1468,9 @@ h3 { margin: 0 0 6px; font-size: 17px; font-weight: 600; }
   .brand span, .who-name { display: none; }
   .theme-toggle { width: 44px; height: 44px; }
   .acct-list div { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .dash { grid-template-columns: minmax(0, 1fr); gap: 24px; padding: 24px 16px 64px; }
+  .dash-nav { position: static; display: flex; gap: 6px; overflow-x: auto; }
+  .dash-link { min-height: 44px; }
   .frame { border: 0; }
   .band { padding: 44px 16px; }
   .hero { padding-top: 56px; }

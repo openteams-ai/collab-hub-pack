@@ -296,3 +296,39 @@ async def test_the_hub_root_opens_the_home_page_where_the_web_pages_run(tmp_path
         response = await client.get("/")
     assert response.status_code == 303
     assert response.headers["location"] == HOME
+
+
+BILLING = "/web/account/billing"
+
+
+async def test_the_billing_page_needs_a_session(tmp_path, idp):
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        response = await client.get(BILLING)
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/web/signin")
+
+
+@pytest.mark.parametrize("path", [ACCOUNT, BILLING])
+async def test_the_account_dashboard_has_a_sidebar_with_account_and_billing(tmp_path, idp, path):
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await sign_in(client, idp, next_path=path)
+        page = await client.get(path)
+    assert page.status_code == 200
+    start = page.text.index('<nav class="dash-nav"')
+    sidebar = page.text[start : page.text.index("</nav>", start)]
+    assert link(ACCOUNT) in sidebar
+    assert link(BILLING) in sidebar
+    # The page being shown is the one marked current.
+    assert f'{link(path)} aria-current="page"' in sidebar
+    assert "<footer" not in page.text
+    assert "font-src 'self'" in page.headers["content-security-policy"]
+
+
+async def test_the_billing_page_is_empty_for_now(tmp_path, idp):
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await sign_in(client, idp, next_path=BILLING)
+        page = await client.get(BILLING)
+    assert "<h1>Billing</h1>" in page.text

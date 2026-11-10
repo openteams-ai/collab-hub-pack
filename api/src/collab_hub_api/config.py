@@ -15,6 +15,7 @@ from pydantic import (
     SecretStr,
     TypeAdapter,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -297,6 +298,9 @@ def _check_session_secret(secret: str) -> None:
         )
 
 
+_HUB_DOMAIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*")
+
+
 class WebConfig(BaseModel):
     """The server-side browser surface (issue #88).
 
@@ -366,6 +370,23 @@ class WebConfig(BaseModel):
     startup rather than shipped to every browser.
     """
 
+    desktop_download_url: str = ""
+    """Where the home page's "Download Collab" link points. Empty renders no
+    link. Same rules as ``account_page_url``."""
+    docs_url: str = ""
+    """Where the home page's "Docs" link points. Empty renders no link. Same
+    rules as ``account_page_url``."""
+
+    hub_domain: str = ""
+    """The domain the home page builds its links from: the web client at
+    ``collab.<domain>`` and Frames at ``frames.<domain>``.
+
+    Empty (the default) takes the issuer's host without its leading
+    ``keycloak.``, which is how the desktop client derives the hub address, so
+    a deployment configures nothing. Set it only where Keycloak lives
+    elsewhere.
+    """
+
     @field_validator(
         "client_id",
         "client_secret",
@@ -375,6 +396,9 @@ class WebConfig(BaseModel):
         "admin_ui_dist",
         "admin_group",
         "account_page_url",
+        "desktop_download_url",
+        "docs_url",
+        "hub_domain",
         mode="before",
     )
     @classmethod
@@ -391,9 +415,9 @@ class WebConfig(BaseModel):
 
         return value.strip() if isinstance(value, str) else value
 
-    @field_validator("account_page_url", mode="after")
+    @field_validator("account_page_url", "desktop_download_url", "docs_url", mode="after")
     @classmethod
-    def _check_account_page_url(cls, value: str) -> str:
+    def _check_link_url(cls, value: str, info: ValidationInfo) -> str:
         # Checked whether or not the surface is enabled: a value that cannot
         # be a link is a configuration error now, not when someone later
         # sets web.client_id and every signed-in page starts carrying it.
@@ -402,9 +426,18 @@ class WebConfig(BaseModel):
         reason = invalid_link_url_reason(value)
         if reason:
             raise ValueError(
-                f"web.account_page_url is unusable ({reason}), got {value!r}: set it to an"
+                f"web.{info.field_name} is unusable ({reason}), got {value!r}: set it to an"
                 " absolute https URL (http only on loopback), e.g. https://billing.example.com/account"
             )
+        return value
+
+    @field_validator("hub_domain", mode="after")
+    @classmethod
+    def _check_hub_domain(cls, value: str) -> str:
+        # The home page writes it into hrefs as https://<label>.<domain>/, so
+        # anything beyond a bare host would let it steer the link elsewhere.
+        if value and not _HUB_DOMAIN.fullmatch(value):
+            raise ValueError(f"web.hub_domain must be a bare host name such as example.org, got {value!r}")
         return value
 
     @property

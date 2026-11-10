@@ -770,6 +770,18 @@ indexer carries too: a publish source needs it, and a sweep reads it.) */}}
 - name: COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL
   value: {{ . | quote }}
 {{- end }}
+{{- with .Values.home.hubDomain }}
+- name: COLLAB_HUB_API__WEB__HUB_DOMAIN
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.home.desktopDownloadUrl }}
+- name: COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.home.docsUrl }}
+- name: COLLAB_HUB_API__WEB__DOCS_URL
+  value: {{ . | quote }}
+{{- end }}
 {{- end }}
 {{- range $name, $on := .Values.features }}
 - name: {{ printf "COLLAB_HUB_API__FEATURES__%s" ($name | upper) | quote }}

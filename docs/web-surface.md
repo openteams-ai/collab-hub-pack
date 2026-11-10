@@ -71,6 +71,9 @@ than dead-ending a signed-in operator.
 | `COLLAB_HUB_API__WEB__ADMIN_UI_DIST` | Directory holding the built admin panel. The image sets it to `/var/collab-hub-api/admin-ui-dist`. Empty, or a directory with no `index.html`, mounts no panel routes (the second case logs `admin_ui_dist_missing_index`). The panel and its `/admin/api/*` endpoints mount only on a membership-resolving deployment (`orgSource` `membership` or `single`). |
 | `COLLAB_HUB_API__WEB__ADMIN_GROUP` | Identity-provider group whose members hold the operator role, reconciled at each sign-in from the ID token's `groups` claim. Matches with or without a leading slash. Empty (default) turns sync off. Needs a groups mapper on the client so the ID token carries the claim; see [frames-operations.md](frames-operations.md#where-operator-rows-come-from-source-and-sign-in-sync). |
 | `COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL` | Optional. An external account page (plan, usage, invoices) the signed-in navigation links to as "Account". Empty (default) renders no link. Same https/loopback rule as the issuer, plus a real host, a valid port, no credentials and no control characters, checked at startup. Chart value `web.accountPageUrl`. See [the account link](#the-account-link-an-optional-extension-point). |
+| `COLLAB_HUB_API__WEB__HUB_DOMAIN` | Optional. The domain [the home page](#the-home-page-webhome) builds its links from (the web client and its Frames page at `collab.<domain>`, the API docs at `frames.<domain>`). Empty (default) takes the issuer's host without its leading `keycloak.`. A bare host name, checked at startup. Chart value `home.hubDomain`. |
+| `COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL` | Optional. The home page's desktop download link. Empty renders none. Same rules as `ACCOUNT_PAGE_URL`. Chart value `home.desktopDownloadUrl`. |
+| `COLLAB_HUB_API__WEB__DOCS_URL` | Optional. The home page's docs link. Empty renders none. Same rules as `ACCOUNT_PAGE_URL`. Chart value `home.docsUrl`. |
 
 The realm's JWKS endpoint is derived from the issuer URL — there is no
 separate JWKS setting to point somewhere else.
@@ -322,6 +325,8 @@ a protection the middleware does not itself enforce.
 | `GET /web/signed-out` | Confirmation page. |
 | `GET /web/app.css` | The shared stylesheet (documents keep `style-src 'self'`). |
 | `GET /web/collab-logo.png` | The product wordmark the server-rendered pages show (documents allow `img-src 'self'`). **Anonymous**, like the stylesheet: the sign-in and acceptance pages show it before anybody has a session. |
+| `GET /web/home` | [The Collab Hub home page](#the-home-page-webhome). **Anonymous**: signed out it offers sign-in and sign-up; signed in it shows who is signed in, the sign-out form and the hub's links. |
+| `GET /web/home.css`, `GET /web/collab-mark.svg` | The home page's stylesheet and the Collab mark (its logo and tab icon). **Anonymous**, like the stylesheet above. |
 | `GET /web/data-statement` | The data statement ([#146]): what is stored, who can see it, and the address deletion requests go to. **Anonymous** — see below. The copy lives in `web/data_statement.py` and the acceptance page renders the same constant above its accept control. Links to the two documents below. |
 | `GET /web/terms` | The canonical Terms of Service ([#95]). **Anonymous** — see below. The copy lives in `web/terms_of_service.py` as one constant; placeholder until counsel replaces it. |
 | `GET /web/privacy` | The canonical Privacy Statement ([#95]). **Anonymous** — see below. The copy lives in `web/privacy_statement.py`, same shape. |
@@ -625,6 +630,32 @@ still kept:
   API would accept. A value that renders is not yet a value that starts. The link is a same-tab navigation like every other link
   on the surface, and the page-level `no-referrer` policy keeps this origin
   out of the billing site's logs.
+
+### The home page (`/web/home`)
+
+What a person sees at the hub's address. Signed out: Sign in and Sign up
+(`/web/signin?register=1`), both returning to the page. Signed in: the
+person's name, Sign out, and one click to each of the web client
+(`https://collab.<domain>/`), Frames (`https://collab.<domain>/frames`), the desktop
+download and docs (when configured) and the account page
+(`web.account_page_url`, or the realm's own account console when unset).
+
+Every link comes from configuration, never the request: the domain from
+`web.hub_domain` or the issuer, the rest from the settings above. The page
+runs no script and has its own stylesheet; its colours are the Collab UI
+kit's, light and dark.
+
+The hub's root host reaches it through the chart's `home.rootRedirect`: an
+HTTPRoute on `home.hubDomain` matching exactly `/` and redirecting to
+`https://<api.nebariapp.hostname>/web/home`. An exact match outranks another
+app's `/` prefix on the same host (such as nebari-landing), so the root is
+taken without uninstalling it. Where another app owns a listener for the root host, the route has to
+attach to that listener: a listener for the exact host takes all of that host's
+traffic. The Nebari operator gives nebari-landing such a listener and admits
+only routes from `nebari-system`, so on those clusters set
+`home.rootRedirect.namespace: nebari-system` and name the listener in
+`home.rootRedirect.parentRefs[].sectionName`. The page itself stays on the API's host,
+where the sign-in redirect URI and the session cookie already live.
 
 ### These checks are a rollout gate, not a runtime control
 

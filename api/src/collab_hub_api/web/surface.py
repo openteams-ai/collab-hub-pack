@@ -197,6 +197,92 @@ acceptance page is: a static document, rendered from constants, reading
 nothing from the request, with nothing to act on.
 """
 
+HOME_PATH = "/web/home"
+"""The Collab Hub home page: where a person arriving at the hub's address
+lands, signed in or not. The copy and layout live in :mod:`.home`.
+
+In :data:`PUBLIC_WEB_PATHS` **by design**: its audience includes people with
+no account yet, who are offered sign-in and sign-up from it. It is anonymous
+*safely*: a GET that changes nothing, whose links come from configuration.
+With a session it also shows who is signed in and the sign-out form, read
+from the session cookie the way every page of this surface reads it.
+"""
+
+ACCOUNT_PATH = "/web/account"
+"""The signed-in person's account page, in the home page's look and theme.
+Requires a session like every route not in :data:`PUBLIC_WEB_PATHS`."""
+
+HOME_STYLE_PATH = f"{WEB_PATH_PREFIX}/home.css"
+"""The home page's stylesheet. Public like :data:`STYLE_ASSET_PATH`: the page
+it styles is shown to people with no session."""
+
+HOME_MARK_PATH = f"{WEB_PATH_PREFIX}/collab-mark.svg"
+"""The Collab mark: the home page's logo and its tab icon. Public like
+:data:`WEB_LOGO_PATH`."""
+
+HOME_FONT_FILES = (
+    "ibm-plex-sans-400.woff2",
+    "ibm-plex-sans-500.woff2",
+    "ibm-plex-sans-600.woff2",
+    "ibm-plex-sans-700.woff2",
+    "cascadia-code-400.woff2",
+    "ibm-plex-mono-400.woff2",
+)
+"""The home page's typefaces, shipped in ``web/fonts`` with their OFL licences.
+Served from this origin so the page names no font host in its CSP."""
+
+HOME_FONT_PATHS = tuple(f"{WEB_PATH_PREFIX}/fonts/{name}" for name in HOME_FONT_FILES)
+
+HOME_SHOT_FILES = tuple(
+    f"{view}-{scheme}.jpg" for view in ("frames", "hub", "hub-usage") for scheme in ("dark", "light")
+)
+"""Real screenshots of the Collab web client the home page shows, one per view
+and theme, shipped in ``web/shots``."""
+
+HOME_MODEL_LOGOS = (
+    "anthropic",
+    "openai",
+    "gemini",
+    "xai",
+    "meta",
+    "mistral",
+    "deepseek",
+    "qwen",
+    "moonshot",
+    "zai",
+    "minimax",
+    "cohere",
+    "nvidia",
+)
+"""Provider logos for the model picker, shipped in ``web/models`` (see SOURCE.txt there)."""
+
+HOME_CONNECTOR_LOGOS = ("gmail", "google-drive", "google-calendar", "slack", "github", "notion", "sharepoint")
+"""Logos of the tools Collab connects to, shipped in ``web/connectors`` (see SOURCE.txt there)."""
+
+HOME_THEME_SCRIPT_PATH = f"{WEB_PATH_PREFIX}/theme.js"
+"""The hub pages' theme switch and menus, loaded in ``<head>`` so the theme is
+set before the page draws."""
+
+HOME_SCRIPT_PATH = f"{WEB_PATH_PREFIX}/home.js"
+"""The home page's one script: the demo Collab window (model picker, mock chat).
+Served from this origin; the page's CSP allows ``script-src 'self'`` and
+nothing inline. No other page of the surface runs it or any script."""
+
+HOME_ASSETS = {
+    **{path: (f"fonts/{name}", "font/woff2") for path, name in zip(HOME_FONT_PATHS, HOME_FONT_FILES, strict=True)},
+    **{f"{WEB_PATH_PREFIX}/shots/{name}": (f"shots/{name}", "image/jpeg") for name in HOME_SHOT_FILES},
+    **{f"{WEB_PATH_PREFIX}/models/{name}.svg": (f"models/{name}.svg", "image/svg+xml") for name in HOME_MODEL_LOGOS},
+    **{
+        f"{WEB_PATH_PREFIX}/connectors/{name}.svg": (f"connectors/{name}.svg", "image/svg+xml")
+        for name in HOME_CONNECTOR_LOGOS
+    },
+    HOME_SCRIPT_PATH: ("home.js", "text/javascript; charset=utf-8"),
+    HOME_THEME_SCRIPT_PATH: ("theme.js", "text/javascript; charset=utf-8"),
+}
+"""Every file the home page loads besides its stylesheet and mark: public path
+-> (file under ``web/``, media type). Public like :data:`HOME_STYLE_PATH`: the
+page that uses them has no session."""
+
 TERMS_PATH = "/web/terms"
 """The Terms of Service (#95). The copy lives in :mod:`.terms_of_service`.
 
@@ -290,6 +376,10 @@ PUBLIC_WEB_PATHS = frozenset(
         SIGNED_OUT_PATH,
         STYLE_ASSET_PATH,
         WEB_LOGO_PATH,
+        HOME_PATH,
+        HOME_STYLE_PATH,
+        HOME_MARK_PATH,
+        *HOME_ASSETS,
         ACCEPT_PAGE_PATH,
         DATA_STATEMENT_PATH,
         TERMS_PATH,
@@ -450,6 +540,12 @@ class WebSurface:
     public_base_url: str
     account_page_url: str = ""
     """The external account page the signed-in navigation links to; empty = no link."""
+    desktop_download_url: str = ""
+    """The home page's desktop download link; empty = no link."""
+    docs_url: str = ""
+    """The home page's docs link; empty = no link."""
+    hub_domain: str = ""
+    """The domain the home page's links are built from; empty = the issuer's host without ``keycloak.``."""
 
     def __post_init__(self) -> None:
         if self.session_lifetime_seconds <= 0:
@@ -513,6 +609,9 @@ def build_web_surface(config: BaseConfig) -> WebSurface:
         session_lifetime_seconds=web.session_lifetime_seconds,
         public_base_url=web.public_base_url.strip(),
         account_page_url=web.account_page_url,
+        desktop_download_url=web.desktop_download_url,
+        docs_url=web.docs_url,
+        hub_domain=web.hub_domain,
     )
 
 

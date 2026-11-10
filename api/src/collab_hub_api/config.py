@@ -1767,15 +1767,8 @@ def build_cog_registry_serving(
         )
     serve = cogs.serve
     public_url = serve.public_url
-    web_url = config.web.public_base_url
-    if web_url and origin_authority(web_url) != serve.host:
-        # The one other place this deployment states its own external origin.
-        # Two answers means one is wrong, and a registry host that is not the
-        # API's host is one every client refuses.
-        raise RuntimeError(
-            "cogs.serve.public_url and web.public_base_url name different hosts: the Hub serves /v2/ on the "
-            "same origin as its API, and clients accept a registry credential only for that origin."
-        )
+    # web.public_base_url is not compared with public_url: the browser pages
+    # may be served on the hub's root host while /v2/ stays on the API's own.
     # Serving follows registry redirects on clients' behalf: keep signed
     # storage URLs out of the HTTP libraries' own logs. Process-wide, and
     # only here -- with serving off (indexing on or not) logging is untouched.

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import tomllib
 import urllib.parse
 
@@ -61,6 +62,19 @@ def pod_log(api, namespace: str, name: str, container: str) -> str:
     return api.get(f"/api/v1/namespaces/{namespace}/pods/{pod}/log?container={container}").text
 
 
+def wait_for_registry(host: str, within: float = 180.0) -> None:
+    """Until the registry's ``/v2/`` answers: its pod is applied beside this Job, and comes up after it."""
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            if httpx.get(f"http://{host}/v2/", timeout=5.0).status_code < 500:
+                return
+        except httpx.HTTPError as exc:
+            if time.monotonic() > deadline:
+                raise SystemExit(f"E2E FAILED: the registry {host} never answered: {exc}")
+        time.sleep(2)
+
+
 def main() -> int:
     namespace = os.environ["E2E_NAMESPACE"]
     runner_image = os.environ["E2E_RUNNER_IMAGE"]
@@ -68,6 +82,7 @@ def main() -> int:
     cache_claim = os.environ["E2E_CACHE_CLAIM"]
 
     print("== publish the fake Cog to the cluster's registry", flush=True)
+    wait_for_registry(registry_host)
     client = RegistryClient(plain_http={registry_host})
     reference = publish("/cog", f"{registry_host}/cogs/echo:e2e", client)
     print(f"published {reference}", flush=True)

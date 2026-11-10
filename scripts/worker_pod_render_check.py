@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The worker pod a rendered run controller makes: its Cog pulled by digest in an init container.
 
-    helm template t helm/collab-hub -f <values> | (cd execution && uv run python ../scripts/worker_pod_render_check.py)
+    helm template t helm/collab-hub -f <values> | PYTHONPATH=execution/src python3 scripts/worker_pod_render_check.py
 
 The chart renders the controller; the controller makes each worker's
 Deployment at run time (``KubernetesCogExecutor``). This builds that
@@ -10,7 +10,7 @@ controller would, for a Cog installed by digest, and asserts what the chart
 promises of it: an init container of the hub's image pulls the artifact at
 its pinned digest into the cache, the main container serves the package
 from there, and the cache is the claim the values name. Needs the execution
-package (run it from ``execution/``) and PyYAML.
+package on the path, its dependency httpx, and PyYAML.
 """
 
 from __future__ import annotations

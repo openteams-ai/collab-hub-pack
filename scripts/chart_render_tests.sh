@@ -95,8 +95,9 @@ check "run controller remote: the artifact cache claim and the registry credenti
   run-controller-remote-artifacts -f "$TESTDATA/run-controller-remote-artifacts.yaml"
 # The worker a remote controller makes: from the chart's rendered controller, the Deployment the executor
 # would make for an installed Cog pulls its artifact at a pinned digest in an init container.
-if (cd "$ROOT/execution" && helm_render="$($HELM template t "$CHART" -f "$TESTDATA/run-controller-remote-artifacts.yaml")" \
-    && printf '%s' "$helm_render" | uv run --quiet --with pyyaml python "$ROOT/scripts/worker_pod_render_check.py"); then
+# Needs PyYAML and httpx (the execution package's one dependency) on python3.
+if helm_render="$($HELM template t "$CHART" -f "$TESTDATA/run-controller-remote-artifacts.yaml")" \
+    && printf '%s' "$helm_render" | PYTHONPATH="$ROOT/execution/src" python3 "$ROOT/scripts/worker_pod_render_check.py"; then
   pass "run controller remote: a worker pod pulls its Cog's artifact by digest in an init container"
 else
   fail "run controller remote: a worker pod pulls its Cog's artifact by digest in an init container" "see above"

@@ -1026,8 +1026,8 @@ COLLAB_SCHEMA_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
         (
             # The installs (issue #105): each Cog pinned by digest on this
             # hub, what its install has reached (`published`, `fetched`,
-            # `bound`, `invokable`, `uninstalled`: the install machine of
-            # `collab_hub_execution.states.install`), the binding its own
+            # `bound`, `invokable`, `uninstalled`: the execution package's
+            # install machine), the binding its own
             # `resolve` produced, and the step that failed when one did. The
             # API records that an install or its removal was asked for; the
             # run controller moves it, and appends each move to the install's

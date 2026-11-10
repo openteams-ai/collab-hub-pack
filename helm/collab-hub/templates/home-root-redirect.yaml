@@ -25,8 +25,12 @@ metadata:
     {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
 spec:
   parentRefs:
+    {{- /* group and kind are the API's own defaults, written out so the
+    rendered route matches the stored one and ArgoCD does not report drift. */}}
     {{- range .Values.home.rootRedirect.parentRefs }}
-    - name: {{ .name | quote }}
+    - group: {{ .group | default "gateway.networking.k8s.io" | quote }}
+      kind: {{ .kind | default "Gateway" | quote }}
+      name: {{ .name | quote }}
       {{- with .namespace }}
       namespace: {{ . | quote }}
       {{- end }}

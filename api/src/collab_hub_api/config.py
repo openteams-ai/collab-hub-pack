@@ -1014,8 +1014,8 @@ class CogServeConfig(BaseModel):
     accepts a registry credential only when its ``registry`` is exactly the
     authority it sent the exchange to, and treats anything else as a Hub that
     does not serve installs. The chart derives it from the API's host and
-    refuses a value naming another one; the API refuses one that disagrees
-    with ``web.public_base_url`` when that is set. It is
+    refuses a value naming another one. ``web.public_base_url`` may name
+    another host: the browser pages can live on the hub's root host. It is
     configuration rather than read from the request's ``Host`` header because
     it is handed to clients three ways -- the ``registry`` of an exchanged
     credential, the bearer ``realm`` of the challenge, and the host of every

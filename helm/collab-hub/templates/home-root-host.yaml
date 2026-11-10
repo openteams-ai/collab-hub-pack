@@ -62,6 +62,9 @@ spec:
           namespace: {{ .Release.Namespace }}
           {{- end }}
           port: {{ .Values.api.service.port }}
+          {{- /* The API's default weight, written out for the same reason as
+          group and kind above. */}}
+          weight: 1
 {{- if ne $routeNamespace .Release.Namespace }}
 ---
 {{- /* The route lives in another namespace (the listener's), so the API's

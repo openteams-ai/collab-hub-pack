@@ -179,6 +179,8 @@ async def test_the_app_is_told_an_anonymous_browser_has_no_session(tmp_path, idp
         # The statement shown beside the accept button is the same constant the
         # canonical page serves, so the two can never be different texts.
         "data_statement": DATA_STATEMENT_TEXT,
+        # Drawn beside Sign out, so a browser with no session is never handed it.
+        "account_url": None,
     }
     assert "no-store" in response.headers["cache-control"]
 

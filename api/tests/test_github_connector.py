@@ -1477,10 +1477,10 @@ def _counts_handler(
     """Route POST /graphql three ways by GraphQL operation name: the enumeration
     read (ProjectRead), the aggregate count query (ProjectCounts), and the
     per-status column query (ProjectStatusCounts). fail_dsl simulates the
-    board-filter DSL being rejected by the API, so the count path falls back to
-    sampling the enumerated items. read_variables, when given a list, collects
-    the variables of every ProjectRead call so a test can assert on the page
-    size or item filter the client actually sent."""
+    board-filter DSL being rejected by the API, leaving the authoritative
+    counts unavailable (counts=None), without a sampled fallback.
+    read_variables, when given a list, collects the variables of every
+    ProjectRead call to assert the requested page size or item filter."""
     aggregates = aggregates or {}
 
     def handler(request: httpx.Request) -> Response:

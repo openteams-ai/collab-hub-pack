@@ -117,6 +117,10 @@ the next items without re-downloading the first page. `next_cursor` is `null`
 and `truncated` is `false` once the listing is exhausted; on a continued read
 `truncated` refers to what remains, not to the pages already fetched. Raise
 `max_items` (up to 500) only when the full listing is needed in one call.
+Pagination is not a snapshot of the board: if items are added, removed, or
+reordered between requests, a later page may overlap an earlier page or omit
+items. Callers that need a stable working set should deduplicate by item ID
+and refresh the listing when consistency matters.
 An optional `query` narrows the items with GitHub board filter DSL
 (e.g., `status:"In Progress"`, `assignee:octocat`). The response echoes the
 applied filter as `query` and reports `matched_count` (how many items it

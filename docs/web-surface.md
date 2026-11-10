@@ -645,17 +645,26 @@ Every link comes from configuration, never the request: the domain from
 runs no script and has its own stylesheet; its colours are the Collab UI
 kit's, light and dark.
 
-The hub's root host reaches it through the chart's `home.rootRedirect`: an
-HTTPRoute on `home.hubDomain` matching exactly `/` and redirecting to
-`https://<api.nebariapp.hostname>/web/home`. An exact match outranks another
-app's `/` prefix on the same host (such as nebari-landing), so the root is
-taken without uninstalling it. Where another app owns a listener for the root host, the route has to
-attach to that listener: a listener for the exact host takes all of that host's
-traffic. The Nebari operator gives nebari-landing such a listener and admits
-only routes from `nebari-system`, so on those clusters set
-`home.rootRedirect.namespace: nebari-system` and name the listener in
-`home.rootRedirect.parentRefs[].sectionName`. The page itself stays on the API's host,
-where the sign-in redirect URI and the session cookie already live.
+The chart's `home.rootHost` serves these pages on the hub's root host
+(`home.hubDomain`): one HTTPRoute answers `/` with a redirect to `/web/home` on
+the same host and sends `/web`, `/invite` and `/admin` to the API. Nothing else
+is routed there, so `/v1` and `/mcp` stay on the API's own host. An exact `/`
+and those prefixes outrank another app's `/` prefix on the same host (such as
+nebari-landing), so the root host is taken over without uninstalling it.
+
+Where another app owns a listener for the root host, the route has to attach
+to that listener, because a listener for the exact host takes all of that
+host's traffic. The Nebari operator gives nebari-landing such a listener and
+admits only routes from `nebari-system`, so on those clusters set
+`home.rootHost.namespace: nebari-system` and name the listener in
+`home.rootHost.parentRefs[].sectionName`. The chart then adds a ReferenceGrant
+in the API's namespace that lets that route reach the API Service, and nothing
+else.
+
+Two settings outside the chart go with it: `COLLAB_HUB_API__WEB__PUBLIC_BASE_URL`
+names the root host, so sign-in returns there and the session cookie is set
+there, and the Keycloak client registers
+`https://<home.hubDomain>/web/oidc/callback` as a redirect URI.
 
 ### These checks are a rollout gate, not a runtime control
 

@@ -61,12 +61,12 @@ check "feature flags: each entry renders as its variable" features --set feature
 check "account link: the API carries it, the indexer serves no pages" account-link-with-indexer $STATIC --set cogs.index.enabled=true --set web.accountPageUrl=https://billing.example.com/account
 check "home page: its domain and links reach the API" home-page --set home.hubDomain=example.org \
   --set home.desktopDownloadUrl=https://downloads.example.com/collab --set home.docsUrl=https://docs.example.com/collab
-ROOT_REDIRECT='--set api.nebariapp.enabled=true --set api.nebariapp.hostname=frames.example.org --set home.hubDomain=example.org'
-check "root redirect off by default: no route on the root host" no-root-redirect $ROOT_REDIRECT
-check "root redirect on: the root host's / goes to the home page" root-redirect $ROOT_REDIRECT --set home.rootRedirect.enabled=true
-check "root redirect on another app's listener: its namespace and section" root-redirect-listener $ROOT_REDIRECT --set home.rootRedirect.enabled=true \
-  --set home.rootRedirect.namespace=nebari-system --set home.rootRedirect.parentRefs[0].name=nebari-gateway \
-  --set home.rootRedirect.parentRefs[0].namespace=envoy-gateway-system --set home.rootRedirect.parentRefs[0].sectionName=tls-landing
+ROOT_HOST='--namespace nebari-nexus --set api.nebariapp.enabled=true --set api.nebariapp.hostname=frames.example.org --set home.hubDomain=example.org'
+check "root host off by default: nothing routed on the root host" no-root-host $ROOT_HOST
+check "root host on: / opens the home page, the browser pages go to the API" root-host $ROOT_HOST --set home.rootHost.enabled=true
+check "root host on another app's listener: its namespace and section, and a ReferenceGrant" root-host-listener $ROOT_HOST \
+  --set home.rootHost.enabled=true --set home.rootHost.namespace=nebari-system --set home.rootHost.parentRefs[0].name=nebari-gateway \
+  --set home.rootHost.parentRefs[0].namespace=envoy-gateway-system --set home.rootHost.parentRefs[0].sectionName=tls-landing
 refused() { # <label> <needle> <helm args...>: the chart must refuse to render, naming <needle>
   local label="$1" needle="$2" out
   shift 2
@@ -81,8 +81,8 @@ refused() { # <label> <needle> <helm args...>: the chart must refuse to render, 
 refused "feature flags: a non-boolean value is refused" "/features/cogs_ui" --set-string features.cogs_ui=maybe
 # The account link's coarse schema shape (docs/web-surface.md); the API's check
 # at startup is the authoritative one (api/tests/test_web_surface.py).
-refused "root redirect: refused without the root host" "home.rootRedirect needs home.hubDomain" \
-  --set api.nebariapp.enabled=true --set api.nebariapp.hostname=frames.example.org --set home.rootRedirect.enabled=true
+refused "root host: refused without the root host's name" "home.rootHost needs home.hubDomain" \
+  --set api.nebariapp.enabled=true --set api.nebariapp.hostname=frames.example.org --set home.rootHost.enabled=true
 refused "home page: a hub domain that is not a bare host is refused" "/home/hubDomain" --set home.hubDomain=https://example.org
 refused "home page: a javascript: docs link is refused" "/home/docsUrl" --set home.docsUrl='javascript:alert(1)'
 refused "account link: plain http to a remote host is refused" "/web/accountPageUrl" --set web.accountPageUrl=http://billing.example.com/account

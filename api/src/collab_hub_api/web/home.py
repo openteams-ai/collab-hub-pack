@@ -923,10 +923,10 @@ html { scrollbar-color: var(--line) transparent; accent-color: var(--blue); care
 .menu-head span { display: block; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
 .menu-item {
   display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px; border: 0; border-radius: 8px;
-  background: transparent; color: var(--text); font: inherit; font-size: 14px; text-align: left; text-decoration: none; cursor: pointer;
+  background: transparent; color: var(--text); font: inherit; font-size: 14px; font-weight: 500; text-align: left; text-decoration: none; cursor: pointer;
 }
 .menu-item:hover { background: var(--panel); }
-.menu-item .icon-sm { color: var(--muted); }
+.menu-item .icon-sm { color: var(--text); }
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   font: inherit; font-size: 15px; font-weight: 500; line-height: 22px;

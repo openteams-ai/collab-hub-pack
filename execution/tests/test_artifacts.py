@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import pytest
 from fake_registry import FakeRegistry
@@ -18,6 +19,7 @@ from collab_hub_execution.artifacts import (
     is_reference,
     locate,
     materialize,
+    package_files,
     publish,
     serve_command,
 )
@@ -65,6 +67,26 @@ def test_a_pinned_reference_is_parsed_and_anything_else_is_not():
         assert not is_reference(bad)
         with pytest.raises(PullError, match="not a pinned artifact reference"):
             ArtifactReference.parse(bad)
+
+
+def test_a_configmap_mount_publishes_its_files_and_none_of_its_links(tmp_path, registry):
+    """A package mounted from a ConfigMap is symbolic links into ``..data``, itself a link to a ``..<timestamp>``
+    directory: the files are published under their own names, and neither hidden directory is a layer."""
+    mount = tmp_path / "cog"
+    versioned = mount / "..2026_11_10_15_14_49.3388200455"
+    versioned.mkdir(parents=True)
+    for name, text in (("pixi.toml", MANIFEST), ("pixi.lock", "version: 6\n"), ("serve.py", "print('hi')\n"),
+                       ("COG.md", "# echo\n")):
+        (versioned / name).write_text(text)
+        (mount / name).symlink_to(Path("..data") / name)
+    (mount / "..data").symlink_to(versioned.name, target_is_directory=True)
+
+    assert [p.name for p in package_files(mount)] == ["COG.md", "pixi.lock", "pixi.toml", "serve.py"]
+    reference = publish(mount, f"{registry.host}/cogs/echo:cm", client(registry))
+    pulled = materialize(reference, tmp_path / "cache", client(registry))
+    pulled_files = sorted(p.name for p in pulled.directory.iterdir() if not p.name.startswith("."))
+    assert pulled_files == ["COG.md", "pixi.lock", "pixi.toml", "serve.py"]  # beside the puller's own marker
+    assert (pulled.directory / "pixi.toml").read_text() == MANIFEST
 
 
 def test_a_package_is_published_and_pulled_back_byte_for_byte_into_the_cache(tmp_path, registry):

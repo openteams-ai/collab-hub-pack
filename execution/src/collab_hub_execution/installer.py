@@ -148,14 +148,14 @@ class Installer:
     # --- installing --------------------------------------------------------------------------
 
     def install(self, install_id: str) -> InstallRow | None:
-        """Fetch, bind and check one install; the row after, or ``None`` when it was gone."""
+        """Fetch, bind and check one install; the row after, with what failed recorded, or ``None`` when it was gone."""
         row = self.store.get(install_id)
         if row is None:
             return None
         try:
             row = self._fetch(row)
             if row is None:
-                return None
+                return self.store.get(install_id)  # stayed published, with the failed fetch recorded
             row = self._bind(row)
             if row.machine().state is not InstallState.BOUND:
                 return row

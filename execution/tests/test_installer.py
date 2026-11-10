@@ -221,7 +221,8 @@ def test_an_artifact_the_registry_does_not_hold_or_that_is_not_runnable_is_not_f
     asked = store.create(row(missing))
     store.claim(asked.id, "one")
     done = installer(store, InMemoryCogExecutor({}), registry).install(asked.id)
-    assert done is None and store.get(asked.id).state == "published"
+    # The row comes back as recorded, so a caller sees what failed rather than nothing.
+    assert done is not None and done.state == "published" and done.failed_step == "fetch"
     assert store.get(asked.id).failed_step == "fetch" and "not in the registry" in store.get(asked.id).failure
     assert store.events(asked.id) == ()
 

@@ -591,11 +591,18 @@ def _media_type(title: str) -> str:
 
 
 def package_files(directory: Path) -> list[Path]:
-    """The files of a package directory to publish: everything but its environment and caches."""
+    """The files of a package directory to publish: everything but its environment, its caches and hidden entries.
+
+    A path with a segment the puller would refuse as a layer title (``.git``, ``.pixi``, or the ``..data``
+    and ``..<timestamp>`` entries a Kubernetes ConfigMap mount keeps beside the files it links to) is left
+    out, so what is published is what can be pulled; a file reached through a symbolic link is read as it is.
+    """
     found = []
     for path in sorted(Path(directory).rglob("*")):
         relative = path.relative_to(directory)
-        if any(part in EXCLUDED_FROM_PUBLISH for part in relative.parts) or not path.is_file():
+        if any(part in EXCLUDED_FROM_PUBLISH or not _TITLE_SEGMENT.match(part) for part in relative.parts):
+            continue
+        if not path.is_file():
             continue
         found.append(path)
     return found

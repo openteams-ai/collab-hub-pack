@@ -1282,7 +1282,7 @@
                   "additionalProperties": {
                     "type": "string"
                   },
-                  "description": "Labels on the Namespace the chart makes."
+                  "description": "Labels on the Namespace the chart makes; `pod-security.kubernetes.io/enforce: restricted` by default."
                 }
               }
             }

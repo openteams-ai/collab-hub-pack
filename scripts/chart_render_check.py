@@ -445,6 +445,7 @@ def case_run_controller_remote(r: Rendered) -> None:
     assert re.fullmatch(r"[0-9a-f]{64}", controller.annotations.get("checksum/run-models", "")), controller.annotations
     role, workers = workers_namespace_of_their_own(r, workers=f"{r.release_namespace}-workers")
     assert workers in r.namespaces, "the chart did not make the workers' namespace"
+    # The chart's own default, not a value the test adds: the namespace it makes refuses a privileged pod.
     assert r.namespaces[workers]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "restricted"
     rules = {(rule["apiGroups"][0], rule["resources"][0]): sorted(rule["verbs"]) for rule in role["rules"]}
     assert rules == {

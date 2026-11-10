@@ -466,8 +466,12 @@ runs:
   `workerNamespace.name`, `<release namespace>-workers` when empty, and never
   the release namespace (the chart refuses that). The chart makes it unless
   `workerNamespace.create: false` says it exists, with `workerNamespace.labels`
-  on it; a worker pod is what Pod Security `restricted` admits, so
-  `pod-security.kubernetes.io/enforce: restricted` holds there. The controller
+  on it, `pod-security.kubernetes.io/enforce: restricted` by default: a worker
+  pod is what `restricted` admits, and the controller's identity, which may
+  create any Deployment there, is then refused a privileged pod, a `hostPath`
+  mount or `hostNetwork`, with which it could reach the node and the Secrets
+  of every hub pod on it. With `create: false`, put that label on the
+  namespace yourself; the chart labels nothing it did not make. The controller
   reaches each worker's Service by its namespace-qualified DNS name, and each
   worker's NetworkPolicy admits the controller's pods from the release
   namespace, by the `kubernetes.io/metadata.name` label Kubernetes sets on

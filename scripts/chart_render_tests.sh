@@ -91,8 +91,7 @@ else
 fi
 # Workers in a namespace of their own (issue #253): the Role there, nothing in the release namespace.
 check "run controller remote: a Deployment of its own with the only workload Role, in the workers' namespace, the API with none" \
-  run-controller-remote -f "$TESTDATA/run-controller-remote.yaml" --namespace hub \
-  --set runs.controller.workerNamespace.labels.pod-security\\.kubernetes\\.io/enforce=restricted
+  run-controller-remote -f "$TESTDATA/run-controller-remote.yaml" --namespace hub
 check "run controller remote: a workers' namespace that exists is used, not made" \
   run-controller-remote-existing-namespace -f "$TESTDATA/run-controller-remote.yaml" --namespace hub \
   --set runs.controller.workerNamespace.name=cog-workers --set runs.controller.workerNamespace.create=false

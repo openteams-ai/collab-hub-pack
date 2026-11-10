@@ -1,34 +1,60 @@
-// The hub pages' theme and menus. Loaded in <head> without defer, so the
-// saved or system theme is on <html data-theme> before the page draws and it
-// never flashes the other one. The choice lives in this browser only.
+// The hub pages' theme, menus and dashboard sidebar. Loaded in <head> without defer, so the
+// saved or system theme is on <html data-theme>, and a folded sidebar on
+// <html data-sidebar>, before the page draws, so neither flashes. The choices
+// live in this browser only.
 (() => {
   const KEY = "collab-hub-theme";
+  const SIDEBAR_KEY = "collab-hub-sidebar";
   const root = document.documentElement;
   const system = window.matchMedia("(prefers-color-scheme: dark)");
-  const saved = () => {
+  const read = (key) => {
     try {
-      const value = localStorage.getItem(KEY);
-      return value === "light" || value === "dark" ? value : null;
+      return localStorage.getItem(key);
     } catch {
       return null;
     }
+  };
+  const write = (key, value) => {
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      // Storage refused (private window): the switch still holds for this page.
+    }
+  };
+  const saved = () => {
+    const value = read(KEY);
+    return value === "light" || value === "dark" ? value : null;
   };
   const apply = () => {
     root.dataset.theme = saved() || (system.matches ? "dark" : "light");
   };
   apply();
+  if (read(SIDEBAR_KEY) === "folded") root.dataset.sidebar = "folded";
   system.addEventListener("change", apply);
 
   document.addEventListener("DOMContentLoaded", () => {
     for (const toggle of document.querySelectorAll("[data-theme-toggle]")) {
       toggle.addEventListener("click", () => {
         const next = root.dataset.theme === "dark" ? "light" : "dark";
-        try {
-          localStorage.setItem(KEY, next);
-        } catch {
-          // Storage refused (private window): the switch still holds for this page.
-        }
+        write(KEY, next);
         root.dataset.theme = next;
+      });
+    }
+
+    // The dashboard sidebar folds to its icons and back.
+    for (const fold of document.querySelectorAll("[data-sidebar-toggle]")) {
+      const show = () => {
+        const folded = root.dataset.sidebar === "folded";
+        fold.setAttribute("aria-expanded", String(!folded));
+        fold.setAttribute("aria-label", folded ? "Expand sidebar" : "Collapse sidebar");
+      };
+      show();
+      fold.addEventListener("click", () => {
+        const folded = root.dataset.sidebar !== "folded";
+        if (folded) root.dataset.sidebar = "folded";
+        else delete root.dataset.sidebar;
+        write(SIDEBAR_KEY, folded ? "folded" : "open");
+        show();
       });
     }
 

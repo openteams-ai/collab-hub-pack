@@ -75,6 +75,7 @@ _ICON_PATHS = {
     "logout": '<path d="M9 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h3M15 16l4-4-4-4M19 12H9"/>',
     "sun": '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
     "moon": '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
+    "sidebar": '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/>',
     "card": '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18M7 15h4"/>',
     "arrow": '<path d="M5 12h14M13 6l6 6-6 6"/>',
     "shield": '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
@@ -587,7 +588,7 @@ def _chrome(surface: WebSurface, session: WebSession | None, root_path: str, bac
     nav = [f'<a href="{html.escape(web_client)}">Collab</a>', f'<a href="{html.escape(frames)}">Frames</a>']
     if docs:
         nav.append(f'<a href="{html.escape(docs)}">Docs</a>')
-    if download:
+    if download and session is None:
         nav.append(f'<a href="{html.escape(download)}">Download</a>')
 
     product_links = [("Open Collab", web_client)]
@@ -656,8 +657,19 @@ def _signout_form(root: str, session: WebSession, css_class: str) -> str:
     )
 
 
-def _document(*, title: str, chrome: _Chrome, main: str, scripts: tuple[str, ...] = (), footer: bool = False) -> str:
-    """A complete hub page: head, header, ``main`` inside the frame, footer."""
+def _document(
+    *,
+    title: str,
+    chrome: _Chrome,
+    main: str,
+    scripts: tuple[str, ...] = (),
+    footer: bool = False,
+    framed: bool = True,
+) -> str:
+    """A complete hub page: head, header, ``main``, footer. ``framed`` puts
+    ``main`` in the landing page's centred column with its side rules and
+    its section links in the header; unframed, a dashboard fills the window
+    beside its own sidebar, with the logo at the far left above it."""
 
     root = chrome.root
     tail = "".join(f'<script src="{root}{path}" defer></script>\n' for path in scripts)
@@ -676,13 +688,13 @@ def _document(*, title: str, chrome: _Chrome, main: str, scripts: tuple[str, ...
 <script src="{root}{HOME_THEME_SCRIPT_PATH}"></script>
 </head>
 <body>
-<header class="topbar"><div class="topbar-in">
+<header class="topbar"><div class="topbar-in{"" if framed else " wide"}">
 <a class="brand" href="{root}{HOME_PATH}">
 <img src="{root}{HOME_MARK_PATH}" alt="" width="28" height="28"><span>Collab Hub</span></a>
-<nav class="nav">{chrome.nav}</nav>
+<nav class="nav">{chrome.nav if framed else ""}</nav>
 <div class="actions">{chrome.header_actions}</div>
 </div></header>
-<div class="frame">
+<div class="{"frame" if framed else "shell"}">
 {main}
 </div>
 {_footer(root, chrome.domain, chrome.product_links, chrome.hub_links) if footer else ""}
@@ -695,8 +707,8 @@ def _document(*, title: str, chrome: _Chrome, main: str, scripts: tuple[str, ...
 # second pass beside it for the grain of a pencil line. Decoration only.
 _SCRIBBLE = (
     '<svg class="scribble-line" viewBox="0 0 220 24" preserveAspectRatio="none" aria-hidden="true">'
-    '<path pathLength="1" d="M4 15c18-7 33 5 52-1s31-9 50-2 33 6 52-1 31-6 56-2"/>'
-    '<path class="grain" pathLength="1" d="M8 18c20-5 36 3 54-2s33-7 51-1 31 4 50-1 30-4 50 0"/>'
+    '<path d="M4 15c18-7 33 5 52-1s31-9 50-2 33 6 52-1 31-6 56-2"/>'
+    '<path class="grain" d="M8 18c20-5 36 3 54-2s33-7 51-1 31 4 50-1 30-4 50 0"/>'
     "</svg>"
 )
 
@@ -759,7 +771,7 @@ def home_page(*, surface: WebSurface, session: WebSession | None, root_path: str
     )
 
     main = f"""<section class="band hero">
-<h1>AI that already <span class="scribble">knows{_SCRIBBLE}</span><br>how your team works.</h1>
+<h1>AI that already <span class="scribble">knows{_SCRIBBLE}</span><br>how your <span class="scribble">team works{_SCRIBBLE}</span>.</h1>
 <p class="lead">Collab is your team's AI workspace. Write your context down once, connect the tools you use,
 and every chat starts informed. It all runs on your organization's own hub.</p>
 <div class="hero-actions">{hero_actions}</div>
@@ -804,18 +816,30 @@ def _dashboard(*, surface: WebSurface, session: WebSession, root_path: str, curr
     """The account dashboard: a sidebar of sections beside the one shown."""
 
     chrome = _chrome(surface, session, root_path, current)
-    links = "".join(
-        f'<a class="dash-link" href="{html.escape(root_path + path)}"'
-        f"{' aria-current="page"' if path == current else ''}>{_icon(icon, 'icon-sm')}{label}</a>"
+
+    def entry(href: str, label: str, icon: str, attrs: str = "") -> str:
+        # The name doubles as a tooltip, for when the sidebar is folded to icons.
+        return (
+            f'<li><a class="dash-link" href="{html.escape(href)}"{attrs} title="{label}">'
+            f"{icon}<span>{label}</span></a></li>"
+        )
+
+    sections = "".join(
+        entry(root_path + path, label, _icon(icon, "icon-sm"), ' aria-current="page"' if path == current else "")
         for path, label, icon in _DASHBOARD
+    )
+    product = entry(chrome.web_client, "Collab", _mark()) + entry(chrome.frames, "Frames", _icon("frames", "icon-sm"))
+    fold = (
+        '<button type="button" class="dash-fold" data-sidebar-toggle aria-controls="dash-nav" '
+        f'aria-expanded="true" aria-label="Collapse sidebar">{_icon("sidebar", "icon-sm")}</button>'
     )
     main = (
         '<section class="dash">'
-        f'<nav class="dash-nav" aria-label="Account">{links}</nav>'
+        f'<nav class="dash-nav" id="dash-nav" aria-label="Account"><ul>{sections}</ul><ul>{product}</ul>{fold}</nav>'
         f'<div class="dash-main">{body}</div>'
         "</section>"
     )
-    return _document(title=f"{title} · Collab Hub", chrome=chrome, main=main)
+    return _document(title=f"{title} · Collab Hub", chrome=chrome, main=main, framed=False)
 
 
 def account_page(*, surface: WebSurface, session: WebSession, root_path: str = "") -> str:
@@ -1011,11 +1035,12 @@ h3 { margin: 0 0 6px; font-size: 17px; font-weight: 600; }
 }
 .scribble-line path {
   fill: none; stroke: var(--accent); stroke-width: 3.2px; stroke-linecap: round; stroke-linejoin: round;
-  vector-effect: non-scaling-stroke; stroke-dasharray: 1; stroke-dashoffset: 0;
+  vector-effect: non-scaling-stroke; stroke-dasharray: 2000; stroke-dashoffset: 0;
   animation: scribble 900ms 450ms cubic-bezier(.4, 0, .2, 1) both;
 }
 .scribble-line .grain { stroke-width: 1.4px; opacity: 0.45; animation-delay: 650ms; }
-@keyframes scribble { from { stroke-dashoffset: 1; } }
+/* Non-scaling strokes dash in screen pixels: 2000 outlasts any underline. */
+@keyframes scribble { from { stroke-dashoffset: 2000; } }
 .lead { text-wrap: pretty; margin: 0 auto 36px; max-width: 34em; font-size: 19px; line-height: 1.6; color: var(--muted); }
 .hero-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
 
@@ -1340,7 +1365,11 @@ h3 { margin: 0 0 6px; font-size: 17px; font-weight: 600; }
 .ubar .b0 { width: 46%; } .ubar .b1 { width: 82%; opacity: 0.55; }
 
 @supports (animation-timeline: view()) {
-  .art * { animation-timeline: view(); animation-fill-mode: both; animation-timing-function: ease-out; }
+  /* One timeline per illustration: its own passage through the viewport. Each
+     sequence starts once the illustration is in view and ends as it reaches
+     the middle of the screen, where it is being looked at. */
+  .art { view-timeline-name: --art; }
+  .art * { animation-timeline: --art; animation-fill-mode: both; animation-timing-function: ease-out; }
   @keyframes knob-on { from { left: 3px; background: var(--bg); } }
   @keyframes track-on { from { background: var(--line); } }
   @keyframes edge-on { from { border-color: var(--line); } }
@@ -1352,31 +1381,53 @@ h3 { margin: 0 0 6px; font-size: 17px; font-weight: 600; }
     100% { opacity: 0; left: CXX%; top: CYY%; }
   }
   @keyframes grow { from { transform: scaleX(0); } }
-  .fcard.on .toggle b { animation-name: knob-on; animation-range: entry 30% entry 70%; }
-  .fcard.on .toggle { animation-name: track-on; animation-range: entry 30% entry 70%; }
-  .fcard.on { animation-name: edge-on; animation-range: entry 30% entry 70%; }
-  .fcard.on.s2 .toggle b, .fcard.on.s2 .toggle, .fcard.on.s2 { animation-range: entry 45% entry 85%; }
-  .fline { animation-name: draw-x; animation-range: entry 70% entry 95%; }
-  .fdot, .nc-chips .c1, .nc-head span { animation-name: appear; animation-range: entry 85% entry 100%; }
-  .nc-chips .c2 { animation-name: appear; animation-range: entry 90% entry 100%; }
-  .ping { animation-name: travel; animation-range: entry 40% entry 100%; animation-timing-function: linear; }
-  .htile { animation-name: appear; animation-range: entry 20% entry 60%; }
-  .h1 { animation-range: entry 30% entry 70%; } .h2 { animation-range: entry 40% entry 80%; }
-  .ubar i { animation-name: grow; animation-range: entry 60% entry 100%; }
+  .fcard.on .toggle b { animation-name: knob-on; animation-range: cover 28% cover 34%; }
+  .fcard.on .toggle { animation-name: track-on; animation-range: cover 28% cover 34%; }
+  .fcard.on { animation-name: edge-on; animation-range: cover 28% cover 34%; }
+  .fcard.on.s2 .toggle b, .fcard.on.s2 .toggle, .fcard.on.s2 { animation-range: cover 34% cover 40%; }
+  .fline { animation-name: draw-x; animation-range: cover 40% cover 45%; }
+  .fdot, .nc-chips .c1, .nc-head span { animation-name: appear; animation-range: cover 44% cover 48%; }
+  .nc-chips .c2 { animation-name: appear; animation-range: cover 46% cover 50%; }
+  .ping { animation-name: travel; animation-range: cover 28% cover 50%; animation-timing-function: linear; }
+  .htile { animation-name: appear; animation-range: cover 28% cover 36%; }
+  .h1 { animation-range: cover 32% cover 40%; } .h2 { animation-range: cover 36% cover 44%; }
+  .ubar i { animation-name: grow; animation-range: cover 40% cover 50%; }
 }
 
-.dash {
-  display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 48px;
-  padding: 48px 64px 96px; align-items: start;
+.shell { flex: 1; display: flex; width: 100%; }
+.topbar-in.wide { max-width: none; padding: 14px 28px; }
+/* The account dashboard's sidebar, in the admin panel's shape. Folded, it
+   keeps only its icons; the choice is remembered in this browser. */
+.dash { flex: 1; display: grid; grid-template-columns: 15rem minmax(0, 1fr); transition: grid-template-columns 0.2s ease; }
+.dash-nav {
+  position: sticky; top: 65px; align-self: start; height: calc(100vh - 65px);
+  display: flex; flex-direction: column; gap: 1.75rem; padding: 1.5rem 1rem; border-right: 1px solid var(--line);
 }
-.dash-nav { position: sticky; top: 88px; display: grid; gap: 2px; }
+.dash-nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.dash-nav ul + ul { padding-top: 1.75rem; border-top: 1px solid var(--line); margin-top: -0.875rem; }
 .dash-link {
-  display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px;
-  color: var(--text); font-size: 15px; font-weight: 500; text-decoration: none;
+  display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0.6rem; border-radius: 6px;
+  color: var(--text); font-size: 0.9rem; text-decoration: none; white-space: nowrap; overflow: hidden;
 }
-.dash-link:hover { background: var(--panel); }
-.dash-link[aria-current="page"] { background: var(--tile); color: var(--accent); }
-.dash-main { min-width: 0; padding-top: 4px; }
+.dash-link svg { color: var(--muted); }
+.dash-link:hover { background: color-mix(in srgb, var(--text) 7%, transparent); }
+.dash-link:hover svg { color: var(--text); }
+.dash-link[aria-current="page"] { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font-weight: 600; }
+.dash-link[aria-current="page"] svg { color: var(--accent); }
+.dash-link .mark-img, .dash-link img { width: 16px; height: 16px; flex: none; }
+.dash-fold {
+  margin-top: auto; align-self: flex-start; display: inline-grid; place-items: center; width: 32px; height: 32px;
+  border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer;
+}
+.dash-fold:hover { color: var(--text); border-color: var(--muted); }
+:root[data-sidebar="folded"] .dash { grid-template-columns: 4.25rem minmax(0, 1fr); }
+:root[data-sidebar="folded"] .dash-nav { padding-inline: 0.75rem; }
+:root[data-sidebar="folded"] .dash-link { justify-content: center; padding-inline: 0; }
+:root[data-sidebar="folded"] .dash-link span { display: none; }
+:root[data-sidebar="folded"] .dash-fold { align-self: center; }
+:root[data-sidebar="folded"] .dash-fold svg { transform: scaleX(-1); }
+@media (prefers-reduced-motion: reduce) { .dash { transition: none; } }
+.dash-main { min-width: 0; max-width: 64rem; padding: 2.5rem 2.5rem 4rem; }
 .dash-main h1 { font-size: 32px; margin: 0 0 24px; }
 .acct-head { display: flex; align-items: center; gap: 20px; margin-bottom: 40px; }
 .acct-head .avatar { width: 64px; height: 64px; }
@@ -1468,8 +1519,19 @@ h3 { margin: 0 0 6px; font-size: 17px; font-weight: 600; }
   .brand span, .who-name { display: none; }
   .theme-toggle { width: 44px; height: 44px; }
   .acct-list div { grid-template-columns: minmax(0, 1fr); gap: 4px; }
-  .dash { grid-template-columns: minmax(0, 1fr); gap: 24px; padding: 24px 16px 64px; }
-  .dash-nav { position: static; display: flex; gap: 6px; overflow-x: auto; }
+  .dash { grid-template-columns: minmax(0, 1fr); align-content: start; }
+  .topbar-in.wide { padding: 12px 16px; }
+  .dash, :root[data-sidebar="folded"] .dash { grid-template-columns: minmax(0, 1fr); }
+  .dash-nav, :root[data-sidebar="folded"] .dash-nav {
+    position: static; height: auto; flex-direction: row; gap: 6px; padding: 8px 16px;
+    overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line);
+  }
+  .dash-nav ul { flex-direction: row; gap: 6px; }
+  .dash-nav ul + ul { padding: 0 0 0 6px; margin: 0; border-top: 0; border-left: 1px solid var(--line); }
+  :root[data-sidebar="folded"] .dash-link { padding-inline: 0.6rem; }
+  :root[data-sidebar="folded"] .dash-link span { display: inline; }
+  .dash-fold { display: none; }
+  .dash-main { padding: 24px 16px 64px; }
   .dash-link { min-height: 44px; }
   .frame { border: 0; }
   .band { padding: 44px 16px; }

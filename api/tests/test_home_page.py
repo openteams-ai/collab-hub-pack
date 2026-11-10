@@ -322,8 +322,27 @@ async def test_the_account_dashboard_has_a_sidebar_with_account_and_billing(tmp_
     assert link(BILLING) in sidebar
     # The page being shown is the one marked current.
     assert f'{link(path)} aria-current="page"' in sidebar
+    # The product links live in the sidebar too, and the landing page's
+    # framed column is not used here.
+    assert link("https://collab.127.0.0.1/") in sidebar
+    assert link("https://collab.127.0.0.1/frames") in sidebar
+    assert 'class="frame"' not in page.text
     assert "<footer" not in page.text
     assert "font-src 'self'" in page.headers["content-security-policy"]
+
+
+async def test_the_dashboard_sidebar_can_be_collapsed(tmp_path, idp):
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await sign_in(client, idp, next_path=ACCOUNT)
+        page = await client.get(ACCOUNT)
+    # A button folds the sidebar to its icons; each link keeps its name as a
+    # tooltip, so a folded sidebar still says where each icon goes.
+    assert (
+        '<button type="button" class="dash-fold" data-sidebar-toggle aria-controls="dash-nav" '
+        'aria-expanded="true" aria-label="Collapse sidebar">'
+    ) in page.text
+    assert f'{link(BILLING)} title="Billing"' in page.text
 
 
 async def test_the_billing_page_is_empty_for_now(tmp_path, idp):
@@ -332,3 +351,18 @@ async def test_the_billing_page_is_empty_for_now(tmp_path, idp):
         await sign_in(client, idp, next_path=BILLING)
         page = await client.get(BILLING)
     assert "<h1>Billing</h1>" in page.text
+
+
+async def test_a_logged_in_visitor_is_not_offered_the_download_in_the_header(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"desktop_download_url": DOWNLOAD_URL})
+    async with web_client(app) as client:
+        anonymous = await client.get(HOME)
+        await sign_in(client, idp, next_path=HOME)
+        signed_in = await client.get(HOME)
+
+    def header_nav(text: str) -> str:
+        start = text.index('<nav class="nav">')
+        return text[start : text.index("</nav>", start)]
+
+    assert link(DOWNLOAD_URL) in header_nav(anonymous.text)
+    assert link(DOWNLOAD_URL) not in header_nav(signed_in.text)

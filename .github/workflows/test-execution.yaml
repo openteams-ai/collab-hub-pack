@@ -18,6 +18,12 @@ on:
       - ".github/workflows/test-execution.yaml"
   pull_request: {}   # runs on every PR so it can be a required status check
 
+# uv uses only uv-managed CPython builds here, never the runner's system
+# Python: a system 3.14 (ubuntu-26.04 ships 3.14.4) would satisfy a 3.14
+# request without CPython's ssl eMudhra denylist (#285).
+env:
+  UV_PYTHON_PREFERENCE: only-managed
+
 jobs:
   test-execution:
     runs-on: ubuntu-latest
@@ -40,17 +46,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version-file: .github/uv.toml
 
+      # -p 3.14: the hub image's minor version, as a uv-managed build (see the
+      # workflow's env), not whatever Python the runner happens to ship.
       - name: Lint
         working-directory: execution
-        run: uv run --with ruff ruff check src tests
+        run: uv run -p 3.14 --with ruff ruff check src tests
 
       - name: Test
         working-directory: execution
-        run: uv run --group test pytest
+        run: uv run -p 3.14 --group test pytest
 
 
   test-execution-macos:
@@ -58,13 +66,17 @@ jobs:
     # service on these runners: the Postgres Track tests skip here and run in the job above. The job
     # reports and does not block: what fails on these runners (readiness deadlines, /private/var, the
     # reaper's view of another process) is #214, and a merge waits on the Linux job.
+    # Disabled for now, as its broken, takes forever and uses high CI credits
     runs-on: macos-latest
     continue-on-error: true
+    if: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version-file: .github/uv.toml
 
       - name: Test
         working-directory: execution

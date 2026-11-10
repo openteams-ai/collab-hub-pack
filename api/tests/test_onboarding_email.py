@@ -184,9 +184,7 @@ def test_automated_delivery_still_renders_the_same_approved_copy() -> None:
     """
 
     sent = render_for_automated_delivery(**DELIVERY_KWARGS)
-    pasted = render_onboarding_email(
-        **{k: v for k, v in DELIVERY_KWARGS.items() if k != "app_instructions"}
-    )
+    pasted = render_onboarding_email(**{k: v for k, v in DELIVERY_KWARGS.items() if k != "app_instructions"})
     assert sent == (
         pasted.replace(NAME_PLACEHOLDER, AUTOMATED_GREETING_NAME).replace(
             APP_INSTRUCTIONS_PLACEHOLDER, DELIVERY_KWARGS["app_instructions"]
@@ -383,9 +381,7 @@ def test_an_unresolvable_template_names_what_actually_survived(label, damage, ex
     import collab_hub_api.web.onboarding_email as module
 
     with pytest.raises(ValueError) as raised:
-        module._resolve_conditionals(
-            damage(module._BODY_TEMPLATE), require_verified_email=True
-        )
+        module._resolve_conditionals(damage(module._BODY_TEMPLATE), require_verified_email=True)
     assert expect_named in str(raised.value)
     assert "unclosed" not in str(raised.value), "the message must not guess at a cause"
 
@@ -410,9 +406,7 @@ def test_both_variants_are_resolved_once() -> None:
         ("Download [SOME PLACEHOLDER] build", True),
     ],
 )
-def test_configuring_invitation_email_renders_a_probe_at_startup(
-    app_instructions, raises
-) -> None:
+def test_configuring_invitation_email_renders_a_probe_at_startup(app_instructions, raises) -> None:
     """Construction renders the message the send path renders.
 
     Resolving the template alone was not enough, and the reason is the shape of

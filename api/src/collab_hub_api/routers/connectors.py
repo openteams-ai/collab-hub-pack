@@ -40,6 +40,8 @@ from collab_hub_api.connectors.models import (
     GOOGLE_DRIVE_CONNECTOR_ID,
     NOTION_CONNECTOR_ID,
     NOTION_READONLY_CAPABILITIES,
+    SHAREPOINT_CONNECTOR_ID,
+    SHAREPOINT_READONLY_SCOPES,
     SLACK_CONNECTOR_ID,
     SLACK_READONLY_SCOPES,
     CalendarReadRequest,
@@ -81,6 +83,11 @@ from collab_hub_api.connectors.models import (
     NotionSearchRequest,
     NotionSearchResponse,
     NotionStatus,
+    SharePointReadRequest,
+    SharePointReadResponse,
+    SharePointSearchRequest,
+    SharePointSearchResponse,
+    SharePointStatus,
     SlackChannelsResponse,
     SlackDmsResponse,
     SlackReadRequest,
@@ -98,6 +105,14 @@ from collab_hub_api.connectors.notion_client import (
     notion_time_bounds,
 )
 from collab_hub_api.connectors.notion_tokens import NotionTokenProvider
+from collab_hub_api.connectors.sharepoint_client import (
+    SharePointBusy,
+    SharePointClient,
+    SharePointSearchError,
+    SharePointUpstreamError,
+    sharepoint_time_bounds,
+)
+from collab_hub_api.connectors.sharepoint_tokens import SharePointTokenProvider
 from collab_hub_api.connectors.slack_client import (
     SLACK_TOKEN_INVALID_ERRORS,
     SlackClient,
@@ -985,6 +1000,84 @@ async def query_notion_database(
     return NotionDatabaseQueryResponse(rows=rows, next_page_token=next_page_token)
 
 
+@router.get("/sharepoint/status", response_model=SharePointStatus, dependencies=[_offered("sharepoint")])
+async def sharepoint_status(
+    request: Request,
+    _auth=Depends(get_auth_context),
+    config: ConnectorsConfig = Depends(get_connectors_config),
+) -> SharePointStatus:
+    return await _sharepoint_status(request, config)
+
+
+@router.post("/sharepoint/search", response_model=SharePointSearchResponse)
+async def search_sharepoint(
+    body: SharePointSearchRequest,
+    request: Request,
+    _auth=Depends(get_auth_context),
+    config: ConnectorsConfig = Depends(get_connectors_config),
+) -> SharePointSearchResponse:
+    client = await _sharepoint_client(request, config)
+    try:
+        lower, upper = sharepoint_time_bounds(
+            days_back=body.days_back,
+            since_date=body.since_date,
+            until_date=body.until_date,
+            time_zone=body.time_zone,
+        )
+        hits, next_page_token, total = await client.search(
+            query=body.query,
+            limit=body.limit,
+            lower=lower,
+            upper=upper,
+            time_zone=body.time_zone,
+            sort=body.sort,
+            page_token=body.page_token,
+        )
+    except SharePointSearchError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    except SharePointUpstreamError as exc:
+        logger.info(
+            "sharepoint_search_upstream_error",
+            extra={"operation": exc.operation, "status_code": exc.status_code},
+        )
+        _raise_sharepoint_upstream(exc)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "SharePoint search failed") from exc
+    return SharePointSearchResponse(hits=hits, next_page_token=next_page_token, total=total)
+
+
+@router.post("/sharepoint/drives/{drive_id}/items/{item_id}/read", response_model=SharePointReadResponse)
+async def read_sharepoint_item(
+    drive_id: str,
+    item_id: str,
+    body: SharePointReadRequest,
+    request: Request,
+    _auth=Depends(get_auth_context),
+    config: ConnectorsConfig = Depends(get_connectors_config),
+) -> SharePointReadResponse:
+    _validate_sharepoint_drive_id(drive_id)
+    _validate_sharepoint_item_id(item_id)
+    client = await _sharepoint_client(request, config)
+    try:
+        return await client.read_item(drive_id=drive_id, item_id=item_id, max_chars=body.max_chars)
+    except SharePointBusy as exc:
+        # Document reads are admitted one at a time; past the bounded wait the
+        # caller is told to retry rather than queued with a body in memory.
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            str(exc),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
+    except SharePointUpstreamError as exc:
+        logger.info(
+            "sharepoint_item_read_upstream_error",
+            extra={"operation": exc.operation, "status_code": exc.status_code},
+        )
+        _raise_sharepoint_upstream(exc, not_found_detail=_SHAREPOINT_NOT_FOUND_DETAIL)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "SharePoint item read failed") from exc
+
+
 async def _github_status(request: Request, config: ConnectorsConfig) -> GitHubStatus:
     provider = GitHubTokenProvider(config.github)
     try:
@@ -1170,6 +1263,98 @@ def _raise_notion_upstream(exc: NotionUpstreamError) -> None:
     # Notion returns 400 for caller-correctable input: invalid params or a
     # stale/garbage start_cursor. Surface those as 422; everything else
     # (timeout, 5xx, bad JSON, cursor cycle) is a provider failure -> 502.
+    if exc.status_code == 400:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+async def _sharepoint_status(request: Request, config: ConnectorsConfig) -> SharePointStatus:
+    provider = SharePointTokenProvider(config.sharepoint)
+    try:
+        token = await provider.access_token(request)
+    except ConnectorTokenError as exc:
+        return SharePointStatus(connected=False, state=exc.state, scopes=[], detail=str(exc))
+    client = _new_sharepoint_client(token, config)
+    try:
+        access = await client.verify_access()
+    except SharePointUpstreamError as exc:
+        state = "reconnect_required" if exc.status_code in {401, 403} else "unavailable"
+        return SharePointStatus(connected=False, state=state, scopes=[], detail=str(exc))
+    except httpx.HTTPError:
+        return SharePointStatus(
+            connected=False,
+            state="unavailable",
+            scopes=[],
+            detail="Microsoft Graph access check failed.",
+        )
+    return SharePointStatus(
+        connected=True,
+        state="connected",
+        scopes=[*SHAREPOINT_READONLY_SCOPES],
+        account=access.account,
+    )
+
+
+def _new_sharepoint_client(token: str, config: ConnectorsConfig) -> SharePointClient:
+    return SharePointClient(
+        access_token=token,
+        api_base_url=config.sharepoint.api_base_url,
+        timeout_seconds=config.sharepoint.request_timeout_seconds,
+        download_timeout_seconds=config.sharepoint.download_timeout_seconds,
+        max_download_bytes=config.sharepoint.max_download_bytes,
+        include_personal_onedrive=config.sharepoint.include_personal_onedrive,
+        extraction_timeout_seconds=config.sharepoint.extraction_timeout_seconds,
+        extraction_memory_limit_bytes=config.sharepoint.extraction_memory_limit_bytes,
+        extraction_wait_seconds=config.sharepoint.extraction_wait_seconds,
+    )
+
+
+async def _sharepoint_client(request: Request, config: ConnectorsConfig) -> SharePointClient:
+    provider = SharePointTokenProvider(config.sharepoint)
+    try:
+        token = await provider.access_token(request)
+    except ConnectorNotConnected as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except ConnectorReconnectRequired as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except ConnectorTokenError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    return _new_sharepoint_client(token, config)
+
+
+# Graph drive ids look like ``b!AbC...-xyz`` (base64url plus '!'); driveItem ids
+# are opaque alphanumerics. Anything else is refused before it can reach a URL.
+_SHAREPOINT_DRIVE_ID_PATTERN = r"[A-Za-z0-9!_-]{1,200}"
+_SHAREPOINT_ITEM_ID_PATTERN = r"[A-Za-z0-9_-]{1,200}"
+
+# A Graph 404 on a read is ambiguous: the item may have been moved or deleted,
+# or it may be invisible to this delegated token. Never collapse it to a bare
+# "not found".
+_SHAREPOINT_NOT_FOUND_DETAIL = (
+    "SharePoint returned not found. The item may not exist, may have been moved "
+    "or deleted, or may not be visible to your linked Microsoft account."
+)
+
+
+def _validate_sharepoint_drive_id(drive_id: str) -> None:
+    if not re.fullmatch(_SHAREPOINT_DRIVE_ID_PATTERN, drive_id):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "A valid SharePoint drive id is required")
+
+
+def _validate_sharepoint_item_id(item_id: str) -> None:
+    if not re.fullmatch(_SHAREPOINT_ITEM_ID_PATTERN, item_id):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "A valid SharePoint item id is required")
+
+
+def _raise_sharepoint_upstream(exc: SharePointUpstreamError, *, not_found_detail: str = "") -> None:
+    if exc.status_code == 429:
+        headers = {"Retry-After": exc.retry_after} if exc.retry_after else None
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc), headers=headers) from exc
+    if exc.status_code == 404 and not_found_detail:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, not_found_detail) from exc
+    # Graph answers 400 for caller-correctable input (a malformed KQL query, a
+    # paging offset past the search limit). Surface it as 422 so the model fixes
+    # the request instead of retrying a 502.
     if exc.status_code == 400:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
@@ -1390,5 +1575,6 @@ _STATUS_READERS = {
     SLACK_CONNECTOR_ID: _slack_status,
     GITHUB_CONNECTOR_ID: _github_status,
     NOTION_CONNECTOR_ID: _notion_status,
+    SHAREPOINT_CONNECTOR_ID: _sharepoint_status,
 }
 """The status read behind each catalog entry, keyed by connector id."""

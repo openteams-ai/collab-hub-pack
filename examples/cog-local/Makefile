@@ -73,7 +73,7 @@ env: ## Install what the example uses: the CLI, the hub, Toad, pixi, and Hermes'
 	@# an older pixi already on PATH would otherwise be kept and then refuse to install that package. Checked with
 	@# ~/.pixi/bin first on PATH, as the install lines below run, so a pixi this installed is found before a new shell.
 	@PATH="$$HOME/.pixi/bin:$$PATH"; { command -v pixi >/dev/null && [ "$$(printf '%s\n' 0.82.1 "$$(pixi --version | cut -d' ' -f2)" | sort -V | head -n1)" = 0.82.1 ]; } \
-	  || { echo "installing pixi 0.82.1 (https://pixi.sh)"; curl -fsSL https://pixi.sh/install.sh | PIXI_VERSION=v0.82.1 bash; }
+	  || { echo "installing pixi 0.84.1 (https://pixi.sh)"; curl -fsSL https://pixi.sh/install.sh | PIXI_VERSION=v0.84.1 bash; }
 	PATH="$$HOME/.pixi/bin:$$PATH" pixi install --manifest-path $(ROOT)/cogs/hermes/pixi.toml
 	PATH="$$HOME/.pixi/bin:$$PATH" pixi install --manifest-path $(CURDIR)/cogs/hello/pixi.toml
 	@echo "Ready. If pixi or toad was just installed, or pixi replaced, open a new shell, or put ~/.pixi/bin and ~/.local/bin first on PATH."

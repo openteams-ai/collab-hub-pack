@@ -438,10 +438,7 @@ class PostgresTaskStore:
         store._tasks = {store._record_key(item): item for item in tasks}
         store._runs = {store._record_key(item): item for item in runs}
         store._occurrences = {store._occurrence_key(item): store._record_key(item) for item in store._runs.values()}
-        store._devices = {
-            (item.org_id, item.workspace_id, item.user_id, item.device_id): item
-            for item in devices
-        }
+        store._devices = {(item.org_id, item.workspace_id, item.user_id, item.device_id): item for item in devices}
         store._notifications = {store._record_key(item): item for item in notifications}
         return store
 

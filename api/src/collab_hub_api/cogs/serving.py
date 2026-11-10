@@ -261,9 +261,7 @@ class CogRegistryFront:
                 # The source is about to send something other than what the
                 # manifest promised; refuse before a single byte is relayed.
                 await stream.aclose()
-                logger.warning(
-                    "cog_serve_blob_size_mismatch", extra={"source_id": located.source_id, "digest": digest}
-                )
+                logger.warning("cog_serve_blob_size_mismatch", extra={"source_id": located.source_id, "digest": digest})
                 unavailable = True
                 continue
             return ServedBlob(stream, located.size, max_bytes=self._max_blob_bytes)

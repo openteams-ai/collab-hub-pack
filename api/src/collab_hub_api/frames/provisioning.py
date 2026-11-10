@@ -275,12 +275,9 @@ class ProvisioningStore:
         if current is None:
             raise LookupError(f"no provisioning claim for {key!r}")
         if PHASES.index(phase) < PHASES.index(current.phase):
-            raise ValueError(
-                f"refusing to move provisioning backwards for {key!r}: {current.phase!r} -> {phase!r}"
-            )
+            raise ValueError(f"refusing to move provisioning backwards for {key!r}: {current.phase!r} -> {phase!r}")
         raise ValueError(
-            f"refusing to replace the account id for {key!r}: "
-            f"stored {current.idp_user_id!r}, given {idp_user_id!r}"
+            f"refusing to replace the account id for {key!r}: stored {current.idp_user_id!r}, given {idp_user_id!r}"
         )
 
     def unfinished(self, *, older_than_seconds: int = 0) -> list[ProvisioningRecord]:

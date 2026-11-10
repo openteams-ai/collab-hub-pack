@@ -65,9 +65,7 @@ def _resolved_membership(request: Request, user: str) -> OrgMembership | None:
     return store.get_membership(user)
 
 
-def owner_context(
-    request: Request, session: WebSession = Depends(require_org_owner)
-) -> AuthContext:
+def owner_context(request: Request, session: WebSession = Depends(require_org_owner)) -> AuthContext:
     """The caller's :class:`~..frames.auth.AuthContext`, for an owner action.
 
     The same bridge :func:`~.operator.operator_context` is: the browser
@@ -94,9 +92,7 @@ def owner_context(
 
     membership = _resolved_membership(request, session.user)
     if membership is None or not membership.is_active or membership.role != ROLE_OWNER:
-        raise WebForbidden(
-            f"user {session.user!r} is no longer an active organization owner"
-        )
+        raise WebForbidden(f"user {session.user!r} is no longer an active organization owner")
     return AuthContext(
         user=session.user,
         home_org_id=membership.org_id,

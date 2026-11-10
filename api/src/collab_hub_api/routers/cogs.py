@@ -630,7 +630,11 @@ def get_cog_reference(
 )
 def get_cog_version(
     request: Request,
-    _auth: AuthDep, store: CatalogDep, registry_host: RegistryHostDep, cog_id: CogIdPath, digest: DigestPath
+    _auth: AuthDep,
+    store: CatalogDep,
+    registry_host: RegistryHostDep,
+    cog_id: CogIdPath,
+    digest: DigestPath,
 ) -> JSONResponse:
     """The exact card indexed for this digest -- what an install pins -- in full.
 
@@ -684,9 +688,7 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(CogPublishForbiddenError)
     async def cog_publish_forbidden_handler(_request: Request, _exc: CogPublishForbiddenError):
-        return error_response(
-            status.HTTP_403_FORBIDDEN, "cog_publish_forbidden", "This account may not publish Cogs"
-        )
+        return error_response(status.HTTP_403_FORBIDDEN, "cog_publish_forbidden", "This account may not publish Cogs")
 
     @app.exception_handler(CogRegistryCredentialNotFoundError)
     async def cog_registry_credential_not_found_handler(_request: Request, _exc: CogRegistryCredentialNotFoundError):

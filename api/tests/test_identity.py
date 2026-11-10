@@ -31,28 +31,42 @@ async def test_the_cli_config_names_the_issuer_and_the_client_without_credential
     monkeypatch.setenv("COLLAB_HUB_CLI_CLIENT_ID", "hub-cli")
     response = await client.get("/v1/auth/cli")
     assert response.status_code == 200
-    assert response.json() == {"issuer": "https://id.example.org/realms/nebari", "client_id": "hub-cli",
-                               "dev_auth": False}
+    assert response.json() == {
+        "issuer": "https://id.example.org/realms/nebari",
+        "client_id": "hub-cli",
+        "dev_auth": False,
+    }
 
 
 async def test_the_cli_config_defaults_the_client_and_says_when_the_hub_runs_dev_auth(dev_client, monkeypatch):
     monkeypatch.delenv("FRAMES_BEARER_ISSUER", raising=False)
     monkeypatch.delenv("COLLAB_HUB_CLI_CLIENT_ID", raising=False)
-    assert (await dev_client.get("/v1/auth/cli")).json() == {"issuer": None, "client_id": "apollo-desktop",
-                                                             "dev_auth": True}
+    assert (await dev_client.get("/v1/auth/cli")).json() == {
+        "issuer": None,
+        "client_id": "apollo-desktop",
+        "dev_auth": True,
+    }
 
 
 async def test_a_hardened_hub_answers_the_cli_config_but_not_me_without_credentials(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
     monkeypatch.setenv("FRAMES_IDTOKEN_ALLOW_UNSIGNED", "true")
-    config = Config.parse({
-        "storage": {"frames_path": str(tmp_path / "frames")},
-        "frames": {"active_state": {"backend": "memory"}, "history": {"backend": "memory"},
-                   "usage": {"backend": "memory"}, "mcp_session_manager_enabled": False},
-        "tasks": {"backend": "memory"},
-        "security": {"paths": [rule.model_dump() for rule in recommended_path_rules()],
-                     "default_access": "authenticated"},
-    })
+    config = Config.parse(
+        {
+            "storage": {"frames_path": str(tmp_path / "frames")},
+            "frames": {
+                "active_state": {"backend": "memory"},
+                "history": {"backend": "memory"},
+                "usage": {"backend": "memory"},
+                "mcp_session_manager_enabled": False,
+            },
+            "tasks": {"backend": "memory"},
+            "security": {
+                "paths": [rule.model_dump() for rule in recommended_path_rules()],
+                "default_access": "authenticated",
+            },
+        }
+    )
     app = make_app(config)
     async with app.router.lifespan_context(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:

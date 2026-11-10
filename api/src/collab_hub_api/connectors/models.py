@@ -786,6 +786,108 @@ class NotionDatabaseQueryResponse(UntrustedConnectorResponse):
     next_page_token: str = ""
 
 
+SHAREPOINT_CONNECTOR_ID = "sharepoint"
+# Delegated, read-only Microsoft Graph permissions requested through the
+# Keycloak ``microsoft`` identity provider (plus the OIDC sign-in scopes). All
+# three are look-only; read-only is also enforced by the fact that only read
+# methods exist in sharepoint_client and by tests. See docs/sharepoint-connector.md.
+SHAREPOINT_READONLY_SCOPES = ["User.Read", "Sites.Read.All", "Files.Read.All"]
+
+
+class SharePointStatus(ConnectorSummary):
+    id: str = SHAREPOINT_CONNECTOR_ID
+    name: str = "SharePoint"
+    # Signed-in Microsoft account (user principal name), surfaced so the UI can
+    # show *which* account is linked. Empty until the capability probe resolves it.
+    account: str = ""
+
+
+class SharePointSearchRequest(BaseModel):
+    # Empty = every file the user can see, newest first, within the window below.
+    # Graph search needs a non-empty query string, so an empty query is sent as
+    # ``*`` -- but only when a date window narrows it (see the validator).
+    query: str = Field(default="", max_length=512)
+    limit: int = Field(default=10, ge=1, le=25)
+    # Friendly date filtering on the file's last-modified time. Resolved in the
+    # caller's zone to whole days and sent to Graph as a KQL ``LastModifiedTime``
+    # clause; the Hub re-checks every hit against the same window.
+    days_back: int = Field(default=0, ge=0, le=3650)
+    since_date: date | None = None
+    until_date: date | None = None
+    time_zone: str = Field(default="UTC", max_length=128)  # IANA zone from the desktop
+    # ``relevance`` is Graph's default ranking; ``modified`` is newest first, the
+    # natural order for a daily digest ("what changed yesterday").
+    sort: Literal["relevance", "modified"] = "relevance"
+    # Opaque continuation from a prior response's ``next_page_token``. It wraps
+    # Graph's ``from`` offset plus a fingerprint of (query, window, sort, limit);
+    # reusing it after changing any of those is a stale cursor and rejected with 422.
+    page_token: str = Field(default="", max_length=256)
+
+    @model_validator(mode="after")
+    def _resolve_window(self) -> SharePointSearchRequest:
+        self.time_zone = _validate_notion_time_zone(self.time_zone)
+        if self.since_date is not None and self.until_date is not None and self.until_date < self.since_date:
+            raise ValueError("until_date must be on or after since_date")
+        if not (self.query.strip() or self.days_back or self.since_date is not None or self.until_date is not None):
+            raise ValueError("Provide a SharePoint query, days_back, since_date, or until_date.")
+        return self
+
+
+class SharePointReadRequest(BaseModel):
+    # drive_id/item_id are path parameters (validated as Graph ids in the
+    # router), not body fields -- mirrors DriveReadRequest/NotionPageReadRequest.
+    max_chars: int = Field(default=12_000, ge=1, le=50_000)
+
+
+# Every Graph driveItem carries ``webUrl`` plus ``@odata.*`` links. All are
+# deliberately dropped from the public models: the Apollo tool-output contract
+# forbids link-shaped text (see connectors/connector_text.py). ``drive_id`` +
+# ``id`` are what a follow-up read needs, not a URL. ``site_name`` is derived
+# server-side from the item's SharePoint site path before the URL is discarded.
+# Every text field is link-sanitized in sharepoint_client.
+class SharePointItemMetadata(BaseModel):
+    id: str
+    drive_id: str = ""
+    # File names are dotted identifiers ("report.docx"), so they are sanitized
+    # with the code-aware variant (scheme/www/markdown/email masked, bare domains
+    # kept) -- the strict masking would turn every file name into "[link]".
+    name: str = ""
+    # Lower-case extension taken from the raw name before masking; this, not the
+    # masked name, decides how the read route handles the file.
+    extension: str = ""
+    site_name: str = ""  # sanitized; "OneDrive" for a personal drive
+    mime_type: str = ""
+    size: int = 0
+    last_modified: datetime | None = None
+    last_modified_by: str = ""  # sanitized display name
+    is_folder: bool = False
+
+
+class SharePointSearchHit(SharePointItemMetadata):
+    # Graph's search snippet with its highlight/ellipsis markup removed, then
+    # sanitized. Empty when Graph returned none.
+    summary: str = ""
+
+
+class SharePointSearchResponse(UntrustedConnectorResponse):
+    hits: list[SharePointSearchHit]
+    next_page_token: str = ""
+    # Graph's estimate of matching items (before the Hub's OneDrive/window
+    # filtering), so a digest can say "12 files changed" without paging them all.
+    total: int = 0
+
+
+class SharePointReadResponse(UntrustedConnectorResponse):
+    item: SharePointItemMetadata
+    text: str = ""
+    truncated: bool = False
+    # Set when the file cannot be returned as text (a folder, an image/archive,
+    # a file over the download cap, or a conversion/extraction failure). The
+    # metadata is still returned so the model can say what the file is.
+    unsupported: bool = False
+    unsupported_reason: str = ""
+
+
 def coerce_github_param_value(value: str | int | bool) -> str:
     """Single authority for the GitHub query-param wire format.
 

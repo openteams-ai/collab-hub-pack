@@ -140,6 +140,7 @@ from ..web.surface import (
     ORG_INVITATIONS_NAME_PATH,
     ORG_INVITATIONS_PATH,
     ORG_INVITATIONS_REVOKE_PATH,
+    account_page_url,
 )
 
 logger = logging.getLogger("frames_server.web")
@@ -188,9 +189,7 @@ def issue_invitation(
 
 
 @requires_org_role(ROLE_OWNER, org_arg="org_id")
-def revoke_invitation(
-    auth: AuthContext, service: InvitationService, *, org_id: str, invitation_id: str
-) -> Invitation:
+def revoke_invitation(auth: AuthContext, service: InvitationService, *, org_id: str, invitation_id: str) -> Invitation:
     """Revoke one of *org_id*'s invitations, recorded as ``invitation.revoke``.
 
     ``expect_org_id`` carries the authorized scope down into the transaction,
@@ -325,6 +324,7 @@ def make_router() -> APIRouter:
                 has_more=page.has_more if page is not None else False,
                 now=now,
                 notice=notice,
+                account_url=account_page_url(request),
             ),
             status_code=status_code,
             path=ORG_INVITATIONS_PATH,
@@ -497,9 +497,7 @@ def make_router() -> APIRouter:
             return _forbidden(request)
         invitation_id = form_field(fields, INVITATION_ID_FIELD, max_length=MAX_INVITATION_ID_LENGTH)
         try:
-            invitation = revoke_invitation(
-                auth, service, org_id=auth.org_id, invitation_id=invitation_id
-            )
+            invitation = revoke_invitation(auth, service, org_id=auth.org_id, invitation_id=invitation_id)
         except InvitationNotFoundError:
             return _render(
                 request,
@@ -534,9 +532,7 @@ def make_router() -> APIRouter:
             "web_invitation_revoked",
             extra={"user": session.user, "invitation_id": invitation.id},
         )
-        return _render(
-            request, session, auth, service, delivery, notice=Notice(NOTICE_REVOKED, invitation.email)
-        )
+        return _render(request, session, auth, service, delivery, notice=Notice(NOTICE_REVOKED, invitation.email))
 
     @router.post(ORG_INVITATIONS_NAME_PATH)
     async def name(

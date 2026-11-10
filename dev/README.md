@@ -1095,6 +1095,32 @@ Frames and the user directory work immediately. Three things do not:
 - **Slack linking** needs an HTTPS broker endpoint — see
   [Slack](#7-slack) above.
 
+### The run routes the front door carries
+
+Hub runs go through the same front door: the Caddyfile's last `handle` sends
+every request that is not for `keycloak.localhost` to the API, so the run
+routes the desktop client calls
+([apollo-desktop#1145](https://github.com/openteams-ai/apollo-desktop/issues/1145))
+answer at `http://localhost:9080` with the bearer it signed in with:
+
+| Route | |
+|---|---|
+| `POST /v1/runs`, `GET /v1/runs` | submit a run; list the organization's runs |
+| `GET /v1/runs/launchable` | what a run may name: the organization's invokable installs by reference, and the packages of the directory source when the API has one |
+| `GET /v1/runs/{id}` | one run, with its outputs |
+| `GET /v1/runs/{id}/events` | its Track, as a page or, with `Accept: text/event-stream`, as a stream |
+| `GET /v1/runs/{id}/steps/{step}/payload` | one step's result |
+| `POST /v1/runs/{id}/steps/{step}/decision` | decide a step held at a Gate |
+| `POST /v1/runs/{id}/retry`, `POST /v1/runs/{id}/cancel` | retry a run that ended short of completing; cancel one |
+
+`make api-desktop` serves them on the hub's Postgres Track (level 2's
+database) and gives the API no package directory, so what the client can
+launch is what `make cog-install` installed, or what
+`COLLAB_HUB_API__RUNS__PACKAGES` names. A run stays `SUBMITTED` until a
+controller on the same Track advances it: `make controller
+TRACK=postgresql://collab:collab@127.0.0.1:5432/collab` in another terminal
+([Running Cogs and Ops](#running-cogs-and-ops)).
+
 ---
 
 ## Running Cogs and Ops

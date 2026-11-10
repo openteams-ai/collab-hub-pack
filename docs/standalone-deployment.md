@@ -500,7 +500,7 @@ runs:
   to the model endpoints the binding names; egress is otherwise open (#11),
   the database service included.
 - **Its Track and its installs** are the hub's database (`frames.postgres`,
-  migrations 12 to 17); the chart refuses the controller without it.
+  migrations 12 to 18); the chart refuses the controller without it.
   `models` and `extraEnv` are as below; `[cogs]` in the block binds only a
   package run by name, which the `remote` location offers none of.
 

@@ -62,8 +62,8 @@ and the controller mount), finds the package and the environment and pulls
 and solves nothing again, which the init container's log says (`artifact
 cached:` rather than `artifact pulling:`); on an `emptyDir` of the pod's own
 each pod builds its environment. A step naming a package by name runs it
-from the image's packages under `/opt/collab-hub/cogs`, which the chart no
-longer offers at `remote` and the tests keep. It is given what a local worker
+from the image's packages under `/opt/collab-hub/cogs`, which the chart's
+`remote` location does not offer and the tests keep. It is given what a local worker
 is given, in its environment: `COLLAB_COG_HOST` (`0.0.0.0`) and
 `COLLAB_COG_PORT`, `COLLAB_COG_ID` and `COLLAB_RUN_ID` as literals on the
 pod template; `COLLAB_RUN_TOKEN` and what the binding delivers (the key its

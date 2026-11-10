@@ -75,7 +75,7 @@ POSTGRES_SCHEMES = ("postgresql://", "postgres://")
 TRACK_TABLES = ("collab_track_events", "collab_track_payloads")
 """The Track's tables on Postgres, both from the hub's migrations: events, and payloads too large to keep inline."""
 INSTALL_TABLES = ("collab_cog_installs", "collab_cog_install_events")
-"""The installs' tables on Postgres, from the hub's migrations (migration 17)."""
+"""The installs' tables on Postgres, from the hub's migrations (migration 18)."""
 
 
 class BindingDelivery:

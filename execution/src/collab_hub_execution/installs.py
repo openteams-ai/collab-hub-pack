@@ -406,7 +406,7 @@ class SqliteInstallStore:
 
 
 class PostgresInstallStore:
-    """The install store on the hub's database; its tables come from the hub's migrations (migration 17).
+    """The install store on the hub's database; its tables come from the hub's migrations (migration 18).
 
     ``_SCHEMA`` is the registry's install statements, in order, and a test
     holds the two equal; ``ensure_schema`` is for the standalone package and

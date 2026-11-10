@@ -1022,7 +1022,7 @@ COLLAB_SCHEMA_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
         ),
     ),
     (
-        17,
+        18,
         (
             # The installs (issue #105): each Cog pinned by digest on this
             # hub, what its install has reached (`published`, `fetched`,

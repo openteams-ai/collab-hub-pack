@@ -32,7 +32,7 @@ Three kinds of event share the Track:
 | Event | Payload | Written when |
 |---|---|---|
 | `op_submitted` | `op` — the Op as submitted, its steps with their Gates | a run is submitted; one per run, which the store enforces |
-| `run_picked_up` | — | a controller takes the run |
+| `run_picked_up` | `controller` — the id of the controller that took it, which owns it from here | a controller takes the run, written only if nobody took it or cancelled it first |
 | `gate_escalated` | `step`, `attempt`, `reason`, `escalation` (its id), `envelope` (the result the Gate escalated), `usage`, `approvers` (roles that may decide), `gate` (the policy) | a step's Gate escalates its result |
 | `gate_decided` | `step`, `outcome` (`approve`, `send_back`, `reject`), `escalation` (the id answered), `actor`, `value` (the findings), `envelope_digest` (a stable id of the result decided on) | a person decides an escalation |
 | `completed` | — | every step completed |
@@ -40,7 +40,7 @@ Three kinds of event share the Track:
 | `budget_exceeded` | `step`, `dimension` (`duration`, `tokens`, `cost`), `reason` | a budget stops the run |
 | `cancelled` | `actor` | a client cancels |
 | `interrupted` | `backend` | the host stopped under `none` and the run cannot resume |
-| `retry_requested` | `from_status`, `attempt` (`same` or `new`), `budget_epoch` | a run is retried |
+| `retry_requested` | `from_status`, `attempt` (`same` or `new`), `budget_epoch`, `controller` (the one retrying it, which owns it from here) | a run is retried |
 
 `op_submitted` also carries `submitted_by` (`user`, `org_id`, `workspace_id`,
 and a `name` for showing) when a client submitted the run through the run API,
@@ -57,6 +57,51 @@ if the run has not ended and holds no request yet, so none is ever written
 after a run's end and two racing requests leave one. A request belongs to the
 attempt it was made of: one a run outlived, by ending on its own and being
 retried, does not cancel the retry.
+
+`decision_requested` (`escalation`, `outcome`, `actor`, `findings`) is a
+client's decision on the Gate a run waits at, written with `append_if` only
+while the run waits on that escalation and holds no other decision. The
+controller that owns the run delivers it, and the runner records
+`gate_decided`; when the runner does not take it, the controller records
+`decision_refused` (`escalation`, `error`). Neither moves the run. A decision
+is pending only while the run waits on the escalation it names: one left
+undelivered when the run ends, or when a retry opens a new escalation, lapses
+with it, and is neither delivered nor refused.
+
+`interrupted` (`backend`) is written by the host that finds a run it was
+advancing when it starts again; written by another controller, having found
+the run's owner no longer holds its id, it also names `taken_over_by` and
+`from_controller`. `worker_started` at the remote location carries the
+workloads' `name` and `namespace`, by which a later controller reaps a pod.
+
+`retry_asked` (`actor`) is a client's request that an ended run run again,
+written with `append_if` only while the run has ended in a state the run
+machine retries from and holds no request yet. A controller takes it: the
+runner records `retry_requested` as the run moves, or the controller records
+`retry_refused` (`error`) when the runner would not. Neither moves the run.
+
+A step's Frames travel by reference: `op_submitted`'s Op carries each step's
+`frames`, with the Frame's `id`, `name`, the `digest` of the snapshot taken
+at submit and the `ref` it is kept under beside the Track, like a large
+payload; `step_completed` names the `id` and `digest` of each Frame the step
+was given. The text itself is never on an event.
+
+**The index of runs.** Each store keeps one row per run, derived from the
+run's events by the store itself in the same transaction as any event that
+moves the run: its status, the organization that submitted it, when it was
+submitted and last moved, and whether a retry is asked for. Status is still
+the Track's, replayed through the run machine; the row is a projection a
+listing or a controller's pass reads instead of every Track, and `reindex()`
+rebuilds it from the events. On Postgres it is `collab_track_runs`, from
+migration 15. An API process checks once, at its first listing, whether a
+submitted run has no row, and reindexes if so: what a Track from before the
+index needs. On the upgrade that brings the index, a run an old API pod
+accepts after a new pod has checked stays unlisted until an API pod restarts,
+which heals it; `run show` reads the Track and is unaffected.
+
+A Track written before controllers named themselves has `run_picked_up` with
+no `controller`: such a run belongs to the first controller to start
+([runs.md](runs.md#pickup-and-ownership)).
 
 ### Step facts
 
@@ -103,7 +148,7 @@ the runner around the executor's calls:
 | Event | Payload |
 |---|---|
 | `worker_started` | `step`, `attempt`, `instance`, `location`, `run_token_sha256`, and where the worker is: at `local`, `package` (`name`, `digest`), `pid`, `pgid` and `logs`, the directory its stdout and stderr go to |
-| `worker_stopped` | `step`, `attempt`, `instance` — the worker was torn down, and its run token has expired |
+| `worker_stopped` | `step`, `attempt`, `instance` — the worker was torn down, and its run token has expired; `reaped` when a starting controller wrote it for a run it interrupted, `true` if it killed a worker left alive |
 
 `run_token_sha256` is the hash of the worker's run token; the token itself is
 never recorded. A token is valid while its `worker_started` has no

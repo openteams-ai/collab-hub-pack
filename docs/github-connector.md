@@ -180,8 +180,20 @@ an allowed org, and paths that can read across orgs — `/search/*`, the `/user/
 self-endpoints, `/issues`, `/gists`, `/notifications` — are refused (a redirect
 onto a disallowed owner is re-checked and refused too). An empty allowlist (the
 default) means the token's full visibility. Set `allowed_orgs` in real deploys so
-the generic read cannot reach outside your orgs. The curated search reads the
-same key once PR #76 lands; on this branch the allowlist governs `api/get`.
+the generic read cannot reach outside your orgs.
+
+The curated search reads the same key. With `allowed_orgs` set and no `repo`
+given, the search is scoped with a repeated `org:` qualifier per allowed login
+(GitHub ORs them); with a `repo` given, its owner must itself be in the
+allowlist or the request is refused as a `422`. The `repo` must be exactly
+`owner/name`; anything else is a `422`. With the allowlist set the hub owns the
+search scope, so a `query` containing an `org:`, `user:`, `owner:` or `repo:`
+qualifier is refused as a `422` too (GitHub would OR it with the hub's own
+qualifiers). That also refuses a quoted phrase containing one of those tokens.
+As a second layer, any returned hit whose repository owner is outside the
+allowlist is dropped. An explicit `repo` therefore narrows within the allowlist
+rather than escaping it. An empty allowlist leaves the search at the token's
+full visibility, unchanged.
 
 The curated endpoints return no GitHub URL of any kind: all provider text is
 link-sanitized (bare domains included) and `repo`/`number` (not URLs) are what a

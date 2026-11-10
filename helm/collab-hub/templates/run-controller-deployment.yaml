@@ -1,0 +1,127 @@
+{{- $controller := .Values.runs.controller }}
+{{- if and .Values.api.enabled $controller.enabled (eq $controller.location "remote") }}
+{{- $component := "run-controller" }}
+{{- /* The run controller at the remote location (issue #6): a Deployment of its own, the same image as the
+API running `collab-hub-run-controller`, on the hub's database as its Track. It alone holds workload
+permissions (run-controller-rbac.yaml): each Cog launched through /v1/runs becomes a Deployment and a
+Service it makes, reached by it alone through a NetworkPolicy per worker, and torn down by it. The API
+pod constructs no executor and may not create workloads. One replica under one id, Recreate so a
+rollout never runs two under that id; the new pod's controller waits (--wait) for the old one to let
+the id go. Liveness only: a readiness probe on a controller waiting for its id would hold nothing but
+itself, and it serves no traffic. */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "collab-hub.component-name" (dict "top" . "component" $component) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "collab-hub.selectorLabels" (dict "top" . "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 8 }}
+      {{- if $controller.models }}
+      annotations:
+        # The controller reads its models block once, at start: a new block rolls the pod.
+        checksum/run-models: {{ $controller.models | sha256sum }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "collab-hub.component-name" (dict "top" . "component" $component) }}
+      {{- with .Values.api.deployment.securityContext.pod }}
+      securityContext:
+        {{- . | toYaml | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: run-controller
+          image: "{{ .Values.api.deployment.image.repository }}:{{ .Values.api.deployment.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.api.deployment.image.pullPolicy }}
+          {{- with .Values.api.deployment.securityContext.container }}
+          securityContext:
+            {{- . | toYaml | nindent 12 }}
+          {{- end }}
+          command: ["collab-hub-run-controller"]
+          env:
+            - name: COLLAB_CONTROLLER_TRACK
+              {{- if .Values.frames.postgres.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.frames.postgres.existingSecret | quote }}
+                  key: {{ .Values.frames.postgres.databaseUrlKey | quote }}
+              {{- else }}
+              value: {{ .Values.frames.postgres.url | quote }}
+              {{- end }}
+            - name: COLLAB_CONTROLLER_ID
+              value: {{ $controller.id | quote }}
+            - name: COLLAB_CONTROLLER_LOCATION
+              value: "remote"
+            # Each worker pod runs this same image, which ships the Cog packages and pixi.
+            - name: COLLAB_CONTROLLER_IMAGE
+              value: "{{ .Values.api.deployment.image.repository }}:{{ .Values.api.deployment.image.tag | default .Chart.AppVersion }}"
+            - name: COLLAB_CONTROLLER_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            # Only this controller's pods may reach a worker's /invoke: the NetworkPolicy each worker gets.
+            - name: COLLAB_CONTROLLER_ALLOW_INGRESS_FROM
+              value: {{ (fromYaml (include "collab-hub.selectorLabels" (dict "top" . "component" $component))) | toJson | quote }}
+            - name: COLLAB_CONTROLLER_INTERACTION_TIMEOUT
+              value: {{ $controller.interactionTimeoutSeconds | quote }}
+            - name: COLLAB_CONTROLLER_WAIT
+              value: {{ $controller.waitSeconds | quote }}
+            - name: COLLAB_CONTROLLER_WORKER_START_TIMEOUT
+              value: {{ $controller.workerStartSeconds | quote }}
+            # Each worker pod's resources and the limits of its volumes; its securityContext is the executor's
+            # restricted-compatible default.
+            - name: COLLAB_CONTROLLER_WORKER_RESOURCES
+              value: {{ $controller.worker.resources | toJson | quote }}
+            - name: COLLAB_CONTROLLER_WORKER_CACHE_SIZE_LIMIT
+              value: {{ $controller.worker.cacheSizeLimit | quote }}
+            - name: COLLAB_CONTROLLER_WORKER_TMP_SIZE_LIMIT
+              value: {{ $controller.worker.tmpSizeLimit | quote }}
+            - name: COLLAB_CONTROLLER_HEALTH_HOST
+              value: "0.0.0.0"
+            - name: COLLAB_CONTROLLER_HEALTH_PORT
+              value: {{ $controller.healthPort | quote }}
+            {{- if $controller.models }}
+            - name: COLLAB_CONTROLLER_MODELS
+              value: "/etc/collab-hub/runs/models.toml"
+            {{- end }}
+            - name: HOME
+              value: "/tmp"
+            {{- with $controller.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with $controller.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if $controller.models }}
+            - name: run-models
+              mountPath: /etc/collab-hub/runs
+              readOnly: true
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              port: {{ $controller.healthPort }}
+              path: /healthz
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ $controller.tmpSizeLimit | quote }}
+        {{- if $controller.models }}
+        - name: run-models
+          configMap:
+            name: {{ include "collab-hub.component-name" (dict "top" . "component" "run-models") }}
+        {{- end }}
+{{- end }}

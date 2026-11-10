@@ -11,6 +11,11 @@ name: PR Title
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
+  # On a merge-queue group the check reads every squash commit the group
+  # would land on main, which is what semantic-release parses, so a title
+  # edited at merge time or taken from a single-commit PR cannot slip past
+  # it, and neither can an earlier PR in the group whose own run failed.
+  merge_group: {}
 
 permissions:
   contents: read
@@ -20,19 +25,41 @@ jobs:
     name: Conventional-commit PR title
     runs-on: ubuntu-latest
     steps:
+      # The group's commits are those on its head but not yet on the base
+      # branch; the clone needs that branch to list them.
+      - uses: actions/checkout@v7
+        if: github.event_name == 'merge_group'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Check title
         env:
-          TITLE: ${{ github.event.pull_request.title }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          # The base branch, not base_sha: base_sha is the previous PR in the
+          # queue, so diffing against it would see only this PR's commit.
+          GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
         run: |
           set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = merge_group ]; then
+            # One squash commit per queued PR; its first line is the PR title.
+            mapfile -t titles < <(git log --format=%s "origin/${GROUP_BASE_REF#refs/heads/}..HEAD")
+          else
+            titles=("$PR_TITLE")
+          fi
           # type(optional-scope)!: description  — types cover the release
           # mapping (feat = minor, fix/perf = patch, ! or BREAKING CHANGE =
           # major) plus the non-releasing housekeeping types.
           pattern='^(feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)(\([a-zA-Z0-9_./-]+\))?!?: .+'
-          if printf '%s' "$TITLE" | grep -Eq "$pattern"; then
-            echo "PR title is conventional: $TITLE"
-          else
-            echo "::error::PR title is not a conventional commit: '$TITLE'"
+          status=0
+          for TITLE in "${titles[@]}"; do
+            if printf '%s' "$TITLE" | grep -Eq "$pattern"; then
+              echo "Title is conventional: $TITLE"
+            else
+              echo "::error::Title is not a conventional commit: '$TITLE'"
+              status=1
+            fi
+          done
+          if [ "$status" -ne 0 ]; then
             echo "Expected: type(scope)?: description — e.g. 'feat(agents): add hub model labels'."
             echo "Types: feat fix perf refactor docs test build ci chore style revert."
             exit 1

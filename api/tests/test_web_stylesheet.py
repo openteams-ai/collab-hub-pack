@@ -86,9 +86,7 @@ async def test_every_font_the_stylesheet_names_resolves_without_a_session(tmp_pa
     async with web_client(app) as client:
         stylesheet = await client.get(STYLE_ASSET_PATH)
         urls = referenced_urls(stylesheet.text)
-        fetched = {
-            url: await client.get(urljoin(str(stylesheet.url), url)) for url in urls
-        }
+        fetched = {url: await client.get(urljoin(str(stylesheet.url), url)) for url in urls}
 
     assert stylesheet.status_code == 200
     assert any(url.endswith(".woff2") for url in urls), "the stylesheet names no font file"

@@ -14,6 +14,7 @@ from collab_hub_api.connectors.calendar_client import (
     CalendarUpstreamError,
     GoogleCalendarClient,
 )
+from collab_hub_api.connectors.catalog import CATALOG, ConnectorDescriptor, connector_link, is_offered
 from collab_hub_api.connectors.drive_client import DriveUpstreamError, GoogleDriveClient, UnsupportedDriveFileType
 from collab_hub_api.connectors.github_client import (
     GitHubApiRequestError,
@@ -31,14 +32,23 @@ from collab_hub_api.connectors.google_tokens import (
 )
 from collab_hub_api.connectors.models import (
     DRIVE_READONLY_SCOPE,
+    GITHUB_CONNECTOR_ID,
+    GMAIL_CONNECTOR_ID,
     GMAIL_READONLY_SCOPE,
+    GOOGLE_CALENDAR_CONNECTOR_ID,
     GOOGLE_CALENDAR_READONLY_SCOPE,
+    GOOGLE_DRIVE_CONNECTOR_ID,
+    NOTION_CONNECTOR_ID,
     NOTION_READONLY_CAPABILITIES,
+    SHAREPOINT_CONNECTOR_ID,
+    SHAREPOINT_READONLY_SCOPES,
+    SLACK_CONNECTOR_ID,
     SLACK_READONLY_SCOPES,
     CalendarReadRequest,
     CalendarReadResponse,
     CalendarSearchRequest,
     CalendarSearchResponse,
+    ConnectorListing,
     ConnectorSummary,
     DriveReadRequest,
     DriveReadResponse,
@@ -73,6 +83,11 @@ from collab_hub_api.connectors.models import (
     NotionSearchRequest,
     NotionSearchResponse,
     NotionStatus,
+    SharePointReadRequest,
+    SharePointReadResponse,
+    SharePointSearchRequest,
+    SharePointSearchResponse,
+    SharePointStatus,
     SlackChannelsResponse,
     SlackDmsResponse,
     SlackReadRequest,
@@ -90,6 +105,14 @@ from collab_hub_api.connectors.notion_client import (
     notion_time_bounds,
 )
 from collab_hub_api.connectors.notion_tokens import NotionTokenProvider
+from collab_hub_api.connectors.sharepoint_client import (
+    SharePointBusy,
+    SharePointClient,
+    SharePointSearchError,
+    SharePointUpstreamError,
+    sharepoint_time_bounds,
+)
+from collab_hub_api.connectors.sharepoint_tokens import SharePointTokenProvider
 from collab_hub_api.connectors.slack_client import (
     SLACK_TOKEN_INVALID_ERRORS,
     SlackClient,
@@ -105,7 +128,28 @@ router = APIRouter(prefix="/connectors", tags=["connectors"])
 logger = logging.getLogger("frames_server.connectors")
 
 
-def get_connectors_config(request: Request) -> ConnectorsConfig:
+def switched_off_connectors(request: Request) -> frozenset[str]:
+    """The connectors an operator has switched off, read once per request.
+
+    A store that cannot answer disables nothing. Failing closed here would take
+    every connector down over a database blip, which is a far worse outcome
+    than briefly honouring a switch late.
+    """
+
+    store = getattr(request.app.state, "connector_store", None)
+    if store is None:
+        return frozenset()
+    try:
+        return frozenset(store.disabled())
+    except Exception:
+        logger.warning("connector_state_unavailable")
+        return frozenset()
+
+
+def get_connectors_config(
+    request: Request,
+    disabled: frozenset[str] = Depends(switched_off_connectors),
+) -> ConnectorsConfig:
     """This deployment's connector configuration, minus anything switched off.
 
     The switch is applied here rather than in each handler because every
@@ -113,41 +157,104 @@ def get_connectors_config(request: Request) -> ConnectorsConfig:
     route that can forget. A disabled connector arrives with its credentials
     blanked, so it reads as unconfigured to code that already handles that --
     see :mod:`..frames.connector_state`.
-
-    A store that cannot answer disables nothing. Failing closed here would take
-    every connector down over a database blip, which is a far worse outcome
-    than briefly honouring a switch late.
     """
 
-    config = request.app.state.connectors_config
-    store = getattr(request.app.state, "connector_store", None)
-    if store is None:
-        return config
-    try:
-        disabled = store.disabled()
-    except Exception:
-        logger.warning("connector_state_unavailable")
-        return config
-    return apply_disabled(config, disabled)
+    return apply_disabled(request.app.state.connectors_config, disabled)
 
 
-@router.get("", response_model=list[ConnectorSummary])
+def _offered(connector: str):
+    """Answer 404 on a status route whose connector is switched off.
+
+    Blanked credentials alone make status read ``not_connected``, which a
+    client renders as something the user can connect -- and here they cannot.
+    A 404 says what is true: this hub does not offer the connector. It is
+    limited to a connector that was explicitly switched off; one that was
+    simply never configured keeps answering ``not_connected`` as before.
+    """
+
+    def dependency(
+        _auth=Depends(get_auth_context),
+        disabled: frozenset[str] = Depends(switched_off_connectors),
+    ) -> None:
+        if connector in disabled:
+            # The access log shows a 404 on a route that plainly exists; the
+            # response body tells it apart from a path nothing serves, and so
+            # does this line when debug logging is on. At debug, because
+            # clients poll status: a switched-off provider would otherwise add
+            # a line per connector, per user, per refresh.
+            logger.debug("connector_status_switched_off", extra={"connector": connector})
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                f"The {connector} connector is switched off on this hub",
+            )
+
+    return Depends(dependency)
+
+
+@router.get("", response_model=list[ConnectorListing])
 async def list_connectors(
     request: Request,
     _auth=Depends(get_auth_context),
     config: ConnectorsConfig = Depends(get_connectors_config),
-) -> list[ConnectorSummary]:
+) -> list[ConnectorListing]:
+    """The connectors this hub offers, and the caller's state in each.
+
+    This is how a client discovers connectors, so it lists only what the
+    deployment can serve: one with no credentials is left out, and so is one an
+    operator switched off (it arrives here with its credentials blanked). An
+    empty list is an answer, not an error.
+    """
+
+    offered = [
+        (descriptor, getattr(config, descriptor.provider))
+        for descriptor in CATALOG
+        if is_offered(getattr(config, descriptor.provider))
+    ]
+    statuses = await asyncio.gather(*(_listed_status(request, config, descriptor) for descriptor, _ in offered))
     return [
-        await _google_drive_status(request, config),
-        await _gmail_status(request, config),
-        await _google_calendar_status(request, config),
-        await _slack_status(request, config),
-        await _github_status(request, config),
-        await _notion_status(request, config),
+        ConnectorListing(
+            id=descriptor.id,
+            name=descriptor.name,
+            short_name=descriptor.short_name,
+            description=descriptor.description,
+            provider=descriptor.provider,
+            link=connector_link(descriptor, section),
+            connect_hint=descriptor.connect_hint,
+            connected=found.connected,
+            state=found.state,
+            scopes=found.scopes,
+            detail=found.detail,
+            account=getattr(found, "account", ""),
+        )
+        for (descriptor, section), found in zip(offered, statuses, strict=True)
     ]
 
 
-@router.get("/google-drive/status", response_model=GoogleDriveStatus)
+async def _listed_status(
+    request: Request, config: ConnectorsConfig, descriptor: ConnectorDescriptor
+) -> ConnectorSummary:
+    """One connector's status for the list, which a single failure must not sink.
+
+    The status helpers answer provider trouble as a state, but an unexpected
+    error in one would otherwise turn the whole list into a 500 and hide every
+    connector that is working. Cancellation is not a failure of one connector
+    and is left to propagate: a request that is going away takes its list along.
+    """
+
+    try:
+        return await _STATUS_READERS[descriptor.id](request, config)
+    except Exception:
+        logger.exception("connector_list_status_failed", extra={"connector": descriptor.id})
+        return ConnectorSummary(
+            id=descriptor.id,
+            name=descriptor.name,
+            connected=False,
+            state="unavailable",
+            detail=f"{descriptor.name} status check failed.",
+        )
+
+
+@router.get("/google-drive/status", response_model=GoogleDriveStatus, dependencies=[_offered("google")])
 async def google_drive_status(
     request: Request,
     _auth=Depends(get_auth_context),
@@ -213,7 +320,7 @@ async def read_google_drive_file(
     return DriveReadResponse(file=file, text=text, truncated=truncated)
 
 
-@router.get("/gmail/status", response_model=GmailStatus)
+@router.get("/gmail/status", response_model=GmailStatus, dependencies=[_offered("google")])
 async def gmail_status(
     request: Request,
     _auth=Depends(get_auth_context),
@@ -282,7 +389,7 @@ async def read_gmail_message(
     )
 
 
-@router.get("/google-calendar/status", response_model=GoogleCalendarStatus)
+@router.get("/google-calendar/status", response_model=GoogleCalendarStatus, dependencies=[_offered("google")])
 async def google_calendar_status(
     request: Request,
     _auth=Depends(get_auth_context),
@@ -352,7 +459,7 @@ async def read_google_calendar_event(
     return CalendarReadResponse(event=event, truncated=truncated)
 
 
-@router.get("/slack/status", response_model=SlackStatus)
+@router.get("/slack/status", response_model=SlackStatus, dependencies=[_offered("slack")])
 async def slack_status(
     request: Request,
     _auth=Depends(get_auth_context),
@@ -495,7 +602,7 @@ async def read_slack_thread(
     )
 
 
-@router.get("/github/status", response_model=GitHubStatus)
+@router.get("/github/status", response_model=GitHubStatus, dependencies=[_offered("github")])
 async def github_status(
     request: Request,
     _auth=Depends(get_auth_context),
@@ -511,6 +618,8 @@ async def search_github(
     _auth=Depends(get_auth_context),
     config: ConnectorsConfig = Depends(get_connectors_config),
 ) -> GitHubSearchResponse:
+    if body.repo.strip():
+        _validate_github_repo(body.repo)
     client = await _github_client(request, config)
     try:
         hits, next_page_token, incomplete = await client.search(
@@ -891,6 +1000,84 @@ async def query_notion_database(
     return NotionDatabaseQueryResponse(rows=rows, next_page_token=next_page_token)
 
 
+@router.get("/sharepoint/status", response_model=SharePointStatus, dependencies=[_offered("sharepoint")])
+async def sharepoint_status(
+    request: Request,
+    _auth=Depends(get_auth_context),
+    config: ConnectorsConfig = Depends(get_connectors_config),
+) -> SharePointStatus:
+    return await _sharepoint_status(request, config)
+
+
+@router.post("/sharepoint/search", response_model=SharePointSearchResponse)
+async def search_sharepoint(
+    body: SharePointSearchRequest,
+    request: Request,
+    _auth=Depends(get_auth_context),
+    config: ConnectorsConfig = Depends(get_connectors_config),
+) -> SharePointSearchResponse:
+    client = await _sharepoint_client(request, config)
+    try:
+        lower, upper = sharepoint_time_bounds(
+            days_back=body.days_back,
+            since_date=body.since_date,
+            until_date=body.until_date,
+            time_zone=body.time_zone,
+        )
+        hits, next_page_token, total = await client.search(
+            query=body.query,
+            limit=body.limit,
+            lower=lower,
+            upper=upper,
+            time_zone=body.time_zone,
+            sort=body.sort,
+            page_token=body.page_token,
+        )
+    except SharePointSearchError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    except SharePointUpstreamError as exc:
+        logger.info(
+            "sharepoint_search_upstream_error",
+            extra={"operation": exc.operation, "status_code": exc.status_code},
+        )
+        _raise_sharepoint_upstream(exc)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "SharePoint search failed") from exc
+    return SharePointSearchResponse(hits=hits, next_page_token=next_page_token, total=total)
+
+
+@router.post("/sharepoint/drives/{drive_id}/items/{item_id}/read", response_model=SharePointReadResponse)
+async def read_sharepoint_item(
+    drive_id: str,
+    item_id: str,
+    body: SharePointReadRequest,
+    request: Request,
+    _auth=Depends(get_auth_context),
+    config: ConnectorsConfig = Depends(get_connectors_config),
+) -> SharePointReadResponse:
+    _validate_sharepoint_drive_id(drive_id)
+    _validate_sharepoint_item_id(item_id)
+    client = await _sharepoint_client(request, config)
+    try:
+        return await client.read_item(drive_id=drive_id, item_id=item_id, max_chars=body.max_chars)
+    except SharePointBusy as exc:
+        # Document reads are admitted one at a time; past the bounded wait the
+        # caller is told to retry rather than queued with a body in memory.
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            str(exc),
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
+    except SharePointUpstreamError as exc:
+        logger.info(
+            "sharepoint_item_read_upstream_error",
+            extra={"operation": exc.operation, "status_code": exc.status_code},
+        )
+        _raise_sharepoint_upstream(exc, not_found_detail=_SHAREPOINT_NOT_FOUND_DETAIL)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "SharePoint item read failed") from exc
+
+
 async def _github_status(request: Request, config: ConnectorsConfig) -> GitHubStatus:
     provider = GitHubTokenProvider(config.github)
     try:
@@ -1076,6 +1263,98 @@ def _raise_notion_upstream(exc: NotionUpstreamError) -> None:
     # Notion returns 400 for caller-correctable input: invalid params or a
     # stale/garbage start_cursor. Surface those as 422; everything else
     # (timeout, 5xx, bad JSON, cursor cycle) is a provider failure -> 502.
+    if exc.status_code == 400:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+
+async def _sharepoint_status(request: Request, config: ConnectorsConfig) -> SharePointStatus:
+    provider = SharePointTokenProvider(config.sharepoint)
+    try:
+        token = await provider.access_token(request)
+    except ConnectorTokenError as exc:
+        return SharePointStatus(connected=False, state=exc.state, scopes=[], detail=str(exc))
+    client = _new_sharepoint_client(token, config)
+    try:
+        access = await client.verify_access()
+    except SharePointUpstreamError as exc:
+        state = "reconnect_required" if exc.status_code in {401, 403} else "unavailable"
+        return SharePointStatus(connected=False, state=state, scopes=[], detail=str(exc))
+    except httpx.HTTPError:
+        return SharePointStatus(
+            connected=False,
+            state="unavailable",
+            scopes=[],
+            detail="Microsoft Graph access check failed.",
+        )
+    return SharePointStatus(
+        connected=True,
+        state="connected",
+        scopes=[*SHAREPOINT_READONLY_SCOPES],
+        account=access.account,
+    )
+
+
+def _new_sharepoint_client(token: str, config: ConnectorsConfig) -> SharePointClient:
+    return SharePointClient(
+        access_token=token,
+        api_base_url=config.sharepoint.api_base_url,
+        timeout_seconds=config.sharepoint.request_timeout_seconds,
+        download_timeout_seconds=config.sharepoint.download_timeout_seconds,
+        max_download_bytes=config.sharepoint.max_download_bytes,
+        include_personal_onedrive=config.sharepoint.include_personal_onedrive,
+        extraction_timeout_seconds=config.sharepoint.extraction_timeout_seconds,
+        extraction_memory_limit_bytes=config.sharepoint.extraction_memory_limit_bytes,
+        extraction_wait_seconds=config.sharepoint.extraction_wait_seconds,
+    )
+
+
+async def _sharepoint_client(request: Request, config: ConnectorsConfig) -> SharePointClient:
+    provider = SharePointTokenProvider(config.sharepoint)
+    try:
+        token = await provider.access_token(request)
+    except ConnectorNotConnected as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except ConnectorReconnectRequired as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except ConnectorTokenError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    return _new_sharepoint_client(token, config)
+
+
+# Graph drive ids look like ``b!AbC...-xyz`` (base64url plus '!'); driveItem ids
+# are opaque alphanumerics. Anything else is refused before it can reach a URL.
+_SHAREPOINT_DRIVE_ID_PATTERN = r"[A-Za-z0-9!_-]{1,200}"
+_SHAREPOINT_ITEM_ID_PATTERN = r"[A-Za-z0-9_-]{1,200}"
+
+# A Graph 404 on a read is ambiguous: the item may have been moved or deleted,
+# or it may be invisible to this delegated token. Never collapse it to a bare
+# "not found".
+_SHAREPOINT_NOT_FOUND_DETAIL = (
+    "SharePoint returned not found. The item may not exist, may have been moved "
+    "or deleted, or may not be visible to your linked Microsoft account."
+)
+
+
+def _validate_sharepoint_drive_id(drive_id: str) -> None:
+    if not re.fullmatch(_SHAREPOINT_DRIVE_ID_PATTERN, drive_id):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "A valid SharePoint drive id is required")
+
+
+def _validate_sharepoint_item_id(item_id: str) -> None:
+    if not re.fullmatch(_SHAREPOINT_ITEM_ID_PATTERN, item_id):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "A valid SharePoint item id is required")
+
+
+def _raise_sharepoint_upstream(exc: SharePointUpstreamError, *, not_found_detail: str = "") -> None:
+    if exc.status_code == 429:
+        headers = {"Retry-After": exc.retry_after} if exc.retry_after else None
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc), headers=headers) from exc
+    if exc.status_code == 404 and not_found_detail:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, not_found_detail) from exc
+    # Graph answers 400 for caller-correctable input (a malformed KQL query, a
+    # paging offset past the search limit). Surface it as 422 so the model fixes
+    # the request instead of retrying a 502.
     if exc.status_code == 400:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
@@ -1287,3 +1566,15 @@ def _validate_slack_channel_id(channel_id: str) -> None:
 def _validate_slack_message_ts(message_ts: str) -> None:
     if not re.fullmatch(_SLACK_MESSAGE_TS_PATTERN, message_ts):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "A Slack message timestamp is required")
+
+
+_STATUS_READERS = {
+    GOOGLE_DRIVE_CONNECTOR_ID: _google_drive_status,
+    GMAIL_CONNECTOR_ID: _gmail_status,
+    GOOGLE_CALENDAR_CONNECTOR_ID: _google_calendar_status,
+    SLACK_CONNECTOR_ID: _slack_status,
+    GITHUB_CONNECTOR_ID: _github_status,
+    NOTION_CONNECTOR_ID: _notion_status,
+    SHAREPOINT_CONNECTOR_ID: _sharepoint_status,
+}
+"""The status read behind each catalog entry, keyed by connector id."""

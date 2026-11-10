@@ -252,21 +252,56 @@ async def test_rest_requests_without_credentials_are_anonymous() -> None:
 
 
 @pytest.mark.parametrize("status", [401, 403])
-async def test_rest_refused_credential_is_a_clear_error_without_the_secret(status: int) -> None:
+async def test_rest_refused_credential_is_a_clear_error_without_the_secret(
+    status: int,
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status, json={"errors": [{"code": "UNAUTHORIZED", "message": "unauthorized"}]})
+        return httpx.Response(
+            status,
+            json={"errors": [{"code": "UNAUTHORIZED", "message": "unauthorized"}]},
+        )
 
     with pytest.raises(RegistrySourceAuthError) as excinfo:
         await make_source(handler).list_repositories()
+
     message = str(excinfo.value)
-    assert f"refused the configured credential for /projects/cogs/repositories (HTTP {status})" in message
+
+    assert (f"refused the configured credential for /projects/cogs/repositories (HTTP {status})") in message
+
     assert CREDENTIALS["password"] not in message
-    assert "unauthorized" not in message  # Harbor's body is not echoed either
+    assert "unauthorized" not in message
+    assert API_URL not in message
+    assert HOST not in message
+
+    assert ("repository:list" in message) == (status == 403)
+
+
+async def test_rest_403_on_artifacts_names_the_artifact_permissions() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/repositories"):
+            return httpx.Response(200, json=[{"name": "cogs/cog-a1b2"}])
+        return httpx.Response(403, json={"errors": [{"code": "FORBIDDEN", "message": "forbidden"}]})
+
+    with pytest.raises(RegistrySourceAuthError) as excinfo:
+        await make_source(handler).list_artifacts("cogs/cog-a1b2")
+    message = str(excinfo.value)
+    assert "artifact:list" in message
+    assert "repository:list" not in message
+    assert API_URL not in message
+    assert HOST not in message
 
 
 async def test_rest_404_and_5xx_and_bad_bodies() -> None:
-    with pytest.raises(RegistrySourceError, match="does not exist on the registry"):
+    with pytest.raises(RegistrySourceError, match="does not exist on the registry") as missing_project:
         await make_source(lambda r: httpx.Response(404, json={"errors": []})).list_repositories()
+    # A repository that does not exist is the same error to everyone, and one a sweep can tell apart:
+    # sent there by a publish through the Hub that never landed, it reads this as "nothing there".
+    from collab_hub_api.cogs.registry import RegistryRepositoryNotFound
+
+    assert not isinstance(missing_project.value, RegistryRepositoryNotFound)
+    with pytest.raises(RegistrySourceError, match="does not exist on the registry") as missing_repository:
+        await make_source(lambda r: httpx.Response(404, json={"errors": []})).list_artifacts("cogs/never-landed")
+    assert isinstance(missing_repository.value, RegistryRepositoryNotFound)
     with pytest.raises(RegistrySourceProtocolError, match="answered HTTP 503"):
         await make_source(lambda r: httpx.Response(503)).list_repositories()
     with pytest.raises(RegistrySourceProtocolError, match="is not JSON"):

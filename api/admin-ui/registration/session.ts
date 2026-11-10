@@ -24,6 +24,8 @@ export interface InviteSession extends SignIn {
   requireVerifiedEmail: boolean;
   /** The data statement, shown in full beside the accept button. */
   dataStatement: string;
+  /** The deployment's external account page, or "" when it sets none. */
+  accountUrl: string;
 }
 
 /**
@@ -49,6 +51,7 @@ export async function loadSession(fetchImpl: typeof fetch = fetch): Promise<Invi
       identity: typeof body.identity === "string" ? body.identity : "",
       requireVerifiedEmail: body.require_verified_email !== false,
       dataStatement: typeof body.data_statement === "string" ? body.data_statement : "",
+      accountUrl: typeof body.account_url === "string" ? body.account_url : "",
     };
   } catch {
     return null;

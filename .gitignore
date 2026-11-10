@@ -6,6 +6,9 @@ dev/.cache/
 
 # Helm
 .chart-parity-*/
+
+# scripts/cog-serve-e2e/run.sh scratch (removed on exit)
+.cog-serve-e2e.*/
 examples/wrap-existing-chart/chart/charts/
 *.tgz
 

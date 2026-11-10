@@ -263,9 +263,7 @@ class FakeInvitationService:
 
     def revoke(self, ctx, invitation_id, *, expect_org_id=None):
         self._guard()
-        self.revoke_calls.append(
-            {"actor": ctx.user, "invitation_id": invitation_id, "expect_org_id": expect_org_id}
-        )
+        self.revoke_calls.append({"actor": ctx.user, "invitation_id": invitation_id, "expect_org_id": expect_org_id})
         if self.revoke_raises is not None:
             raise self.revoke_raises
         for index, row in enumerate(self.rows):
@@ -455,9 +453,7 @@ async def test_a_signed_in_member_is_refused_with_a_page_not_a_shrug(tmp_path, i
         page = await client.get(ORG_INVITATIONS_PATH)
         assert page.status_code == 403
         assert "does not hold the role" in page.text
-        posted = await client.post(
-            ORG_INVITATIONS_PATH, data={"csrf_token": "irrelevant", EMAIL_FIELD: INVITEE}
-        )
+        posted = await client.post(ORG_INVITATIONS_PATH, data={"csrf_token": "irrelevant", EMAIL_FIELD: INVITEE})
         assert posted.status_code == 403
     assert service.issue_calls == []
 
@@ -500,9 +496,7 @@ def test_the_actions_refuse_without_the_owner_org_role(role):
     service = FakeInvitationService()
     for action in (
         lambda: org_router.issue_invitation(_context(role), service, org_id=ORG_ID, email=INVITEE),
-        lambda: org_router.revoke_invitation(
-            _context(role), service, org_id=ORG_ID, invitation_id="inv-1"
-        ),
+        lambda: org_router.revoke_invitation(_context(role), service, org_id=ORG_ID, invitation_id="inv-1"),
         lambda: org_router.name_organization(_context(role), service, org_id=ORG_ID, name=CHOSEN_NAME),
     ):
         with pytest.raises(HTTPException) as refused:
@@ -576,6 +570,19 @@ async def test_issuing_targets_the_callers_own_organization(tmp_path, idp):
     assert notice_text(NOTICE_ISSUED_SENT, INVITEE) in response.text
 
 
+async def test_the_page_carries_the_account_link_when_the_deployment_sets_one(tmp_path, idp):
+    # The footer is rendered by pages.render_page, but this route is what
+    # hands it the value (#275): a dropped `account_url=` here fails here.
+    url = "https://billing.example.com/account"
+    app, _, _ = build_app(tmp_path, idp, web={"account_page_url": url})
+    async with web_client(app) as client:
+        await signed_in(client, idp)
+        page = await client.get(ORG_INVITATIONS_PATH)
+    assert page.status_code == 200
+    assert page.text.count(f'<a href="{url}">Account</a>') == 1
+    assert page.text.index(">Account</a>") < page.text.index("Sign out")
+
+
 async def test_the_page_offers_no_way_to_name_an_organization(tmp_path, idp):
     """No org input exists, and a smuggled org field changes nothing."""
 
@@ -626,9 +633,7 @@ async def test_an_unusable_address_creates_nothing(tmp_path, idp, address):
 
 async def test_issuing_twice_for_one_address_mints_no_second_token(tmp_path, idp):
     existing = an_invitation()
-    app, service, _delivery = build_app(
-        tmp_path, idp, issue_result=LiveInvitationExists(existing=existing)
-    )
+    app, service, _delivery = build_app(tmp_path, idp, issue_result=LiveInvitationExists(existing=existing))
     async with web_client(app) as client:
         await signed_in(client, idp)
         response = await issue(client)
@@ -676,9 +681,7 @@ async def test_issuing_sends_and_renders_no_token_anywhere(tmp_path, idp):
     ],
 )
 async def test_a_failed_or_unconfirmed_send_is_worded_not_hidden(tmp_path, idp, status, kind):
-    app, _service, _delivery = build_app(
-        tmp_path, idp, delivery=EmailModeDelivery(status=status, error_code="boom")
-    )
+    app, _service, _delivery = build_app(tmp_path, idp, delivery=EmailModeDelivery(status=status, error_code="boom"))
     async with web_client(app) as client:
         await signed_in(client, idp)
         response = await issue(client)
@@ -745,9 +748,7 @@ async def test_revoking_names_the_invitation_and_carries_the_org_pin(tmp_path, i
         response = await revoke(client, "inv-1")
     assert response.status_code == 200
     assert notice_text(NOTICE_REVOKED, INVITEE) in response.text
-    assert service.revoke_calls == [
-        {"actor": OWNER_SUB, "invitation_id": "inv-1", "expect_org_id": ORG_ID}
-    ]
+    assert service.revoke_calls == [{"actor": OWNER_SUB, "invitation_id": "inv-1", "expect_org_id": ORG_ID}]
 
 
 async def test_another_organizations_invitation_is_a_plain_not_found(tmp_path, idp):
@@ -769,9 +770,7 @@ async def test_another_organizations_invitation_is_a_plain_not_found(tmp_path, i
         (InvitationsUnavailableError("down"), NOTICE_UNAVAILABLE, 503),
     ],
 )
-async def test_a_revoke_that_cannot_happen_renders_its_own_sentence(
-    tmp_path, idp, raises, notice, code
-):
+async def test_a_revoke_that_cannot_happen_renders_its_own_sentence(tmp_path, idp, raises, notice, code):
     app, _service, _delivery = build_app(tmp_path, idp, rows=[an_invitation()], revoke_raises=raises)
     async with web_client(app) as client:
         await signed_in(client, idp)
@@ -1187,9 +1186,7 @@ async def test_live_an_owner_takes_an_address_into_their_existing_org(live_app, 
             "SELECT user_id, org_id, role FROM collab_org_members ORDER BY created_at"
         ).fetchall()
         orgs = conn.execute("SELECT id FROM collab_orgs").fetchall()
-        events = conn.execute(
-            "SELECT action, actor, org_id FROM collab_audit_events ORDER BY id"
-        ).fetchall()
+        events = conn.execute("SELECT action, actor, org_id FROM collab_audit_events ORDER BY id").fetchall()
         leaked = conn.execute(
             "SELECT count(*) AS n FROM collab_audit_events WHERE detail::text LIKE %s",
             (f"%{token}%",),
@@ -1252,8 +1249,7 @@ async def test_live_an_owner_revokes_and_the_link_dies(live_app, idp, live_db):
     with live_db.connection() as conn:
         status_row = conn.execute("SELECT status FROM collab_invitations").fetchone()
         actions = [
-            row["action"]
-            for row in conn.execute("SELECT action FROM collab_audit_events ORDER BY id").fetchall()
+            row["action"] for row in conn.execute("SELECT action FROM collab_audit_events ORDER BY id").fetchall()
         ]
     assert status_row["status"] == "revoked"
     assert actions == ["invitation.send", "invitation.revoke"]

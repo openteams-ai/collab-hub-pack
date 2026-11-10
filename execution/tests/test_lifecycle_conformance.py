@@ -2,7 +2,7 @@
 
 Every backend the configuration can build runs the same Ops to the same Track:
 multi-step completion, a Gate escalating and each human decision, cancel, a
-budget stop, and a retry as a new attempt. Durable backends (Phases 26 and 32)
+budget stop, and a retry as a new attempt. Durable backends (Phases 27 and 33)
 join the parametrization when they are built.
 """
 

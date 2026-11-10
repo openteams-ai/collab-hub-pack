@@ -20,11 +20,12 @@ from pathlib import Path
 import pytest
 
 from collab_hub_execution import InMemoryTrackStore, LifecycleRunner, OpDefinition, OpStep, RunState, intents
-from collab_hub_execution.controller import RunController, _deliveries
+from collab_hub_execution.controller import RunController
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 HERMES = REPOSITORY / "cogs" / "hermes"
-FAKE_AGENT = Path(__file__).resolve().parent / "fake_acp_agent.py"
+FAKE_AGENT = REPOSITORY / "dev" / "fake-agent" / "fake_acp_agent.py"
+WORKER_SDK = REPOSITORY / "worker" / "src"  # the worker runs on the SDK from this checkout, under this Python
 FAKE_MODEL = REPOSITORY / "dev" / "fake-model" / "fake_model.py"
 BY = {"user": "alice", "org_id": "acme"}
 
@@ -36,7 +37,8 @@ def _controller(tmp_path, track, environment):
     manifest = root / "hermes" / "pixi.toml"
     manifest.write_text(re.sub(r'^serve = .*$', f'serve = "{sys.executable} serve.py"', manifest.read_text(),
                                flags=re.M))
-    environment = {"COLLAB_HERMES_COMMAND": f"{sys.executable} {FAKE_AGENT}", **environment}
+    environment = {"COLLAB_HERMES_COMMAND": f"{sys.executable} {FAKE_AGENT}", "PYTHONPATH": str(WORKER_SDK),
+                   **environment}
     runner = LifecycleRunner(track=track, location="local", location_settings={
         "packages": [root], "work_dir": tmp_path / "runs", "environment": "host", "interaction_timeout": None,
         "deliver": lambda cog, run_id, instance: environment if cog == "hermes" else {}})
@@ -109,6 +111,60 @@ def test_with_claude_hermes_uses_its_anthropic_provider_and_gets_only_that_key(t
     _until(controller, lambda: intents.describe(track, "r").state is RunState.CANCELLED, "not cancelled")
 
 
+def test_a_delivered_ca_bundle_reaches_hermes(tmp_path):
+    track = InMemoryTrackStore()
+    controller = _controller(tmp_path, track, {**MODEL, "SSL_CERT_FILE": "/delivered/ca.pem",
+                                               "REQUESTS_CA_BUNDLE": "/delivered/ca.pem"})
+    intents.submit(track, OpDefinition("r", (OpStep("chat", "hermes", "session"),)), by=BY)
+    seen = json.loads(_answer(controller, track, "r", "env"))
+    assert seen["ssl_cert_file"] == "/delivered/ca.pem" and seen["requests_ca_bundle"] == "/delivered/ca.pem"
+    intents.request_cancel(track, "r", actor="alice")
+    _until(controller, lambda: intents.describe(track, "r").state is RunState.CANCELLED, "not cancelled")
+
+
+def _serve_module():
+    """The Hermes Cog's worker module, imported from the package: its environment assembly is tested in-process."""
+    import importlib.util
+
+    if str(WORKER_SDK) not in sys.path:
+        sys.path.insert(0, str(WORKER_SDK))  # the worker runs on the SDK from this checkout
+    spec = importlib.util.spec_from_file_location("hermes_serve", HERMES / "serve.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_hermes_gets_its_environments_ca_bundle_only_inside_pixi_and_never_over_a_delivered_one(tmp_path, monkeypatch):
+    serve = _serve_module()
+    bundle = tmp_path / "cacert.pem"
+    bundle.write_text("")
+    monkeypatch.setattr(serve, "CA_BUNDLE", bundle)
+    for name in ("PIXI_ENVIRONMENT_NAME", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE"):
+        monkeypatch.delenv(name, raising=False)
+    # The `host` environment: whatever interpreter runs the worker, whose bundle is not the package's.
+    assert not {"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"} & serve.hermes_environment().keys()
+    # The package's pixi environment: its conda bundle, current by the lock, for httpx and requests alike.
+    monkeypatch.setenv("PIXI_ENVIRONMENT_NAME", "default")
+    env = serve.hermes_environment()
+    assert env["SSL_CERT_FILE"] == str(bundle) and env["REQUESTS_CA_BUNDLE"] == str(bundle)
+    # Delivered bundles win, and a delivered directory alone disables the defaults too: Hermes resolves
+    # SSL_CERT_FILE or REQUESTS_CA_BUNDLE itself and otherwise lets httpx read SSL_CERT_FILE, then SSL_CERT_DIR,
+    # so a default file beside the delivered directory would take precedence over it.
+    monkeypatch.setenv("SSL_CERT_DIR", "/delivered/ca")
+    env = serve.hermes_environment()
+    assert env["SSL_CERT_DIR"] == "/delivered/ca"
+    assert not {"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"} & env.keys()
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/delivered/ca.pem")
+    env = serve.hermes_environment()
+    assert "SSL_CERT_FILE" not in env
+    assert env["SSL_CERT_DIR"] == "/delivered/ca" and env["REQUESTS_CA_BUNDLE"] == "/delivered/ca.pem"
+    # An environment without the bundle sets nothing either.
+    monkeypatch.delenv("SSL_CERT_DIR")
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE")
+    bundle.unlink()
+    assert not {"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"} & serve.hermes_environment().keys()
+
+
 @pytest.mark.parametrize(("environment", "why"), [
     ({"COLLAB_MODEL_PROVIDER": "anthropic"}, "needs COLLAB_MODEL_API_KEY"),
     ({"COLLAB_MODEL_PROVIDER": "gemini", "COLLAB_MODEL_BASE_URL": "http://x/v1"}, "unknown COLLAB_MODEL_PROVIDER"),
@@ -179,24 +235,23 @@ def test_without_a_model_the_step_fails_and_says_why(tmp_path):
     assert "COLLAB_MODEL_BASE_URL" in view.reason
 
 
-def test_the_controller_delivers_a_variable_to_the_cog_named_and_no_other(monkeypatch):
-    monkeypatch.setenv("COLLAB_MODEL_BASE_URL", "http://model")
-    monkeypatch.delenv("COLLAB_MODEL_API_KEY", raising=False)
-    deliver = _deliveries(["hermes:COLLAB_MODEL_BASE_URL", "hermes:COLLAB_MODEL_API_KEY"])
-    assert deliver("hermes", "r", "s:0") == {"COLLAB_MODEL_BASE_URL": "http://model"}  # unset ones are skipped
-    assert deliver("hello", "r", "s:0") == {}
-    with pytest.raises(SystemExit, match="COG:NAME"):
-        _deliveries(["COLLAB_MODEL_BASE_URL"])
-
-
 NEEDS_HERMES = pytest.mark.skipif(
     not (HERMES / ".pixi" / "envs" / "default").is_dir() or shutil.which("pixi") is None,
     reason="the Hermes Cog's pixi environment is not installed (make -C examples/cog-local env)")
 
 
-def _hermes_session(tmp_path, model_command, port):
-    """Hermes itself, in its own environment, in a session, against a model this test runs."""
-    model = subprocess.Popen([sys.executable, *model_command], stderr=open(tmp_path / "model.log", "w"))
+def _free_port():
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _hermes_session(tmp_path, model_command):
+    """Hermes itself, in its own environment, in a session, against a model this test runs, on a free port."""
+    port = _free_port()
+    model = subprocess.Popen([sys.executable, *model_command(port)], stderr=open(tmp_path / "model.log", "w"))
     track = InMemoryTrackStore()
     runner = LifecycleRunner(track=track, location="local", location_settings={
         "packages": [REPOSITORY / "cogs"], "allow": ["hermes"], "work_dir": tmp_path / "runs",
@@ -219,7 +274,7 @@ def _end(model, track, controller):
 
 @NEEDS_HERMES
 def test_hermes_itself_answers_through_the_fake_model(tmp_path):
-    model, track, controller = _hermes_session(tmp_path, [str(FAKE_MODEL), "--port", "18791"], 18791)
+    model, track, controller = _hermes_session(tmp_path, lambda port: [str(FAKE_MODEL), "--port", str(port)])
     try:
         assert _answer(controller, track, "r", "hello hermes") == "The fake model heard: hello hermes"
     finally:
@@ -231,7 +286,7 @@ def test_hermes_runs_no_command_even_when_its_model_orders_one(tmp_path):
     # Decision 14: prompt in, answer out. The model asks for the `terminal` tool; Hermes has none to run.
     marker = tmp_path / "hermes-ran-a-command"
     ordering = Path(__file__).resolve().parent / "tool_ordering_model.py"
-    model, track, controller = _hermes_session(tmp_path, [str(ordering), "18792", str(marker)], 18792)
+    model, track, controller = _hermes_session(tmp_path, lambda port: [str(ordering), str(port), str(marker)])
     try:
         answer = _answer(controller, track, "r", "please run a command")
     finally:
@@ -242,11 +297,13 @@ def test_hermes_runs_no_command_even_when_its_model_orders_one(tmp_path):
 
 
 BEDROCK_PROBE = """
-import os, subprocess, sys, tempfile
+import os, subprocess, sys
 sys.path.insert(0, os.getcwd())
 import serve
-root = tempfile.mkdtemp()
-os.environ.update(HERMES_HOME=str(serve.hermes_home(root)), HOME=root)
+from collab_hub_cog_worker import Context, load_binding
+context = Context(binding=load_binding())
+env = serve.Hermes(context).environment(context)
+os.environ.update(HERMES_HOME=env["HERMES_HOME"], HOME=env["HOME"])
 installs = []
 run = subprocess.run
 subprocess.run = lambda *a, **k: (installs.append(str(a[0] if a else k.get("args"))), run(*a, **k))[1]

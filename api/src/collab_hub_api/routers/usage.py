@@ -201,11 +201,7 @@ def build_usage_report(
         event_counts = [item for item in event_counts if item.user in user_filter]
         frame_counts = [item for item in frame_counts if item.actor in user_filter]
 
-    chat_counts = [
-        UserCount(user=item.user, count=item.count)
-        for item in event_counts
-        if item.event == "chat_created"
-    ]
+    chat_counts = [UserCount(user=item.user, count=item.count) for item in event_counts if item.event == "chat_created"]
     created_counts = _user_counts(frame_counts, "created")
     updated_counts = _user_counts(frame_counts, "updated")
 

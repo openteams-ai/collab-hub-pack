@@ -327,9 +327,8 @@ class WebSecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Apply the surface's security headers to **every** response it owns.
 
     Per-response headers were not enough, and the gap was not theoretical: a
-    redirect, an asset, a 405 from an unsupported method, and — because the
-    MCP app is mounted at ``/`` and matches whatever the routers did not
-    (issue #86) — any unmatched ``/web/*`` path all produced responses that
+    redirect, an asset, a 405 from an unsupported method, and any unmatched
+    ``/web/*`` path (the router's own 404) all produced responses that
     the route handlers never touched, and so answered without
     ``Referrer-Policy``, without ``no-store``, and without a CSP.
 
@@ -473,9 +472,7 @@ def preferred_theme(request: Request) -> str | None:
 def set_theme_cookie(response: Response, theme: str) -> None:
     """Record a choice for a year, for every path of this origin."""
 
-    response.set_cookie(
-        THEME_COOKIE, theme, max_age=365 * 86400, path="/", secure=True, httponly=False, samesite="lax"
-    )
+    response.set_cookie(THEME_COOKIE, theme, max_age=365 * 86400, path="/", secure=True, httponly=False, samesite="lax")
 
 
 def offered(navigation, *, operator: bool, owner: bool):
@@ -511,6 +508,7 @@ def _shell(
     current_path: str | None,
     roles: ViewerRoles,
     theme: str | None,
+    account_url: str | None,
 ) -> str:
     """The signed-in frame: header, side navigation, main column.
 
@@ -523,9 +521,8 @@ def _shell(
     entries = ""
     for path, label, icon, _needs in offered(NAVIGATION, operator=roles.operator, owner=roles.owner):
         current = ' current" aria-current="page' if path == current_path else ""
-        entries += (
-            f'<li><a class="navlink{current}" href="{root}{path}">{icon}{html.escape(label)}</a></li>'
-        )
+        entries += f'<li><a class="navlink{current}" href="{root}{path}">{icon}{html.escape(label)}</a></li>'
+
     # The switch offers the other theme. With no choice recorded the page
     # follows the system, which the server cannot see, so both switches are
     # rendered and the stylesheet shows the one that applies (see
@@ -541,6 +538,9 @@ def _shell(
             f' aria-label="Switch to {other} theme">{icon}</button></form>'
         )
 
+    # Same-tab navigation, like every other link here; the page-level
+    # no-referrer meta already keeps this origin out of the Referer.
+    account = f'<a href="{html.escape(account_url)}">Account</a>' if account_url else ""
     if theme in THEMES:
         switch = switch_to("light" if theme == "dark" else "dark")
     else:
@@ -553,7 +553,7 @@ def _shell(
         '<div class="header-identity">'
         f'<span class="avatar" aria-hidden="true">{html.escape(initials(identity_label, identity_email))}</span>'
         f'<span class="who">{html.escape(identity_email or identity_label)}</span>'
-        f"{switch}"
+        f"{account}{switch}"
         f'<form class="inline" method="post" action="{root}/web/signout">'
         f'<input type="hidden" name="csrf_token" value="{html.escape(csrf_token)}">'
         '<button type="submit" class="icon-button" title="Sign out" aria-label="Sign out">'
@@ -577,6 +577,7 @@ def render_page(
     current_path: str | None = None,
     roles: ViewerRoles | None = None,
     theme: str | None = None,
+    account_url: str | None = None,
 ) -> str:
     """Render one page of the surface into a complete document.
 
@@ -593,6 +594,13 @@ def render_page(
     ``current_path`` marked. Otherwise the page stands alone in one centred
     column. ``theme`` is the browser's recorded choice, if any; without one the
     page follows the system.
+
+    ``account_url`` is the deployment's external account page
+    (``web.account_page_url``, issue #275). It is rendered only in that
+    signed-in header and only when set; routes read it from configuration
+    through :func:`~.surface.account_page_url`, never from the request. This
+    is the one place the link exists, so a page cannot grow a second copy
+    with a different rule.
     """
 
     if identity_label is not None and csrf_token is not None:
@@ -605,6 +613,7 @@ def render_page(
             current_path=current_path,
             roles=roles if roles is not None else _NO_ROLES,
             theme=theme,
+            account_url=account_url,
         )
     else:
         content = (
@@ -690,10 +699,7 @@ def body_refused_page(*, root_path: str = "", status_code: int) -> str:
         )
     else:
         heading = "That request was too large"
-        detail = (
-            "The form you sent is larger than this page will read, so nothing"
-            " was changed."
-        )
+        detail = "The form you sent is larger than this page will read, so nothing was changed."
     return render_page(
         title=heading,
         body=(

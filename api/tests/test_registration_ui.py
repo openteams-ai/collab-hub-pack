@@ -94,10 +94,7 @@ async def test_every_asset_the_document_references_resolves_without_a_session(tm
     async with web_client(app) as client:
         document = await client.get(ACCEPT_PAGE_PATH)
         base = str(document.url)
-        fetched = {
-            url: (await client.get(urljoin(base, url))).status_code
-            for url in asset_urls(document.text)
-        }
+        fetched = {url: (await client.get(urljoin(base, url))).status_code for url in asset_urls(document.text)}
 
     assert fetched, "the built document must reference at least one asset"
     assert all(status == 200 for status in fetched.values()), fetched

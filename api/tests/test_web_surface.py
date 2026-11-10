@@ -271,9 +271,7 @@ async def start_signin(client: AsyncClient, idp: _StubIdp, next_path: str = "/we
 
 async def sign_in(client: AsyncClient, idp: _StubIdp, next_path: str = "/web"):
     params = await start_signin(client, idp, next_path)
-    return await client.get(
-        "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-    )
+    return await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
 
 
 # --- session and transient cookie codec ------------------------------------
@@ -382,16 +380,12 @@ async def test_a_next_naming_the_signin_route_does_not_loop(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as client:
         await sign_in(client, idp)
-        response = await client.get(
-            "/web/signin", params={"renew": "1", "next": "/web/signin?renew=1"}
-        )
+        response = await client.get("/web/signin", params={"renew": "1", "next": "/web/signin?renew=1"})
         assert response.status_code == 303
         assert response.headers["location"].startswith(idp.issuer)
         params = authorize_params(response.headers["location"])
         idp.nonce = params["nonce"]
-        callback = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-        )
+        callback = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
     assert callback.status_code == 303
     assert callback.headers["location"] == "/web"
 
@@ -485,9 +479,7 @@ async def test_signin_register_flag_starts_the_flow_on_the_registration_form(tmp
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as client:
         plain = await client.get("/web/signin", params={"next": "/web"})
-        register = await client.get(
-            "/web/signin", params={"next": "/web", "register": "1"}
-        )
+        register = await client.get("/web/signin", params={"next": "/web", "register": "1"})
     plain_params = authorize_params(plain.headers["location"])
     register_params = authorize_params(register.headers["location"])
     assert "prompt" not in plain_params
@@ -546,9 +538,7 @@ async def test_callback_refuses_a_wrong_state(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as client:
         await start_signin(client, idp)
-        response = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": "forged-state"}
-        )
+        response = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": "forged-state"})
         assert response.status_code == 400
         assert idp.token_requests == []
         # No session was minted anywhere along the way.
@@ -559,9 +549,7 @@ async def test_callback_refuses_a_wrong_state(tmp_path, idp):
 async def test_callback_without_a_started_flow_is_refused(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as client:
-        response = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": "whatever"}
-        )
+        response = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": "whatever"})
         assert response.status_code == 400
         assert idp.token_requests == []
 
@@ -572,13 +560,9 @@ async def test_callback_cannot_be_replayed(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as client:
         params = await start_signin(client, idp)
-        first = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-        )
+        first = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
         assert first.status_code == 303
-        replay = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-        )
+        replay = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
         assert replay.status_code == 400
         assert len(idp.token_requests) == 1
 
@@ -649,9 +633,7 @@ async def test_a_wrong_nonce_is_refused(tmp_path, idp):
     async with web_client(app) as client:
         params = await start_signin(client, idp)
         idp.nonce = "a-nonce-from-some-other-flow"
-        response = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-        )
+        response = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
         assert response.status_code == 400
 
 
@@ -660,9 +642,7 @@ async def test_a_missing_nonce_is_refused(tmp_path, idp):
     async with web_client(app) as client:
         params = await start_signin(client, idp)
         idp.nonce = None
-        response = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-        )
+        response = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
         assert response.status_code == 400
 
 
@@ -713,9 +693,11 @@ async def test_an_api_idtoken_cookie_is_not_a_web_session(tmp_path, idp, monkeyp
     monkeypatch.setenv("FRAMES_IDTOKEN_ALLOW_UNSIGNED", "true")
     app = make_web_app(tmp_path, idp)
     header = urlsafe_b64encode(json.dumps({"alg": "none"}).encode()).decode().rstrip("=")
-    payload = urlsafe_b64encode(
-        json.dumps({"preferred_username": "alice", "org_id": "o", "workspace_id": "w"}).encode()
-    ).decode().rstrip("=")
+    payload = (
+        urlsafe_b64encode(json.dumps({"preferred_username": "alice", "org_id": "o", "workspace_id": "w"}).encode())
+        .decode()
+        .rstrip("=")
+    )
     async with web_client(app) as client:
         client.cookies.set("IdToken-test", f"{header}.{payload}.", domain="web.test", path="/")
         response = await client.get("/web")
@@ -770,9 +752,7 @@ async def test_signout_with_the_rendered_csrf_token_ends_the_session(tmp_path, i
         ("?next=/web/signin", "/web/signin"),
     ],
 )
-async def test_signing_in_again_returns_to_where_the_person_signed_out_from(
-    tmp_path, idp, query, expected_href
-):
+async def test_signing_in_again_returns_to_where_the_person_signed_out_from(tmp_path, idp, query, expected_href):
     """The signed-out page passes a safe ``next`` on to sign-in, so leaving the
     admin panel and signing in again lands back on the panel. Anything the
     sign-in redirect would refuse is dropped here too."""
@@ -802,9 +782,7 @@ async def test_a_csrf_token_from_another_session_is_refused(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as first:
         await sign_in(first, idp)
-        first_token = re.search(
-            r'name="csrf_token" value="([^"]+)"', (await first.get("/web")).text
-        ).group(1)
+        first_token = re.search(r'name="csrf_token" value="([^"]+)"', (await first.get("/web")).text).group(1)
     async with web_client(app) as second:
         await sign_in(second, idp)
         response = await second.post("/web/signout", data={"csrf_token": first_token})
@@ -956,6 +934,64 @@ async def test_a_token_refusal_is_still_the_403_page_not_a_body_refusal(tmp_path
         assert pulled == 0
 
 
+@pytest.mark.parametrize(
+    "content_type",
+    ["APPLICATION/X-WWW-FORM-URLENCODED", "application/x-www-form-urlencoded; charset=UTF-8"],
+    ids=["uppercase", "charset_param"],
+)
+async def test_the_fallback_reads_the_form_type_however_it_is_spelled(tmp_path, idp, content_type):
+    """The fallback compares the media type, not a prefix of the header (#71):
+    case and parameters do not change the type, so both of these are forms
+    and their token is read. The uppercase spelling used to miss the prefix
+    match and fall through to a 403 for a token that was right."""
+
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        page = (await client.get("/web")).text
+        token = re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
+        response = await client.post(
+            "/web/signout",
+            content=f"csrf_token={token}".encode(),
+            headers={"Content-Type": content_type},
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == "/web/signed-out"
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["application/x-www-form-urlencoded-not-really", "multipart/form-data-ish; boundary=x"],
+    ids=["form_suffix_extended", "multipart_suffix_extended"],
+)
+async def test_a_type_that_only_begins_like_a_form_is_not_read_as_one(tmp_path, idp, content_type):
+    """A type that merely *begins* with a form type does not claim a form
+    (#71). Both used to pass the fallback's prefix match: the urlencoded one
+    then had its body read and parsed (and its token honoured), the multipart
+    one was refused 415 by ``form_fields``. Each is now what any other
+    non-form type is — a missing token, the plain 403, none of its body
+    pulled."""
+
+    pulled = 0
+
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        page = (await client.get("/web")).text
+        token = re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
+
+        async def form_shaped_body():
+            nonlocal pulled
+            pulled += 1
+            yield f"csrf_token={token}".encode()
+
+        response = await client.post("/web/signout", content=form_shaped_body(), headers={"Content-Type": content_type})
+        assert response.status_code == 403
+        assert pulled == 0
+        # A refused sign-out signs nothing out.
+        assert (await client.get("/web")).status_code == 200
+
+
 async def test_an_undecodable_form_fails_the_token_check_not_the_server(tmp_path, idp):
     # Bytes that are not UTF-8 parse to no fields; the CSRF check fails closed
     # on the empty mapping rather than anything raising into a 500.
@@ -975,9 +1011,7 @@ async def test_a_padded_form_under_the_cap_still_signs_out(tmp_path, idp):
         await sign_in(client, idp)
         page = (await client.get("/web")).text
         token = re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
-        response = await client.post(
-            "/web/signout", data={"csrf_token": token, "padding": "p" * 3000}
-        )
+        response = await client.post("/web/signout", data={"csrf_token": token, "padding": "p" * 3000})
         assert response.status_code == 303
         assert response.headers["location"] == "/web/signed-out"
 
@@ -999,7 +1033,7 @@ async def test_any_route_that_takes_the_dependency_inherits_the_bound(tmp_path, 
         return {"ok": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     # Properly gated, says the rollout check — and the gate carries the bound.
     verify_web_route_protection(app.routes)
     stream, sent = oversized_form_stream()
@@ -1052,14 +1086,7 @@ def mount_role_gated_test_pages(app) -> None:
     def owner_page(session=Depends(require_org_owner)):
         return {"user": session.user}
 
-    # make_app has already mounted the MCP catch-all at "/", so a router
-    # appended now would sit behind it and never match; slot the test pages
-    # in ahead of it, exactly where a real page router would be included.
-    before = len(app.router.routes)
     app.include_router(router)
-    added = app.router.routes[before:]
-    del app.router.routes[before:]
-    app.router.routes[:0] = added
 
 
 async def test_operator_pages_never_grant_without_a_role_source(tmp_path, idp):
@@ -1081,7 +1108,7 @@ async def test_operator_pages_admit_operators_and_refuse_others(tmp_path, idp):
     # The issue #87 seam: a resolver installed on app.state. The session
     # principal follows the deployment's identity policy (user_from_claims):
     # unpinned here, so it is the preferred_username, exactly as on the API.
-    app.state.platform_role_resolver = lambda user: ("operator" if user == "alice" else None)
+    app.state.platform_role_resolver = lambda user: "operator" if user == "alice" else None
     async with web_client(app) as client:
         await sign_in(client, idp)
         response = await client.get("/web/test/operator-only")
@@ -1262,9 +1289,7 @@ async def test_a_non_ascii_nonce_claim_is_refused_not_crashed(tmp_path, idp):
     async with web_client(app) as client:
         params = await start_signin(client, idp)
         idp.claims_override = {"nonce": "жетон"}
-        response = await client.get(
-            "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-        )
+        response = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
         assert response.status_code == 400
 
 
@@ -1367,6 +1392,51 @@ def test_an_insecure_public_base_url_is_refused(tmp_path, idp):
         make_web_app(tmp_path, idp, web={"public_base_url": "http://frames.example.com"})
 
 
+# A leading NUL parses away: urlsplit("\x00https://h/") is a clean https URL,
+# while the raw bytes ride into every derived endpoint and redirect. Each URL
+# check refuses it on the raw string, the same way the account link does.
+HIDDEN_CHARACTER_URLS = [
+    "\x00https://auth.example.com/realms/nebari",
+    "https://auth.example.com/realms/nebari\x7f",
+    "https://auth.example.com/realms/\u200bnebari",
+    "https://auth.example.com/realms/nebari\r\nSet-Cookie: a=b",
+    "https://auth.example.com/realms/ nebari",
+]
+
+
+@pytest.mark.parametrize("url", HIDDEN_CHARACTER_URLS, ids=repr)
+def test_an_issuer_with_a_hidden_character_fails_the_rollout(tmp_path, idp, url):
+    from collab_hub_api.web.oidc import invalid_realm_url_reason
+
+    assert invalid_realm_url_reason(url) in (
+        "it contains a control or non-printable character",
+        "it contains whitespace",
+    )
+    with pytest.raises(RuntimeError, match="realm URL is unusable \\(it contains"):
+        make_web_app(tmp_path, idp, web={"issuer_url": url})
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://auth.example.com:0/realms/nebari", "http://localhost:0/realms/nebari"],
+)
+def test_an_issuer_on_port_0_fails_the_rollout(tmp_path, idp, url):
+    # Parses, but no browser will follow a redirect to it and nothing listens.
+    with pytest.raises(RuntimeError, match="realm URL is unusable \\(its port is 0"):
+        make_web_app(tmp_path, idp, web={"issuer_url": url})
+
+
+def test_a_public_base_url_on_port_0_is_refused(tmp_path, idp):
+    with pytest.raises(RuntimeError, match="public_base_url is unusable \\(its port is 0"):
+        make_web_app(tmp_path, idp, web={"public_base_url": "https://frames.example.com:0"})
+
+
+@pytest.mark.parametrize("url", [u.replace("/realms/nebari", "") for u in HIDDEN_CHARACTER_URLS], ids=repr)
+def test_a_public_base_url_with_a_hidden_character_is_refused(tmp_path, idp, url):
+    with pytest.raises(RuntimeError, match="public_base_url is unusable \\(it contains"):
+        make_web_app(tmp_path, idp, web={"public_base_url": url})
+
+
 # --- codex round 2: fail-closed routing, headers, lifetime, resolver -------------
 
 
@@ -1424,11 +1494,7 @@ async def test_a_page_router_added_without_thought_is_authenticated(tmp_path, id
     config = Config.parse(web_values(tmp_path, idp))
     surface = build_web_surface(config)
     app = make_web_app(tmp_path, idp)
-    before = len(app.router.routes)
     app.include_router(make_router(surface, page_routers=[page_router]))
-    added = app.router.routes[before:]
-    del app.router.routes[before:]
-    app.router.routes[:0] = added
 
     async with web_client(app) as client:
         response = await client.get("/admin/invitations")
@@ -1439,7 +1505,7 @@ async def test_a_page_router_added_without_thought_is_authenticated(tmp_path, id
 
 async def test_security_headers_cover_unmatched_paths_and_methods(tmp_path, idp):
     # Not just the routes this package wrote: a 405, an unmatched /web path
-    # (which the mounted MCP catch-all answers, issue #86), and a redirect.
+    # (which the router's own 404 answers), and a redirect.
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as client:
         unsupported_method = await client.post("/web/signin")
@@ -1485,9 +1551,7 @@ def test_the_session_lifetime_ceiling_is_enforced(tmp_path, idp):
         Config.parse(web_values(tmp_path, idp, web={"session_lifetime_seconds": 7 * 24 * 3600}))
     with pytest.raises(Exception, match="session_lifetime_seconds"):
         Config.parse(
-            web_values(
-                tmp_path, idp, web={"session_lifetime_seconds": WEB_SESSION_LIFETIME_CEILING_SECONDS + 1}
-            )
+            web_values(tmp_path, idp, web={"session_lifetime_seconds": WEB_SESSION_LIFETIME_CEILING_SECONDS + 1})
         )
     lowered = Config.parse(web_values(tmp_path, idp, web={"session_lifetime_seconds": 900}))
     assert lowered.web.session_lifetime_seconds == 900
@@ -1497,9 +1561,7 @@ async def test_the_session_cookie_expires_at_the_configured_lifetime(tmp_path, i
     app = make_web_app(tmp_path, idp, web={"session_lifetime_seconds": 900})
     async with web_client(app) as client:
         response = await sign_in(client, idp)
-    session_cookie = next(
-        value for value in response.headers.get_list("set-cookie") if SESSION_COOKIE in value
-    )
+    session_cookie = next(value for value in response.headers.get_list("set-cookie") if SESSION_COOKIE in value)
     assert "Max-Age=900" in session_cookie
 
 
@@ -1620,16 +1682,6 @@ async def test_a_junk_platform_role_source_does_not_grant(tmp_path, idp):
 # inspect the registered result instead.
 
 
-def register_ahead_of_the_mcp_mount(app, router) -> None:
-    """Include *router* where a page router would sit: before the "/" mount."""
-
-    before = len(app.router.routes)
-    app.include_router(router)
-    added = app.router.routes[before:]
-    del app.router.routes[before:]
-    app.router.routes[:0] = added
-
-
 def anonymous_page_router() -> APIRouter:
     router = APIRouter(include_in_schema=False)
 
@@ -1647,7 +1699,7 @@ async def test_bypass_direct_include_router_is_authenticated_by_the_guard(tmp_pa
     # page author forgot the dependency; the guard supplies the boundary, so
     # the body is unreachable without a session and reachable with one.
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, anonymous_page_router())
+    app.include_router(anonymous_page_router())
     async with web_client(app) as client:
         anonymous = await client.get("/web/future-page")
         assert anonymous.status_code == 303
@@ -1668,7 +1720,7 @@ async def test_bypass_appending_to_the_returned_router_is_authenticated(tmp_path
         return {"anonymous": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, returned)
+    app.include_router(returned)
     async with web_client(app) as client:
         response = await client.get("/web/future-page")
         assert response.status_code == 303
@@ -1686,7 +1738,7 @@ async def test_the_guard_covers_every_surface_prefix(tmp_path, idp, path):
         return {"anonymous": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     async with web_client(app) as client:
         response = await client.get(path)
         assert response.status_code == 303
@@ -1697,7 +1749,7 @@ async def test_the_guard_refuses_at_boot_not_only_at_request_time(tmp_path, idp)
     # Preferred failure mode: the deploy fails, rather than the first
     # anonymous request being the thing that notices.
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, anonymous_page_router())
+    app.include_router(anonymous_page_router())
     with pytest.raises(RuntimeError, match="/web/future-page"):
         async with app.router.lifespan_context(app):
             pass
@@ -1706,7 +1758,7 @@ async def test_the_guard_refuses_at_boot_not_only_at_request_time(tmp_path, idp)
 def test_the_verifier_reports_offenders_regardless_of_registration_path(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     assert unprotected_web_routes(app.routes) == []
-    register_ahead_of_the_mcp_mount(app, anonymous_page_router())
+    app.include_router(anonymous_page_router())
     assert unprotected_web_routes(app.routes) == ["/web/future-page"]
     with pytest.raises(RuntimeError, match="PUBLIC_WEB_PATHS"):
         verify_web_route_protection(app.routes)
@@ -1731,7 +1783,7 @@ async def test_a_correctly_registered_page_still_serves(tmp_path, idp):
     config = Config.parse(web_values(tmp_path, idp))
     surface = build_web_surface(config)
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, make_router(surface, page_routers=[page_router]))
+    app.include_router(make_router(surface, page_routers=[page_router]))
     async with web_client(app) as client:
         anonymous = await client.get("/admin/invitations")
         assert anonymous.status_code == 303
@@ -1784,9 +1836,7 @@ async def test_no_session_cookie_can_outlive_the_ceiling(tmp_path, idp):
     object.__setattr__(app.state.web_surface, "session_lifetime_seconds", 7 * 24 * 3600)
     async with web_client(app) as client:
         response = await sign_in(client, idp)
-        session_cookie = next(
-            value for value in response.headers.get_list("set-cookie") if SESSION_COOKIE in value
-        )
+        session_cookie = next(value for value in response.headers.get_list("set-cookie") if SESSION_COOKIE in value)
         assert f"Max-Age={WEB_SESSION_LIFETIME_CEILING_SECONDS}" in session_cookie
         # And the signed exp agrees with the cookie's Max-Age.
         decoded = SessionCodec(SESSION_SECRET).decode_session(dict(client.cookies)[SESSION_COOKIE])
@@ -1806,7 +1856,7 @@ async def test_an_exception_from_a_page_still_carries_the_security_headers(tmp_p
     config = Config.parse(web_values(tmp_path, idp))
     surface = build_web_surface(config)
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, make_router(surface, page_routers=[router]))
+    app.include_router(make_router(surface, page_routers=[router]))
     async with web_client(app) as client:
         await sign_in(client, idp)
         response = await client.get("/web/boom")
@@ -1829,7 +1879,7 @@ async def test_an_exception_off_the_surface_is_not_swallowed(tmp_path, idp):
         raise RuntimeError("deliberate")
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     async with web_client(app) as client:
         with pytest.raises(RuntimeError, match="deliberate"):
             await client.get("/not-web/boom")
@@ -1961,10 +2011,13 @@ async def test_a_mount_under_the_surface_refuses_at_boot(tmp_path, idp):
             pass
 
 
-def test_the_mcp_mount_at_root_is_not_treated_as_a_surface_mount(tmp_path, idp):
-    # "/" is not under a guarded prefix; the catch-all must stay unaffected.
+def test_the_mcp_route_is_not_treated_as_a_surface_mount(tmp_path, idp):
+    # MCP is registered at its own exact path rather than mounted at "/" (#67),
+    # and "/mcp" is not under a guarded prefix, so the surface check leaves it
+    # alone and there is no root mount left for it to reason about.
     app = make_web_app(tmp_path, idp)
-    assert any(isinstance(route, Mount) and route.path == "" for route in app.routes)
+    assert not any(isinstance(route, Mount) for route in app.routes)
+    assert any(isinstance(route, Route) and route.path == "/mcp" for route in app.routes)
     assert unprotected_web_routes(app.routes) == []
 
 
@@ -2048,7 +2101,7 @@ async def test_a_partial_wrapped_session_dependency_is_recognized(tmp_path, idp)
         return {"ok": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     assert unprotected_web_routes(app.routes) == []
     async with web_client(app) as client:
         anonymous = await client.get("/web/partial-gated")
@@ -2075,7 +2128,7 @@ async def test_a_forged_wraps_marker_proves_nothing(tmp_path, idp):
         return {"anonymous": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     # The lint is not fooled...
     assert unprotected_web_routes(app.routes) == ["/web/wraps-forged"]
     # ...and even if it were, the guard authenticates the path regardless.
@@ -2110,7 +2163,7 @@ def test_an_unrelated_dependency_is_still_an_offender(tmp_path, idp):
         return {"anonymous": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     assert unprotected_web_routes(app.routes) == ["/web/not-really-gated"]
 
 
@@ -2134,9 +2187,7 @@ async def test_the_mint_path_does_not_call_through_an_overridable_accessor(tmp_p
     object.__setattr__(surface, "session_lifetime_seconds", 7 * 24 * 3600)
     async with web_client(app) as client:
         response = await sign_in(client, idp)
-    session_cookie = next(
-        value for value in response.headers.get_list("set-cookie") if SESSION_COOKIE in value
-    )
+    session_cookie = next(value for value in response.headers.get_list("set-cookie") if SESSION_COOKIE in value)
     assert f"Max-Age={WEB_SESSION_LIFETIME_CEILING_SECONDS}" in session_cookie
 
 
@@ -2172,9 +2223,7 @@ def forged_route_object():
 
     route = Route("/web/forged", endpoint=endpoint)
     # The forgery: claim a dependency tree naming the real session dependency.
-    route.dependant = SimpleNamespace(
-        dependencies=[SimpleNamespace(call=require_web_session, dependencies=[])]
-    )
+    route.dependant = SimpleNamespace(dependencies=[SimpleNamespace(call=require_web_session, dependencies=[])])
     return route
 
 
@@ -2213,7 +2262,7 @@ async def test_the_guard_authenticates_by_path_not_by_route(tmp_path, idp):
             return {"anonymous": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     async with web_client(app) as client:
         for path in ("/web/a", "/admin/b", "/org/c"):
             assert (await client.get(path)).status_code == 303
@@ -2314,12 +2363,8 @@ def test_placeholder_copy_is_labelled_as_placeholder() -> None:
     # Unreviewed legal text is linked from a real consent gate, so it must say
     # so on its face. The banner is driven by each document's own flag, and
     # clearing that flag is the act that asserts counsel has seen the copy.
-    assert TERMS_OF_SERVICE_IS_PLACEHOLDER is (
-        html.escape(PLACEHOLDER_NOTICE) in terms_of_service_page()
-    )
-    assert PRIVACY_STATEMENT_IS_PLACEHOLDER is (
-        html.escape(PLACEHOLDER_NOTICE) in privacy_statement_page()
-    )
+    assert TERMS_OF_SERVICE_IS_PLACEHOLDER is (html.escape(PLACEHOLDER_NOTICE) in terms_of_service_page())
+    assert PRIVACY_STATEMENT_IS_PLACEHOLDER is (html.escape(PLACEHOLDER_NOTICE) in privacy_statement_page())
 
 
 def test_the_documents_publish_the_data_statement_contact() -> None:
@@ -2360,7 +2405,7 @@ async def test_the_guard_leaves_the_public_allowlist_reachable(tmp_path, idp):
 
 async def test_an_invalid_session_cookie_is_treated_as_none_by_the_guard(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, anonymous_page_router())
+    app.include_router(anonymous_page_router())
     async with web_client(app) as client:
         await sign_in(client, idp)
         value = dict(client.cookies)[SESSION_COOKIE]
@@ -2378,13 +2423,11 @@ async def test_the_guard_preserves_the_next_target_including_query(tmp_path, idp
         return {"anonymous": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     async with web_client(app) as client:
         response = await client.get("/admin/invitations", params={"page": "2"})
         assert response.status_code == 303
-        assert response.headers["location"] == (
-            "/web/signin?next=%2Fadmin%2Finvitations%3Fpage%3D2"
-        )
+        assert response.headers["location"] == ("/web/signin?next=%2Fadmin%2Finvitations%3Fpage%3D2")
 
 
 async def test_the_guard_does_not_touch_paths_off_the_surface(tmp_path, idp):
@@ -2400,7 +2443,7 @@ async def test_the_guard_fails_closed_without_a_surface_on_state(tmp_path, idp):
     # MINOR: an absent surface used to mean an empty route table and a
     # permitted request. "Cannot check" must never be served as "no check".
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, anonymous_page_router())
+    app.include_router(anonymous_page_router())
     del app.state.web_surface
     async with web_client(app) as client:
         response = await client.get("/web/future-page")
@@ -2412,15 +2455,14 @@ async def test_guard_denials_are_observable(tmp_path, idp, caplog):
     # MINOR: denials ran outside RequestObservabilityMiddleware, so the events
     # an operator most needs to see carried no request id and no access log.
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, anonymous_page_router())
+    app.include_router(anonymous_page_router())
     with caplog.at_level("INFO", logger="frames_server.access"):
         async with web_client(app) as client:
             response = await client.get("/web/future-page")
     assert response.status_code == 303
     assert "x-request-id" in response.headers
     assert any(
-        record.name == "frames_server.access"
-        and getattr(record, "path", None) == "/web/future-page"
+        record.name == "frames_server.access" and getattr(record, "path", None) == "/web/future-page"
         for record in caplog.records
     )
 
@@ -2466,7 +2508,7 @@ def test_there_is_no_websocket_enable_flag(tmp_path, idp):
 def test_the_lint_still_reports_a_page_missing_its_dependency(tmp_path, idp):
     # The lint remains useful: the handler will not get its typed session.
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, anonymous_page_router())
+    app.include_router(anonymous_page_router())
     assert unprotected_web_routes(app.routes) == ["/web/future-page"]
 
 
@@ -2504,7 +2546,7 @@ async def test_the_guard_and_the_router_agree_under_every_root_path(tmp_path, id
         return {"anonymous": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     response = await probe(app, "/web/secret", root_path=root_path)
     assert "anonymous" not in response.text, f"leaked under root_path={root_path!r}"
     assert response.status_code == 303, f"root_path={root_path!r}"
@@ -2521,7 +2563,7 @@ async def test_a_root_path_that_actually_prefixes_the_app(tmp_path, idp):
         return {"anonymous": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     response = await probe(app, "/web/web/secret", root_path="/web")
     assert response.status_code == 303
     assert "anonymous" not in response.text
@@ -2554,7 +2596,7 @@ async def test_no_normalization_variant_reaches_a_handler_anonymously(tmp_path, 
         return {"anonymous": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     async with web_client(app) as client:
         response = await client.get(path)
     assert "anonymous" not in response.text, f"{path} leaked the handler body"
@@ -2570,7 +2612,7 @@ async def test_a_raw_path_disagreeing_with_path_does_not_help(tmp_path, idp):
         return {"anonymous": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
 
     received: dict = {}
 
@@ -2636,17 +2678,15 @@ async def test_the_canonical_slash_redirect_is_left_to_the_router(tmp_path, idp)
 async def test_the_trailing_slash_form_of_a_public_path_cannot_loop(tmp_path, idp):
     # Following it must terminate, and not by arriving back at sign-in.
     #
-    # Starlette's canonical-slash redirect never actually fires on this app:
-    # the MCP application is mounted at "/" and matches whatever the routers
-    # did not, so it answers first (issue #86, not this branch's to fix). The
-    # trailing-slash form therefore ends at that catch-all's refusal rather
-    # than at the stylesheet. That is a fine terminal answer — it carries the
-    # surface's security headers — and it is emphatically not an auth bounce.
+    # With MCP no longer mounted at "/" (#67), Starlette's canonical-slash
+    # redirect fires: the trailing-slash form redirects once to the stylesheet
+    # and ends there, carrying the surface's security headers.
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as client:
         response = await client.get("/web/app.css/", follow_redirects=True)
-        assert response.status_code in (200, 401, 404)
-        assert not response.history or not response.url.path.startswith("/web/signin")
+        assert response.status_code == 200
+        assert [hop.status_code for hop in response.history] == [307]
+        assert response.url.path == "/web/app.css"
         assert response.headers["referrer-policy"] == "no-referrer"
 
 
@@ -2658,7 +2698,7 @@ async def test_a_broken_codec_answers_the_documented_503(tmp_path, idp):
             raise RuntimeError("hsm unreachable: key handle 0xdeadbeef")
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, anonymous_page_router())
+    app.include_router(anonymous_page_router())
     async with web_client(app) as client:
         await sign_in(client, idp)
         object.__setattr__(app.state.web_surface, "codec", _BrokenCodec())
@@ -2679,9 +2719,7 @@ async def test_websocket_refusals_carry_a_request_id_and_a_metric(tmp_path, idp,
     from collab_hub_api.frames.observability import REQUEST_COUNT, UNMATCHED_PATH_LABEL
 
     def refusal_count() -> float:
-        return REQUEST_COUNT.labels(
-            method="WEBSOCKET", path=UNMATCHED_PATH_LABEL, status="1008"
-        )._value.get()
+        return REQUEST_COUNT.labels(method="WEBSOCKET", path=UNMATCHED_PATH_LABEL, status="1008")._value.get()
 
     before = refusal_count()
     app = make_web_app(tmp_path, idp)
@@ -2712,7 +2750,7 @@ def test_a_page_route_outside_every_guarded_prefix_fails_the_rollout(tmp_path, i
         return {"sensitive": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     assert stray_page_routes(app.routes) == ["/reports/usage"]
     with pytest.raises(RuntimeError, match="WEB_SURFACE_PREFIXES"):
         verify_web_route_protection(app.routes)
@@ -2726,7 +2764,7 @@ async def test_a_stray_page_route_refuses_at_boot(tmp_path, idp):
         return {"sensitive": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     with pytest.raises(RuntimeError, match="/reports/usage"):
         async with app.router.lifespan_context(app):
             pass
@@ -2835,9 +2873,7 @@ async def test_the_access_log_still_records_the_real_refused_path(tmp_path, idp,
     with caplog.at_level("INFO", logger="frames_server.access"):
         async with web_client(app) as client:
             await client.get("/web/some-invented-path")
-    assert any(
-        getattr(record, "path", None) == "/web/some-invented-path" for record in caplog.records
-    )
+    assert any(getattr(record, "path", None) == "/web/some-invented-path" for record in caplog.records)
 
 
 async def test_an_inbound_request_id_does_not_become_the_correlation_id(tmp_path, idp, caplog):
@@ -2852,9 +2888,7 @@ async def test_an_inbound_request_id_does_not_become_the_correlation_id(tmp_path
         add_anonymous_websocket(app)
         with caplog.at_level("INFO"):
             with pytest.raises(WebSocketDisconnect):
-                with client.websocket_connect(
-                    "/web/live", headers={"x-request-id": "victim-correlation-id"}
-                ) as socket:
+                with client.websocket_connect("/web/live", headers={"x-request-id": "victim-correlation-id"}) as socket:
                     socket.receive_text()
     records = [
         record
@@ -2988,7 +3022,7 @@ def csrf_less_post_router() -> APIRouter:
 def test_a_post_without_require_csrf_fails_the_rollout(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     assert unprotected_web_routes(app.routes) == []
-    register_ahead_of_the_mcp_mount(app, csrf_less_post_router())
+    app.include_router(csrf_less_post_router())
     assert unprotected_web_routes(app.routes) == ["/web/forgot-csrf"]
     with pytest.raises(RuntimeError, match="CSRF_ENFORCED_IN_ROUTE"):
         verify_web_route_protection(app.routes)
@@ -3002,7 +3036,7 @@ def test_the_csrf_offence_names_the_methods_it_refused(tmp_path, idp):
         return {"ok": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     reasons = [reason for _, reason in offending_web_routes(app.routes)]
     assert len(reasons) == 1
     assert "DELETE, POST" in reasons[0]
@@ -3025,7 +3059,7 @@ def test_a_public_asset_path_is_exempt_only_for_reads(tmp_path, idp, methods):
         return {"ok": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     reasons = [reason for route, reason in offending_web_routes(app.routes) if route.endpoint is anonymous_write]
     assert len(reasons) == 1
     assert "/invite/assets/{filename}" in reasons[0]
@@ -3039,7 +3073,7 @@ def test_reading_a_public_asset_needs_no_allowlist_line(tmp_path, idp):
         return {"ok": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     assert [r for r, _ in offending_web_routes(app.routes) if r.endpoint is asset] == []
 
 
@@ -3051,7 +3085,7 @@ def test_a_post_carrying_require_csrf_passes_the_check(tmp_path, idp):
         return {"ok": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     assert unprotected_web_routes(app.routes) == []
     verify_web_route_protection(app.routes)
 
@@ -3070,7 +3104,7 @@ def test_require_csrf_is_found_through_a_nested_dependency(tmp_path, idp):
         return {"ok": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     assert unprotected_web_routes(app.routes) == []
 
 
@@ -3090,7 +3124,7 @@ def test_a_route_checking_csrf_in_route_is_exempt_only_by_declaration(tmp_path, 
         return {"ok": True}
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     assert unprotected_web_routes(app.routes) == ["/web/checks-itself"]
 
     monkeypatch.setattr(
@@ -3173,7 +3207,7 @@ def test_the_exemption_is_load_bearing_not_a_vacuous_pass(tmp_path, idp):
     # at a path the set does not name, is refused. So the pass there is the
     # entry doing work rather than the CSRF check failing to look.
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, redeem_style_router("/invite/accept/redeem-elsewhere"))
+    app.include_router(redeem_style_router("/invite/accept/redeem-elsewhere"))
     assert unprotected_web_routes(app.routes) == ["/invite/accept/redeem-elsewhere"]
     with pytest.raises(RuntimeError, match="CSRF_ENFORCED_IN_ROUTE"):
         verify_web_route_protection(app.routes)
@@ -3190,9 +3224,7 @@ def test_the_state_changing_routes_are_gated(tmp_path, idp):
     mutating = {
         route.path: route
         for route in app.routes
-        if isinstance(route, APIRoute)
-        and route.path.startswith("/web")
-        and route_unsafe_methods(route)
+        if isinstance(route, APIRoute) and route.path.startswith("/web") and route_unsafe_methods(route)
     }
     assert sorted(mutating) == ["/web/signout", "/web/theme"]
     assert route_enforces_csrf(mutating["/web/signout"])
@@ -3245,7 +3277,7 @@ def test_an_admin_page_the_map_would_401_fails_the_rollout(tmp_path, idp):
     app = make_web_app(tmp_path, idp, security=hardened_map())
     config = Config.parse(web_values(tmp_path, idp, security=hardened_map()))
     assert blocked_web_route_paths(app.routes, config) == []
-    register_ahead_of_the_mcp_mount(app, admin_page_router())
+    app.include_router(admin_page_router())
     assert blocked_web_route_paths(app.routes, config) == ["/admin/invitations"]
     with pytest.raises(RuntimeError, match="/admin/invitations") as refusal:
         enforce_web_surface_map_access(app.routes, config)
@@ -3257,7 +3289,7 @@ def test_the_map_check_passes_once_the_prefix_is_public(tmp_path, idp):
     security = hardened_map("/admin")
     app = make_web_app(tmp_path, idp, security=security)
     config = Config.parse(web_values(tmp_path, idp, security=security))
-    register_ahead_of_the_mcp_mount(app, admin_page_router())
+    app.include_router(admin_page_router())
     assert blocked_web_route_paths(app.routes, config) == []
     enforce_web_surface_map_access(app.routes, config)
 
@@ -3265,17 +3297,15 @@ def test_the_map_check_passes_once_the_prefix_is_public(tmp_path, idp):
 def test_a_guarded_prefix_with_no_routes_asks_nothing_of_the_map(tmp_path, idp):
     # /org is a guarded prefix with no pages yet (#92). Demanding that every
     # deployment open it now would be asking operators to widen a map for
-    # paths that do not exist — and a request there falls through to the MCP
-    # catch-all, which runs its own McpAuthMiddleware.
+    # paths that do not exist — and a request there still meets the session
+    # guard, which authenticates by path, before the router's 404.
     from collab_hub_api.web.surface import WEB_SURFACE_PREFIXES
 
     assert "/org" in WEB_SURFACE_PREFIXES
     security = hardened_map()
     app = make_web_app(tmp_path, idp, security=security)
     config = Config.parse(web_values(tmp_path, idp, security=security))
-    assert not any(
-        isinstance(route, APIRoute) and route.path.startswith("/org") for route in app.routes
-    )
+    assert not any(isinstance(route, APIRoute) and route.path.startswith("/org") for route in app.routes)
     enforce_web_surface_map_access(app.routes, config)
 
 
@@ -3283,7 +3313,7 @@ async def test_the_map_check_runs_at_boot_for_routes_added_after_make_app(tmp_pa
     # Same two moments as verify_web_route_protection: make_app sees what it
     # registered, the lifespan sees whatever arrived afterwards.
     app = make_web_app(tmp_path, idp, security=hardened_map())
-    register_ahead_of_the_mcp_mount(app, admin_page_router())
+    app.include_router(admin_page_router())
     with pytest.raises(RuntimeError, match="/admin/invitations"):
         async with app.router.lifespan_context(app):
             pass
@@ -3309,9 +3339,7 @@ def test_a_legacy_identity_deployment_warns_rather_than_refusing(tmp_path, idp, 
     assert "web_identity_not_pinned_to_sub" in caplog.text
     # And it still serves: the surface is usable for everything that does not
     # need operator authority.
-    assert any(
-        isinstance(route, APIRoute) and route.path == "/web/signin" for route in app.routes
-    )
+    assert any(isinstance(route, APIRoute) and route.path == "/web/signin" for route in app.routes)
 
 
 def test_a_pinned_deployment_is_silent(tmp_path, idp, monkeypatch, caplog):
@@ -3484,7 +3512,7 @@ def test_an_admin_route_would_pass_the_map_check_on_chart_defaults(tmp_path, idp
     }
     app = make_web_app(tmp_path, idp, security=security)
     config = Config.parse(web_values(tmp_path, idp, security=security))
-    register_ahead_of_the_mcp_mount(app, admin_page_router())
+    app.include_router(admin_page_router())
     assert blocked_web_route_paths(app.routes, config) == []
     enforce_web_surface_map_access(app.routes, config)
 
@@ -3501,7 +3529,7 @@ def test_an_admin_route_would_pass_the_map_check_on_chart_defaults(tmp_path, idp
 async def test_a_route_added_before_the_yield_is_still_caught(tmp_path, idp):
     # The covered half: anything a caller of make_app registers before traffic.
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, csrf_less_post_router())
+    app.include_router(csrf_less_post_router())
     with pytest.raises(RuntimeError, match="CSRF_ENFORCED_IN_ROUTE"):
         async with app.router.lifespan_context(app):
             pass
@@ -3519,7 +3547,7 @@ async def test_a_route_added_after_the_yield_is_deliberately_not_rechecked(tmp_p
     app = make_web_app(tmp_path, idp)
     async with app.router.lifespan_context(app):
         # Boot passed. Now do the thing the checks cannot see.
-        register_ahead_of_the_mcp_mount(app, csrf_less_post_router())
+        app.include_router(csrf_less_post_router())
         assert unprotected_web_routes(app.routes) == ["/web/forgot-csrf"]
     # Nothing raised on the way through: the checks had already run.
     #
@@ -3549,7 +3577,7 @@ def test_an_exemption_whose_route_gained_the_dependency_fails_the_rollout(tmp_pa
 
     monkeypatch_path = "/web/now-declares-it"
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, router)
+    app.include_router(router)
     original = surface_module.CSRF_ENFORCED_IN_ROUTE
     surface_module.CSRF_ENFORCED_IN_ROUTE = original | {monkeypatch_path}
     try:
@@ -3571,9 +3599,7 @@ def test_an_exemption_on_a_route_with_no_unsafe_method_fails_the_rollout(tmp_pat
     # /web is a GET-only page; exempting it claims something untrue.
     surface_module.CSRF_ENFORCED_IN_ROUTE = original | {"/web"}
     try:
-        assert stale_csrf_exemptions(app.routes) == [
-            "/web answers no state-changing method, so it needs no exemption"
-        ]
+        assert stale_csrf_exemptions(app.routes) == ["/web answers no state-changing method, so it needs no exemption"]
     finally:
         surface_module.CSRF_ENFORCED_IN_ROUTE = original
 
@@ -3604,7 +3630,7 @@ def test_a_typo_is_not_silent_because_the_real_route_is_still_caught(tmp_path, i
     import collab_hub_api.web.surface as surface_module
 
     app = make_web_app(tmp_path, idp)
-    register_ahead_of_the_mcp_mount(app, redeem_style_router("/web/needs-exemption"))
+    app.include_router(redeem_style_router("/web/needs-exemption"))
     original = surface_module.CSRF_ENFORCED_IN_ROUTE
     surface_module.CSRF_ENFORCED_IN_ROUTE = original | {"/web/needs-exemtion"}  # typo
     try:
@@ -3652,9 +3678,7 @@ def test_the_shipped_admin_entries_lead_their_routes_without_failing(tmp_path, i
     from collab_hub_api.web.surface import CSRF_ENFORCED_IN_ROUTE
 
     app = make_web_app(tmp_path, idp)
-    mounted_paths = {
-        route.path for route in app.routes if isinstance(route, APIRoute)
-    }
+    mounted_paths = {route.path for route in app.routes if isinstance(route, APIRoute)}
     unmounted = {path for path in CSRF_ENFORCED_IN_ROUTE if path not in mounted_paths}
     assert unmounted == {
         "/admin/invitations",
@@ -3677,11 +3701,10 @@ def test_the_admin_entries_will_cover_the_routes_when_they_arrive(tmp_path, idp)
     # `_csrf_ok` does, and the lint that would otherwise refuse them passes.
     app = make_web_app(tmp_path, idp)
     for path in ("/admin/invitations", "/admin/invitations/revoke"):
-        register_ahead_of_the_mcp_mount(app, redeem_style_router(path))
+        app.include_router(redeem_style_router(path))
     assert unprotected_web_routes(app.routes) == []
     assert stale_csrf_exemptions(app.routes) == []
     verify_web_route_protection(app.routes)
-
 
 
 # ---------------------------------------------------------------------------
@@ -3723,3 +3746,158 @@ def test_the_surface_stylesheet_shouts_at_nobody():
     from collab_hub_api.web.pages import STYLESHEET
 
     assert "text-transform: uppercase" not in STYLESHEET
+
+
+# --- The optional account link (#275) ---------------------------------------
+
+ACCOUNT_URL = "https://billing.example.com/account?plan=1"
+ACCOUNT_LINK = f'<a href="{html.escape(ACCOUNT_URL)}">Account</a>'
+
+
+async def test_no_account_link_renders_unless_the_deployment_sets_one(tmp_path, idp):
+    """The default: nothing to see, no billing configuration needed."""
+
+    app = make_web_app(tmp_path, idp)
+    assert app.state.web_surface.account_page_url == ""
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        overview = await client.get("/web")
+    assert overview.status_code == 200
+    assert "Sign out" in overview.text
+    assert "Account" not in overview.text
+
+
+async def test_the_account_link_renders_from_configuration_when_set(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"account_page_url": f"  {ACCOUNT_URL} "})
+    assert app.state.web_surface.account_page_url == ACCOUNT_URL
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        overview = await client.get("/web")
+    assert overview.status_code == 200
+    assert ACCOUNT_LINK in overview.text
+    assert overview.text.count("Account") == 1
+    assert overview.text.index("Account") < overview.text.index("Sign out")
+    # A same-tab link like every other on the surface: no window-opening
+    # attributes, and the page-level no-referrer meta covers the Referer.
+    assert "target=" not in overview.text
+    assert 'name="referrer" content="no-referrer"' in overview.text
+
+
+# The anonymous case lives in test_acceptance_page.py: /invite/accept is the
+# one public page that renders the footer when signed in, so signed out with
+# the value set is the case that exercises the rule. /web/data-statement never
+# shows a footer and would pass either way.
+
+
+def test_render_page_writes_the_link_only_in_the_signed_in_footer():
+    from collab_hub_api.web.pages import render_page
+
+    signed_in = render_page(
+        title="t", body="", identity_label="Alice", csrf_token="tok", account_url='https://x.example/a?b=1&c="2"'
+    )
+    assert '<a href="https://x.example/a?b=1&amp;c=&quot;2&quot;">Account</a>' in signed_in
+    assert signed_in.index("Account") < signed_in.index("Sign out")
+    for anonymous in (
+        render_page(title="t", body="", account_url="https://x.example/a"),
+        render_page(title="t", body="", identity_label="Alice", csrf_token="tok"),
+        render_page(title="t", body="", identity_label="Alice", csrf_token="tok", account_url=""),
+    ):
+        assert "Account" not in anonymous
+
+
+def test_account_page_url_is_empty_without_a_surface_or_a_value():
+    from collab_hub_api.web.surface import account_page_url
+
+    app = FastAPI()
+    request = Request({"type": "http", "app": app, "headers": []})
+    assert account_page_url(request) == ""
+    app.state.web_surface = WebSurface(**a_surface())
+    assert account_page_url(request) == ""
+    app.state.web_surface = WebSurface(**a_surface(account_page_url=ACCOUNT_URL))
+    assert account_page_url(request) == ACCOUNT_URL
+
+
+# The refusal table draws on the adversarial inputs the surface's own realm-URL
+# tests use, plus the cases a footer href invites: other schemes, credentials,
+# cleartext and loopback lookalikes, and hidden characters. Each row:
+# (value, reason fragment).
+UNUSABLE_LINKS = [
+    # Scheme
+    ("javascript:alert(1)", "http"),
+    ("data:text/html,<script>alert(1)</script>", "http"),
+    ("file:///etc/passwd", "http"),
+    ("FILE:///etc/passwd", "http"),
+    ("ftp://billing.example.com/", "http"),
+    ("myapp://do-something-privileged", "http"),
+    ("mailto:billing@example.com", "http"),
+    # No host, or not absolute
+    ("/account", "http"),
+    ("//billing.example.com/account", "http"),
+    ("billing.example.com/account", "http"),
+    ("https://", "names no host"),
+    ("https:///account", "names no host"),
+    ("https://:443/account", "names no host"),
+    ("https:foo", "names no host"),
+    # Cleartext off loopback, including the lookalikes a suffix rule would pass
+    ("http://billing.example.com/", "plain http"),
+    ("http://93.184.216.34/", "plain http"),
+    ("http://localhost.example.com/", "plain http"),
+    ("http://127.0.0.1.example.com/", "plain http"),
+    ("http://0.0.0.0:9000/", "plain http"),
+    # Credentials
+    ("https://user:pw@billing.example.com/", "credentials"),
+    ("https://user@billing.example.com/", "credentials"),
+    ("http://localhost@evil.example/", "credentials"),
+    # Port
+    ("https://billing.example.com:abc/", "port"),
+    ("https://billing.example.com:99999/", "port"),
+    ("https://billing.example.com:0/", "port is 0"),
+    # Malformed authority
+    ("https://[::1", "parsed"),
+    # Whitespace and control characters, on the raw string
+    ("https://billing.example.com/a b", "whitespace"),
+    ("https://billing.example.com/\u00a0x", "non-printable"),
+    ("https://billing.example.com/\u200bx", "non-printable"),
+    ("\x00https://billing.example.com/", "control"),
+    ("https://billing.example.com/\x7f", "control"),
+    ("https://billing.example.com/x\r\nSet-Cookie: a=b", "control"),
+    ("https://billing.example.com/\tx", "control"),
+]
+
+
+@pytest.mark.parametrize(("value", "reason"), UNUSABLE_LINKS, ids=[repr(v) for v, _ in UNUSABLE_LINKS])
+def test_a_value_that_cannot_be_a_link_is_refused_at_startup(tmp_path, idp, value, reason):
+    from pydantic import ValidationError
+
+    from collab_hub_api.config import WebConfig
+    from collab_hub_api.web.oidc import invalid_link_url_reason
+
+    assert reason in (invalid_link_url_reason(value) or "")
+    # Through the model, whether or not the surface is enabled: the value lands in an href.
+    # Reason first, as public_base_url does, so an operator reads why before what.
+    with pytest.raises(ValidationError, match="web.account_page_url is unusable \\(") as refused:
+        WebConfig(account_page_url=value)
+    assert reason in str(refused.value)
+    with pytest.raises(ValidationError, match="web.account_page_url"):
+        Config.parse(web_values(tmp_path, idp, web={"account_page_url": value}))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "   ",
+        ACCOUNT_URL,
+        "HTTPS://Billing.Example.com:8443/Account",
+        "https://billing.example.com/account#invoices",
+        "https://[2001:db8::1]:8443/account",
+        "http://localhost:3000/account",
+        "http://LOCALHOST/account",
+        "http://127.0.0.1:8080/",
+        "http://[::1]:9000/",
+    ],
+)
+def test_a_usable_or_empty_value_is_accepted(value):
+    from collab_hub_api.config import WebConfig
+
+    assert WebConfig(account_page_url=value).account_page_url == value.strip()

@@ -23,6 +23,23 @@ _NO_SIGNAL = object()
 
 
 @dataclass(frozen=True, slots=True)
+class FrameRef:
+    """A Frame a step is grounded in, as snapshotted when the run was submitted.
+
+    The snapshot's text is kept by reference on the Track (``ref``), so a step
+    retried later is given the Frame as it was at submit, not as edited since;
+    ``digest`` is the sha256 of that text, recorded so the Track names what the
+    step saw.
+    """
+
+    id: str
+    name: str
+    digest: str
+    ref: str
+    uri: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class OpStep:
     """One interaction with a Cog entry point, and the Gate that decides on its result."""
 
@@ -32,6 +49,8 @@ class OpStep:
     input: Any = None
     digest: str | None = None
     gate: Gate = field(default_factory=Gate)
+    frames: tuple[FrameRef, ...] = ()
+    """The Frames the step is grounded in, placed beside its input in the task bundle."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,9 +64,13 @@ class OpDefinition:
 class CogWorker(Protocol):
     def interact(
         self, entry_point: str, input: Any = None, idempotency_key: str | None = None,
-        *, signal: Any = _NO_SIGNAL,
+        *, signal: Any = _NO_SIGNAL, frames: Sequence[Mapping[str, Any]] | None = None,
     ) -> ResultEnvelope:
         """Interact through a declared entry point.
+
+        ``frames`` are the step's Frame snapshots, each ``{id, title, uri,
+        digest, text}``, sent in the task bundle beside the input when the step
+        has any; a worker places them in its prompt and never fetches a Frame.
 
         Return the result envelope (``envelope.py``): ``payload`` is the Cog's
         output and ``usage`` its accounting, never hidden inside the payload.
@@ -145,9 +168,11 @@ class _Worker:
 
     def interact(
         self, entry_point: str, input: Any = None, idempotency_key: str | None = None,
-        *, signal: Any = _NO_SIGNAL,
+        *, signal: Any = _NO_SIGNAL, frames: Sequence[Mapping[str, Any]] | None = None,
     ) -> ResultEnvelope:
         feedback = {} if signal is _NO_SIGNAL else {"signal": signal}
+        if frames:
+            feedback["frames"] = list(frames)
         result = self.handler(entry_point, input, **feedback)
         if isinstance(result, ResultEnvelope):
             return result
@@ -172,10 +197,15 @@ def _serialize_op(op: OpDefinition) -> dict[str, Any]:
                 "input": step.input,
                 "digest": step.digest,
                 "gate": step.gate.to_dict(),
+                **({"frames": [_frame_dict(frame) for frame in step.frames]} if step.frames else {}),
             }
             for step in op.steps
         ],
     }
+
+
+def _frame_dict(frame: FrameRef) -> dict[str, Any]:
+    return {"id": frame.id, "name": frame.name, "digest": frame.digest, "ref": frame.ref, "uri": frame.uri}
 
 
 def _deserialize_op(value: dict[str, Any]) -> OpDefinition:
@@ -189,6 +219,9 @@ def _deserialize_op(value: dict[str, Any]) -> OpDefinition:
                 input=step.get("input"),
                 digest=step.get("digest"),
                 gate=Gate.from_dict(step.get("gate")),
+                frames=tuple(FrameRef(id=f["id"], name=f.get("name") or f["id"], digest=f.get("digest", ""),
+                                      ref=f["ref"], uri=f.get("uri"))
+                             for f in step.get("frames") or ()),
             )
             for step in value["steps"]
         ),

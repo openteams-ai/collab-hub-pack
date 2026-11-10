@@ -152,6 +152,7 @@ from ..web.session import WebSession
 from ..web.surface import (
     ADMIN_INVITATIONS_PATH,
     ADMIN_INVITATIONS_REVOKE_PATH,
+    account_page_url,
 )
 
 logger = logging.getLogger("frames_server.web")
@@ -230,9 +231,7 @@ def create_organization(auth: AuthContext, service: InvitationService, *, name: 
 
 
 @requires_platform_role(PLATFORM_ROLE_OPERATOR)
-def revoke_invitation(
-    auth: AuthContext, service: InvitationService, *, invitation_id: str
-) -> Invitation:
+def revoke_invitation(auth: AuthContext, service: InvitationService, *, invitation_id: str) -> Invitation:
     """Revoke any invitation on the deployment, recorded as ``invitation.revoke``.
 
     ``expect_org_id`` is left unset, which is hub scope: an operator's revoke
@@ -347,6 +346,7 @@ def make_router() -> APIRouter:
                 notice=notice,
                 roles=roles,
                 theme=preferred_theme(request),
+                account_url=account_page_url(request),
             ),
             status_code=status_code,
             path=ADMIN_INVITATIONS_PATH,

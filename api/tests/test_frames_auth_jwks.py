@@ -255,9 +255,7 @@ def test_id_token_fallback_still_honors_a_dedicated_issuer(jwks, monkeypatch):
     assert accepted["preferred_username"] == "signed-user"
 
     with pytest.raises(auth.TokenDecodeError):
-        auth.decode_id_token_payload(
-            _issuer_token(KEY_1_PEM, "key-1", "https://idp.example.com/realms/bearer-realm")
-        )
+        auth.decode_id_token_payload(_issuer_token(KEY_1_PEM, "key-1", "https://idp.example.com/realms/bearer-realm"))
 
 
 def test_separate_urls_do_not_share_a_client(jwks):
@@ -464,6 +462,38 @@ def test_hung_endpoint_releases_the_caller_at_the_timeout(jwks):
     # The hung refresh cost nothing: the last validated set still verifies.
     jwks.resume()
     assert _decode(known_good, jwks.url)["preferred_username"] == "signed-user"
+
+
+def test_hung_forced_refresh_does_not_stall_cached_verification(jwks, clock):
+    """A forced refresh out against a hung IdP holds no lock that a token
+    verifiable from cache would wait on. PyJWT 2.15's own ``get_signing_key``
+    does hold one across the fetch."""
+
+    known_good = _token(KEY_1_PEM, "key-1")
+    assert _decode(known_good, jwks.url)
+
+    # Past PyJWT's own 30s refresh cooldown, so its forced refresh would run too.
+    clock(auth.JWKS_FORCED_REFRESH_MIN_INTERVAL_SECONDS + 1)
+    # Long enough that the hung fetch is still out whatever the scheduling
+    # delay; ``resume`` ends it, not the timeout.
+    _client(jwks.url).timeout = 30
+    jwks.hang()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        forced = pool.submit(_decode, _token(KEY_2_PEM, "rogue-kid"), jwks.url)
+        deadline = time.perf_counter() + 5
+        while jwks.fetches < 2:
+            assert time.perf_counter() < deadline, "the forced refresh never went out"
+            time.sleep(0.01)
+
+        cached = pool.submit(_decode, known_good, jwks.url)
+        try:
+            assert cached.result(timeout=10)["preferred_username"] == "signed-user"
+            assert not forced.done()
+        finally:
+            jwks.resume()
+        with pytest.raises(auth.TokenDecodeError):
+            forced.result(timeout=10)
 
 
 # --- bad responses must not replace a working key set -----------------------

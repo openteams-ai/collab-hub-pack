@@ -254,13 +254,13 @@ def test_one_runs_failure_does_not_stop_the_controller():
 
 def test_the_controller_process_runs_a_submitted_package_and_holds_its_track(tmp_path):
     # The process itself: a submission written to a SQLite Track is run as a real worker, a second
-    # controller on the same Track refuses to start, and stopping it leaves no worker.
+    # controller under the same id refuses to start, and stopping it leaves no worker.
     track_path = tmp_path / "track.sqlite"
     SqliteTrackStore.ensure_schema(track_path)
     track = SqliteTrackStore(track_path)
     command = [sys.executable, "-m", "collab_hub_execution.controller", "--track", str(track_path),
                "--packages", str(packages(tmp_path)), "--work-dir", str(tmp_path / "runs"),
-               "--poll-interval", "0.05"]
+               "--poll-interval", "0.05", "--id", "one"]
     # The fake packages run under this interpreter here, so the executor is told not to use pixi.
     controller = subprocess.Popen([*command, "--environment", "host"], stderr=subprocess.PIPE, text=True)
     try:
@@ -270,7 +270,7 @@ def test_the_controller_process_runs_a_submitted_package_and_holds_its_track(tmp
             assert time.monotonic() < deadline and controller.poll() is None, _types(track, "r")
             time.sleep(0.05)
         second = subprocess.run([*command, "--environment", "host"], capture_output=True, text=True, timeout=30)
-        assert second.returncode == 1 and "one host at a time" in second.stderr
+        assert second.returncode == 1 and "a controller named 'one' is running" in second.stderr
         intents.submit(track, OpDefinition("slow", (OpStep("a", "slow", "run", {"seconds": 60}),)), by=BY)
         while "interaction_started" not in _types(track, "slow"):
             assert time.monotonic() < deadline and controller.poll() is None

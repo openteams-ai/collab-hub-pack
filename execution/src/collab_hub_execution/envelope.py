@@ -17,13 +17,15 @@ ENVELOPE_VERSION = 1
 
 # The error codes the envelope document defines. ``code`` is kept verbatim on
 # the Track's ``failed`` event, so a client can act on it without parsing text.
-ERROR_CODES = frozenset(
-    {"binding-invalid", "invalid-input", "model-unavailable", "model-call-failed", "model-response-malformed"}
-)
+ERROR_CODES = frozenset({
+    "binding-invalid", "invalid-input", "model-unavailable", "model-call-failed", "model-response-malformed",
+    "context-exhausted",
+})
 
 # Over HTTP, the status a worker uses for each code (result-envelope.md, "error").
 STATUS_FOR_CODE: Mapping[str, int] = {
     "invalid-input": 422,
+    "context-exhausted": 422,
     "model-call-failed": 502,
     "model-response-malformed": 502,
     "model-unavailable": 503,

@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
@@ -48,6 +49,15 @@ _PR_REVIEW_PAGE_SIZE = 100
 _LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec"
 
 logger = logging.getLogger("frames_server.connectors")
+
+# Shape of a curated-search ``repo``: exactly ``owner/name``, nothing else. The
+# repo is appended as a ``repo:`` qualifier, so anything looser (whitespace, a
+# second qualifier) would let a caller widen the search past the owner check.
+_SEARCH_REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+# Search qualifiers that set which owners/repos a search spans. GitHub ORs
+# repeated scope qualifiers, so one in caller text would widen an allowlisted
+# search; with an allowlist set, the hub owns the scope and refuses these.
+_SCOPE_QUALIFIER_RE = re.compile(r"\b(?:org|user|owner|repo):", re.IGNORECASE)
 
 # Projects V2 are GraphQL-only. Query the org and user owners in one request and
 # use whichever resolves, so one tool handles org and personal boards.
@@ -142,8 +152,7 @@ _API_GET_REDIRECT_REFUSAL = (
 # SAME-origin hops (a redirect loop or an unusually long renamed-repo chain), so
 # the "archive or binary download" framing would misdirect the model and operator.
 _API_GET_TOO_MANY_REDIRECTS = (
-    f"too many redirects on the GitHub API origin — did not resolve within "
-    f"{_API_GET_MAX_REDIRECTS} hops"
+    f"too many redirects on the GitHub API origin — did not resolve within {_API_GET_MAX_REDIRECTS} hops"
 )
 # A trailing partial line is worth shedding from a truncated text/diff body only
 # when it's a small fraction of the budget; beyond that (a single-long-line minified
@@ -214,8 +223,7 @@ def _status_counts_query(option_count: int) -> str:
     interpolated, so an option name cannot inject query text."""
     var_decls = "".join(f", $q{i}: String!" for i in range(option_count))
     aliases = "\n      ".join(
-        f"s{i}: items(first: 0, {_COUNTS_ARCHIVED}, query: $q{i}) {{ totalCount }}"
-        for i in range(option_count)
+        f"s{i}: items(first: 0, {_COUNTS_ARCHIVED}, query: $q{i}) {{ totalCount }}" for i in range(option_count)
     )
     body = f"projectV2(number: $number) {{\n      {aliases}\n    }}"
     return (
@@ -313,9 +321,9 @@ class GitHubClient:
     ):
         self.access_token = access_token
         self.api_base_url = api_base_url.rstrip("/")
-        # Empty == the token's full visibility. When set, the generic api_get
-        # read is confined to these org logins (and the curated search too, once
-        # PR #76 lands its _build_query enforcement — this branch scopes api_get).
+        # Empty == the token's full visibility. When set, BOTH surfaces are
+        # confined to these org logins: the curated search (_build_query) and the
+        # generic api_get read (_enforce_api_get_org_scope).
         self.allowed_orgs = allowed_orgs or []
         # Case-folded lookup set, computed once (GitHub logins are case-
         # insensitive); allowed_orgs is kept raw for display in refusal messages.
@@ -396,6 +404,14 @@ class GitHubClient:
         total = int(payload.get("total_count", 0) or 0)
         incomplete = bool(payload.get("incomplete_results", False))
         hits = [_search_hit(item) for item in items if isinstance(item, dict)]
+        if self._allowed_orgs_normalized:
+            # Belt and braces: the query is already scoped, but drop any hit
+            # outside the allowlist so the boundary does not rest on GitHub's
+            # query parsing alone. Pagination below still counts raw items.
+            kept = [hit for hit in hits if self._owner_allowed(hit.repo.split("/", 1)[0])]
+            if len(kept) != len(hits):
+                logger.warning("github_search_dropped_out_of_allowlist_hits", extra={"dropped": len(hits) - len(kept)})
+            hits = kept
 
         next_token = ""
         reachable = min(total, GITHUB_SEARCH_RESULT_CAP)
@@ -552,11 +568,9 @@ class GitHubClient:
                 {"login": login, "number": number, "first": _PROJECT_PAGE_SIZE, "after": cursor},
                 operation="project read",
             )
-            project = _owner_project(
-                data, operation="project read", status_code=404, message="project not found"
-            )
+            project = _owner_project(data, operation="project read", status_code=404, message="project not found")
             items_field = project.get("items") or {}
-            for item in (items_field.get("nodes") or []):
+            for item in items_field.get("nodes") or []:
                 if isinstance(item, dict):
                     collected.append(_project_item(item))
             if len(collected) >= cap:
@@ -583,9 +597,7 @@ class GitHubClient:
         fall back to bucketing the enumerated items, flagged non-authoritative.
         A read_project failure, by contrast, propagates -- it's the caller's
         error to map -- after the counts task is cancelled so it can't leak."""
-        counts_task = asyncio.ensure_future(
-            self._authoritative_counts(login=owner.strip(), number=number)
-        )
+        counts_task = asyncio.ensure_future(self._authoritative_counts(login=owner.strip(), number=number))
         try:
             project, items = await self.read_project(owner=owner, number=number, max_items=max_items)
         except BaseException:
@@ -642,9 +654,7 @@ class GitHubClient:
         redacted = total - (issue + pull_request + board_draft)
         status_field = project.get("statusField") or {}
         options = [
-            str((o or {}).get("name", "") or "")
-            for o in (status_field.get("options") or [])
-            if isinstance(o, dict)
+            str((o or {}).get("name", "") or "") for o in (status_field.get("options") or []) if isinstance(o, dict)
         ]
         options = [o for o in options if o]
         by_status = await self._status_column_counts(login=login, number=number, options=options)
@@ -678,17 +688,13 @@ class GitHubClient:
             counted_items=total,
         )
 
-    async def _status_column_counts(
-        self, *, login: str, number: int, options: list[str]
-    ) -> list[GitHubStatusCount]:
+    async def _status_column_counts(self, *, login: str, number: int, options: list[str]) -> list[GitHubStatusCount]:
         if not options:
             return []
         variables: dict[str, str | int] = {"login": login, "number": number}
         for index, option in enumerate(options):
             variables[f"q{index}"] = f'status:"{_project_filter_value(option)}"'
-        data = await self._graphql(
-            _status_counts_query(len(options)), variables, operation="project status counts"
-        )
+        data = await self._graphql(_status_counts_query(len(options)), variables, operation="project status counts")
         # Same reasoning as _authoritative_counts: existence was already confirmed
         # by read_project, so a null projectV2 here is a partial GraphQL error on
         # this specific query, not a real not-found -- no status_code, so the
@@ -753,14 +759,40 @@ class GitHubClient:
         return data if isinstance(data, dict) else {}
 
     def _build_query(self, query: str, repo: str) -> str:
-        parts = [query.strip()]
-        if repo.strip():
-            parts.append(f"repo:{repo.strip()}")
+        query = query.strip()
+        repo = repo.strip()
+        if repo and not _SEARCH_REPO_RE.fullmatch(repo):
+            raise GitHubSearchError("repo must be of the form 'owner/name'")
+        if self._allowed_orgs_normalized:
+            # With an allowlist the hub owns the search scope: caller text must
+            # not carry its own org:/user:/owner:/repo: qualifier, which GitHub
+            # would OR with ours. This also refuses a quoted phrase containing
+            # such a token -- an acceptable cost at a security boundary.
+            if _SCOPE_QUALIFIER_RE.search(query):
+                raise GitHubSearchError(
+                    "the search query may not contain org:, user:, owner: or repo: "
+                    "qualifiers on this hub; use the repo field to narrow the search"
+                )
+            # An explicit repo is narrower than the allowlist, but it is still
+            # caller-supplied, so its owner must itself be in the allowlist.
+            if repo and not self._owner_allowed(repo.split("/", 1)[0]):
+                raise GitHubSearchError(
+                    f"repo {repo!r} is outside the configured GitHub org allowlist ({', '.join(self.allowed_orgs)})"
+                )
+        parts = [query]
+        if repo:
+            parts.append(f"repo:{repo}")
+        else:
+            # Repeating ``org:`` qualifiers ORs them in GitHub issue search, so
+            # results stay confined to the configured org allowlist.
+            parts.extend(f"org:{org}" for org in self.allowed_orgs)
         return " ".join(part for part in parts if part)
 
-    async def _get_response(
-        self, path: str, *, operation: str, params: dict[str, str] | None = None
-    ) -> httpx.Response:
+    def _owner_allowed(self, owner: str) -> bool:
+        """Whether ``owner`` is in the allowlist (GitHub logins fold case)."""
+        return owner.strip().lower() in self._allowed_orgs_normalized
+
+    async def _get_response(self, path: str, *, operation: str, params: dict[str, str] | None = None) -> httpx.Response:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.get(
                 self.api_base_url + path,
@@ -818,11 +850,7 @@ class GitHubClient:
 
         resolved_max = max_chars
         if resolved_max is None:
-            resolved_max = (
-                _API_GET_JSON_DEFAULT_MAX_CHARS
-                if media_type == "json"
-                else _API_GET_TEXT_DEFAULT_MAX_CHARS
-            )
+            resolved_max = _API_GET_JSON_DEFAULT_MAX_CHARS if media_type == "json" else _API_GET_TEXT_DEFAULT_MAX_CHARS
         # Defensive backstop: the route's pydantic bound already enforces the
         # range, but api_get must not trust an out-of-range max_chars from any
         # caller (direct callers, tests) — clamp to [1, ceiling].
@@ -848,9 +876,7 @@ class GitHubClient:
                     for _hop in range(_API_GET_MAX_REDIRECTS + 1):
                         async with client.stream("GET", current, headers=headers) as response:
                             if response.is_redirect:
-                                current = self._resolve_api_redirect(
-                                    current, response.headers.get("location", "")
-                                )
+                                current = self._resolve_api_redirect(current, response.headers.get("location", ""))
                                 # Re-apply the org allowlist to the redirect TARGET.
                                 # _resolve_api_redirect checks only origin, so a
                                 # same-origin 301 (a repo renamed or transferred to a
@@ -881,9 +907,7 @@ class GitHubClient:
         if any(ch.isspace() for ch in path) or has_control_or_nonprintable(path):
             # Whitespace plus the shared control/DEL/zero-width/non-printable class
             # that would otherwise reach httpx.URL and 500 the request.
-            raise GitHubApiRequestError(
-                "path must not contain whitespace, control, or non-printable characters"
-            )
+            raise GitHubApiRequestError("path must not contain whitespace, control, or non-printable characters")
         if ".." in path.split("/"):
             raise GitHubApiRequestError("path must not contain a '..' segment")
         # Courtesy only (NOT the exclusion mechanism — GraphQL is excluded by the
@@ -915,8 +939,7 @@ class GitHubClient:
         allowlist = ", ".join(self.allowed_orgs)
         if owner_scoped:
             raise GitHubApiRequestError(
-                f"path targets {segments[1]!r}, which is outside the configured "
-                f"GitHub org allowlist ({allowlist})"
+                f"path targets {segments[1]!r}, which is outside the configured GitHub org allowlist ({allowlist})"
             )
         raise GitHubApiRequestError(
             "this path is not scoped to an allowed org — the configured allowlist "
@@ -931,7 +954,7 @@ class GitHubClient:
         prefix = httpx.URL(self.api_base_url).path.rstrip("/")
         path = url.path
         if prefix and path.startswith(prefix):
-            path = path[len(prefix):]
+            path = path[len(prefix) :]
         return path if path.startswith("/") else "/" + path
 
     def _resolve_api_redirect(self, current: httpx.URL, location: str) -> httpx.URL:
@@ -959,18 +982,11 @@ class GitHubClient:
         # 301). That's the deliberate side: don't "fix" it to `base.scheme`, which
         # would let an http->https same-host hop pass since both ports normalize to
         # None. http bases simply don't support redirects.
-        if (
-            target.scheme != "https"
-            or target.host != base.host
-            or target.port != base.port
-            or target.userinfo
-        ):
+        if target.scheme != "https" or target.host != base.host or target.port != base.port or target.userinfo:
             raise GitHubApiRequestError(_API_GET_REDIRECT_REFUSAL)
         return target
 
-    async def _read_api_result(
-        self, response: httpx.Response, media_type: str, max_chars: int
-    ) -> GitHubApiGetResponse:
+    async def _read_api_result(self, response: httpx.Response, media_type: str, max_chars: int) -> GitHubApiGetResponse:
         status_code = response.status_code
         # Parse the Content-Type PARAMETER off: live GitHub always appends
         # "; charset=utf-8", so bare-string equality would misroute every real
@@ -999,8 +1015,12 @@ class GitHubClient:
             # checks, vulnerability-alerts) with no Content-Type at all, which
             # would otherwise fall through to the binary-refusal branch below.
             return GitHubApiGetResponse(
-                body=None, body_text="", truncated=False, has_more=has_more,
-                content_type=content_type, status=status_code,
+                body=None,
+                body_text="",
+                truncated=False,
+                has_more=has_more,
+                content_type=content_type,
+                status=status_code,
             )
 
         raw, byte_truncated = await read_capped(response, max_chars * 4 + 1)
@@ -1029,8 +1049,12 @@ class GitHubClient:
             # size-cap error below, which would otherwise send a caller looking
             # at max_chars for a body that was simply never there.
             return GitHubApiGetResponse(
-                body=None, body_text="", truncated=False, has_more=has_more,
-                content_type=content_type, status=status,
+                body=None,
+                body_text="",
+                truncated=False,
+                has_more=has_more,
+                content_type=content_type,
+                status=status,
             )
         text = raw.decode("utf-8", errors="replace")
         try:
@@ -1049,8 +1073,12 @@ class GitHubClient:
                 message = _API_GET_JSON_ERROR if byte_truncated else _API_GET_JSON_INVALID
                 raise GitHubApiRequestError(message) from exc
             return GitHubApiGetResponse(
-                body=None, body_text=prefix, truncated=True, has_more=has_more,
-                content_type=content_type, status=status,
+                body=None,
+                body_text=prefix,
+                truncated=True,
+                has_more=has_more,
+                content_type=content_type,
+                status=status,
             )
         sanitized = self._sanitize_json_values(parsed)
         # Judge truncation on the COMPACT size of the PARSED object — not the raw
@@ -1064,16 +1092,24 @@ class GitHubClient:
         compact = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
         if not byte_truncated and len(compact) <= max_chars:
             return GitHubApiGetResponse(
-                body=sanitized, body_text="", truncated=False, has_more=has_more,
-                content_type=content_type, status=status,
+                body=sanitized,
+                body_text="",
+                truncated=False,
+                has_more=has_more,
+                content_type=content_type,
+                status=status,
             )
         # Genuinely over budget (or byte-truncated): no complete structure worth
         # returning, so serialize the SANITIZED value to a masked text prefix and
         # flag it.
         serialized = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"))
         return GitHubApiGetResponse(
-            body=None, body_text=serialized[:max_chars], truncated=True, has_more=has_more,
-            content_type=content_type, status=status,
+            body=None,
+            body_text=serialized[:max_chars],
+            truncated=True,
+            has_more=has_more,
+            content_type=content_type,
+            status=status,
         )
 
     def _text_result(
@@ -1095,8 +1131,12 @@ class GitHubClient:
         truncated = byte_truncated or len(decoded) > max_chars
         if not truncated:
             return GitHubApiGetResponse(
-                body=None, body_text=sanitized, truncated=False, has_more=has_more,
-                content_type=content_type, status=status,
+                body=None,
+                body_text=sanitized,
+                truncated=False,
+                has_more=has_more,
+                content_type=content_type,
+                status=status,
             )
         body_text = sanitized[:max_chars]
         cut = body_text.rfind("\n")
@@ -1110,8 +1150,12 @@ class GitHubClient:
         if cut != -1 and len(body_text) - cut <= shed_ceiling:
             body_text = body_text[:cut]
         return GitHubApiGetResponse(
-            body=None, body_text=body_text, truncated=truncated, has_more=has_more,
-            content_type=content_type, status=status,
+            body=None,
+            body_text=body_text,
+            truncated=truncated,
+            has_more=has_more,
+            content_type=content_type,
+            status=status,
         )
 
     def _sanitize_json_values(self, value: Any, depth: int = 0) -> Any:
@@ -1258,9 +1302,7 @@ def _decode_page_token(page_token: str, fingerprint: str) -> int:
         return 1
     page_str, _, token_fingerprint = page_token.partition(".")
     if not token_fingerprint or token_fingerprint != fingerprint:
-        raise GitHubSearchError(
-            "page_token does not match the current search parameters; restart from the first page"
-        )
+        raise GitHubSearchError("page_token does not match the current search parameters; restart from the first page")
     try:
         page = int(page_str)
     except ValueError as exc:
@@ -1275,7 +1317,7 @@ def _repo_from_repository_url(repository_url: str) -> str:
     index = repository_url.find(marker)
     if index == -1:
         return ""
-    return repository_url[index + len(marker):].strip("/")
+    return repository_url[index + len(marker) :].strip("/")
 
 
 def _owner_node(data: dict) -> dict | None:

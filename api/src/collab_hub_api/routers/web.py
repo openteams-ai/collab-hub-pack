@@ -81,6 +81,7 @@ from ..web.surface import (
     THEME_PATH,
     WEB_LOGO_PATH,
     WebSurface,
+    account_page_url,
     answers_json,
     clamped_session_lifetime,
     is_public_web_path,
@@ -248,9 +249,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         return response
 
     @app.exception_handler(WebAuthorizationUnavailable)
-    async def _authorization_unavailable(
-        request: Request, exc: WebAuthorizationUnavailable
-    ) -> Response:
+    async def _authorization_unavailable(request: Request, exc: WebAuthorizationUnavailable) -> Response:
         # Error level, and a 503 rather than a 403: this is a deployment that
         # cannot decide operator authority at all, which would otherwise look
         # exactly like a correct refusal and lock every operator out silently.
@@ -465,9 +464,7 @@ def make_router(
         """
 
         transient_value = request.cookies.get(TRANSIENT_COOKIE)
-        transient = (
-            surface.codec.decode(TRANSIENT_PURPOSE, transient_value) if transient_value else None
-        )
+        transient = surface.codec.decode(TRANSIENT_PURPOSE, transient_value) if transient_value else None
         if transient is None:
             return _failed_sign_in(request, "missing or invalid transient state cookie")
         if request.query_params.get("error"):
@@ -552,9 +549,7 @@ def make_router(
         return response
 
     @router.get(LANDING_PATH)
-    async def overview(
-        request: Request, session: WebSession = Depends(require_web_session)
-    ) -> Response:
+    async def overview(request: Request, session: WebSession = Depends(require_web_session)) -> Response:
         """The signed-in overview: proves the session and says what this surface is for.
 
         The roles are read through :func:`viewer_roles`, which offers nothing
@@ -572,8 +567,7 @@ def make_router(
         organization = roles.organization or "your organization"
         if roles.owner:
             purpose = (
-                f"This is where you look after {escape(organization)}: invite people"
-                " into it, and see who has joined."
+                f"This is where you look after {escape(organization)}: invite people into it, and see who has joined."
             )
             if roles.operator:
                 purpose += " The admin panel covers the hub itself."
@@ -602,13 +596,12 @@ def make_router(
                 current_path=LANDING_PATH,
                 roles=roles,
                 theme=preferred_theme(request),
+                account_url=account_page_url(request),
             )
         )
 
     @router.post(THEME_PATH)
-    async def choose_theme(
-        request: Request, session: WebSession = Depends(require_web_session)
-    ) -> Response:
+    async def choose_theme(request: Request, session: WebSession = Depends(require_web_session)) -> Response:
         """Record light or dark for this browser and go back where it was.
 
         Parses its own form (the choice and the page to return to) and checks

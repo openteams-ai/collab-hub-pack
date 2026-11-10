@@ -29,7 +29,7 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
 import pytest_asyncio
@@ -146,7 +146,6 @@ def membership_env(monkeypatch):
     monkeypatch.delenv(DEFAULT_WORKSPACE_ENV, raising=False)
 
 
-
 def notice_text(kind: str, address: str = "") -> str:
     """One notice's copy, escaped the way the page renders it.
 
@@ -234,9 +233,7 @@ class FakeInvitationService:
 
     def revoke(self, ctx, invitation_id, *, expect_org_id=None):
         self._guard()
-        self.revoke_calls.append(
-            {"actor": ctx.user, "invitation_id": invitation_id, "expect_org_id": expect_org_id}
-        )
+        self.revoke_calls.append({"actor": ctx.user, "invitation_id": invitation_id, "expect_org_id": expect_org_id})
         if self.revoke_raises is not None:
             raise self.revoke_raises
         for index, row in enumerate(self.rows):
@@ -387,9 +384,7 @@ async def test_a_signed_in_non_operator_is_refused_with_a_page_not_a_shrug(tmp_p
     async with web_client(app) as client:
         await signed_in(client, idp)
         page = await client.get(ADMIN_INVITATIONS_PATH)
-        posted = await client.post(
-            ADMIN_INVITATIONS_PATH, data={"csrf_token": "x", EMAIL_FIELD: INVITEE}
-        )
+        posted = await client.post(ADMIN_INVITATIONS_PATH, data={"csrf_token": "x", EMAIL_FIELD: INVITEE})
         revoked = await client.post(
             ADMIN_INVITATIONS_REVOKE_PATH, data={"csrf_token": "x", INVITATION_ID_FIELD: "inv-1"}
         )
@@ -416,9 +411,7 @@ async def test_a_deployment_that_cannot_decide_operator_authority_says_so(tmp_pa
 async def test_revoking_the_operator_role_locks_out_a_live_session(tmp_path, idp):
     app, service, _ = build_app(tmp_path, idp)
     allowed = {OPERATOR_SUB}
-    app.state.platform_role_resolver = lambda user: (
-        PLATFORM_ROLE_OPERATOR if user in allowed else None
-    )
+    app.state.platform_role_resolver = lambda user: PLATFORM_ROLE_OPERATOR if user in allowed else None
     async with web_client(app) as client:
         await signed_in(client, idp)
         assert (await client.get(ADMIN_INVITATIONS_PATH)).status_code == 200
@@ -550,6 +543,19 @@ async def test_issuing_creates_an_org_creating_invitation_and_nothing_else(tmp_p
     assert service.plain_create_calls == []
 
 
+async def test_the_page_carries_the_account_link_when_the_deployment_sets_one(tmp_path, idp):
+    # The footer is rendered by pages.render_page, but this route is what
+    # hands it the value (#275): a dropped `account_url=` here fails here.
+    url = "https://billing.example.com/account"
+    app, _, _ = build_app(tmp_path, idp, web={"account_page_url": url})
+    async with web_client(app) as client:
+        await signed_in(client, idp)
+        page = await client.get(ADMIN_INVITATIONS_PATH)
+    assert page.status_code == 200
+    assert page.text.count(f'<a href="{url}">Account</a>') == 1
+    assert page.text.index(">Account</a>") < page.text.index("Sign out")
+
+
 async def test_the_address_is_trimmed_and_ascii_lowercased(tmp_path, idp):
     """Amended on #157: lowered here, because Keycloak asserts it lowered.
 
@@ -620,9 +626,7 @@ async def test_an_unavailable_service_creates_nothing_and_says_so(tmp_path, idp)
     async with web_client(app) as client:
         await signed_in(client, idp)
         page = await client.get(ADMIN_INVITATIONS_PATH)
-        response = await client.post(
-            ADMIN_INVITATIONS_PATH, data={"csrf_token": "x", EMAIL_FIELD: INVITEE}
-        )
+        response = await client.post(ADMIN_INVITATIONS_PATH, data={"csrf_token": "x", EMAIL_FIELD: INVITEE})
     assert page.status_code == 503
     assert notice_text(NOTICE_UNAVAILABLE) in page.text
     # The CSRF refusal comes first; the point here is only that the page still
@@ -641,9 +645,7 @@ async def test_revoking_names_the_invitation_and_stays_hub_scoped(tmp_path, idp)
         await signed_in(client, idp)
         response = await revoke(client, "inv-9")
     assert response.status_code == 200
-    assert service.revoke_calls == [
-        {"actor": OPERATOR_SUB, "invitation_id": "inv-9", "expect_org_id": None}
-    ]
+    assert service.revoke_calls == [{"actor": OPERATOR_SUB, "invitation_id": "inv-9", "expect_org_id": None}]
     assert "Revoked" in response.text
 
 
@@ -656,9 +658,7 @@ async def test_revoking_names_the_invitation_and_stays_hub_scoped(tmp_path, idp)
     ],
     ids=["not_found", "already_accepted", "unavailable"],
 )
-async def test_a_revoke_that_cannot_happen_renders_its_own_sentence(
-    tmp_path, idp, raises, status_code, notice
-):
+async def test_a_revoke_that_cannot_happen_renders_its_own_sentence(tmp_path, idp, raises, status_code, notice):
     app, _, _ = build_app(tmp_path, idp, revoke_raises=raises)
     async with web_client(app) as client:
         await signed_in(client, idp)
@@ -725,6 +725,85 @@ async def test_an_oversized_form_is_refused_before_it_is_parsed(tmp_path, idp, p
             data={"csrf_token": csrf_from(page.text), EMAIL_FIELD: "a" * admin_router.MAX_FORM_BYTES},
         )
     assert response.status_code == admin_router.REQUEST_TOO_LARGE
+    assert service.issue_calls == [] and service.revoke_calls == []
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "application/x-www-form-urlencoded",
+        "application/x-www-form-urlencoded; charset=UTF-8",
+        "APPLICATION/X-WWW-FORM-URLENCODED",
+        " application/x-www-form-urlencoded ;charset=utf-8",
+    ],
+    ids=["exact", "charset_param", "uppercase", "padded"],
+)
+async def test_the_form_type_is_matched_as_a_media_type(tmp_path, idp, content_type):
+    """Parameters and case do not change what the type is (#71).
+
+    Media types are case-insensitive and ``charset`` is a parameter, so each
+    of these is the urlencoded form and is read as one. The uppercase spelling
+    is the case a prefix match got wrong in the other direction: it refused a
+    form it should have read.
+    """
+
+    app, service, _ = build_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await signed_in(client, idp)
+        page = await client.get(ADMIN_INVITATIONS_PATH)
+        response = await client.post(
+            ADMIN_INVITATIONS_PATH,
+            content=urlencode({"csrf_token": csrf_from(page.text), EMAIL_FIELD: INVITEE}),
+            headers={"Content-Type": content_type},
+        )
+    assert response.status_code == 201, response.text
+    assert len(service.issue_calls) == 1
+
+
+@pytest.mark.parametrize("path", ADMIN_PATHS)
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "application/x-www-form-urlencoded-not-really",
+        "application/x-www-form-urlencodedx; charset=utf-8",
+        "multipart/form-data; boundary=x",
+        "text/plain",
+        "",
+        None,
+    ],
+    ids=["suffix_extended", "suffix_extended_with_param", "multipart", "text", "empty", "absent"],
+)
+async def test_anything_but_the_form_type_is_refused_unread(tmp_path, idp, path, content_type):
+    """A type that merely *begins* with the form type is not the form type (#71).
+
+    The gate used to be ``startswith``, so the first two were parsed as forms.
+    They are refused with the same 415 multipart gets, before the body is read,
+    and the connection is let go because that body was never consumed. The
+    body is a valid form carrying the right token, so the only thing that can
+    refuse it is the type gate.
+    """
+
+    pulled = 0
+
+    app, service, _ = build_app(tmp_path, idp, rows=[an_invitation(invitation_id="inv-9")])
+    async with web_client(app) as client:
+        await signed_in(client, idp)
+        page = await client.get(ADMIN_INVITATIONS_PATH)
+        body = {"csrf_token": csrf_from(page.text), EMAIL_FIELD: INVITEE, INVITATION_ID_FIELD: "inv-9"}
+
+        async def form_body():
+            nonlocal pulled
+            pulled += 1
+            yield urlencode(body).encode()
+
+        # None sends no Content-Type at all; httpx adds none for raw content.
+        headers = {} if content_type is None else {"Content-Type": content_type}
+        response = await client.post(path, content=form_body(), headers=headers)
+        assert (content_type is None) == ("content-type" not in response.request.headers)
+    assert response.status_code == admin_router.UNSUPPORTED_MEDIA_TYPE, response.text
+    # Refused before the read, not after it: the server pulled nothing.
+    assert pulled == 0
+    assert response.headers.get("connection") == "close"
     assert service.issue_calls == [] and service.revoke_calls == []
 
 
@@ -906,9 +985,7 @@ async def test_the_browser_session_is_not_api_credentials(tmp_path, idp):
     app, _, _ = build_app(tmp_path, idp)
     async with web_client(app) as client:
         await signed_in(client, idp)
-        response = await client.post(
-            "/v1/operator/invitations", json={"email": INVITEE, "org_id": None}
-        )
+        response = await client.post("/v1/operator/invitations", json={"email": INVITEE, "org_id": None})
     assert response.status_code == 401
 
 
@@ -1055,9 +1132,7 @@ async def test_a_failed_or_unconfirmed_send_is_worded_not_hidden(tmp_path, idp, 
     never quotes the provider's own error code.
     """
 
-    app, _, _ = build_app(
-        tmp_path, idp, delivery=RecordingDelivery(status=status, error_code="boom")
-    )
+    app, _, _ = build_app(tmp_path, idp, delivery=RecordingDelivery(status=status, error_code="boom"))
     async with web_client(app) as client:
         await signed_in(client, idp)
         response = await issue(client)
@@ -1306,13 +1381,9 @@ async def test_live_an_operator_takes_an_address_through_to_a_solo_org(live_app,
     assert accepted.status_code == 200
 
     with live_db.connection() as conn:
-        membership = conn.execute(
-            "SELECT user_id, org_id, role FROM collab_org_members"
-        ).fetchall()
+        membership = conn.execute("SELECT user_id, org_id, role FROM collab_org_members").fetchall()
         orgs = conn.execute("SELECT id, created_by FROM collab_orgs").fetchall()
-        events = conn.execute(
-            "SELECT action, actor, target_label FROM collab_audit_events ORDER BY id"
-        ).fetchall()
+        events = conn.execute("SELECT action, actor, target_label FROM collab_audit_events ORDER BY id").fetchall()
         leaked = conn.execute(
             "SELECT count(*) AS n FROM collab_audit_events WHERE detail::text LIKE %s",
             (f"%{token}%",),
@@ -1343,9 +1414,7 @@ async def test_live_no_organization_exists_until_acceptance(live_app, idp, live_
         assert issued.status_code == 201
         with live_db.connection() as conn:
             assert conn.execute("SELECT count(*) AS n FROM collab_orgs").fetchone()["n"] == 0
-            invitation_id = conn.execute(
-                "SELECT id, org_id FROM collab_invitations"
-            ).fetchone()
+            invitation_id = conn.execute("SELECT id, org_id FROM collab_invitations").fetchone()
         assert invitation_id["org_id"] is None
 
         listing = await operator.get(ADMIN_INVITATIONS_PATH)
@@ -1362,15 +1431,9 @@ async def test_live_no_organization_exists_until_acceptance(live_app, idp, live_
         assert conn.execute("SELECT count(*) AS n FROM collab_orgs").fetchone()["n"] == 0
         assert conn.execute("SELECT count(*) AS n FROM collab_org_members").fetchone()["n"] == 0
         actions = [
-            row["action"]
-            for row in conn.execute(
-                "SELECT action FROM collab_audit_events ORDER BY id"
-            ).fetchall()
+            row["action"] for row in conn.execute("SELECT action FROM collab_audit_events ORDER BY id").fetchall()
         ]
-        actors = {
-            row["actor"]
-            for row in conn.execute("SELECT actor FROM collab_audit_events").fetchall()
-        }
+        actors = {row["actor"] for row in conn.execute("SELECT actor FROM collab_audit_events").fetchall()}
     assert actions == ["invitation.send", "invitation.revoke"]
     assert actors == {OPERATOR_SUB}
 
@@ -1381,12 +1444,8 @@ async def test_live_issuing_twice_mints_one_token_and_writes_one_event(live_app,
         await sign_in(operator, idp, next_path=ADMIN_INVITATIONS_PATH)
         page = await operator.get(ADMIN_INVITATIONS_PATH)
         csrf = csrf_from(page.text)
-        first = await operator.post(
-            ADMIN_INVITATIONS_PATH, data={"csrf_token": csrf, EMAIL_FIELD: INVITEE}
-        )
-        second = await operator.post(
-            ADMIN_INVITATIONS_PATH, data={"csrf_token": csrf, EMAIL_FIELD: INVITEE}
-        )
+        first = await operator.post(ADMIN_INVITATIONS_PATH, data={"csrf_token": csrf, EMAIL_FIELD: INVITEE})
+        second = await operator.post(ADMIN_INVITATIONS_PATH, data={"csrf_token": csrf, EMAIL_FIELD: INVITEE})
     assert first.status_code == 201
     assert second.status_code == 409
     assert "<code>" not in second.text
@@ -1431,9 +1490,9 @@ def test_live_concurrent_issues_for_one_address_produce_one_invitation(live_db):
     with live_db.connection() as conn:
         assert conn.execute("SELECT count(*) AS n FROM collab_invitations").fetchone()["n"] == 1
         assert (
-            conn.execute(
-                "SELECT count(*) AS n FROM collab_audit_events WHERE action = 'invitation.send'"
-            ).fetchone()["n"]
+            conn.execute("SELECT count(*) AS n FROM collab_audit_events WHERE action = 'invitation.send'").fetchone()[
+                "n"
+            ]
             == 1
         )
 
@@ -1441,7 +1500,7 @@ def test_live_concurrent_issues_for_one_address_produce_one_invitation(live_db):
 @live_postgres
 @pytest.mark.parametrize("retired", ["revoked", "expired", "accepted"])
 def test_live_a_retired_invitation_does_not_block_a_fresh_one(live_db, retired):
-    """"Live" is pending and unexpired. Everything else is how an issuer makes
+    """ "Live" is pending and unexpired. Everything else is how an issuer makes
     room for a new link, and blocking on it would strand them."""
 
     service = _live_service(live_db)
@@ -1454,8 +1513,7 @@ def test_live_a_retired_invitation_does_not_block_a_fresh_one(live_db, retired):
     elif retired == "expired":
         with live_db.connection() as conn:
             conn.execute(
-                "UPDATE collab_invitations SET expires_at = now() - interval '1 second'"
-                " WHERE id = %s",
+                "UPDATE collab_invitations SET expires_at = now() - interval '1 second' WHERE id = %s",
                 (first.invitation.id,),
             )
     else:
@@ -1501,9 +1559,7 @@ def test_live_the_one_live_token_rule_is_scoped_to_this_page(live_db):
     assert live == 2, "the documented scope: the API path is not covered by the rule"
 
     # And the page still refuses, against whichever live invitation it finds.
-    assert isinstance(
-        service.create_unless_live(context, email=INVITEE, org_id=None), LiveInvitationExists
-    )
+    assert isinstance(service.create_unless_live(context, email=INVITEE, org_id=None), LiveInvitationExists)
 
 
 @live_postgres
@@ -1565,6 +1621,8 @@ def test_the_lock_key_is_a_signed_32_bit_integer():
 from test_acceptance_page import (  # noqa: E402
     _LoopbackBrowser,
     _post_body_over_socket,
+    _raw_post,
+    _requests_over_one_socket,
     running_server,
 )
 
@@ -1583,9 +1641,7 @@ def _sign_in_operator(browser, idp) -> str:
     assert start.status_code == 303
     params = {k: v[0] for k, v in parse_qs(urlsplit(start.headers["location"]).query).items()}
     idp.nonce = params["nonce"]
-    callback = browser.get(
-        "/web/oidc/callback", params={"code": "stub-code", "state": params["state"]}
-    )
+    callback = browser.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
     assert callback.status_code == 303, callback.text
     return csrf_from(browser.get(ADMIN_INVITATIONS_PATH).text)
 
@@ -1655,17 +1711,29 @@ def test_a_normal_submission_over_a_real_connection_keeps_it_alive(tmp_path, idp
     """The other half: a request whose body *was* read must not be closed.
 
     Without this, "always send Connection: close" would pass every test above
-    while throwing away keep-alive for every ordinary submission.
+    while throwing away keep-alive for every ordinary submission. So it is
+    asserted as reuse: two submissions on **one raw socket**, and the second
+    is served on it (#71). The absence of a ``Connection: close`` header is
+    not enough — the server could drop the connection for any other reason
+    and that control would still pass, which is the regression it is for.
     """
 
     app, service, _ = _operator_app(tmp_path, idp)
     with running_server(app) as base_url, _LoopbackBrowser(base_url) as browser:
         csrf = _sign_in_operator(browser, idp)
-        response = browser.post(
-            ADMIN_INVITATIONS_PATH,
-            data={"csrf_token": csrf, EMAIL_FIELD: INVITEE},
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-    assert response.status_code == 201
-    assert response.headers.get("connection", "").lower() != "close"
-    assert len(service.issue_calls) == 1
+        submissions = [
+            _raw_post(
+                base_url,
+                ADMIN_INVITATIONS_PATH,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Cookie": browser.cookie_header(),
+                },
+                body=urlencode({"csrf_token": csrf, EMAIL_FIELD: address}).encode(),
+            )
+            for address in (INVITEE, "carol@example.com")
+        ]
+        served = _requests_over_one_socket(base_url, submissions)
+    assert len(served) == 2, "the server closed the connection after a normal submission"
+    assert all(response.startswith(b"HTTP/1.1 201") for response in served), [response[:200] for response in served]
+    assert len(service.issue_calls) == 2

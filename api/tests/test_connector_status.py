@@ -15,7 +15,7 @@ from collab_hub_api.frames.connector_status import CREDENTIAL_BROKER, CREDENTIAL
 def test_a_connector_with_no_credential_source_is_reported_as_unconfigured():
     statuses = {status.key: status for status in connector_statuses(ConnectorsConfig())}
 
-    assert set(statuses) == {"google", "slack", "github"}
+    assert set(statuses) == {"google", "slack", "github", "sharepoint"}
     assert all(not status.configured for status in statuses.values())
     assert all(status.credential is None for status in statuses.values())
 

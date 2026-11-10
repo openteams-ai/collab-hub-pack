@@ -862,9 +862,7 @@ def verified_claim_email(email: object, email_verified: object, *, require_verif
     """
 
     if require_verified and email_verified is not True:
-        raise EmailNotVerifiedError(
-            "Accepting an invitation requires a verified email address on your account."
-        )
+        raise EmailNotVerifiedError("Accepting an invitation requires a verified email address on your account.")
     if not isinstance(email, str) or not email:
         # A DIFFERENT condition, and the only one reachable when verification is
         # not required: the signed-in account carried no usable address. It shares
@@ -1210,9 +1208,7 @@ class PostgresInvitationService:
             org_id=org_id,
             detail={"replaced_placeholder": True},
         ) as event:
-            row = event.conn.execute(
-                "SELECT name FROM collab_orgs WHERE id = %s FOR UPDATE", (org_id,)
-            ).fetchone()
+            row = event.conn.execute("SELECT name FROM collab_orgs WHERE id = %s FOR UPDATE", (org_id,)).fetchone()
             if row is None:
                 raise OrgNotFoundError("Organization not found")
             if not is_placeholder_organization_name(row["name"]):
@@ -1361,9 +1357,7 @@ class PostgresInvitationService:
 
     # --- Issue --------------------------------------------------------------
 
-    def create(
-        self, ctx: AuthContext, *, email: str, org_id: str | None, role: str | None = None
-    ) -> IssuedInvitation:
+    def create(self, ctx: AuthContext, *, email: str, org_id: str | None, role: str | None = None) -> IssuedInvitation:
         """Issue one invitation, recorded as ``invitation.send``.
 
         The caller has **already been authorized** by one of the two wrappers
@@ -1382,9 +1376,7 @@ class PostgresInvitationService:
         role = validate_invitation_role(role, org_id=org_id)
         return _retrying(lambda: self._create_once(ctx, email=email, org_id=org_id, role=role))
 
-    def _create_once(
-        self, ctx: AuthContext, *, email: str, org_id: str | None, role: str | None
-    ) -> IssuedInvitation:
+    def _create_once(self, ctx: AuthContext, *, email: str, org_id: str | None, role: str | None) -> IssuedInvitation:
         invited = validate_invited_email(email)
         invitation_id = uuid4().hex
         # One name, one redacted repr: see MintedSecret. A retry mints again,
@@ -1463,9 +1455,7 @@ class PostgresInvitationService:
 
         _refuse_org_creation_under_single_org(org_id)
         role = validate_invitation_role(role, org_id=org_id)
-        return _retrying(
-            lambda: self._create_unless_live_once(ctx, email=email, org_id=org_id, role=role)
-        )
+        return _retrying(lambda: self._create_unless_live_once(ctx, email=email, org_id=org_id, role=role))
 
     def _create_unless_live_once(
         self, ctx: AuthContext, *, email: str, org_id: str | None, role: str | None
@@ -1734,9 +1724,7 @@ class PostgresInvitationService:
         # since a reader who trusts it might treat the column as evidence of
         # verification. What is always true of it is that it matched the
         # invited address.
-        matched_email = verified_claim_email(
-            claim_email, email_verified, require_verified=self._require_verified_email
-        )
+        matched_email = verified_claim_email(claim_email, email_verified, require_verified=self._require_verified_email)
 
         # Minted before the transaction so the audit scope can be declared;
         # discarded with the transaction if the body does not commit. Org ids
@@ -2061,6 +2049,7 @@ class PostgresInvitationService:
         """
 
         return ServiceAccessStateStore(self._db).outstanding()
+
 
 InvitationService = PostgresInvitationService | UnavailableInvitationService
 """Either backend, as one annotation. Callers never branch on which they hold:

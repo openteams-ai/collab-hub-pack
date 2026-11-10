@@ -54,9 +54,15 @@ never the Cog's.
 
 **`error`** — `null`, or `{code, detail}`. Codes: `binding-invalid`,
 `invalid-input`, `model-unavailable`, `model-call-failed`,
-`model-response-malformed`. When set, `ok` is `false`. Over HTTP, the
-status maps 4xx/5xx accordingly: 422 for `invalid-input`, 502 for an
-upstream fault, 503 for unavailable/binding.
+`model-response-malformed`, `context-exhausted`. When set, `ok` is `false`.
+Over HTTP, the status maps 4xx/5xx accordingly: 422 for `invalid-input` and
+`context-exhausted`, 502 for an upstream fault, 503 for unavailable/binding.
+
+`context-exhausted` is the input that did not fit: the prompt and the step's
+Frames could not fit the bound model's context window, even after the
+harness's own recovery, or the model refused them as too long. Retrying on the
+same binding would not help, so a Gate or a person chooses a larger model or
+fewer Frames; a worker reports it before spending anything when it can tell.
 
 **`problems`** — the Cog's self-reported **contract-check** findings,
 structured for Guards and Gates to consume: `check` (machine-readable
@@ -97,7 +103,7 @@ As the hub's worker client implements it (`collab_hub_execution.kubernetes`):
 | Status | Body | The hub reads |
 |---|---|---|
 | 200 | an envelope, `ok` true or false | the envelope |
-| 422 | an envelope with `error.code: invalid-input` | the envelope's code |
+| 422 | an envelope with `error.code: invalid-input` or `context-exhausted` | the envelope's code |
 | 502 | an envelope with `model-call-failed` or `model-response-malformed` | the envelope's code |
 | 503 | an envelope with `model-unavailable` or `binding-invalid` | the envelope's code |
 | 422 / 502 / 503 | not an envelope — a proxy's error page, a worker that died mid-answer | an error envelope with the status's own code: `invalid-input`, `model-call-failed`, `model-unavailable` |

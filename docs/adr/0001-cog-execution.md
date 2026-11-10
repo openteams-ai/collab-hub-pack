@@ -25,6 +25,24 @@ A4 needs to execute Cogs and Ops. The open tension was local vs. hub execution u
 
 **D6 — Nebi is the v1 distribution mechanism.** Publish Cogs via Nebi to an OCI registry, and index that registry into the catalog. Not every Cog must use Nebi, but v1 Cogs do.
 
+**D6 amendment — Hub-owned discovery and install authorization (2026-10-08).**
+For Hub-managed Cogs, the client-facing registry endpoint is the Hub host.
+Discovery and installation use one Hub sign-in and one membership model;
+users do not need a second account or a personal credential on the backing
+registry. Nebi remains the distribution client, and an existing OCI registry
+remains the backing store that the Hub indexes. Clients that persist a
+registry login exchange their Hub session for a limited Hub-issued registry
+credential, rather than storing the Hub access or refresh token.
+
+The pull surface is read-only in [#181](https://github.com/nebari-dev/collab-hub-pack/pull/181).
+Publishing through the same Hub endpoint is separate work in
+[#182](https://github.com/nebari-dev/collab-hub-pack/pull/182), with its own
+publish permission and repository-ownership decisions. The client contract
+is the Hub host and Hub-issued authorization; transferring bytes through
+registry software behind that endpoint later can preserve this contract.
+That refactor is not a prerequisite for the pull implementation. Cross-Hub
+sharing and public-registry federation remain separate decisions.
+
 **D7 — Collab edits Ops; it does not build Cogs.** End users compose Ops from existing Cogs. Cog authoring is technical and out of A4 scope. The spec stays open so other clients could author Cogs and enter a future marketplace.
 
 **D8 — One durable Track per run.** The hub preserves history, paused steps, and artifacts across an Op's lifetime; the desktop observes through signals (state, logs, artifacts, failures, timings, who started it). Run status derives from the Track, not from in-memory state.

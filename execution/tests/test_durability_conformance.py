@@ -1,6 +1,6 @@
 """The durability conformance suite: what survives a host that stops.
 
-A durable backend (``dbos``, Phase 26; ``temporal``, Phase 32) resumes a run
+A durable backend (``dbos``, Phase 27; ``temporal``, Phase 33) resumes a run
 killed mid-step without resubmission, resumes one paused at a Gate there, and
 never lets two replicas run one step; those cases join this suite with the
 backends. ``none`` is not durable, and this suite holds it to that contract
@@ -164,6 +164,6 @@ def test_starting_leaves_a_run_this_host_is_advancing_alone():
     assert outcome["state"] is RunState.COMPLETED
 
 
-@pytest.mark.parametrize("backend", [])  # dbos (Phase 26) and temporal (Phase 32) join here
+@pytest.mark.parametrize("backend", [])  # dbos (Phase 27) and temporal (Phase 33) join here
 def test_a_durable_backend_resumes_a_run_killed_mid_step_without_resubmission(backend):
     raise AssertionError("a durable backend's case runs only once the backend is built")

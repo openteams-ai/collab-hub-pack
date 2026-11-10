@@ -111,6 +111,7 @@ export function App({ tab, claimed }: { tab: Tab; claimed: Claim }) {
           <span>
             Signed in as <strong>{session.identity}</strong>
           </span>
+          {session.accountUrl && <a href={session.accountUrl}>Account</a>}
           <button type="button" className="link" onClick={signOut} disabled={busy}>
             Sign out
           </button>

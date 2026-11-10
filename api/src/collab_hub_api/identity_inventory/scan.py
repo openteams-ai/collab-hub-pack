@@ -620,7 +620,9 @@ def scan_s3_frames(result: ScanResult, s3) -> None:
             fallback_frame_id=parts[-2] if len(parts) >= 2 else key,
         )
         count += 1
-    result.coverage.append(SourceCoverage("frames (S3)", True, f"{count} frame sidecars in s3://{s3.bucket}/{s3.prefix}"))
+    result.coverage.append(
+        SourceCoverage("frames (S3)", True, f"{count} frame sidecars in s3://{s3.bucket}/{s3.prefix}")
+    )
 
 
 def scan_groups(result: ScanResult, db) -> None:
@@ -859,9 +861,7 @@ def scan_tasks(result: ScanResult, db) -> None:
 
     if db.table_exists("nexus_task_state"):
         count = 0
-        for row in db.iter_rows(
-            "SELECT org_id, workspace_id, owner_id, payload, updated_at FROM nexus_task_state"
-        ):
+        for row in db.iter_rows("SELECT org_id, workspace_id, owner_id, payload, updated_at FROM nexus_task_state"):
             count += 1
             org_id = str(row.get("org_id") or "")
             workspace_id = str(row.get("workspace_id") or "")

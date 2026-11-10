@@ -11,13 +11,13 @@ invitation page ([#91], `/admin/invitations`), the owner invitation page
 `/web/data-statement`), and the canonical Terms of Service and Privacy
 Statement ([#95], `/web/terms` and `/web/privacy`).
 
-[#88]: https://github.com/nebari-dev/collab-hub-pack/issues/88
-[#90]: https://github.com/nebari-dev/collab-hub-pack/issues/90
-[#91]: https://github.com/nebari-dev/collab-hub-pack/issues/91
-[#142]: https://github.com/nebari-dev/collab-hub-pack/issues/142
-[#44]: https://github.com/nebari-dev/collab-hub-pack/issues/188
-[#146]: https://github.com/nebari-dev/collab-hub-pack/issues/146
-[#95]: https://github.com/nebari-dev/collab-hub-pack/issues/95
+[#88]: https://github.com/openteams-ai/collab-hub-pack/issues/88
+[#90]: https://github.com/openteams-ai/collab-hub-pack/issues/90
+[#91]: https://github.com/openteams-ai/collab-hub-pack/issues/91
+[#142]: https://github.com/openteams-ai/collab-hub-pack/issues/142
+[#44]: https://github.com/openteams-ai/collab-hub-pack/issues/188
+[#146]: https://github.com/openteams-ai/collab-hub-pack/issues/146
+[#95]: https://github.com/openteams-ai/collab-hub-pack/issues/95
 
 ## Two auth axes, deliberately
 
@@ -70,16 +70,18 @@ than dead-ending a signed-in operator.
 | `COLLAB_HUB_API__WEB__PUBLIC_BASE_URL` | External origin the surface builds its absolute URLs from, the OIDC redirect URI among them. **Required** when the surface is enabled on a membership-resolving deployment — startup refuses without it, because those origins must never be derived from a forgeable request `Host` (see below). Also what makes the redirect URI correct behind a proxy whose forwarded headers are not trusted. Same https/loopback rule as the issuer. |
 | `COLLAB_HUB_API__WEB__ADMIN_UI_DIST` | Directory holding the built admin panel, and inside it the registration app in `registration/`. The image sets it to `/var/collab-hub-api/admin-ui-dist`. Empty, or a directory with no `index.html`, mounts no panel routes (the second case logs `admin_ui_dist_missing_index`). With no `registration/index.html`, or with the setting empty, the invitation page answers 503 with a plain notice, and startup logs `registration_ui_missing` at error level. The panel and its `/admin/api/*` endpoints mount only on a membership-resolving deployment (`orgSource` `membership` or `single`). |
 | `COLLAB_HUB_API__WEB__ADMIN_GROUP` | Identity-provider group whose members hold the operator role, reconciled at each sign-in from the ID token's `groups` claim. Matches with or without a leading slash. Empty (default) turns sync off. Needs a groups mapper on the client so the ID token carries the claim; see [frames-operations.md](frames-operations.md#where-operator-rows-come-from-source-and-sign-in-sync). |
+| `COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL` | Optional. An external account page (plan, usage, invoices) the signed-in navigation links to as "Account". Empty (default) renders no link. Same https/loopback rule as the issuer, plus a real host, a valid port, no credentials and no control characters, checked at startup. Chart value `web.accountPageUrl`. See [the account link](#the-account-link-an-optional-extension-point). |
 
 The realm's JWKS endpoint is derived from the issuer URL — there is no
 separate JWKS setting to point somewhere else.
 
 ### Deploying it
 
-There is no `web.*` value in the chart yet, so a deployment supplies the
-settings through `api.deployment.extraEnv`, which is rendered verbatim and
-therefore accepts `valueFrom`. The client secret must arrive that way — never
-as a chart value, where it would land in a rendered manifest:
+The chart's `web.*` block holds only what is safe in a rendered manifest
+(today, `web.accountPageUrl`). Enabling the surface goes through
+`api.deployment.extraEnv`, which is rendered verbatim and therefore accepts
+`valueFrom`. The client secret must arrive that way — never as a chart value,
+where it would land in a rendered manifest:
 
 ```yaml
 api:
@@ -208,12 +210,12 @@ elsewhere" shape as `web_platform_role_source_missing`.
   [Invitation acceptance](#invitation-acceptance-inviteaccept).
   They are applied by middleware keyed on the path rather than by each handler,
   so responses no handler of this surface produced — redirects, a 405, an
-  unmatched `/web/*` path answered by the mounted MCP catch-all ([#86]), and an
+  unmatched `/web/*` path answered by the router's own 404, and an
   exception escaping a page (which `ServerErrorMiddleware` would otherwise
   answer above this middleware, bare) — carry them too.
 
-[#86]: https://github.com/nebari-dev/collab-hub-pack/issues/86
-[#83]: https://github.com/nebari-dev/collab-hub-pack/issues/83
+[#67]: https://github.com/openteams-ai/collab-hub-pack/issues/67
+[#83]: https://github.com/openteams-ai/collab-hub-pack/issues/83
 
 ## The per-path protection map
 
@@ -300,10 +302,11 @@ deliberate: requiring a deployment to open `/org` before anything serves
 `/org` would be asking operators to widen a map for paths that do not exist.
 (The chart choosing to ship `/admin` early is a separate decision, made on
 merge-ordering grounds above — the check does not demand it.)
-While a prefix is empty, a request to it matches nothing here and falls
-through to the MCP catch-all mounted at `/` ([#86]). That is not a hole — that
-mount runs its own `McpAuthMiddleware` and authenticates on the API axis
-before the sub-application sees the request. Map-public means "the web
+While a prefix is empty, a request to it matches nothing here and, once the
+session guard (which authenticates by path, before routing) has let it
+through, answers the router's own 404. That is not a hole — a 404 serves
+nothing. (Until [#67] the MCP app was mounted at `/` and answered such paths
+instead; it is now registered at `/mcp` only.) Map-public means "the web
 surface's own session flow decides this path", never "unauthenticated".
 
 Pages built on the surface register their own paths the same way: `/admin/*`
@@ -618,6 +621,51 @@ tidiness rather than safety: a misspelled entry exempts nothing, so the route
 it was meant to cover is still refused by the primary check, loudly, naming
 the real path.
 
+### The account link — an optional extension point
+
+A deployment can show its users a link to an external account page — plan,
+usage, invoices — from the signed-in navigation, **only when it turns the
+link on** (issue [#275]). Set `web.account_page_url`
+(`COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL`, chart value `web.accountPageUrl`) and
+every page that renders the signed-in footer carries `Account` beside
+`Sign out`. Leave it unset, which is the default, and nothing renders: a
+normal Hub install needs no billing configuration and shows no trace of one.
+
+The page itself, and whatever APIs sit behind it, belong to the add-on that
+provides them. The Hub only links: it installs no payment integration, holds
+no merchant credentials, schedules no billing email and carries no pricing.
+
+Three properties the implementation keeps, and a reviewer should check are
+still kept:
+
+- **Configuration only, never the request.** Routes read the URL through
+  `web.surface.account_page_url(request)`, which looks up the `WebSurface` the
+  app was built with — the same posture as `public_base_url` above. Nothing
+  in the request can steer where the link points.
+- **One owner.** `pages.render_page` is the only place the link is written,
+  inside the same footer as the sign-out form, so there is one rule for when
+  it appears (a signed-in page, and the value is set) and a page cannot grow
+  a second copy with another.
+- **Checked at startup, to the surface's usual bar.** `WebConfig` runs the
+  value through `web.oidc.invalid_link_url_reason`, which follows the same rules
+  as the realm-URL check: absolute `https://` (plain `http://` only on
+  loopback, the same exact-match host set), a real host, a usable port (not 0), no
+  credentials, and no control or non-printable character — checked on the
+  raw string, because `urlsplit` quietly drops a leading NUL that would
+  otherwise land in the attribute. A query and fragment are allowed, since
+  nothing is appended to a link. This holds whether or not the surface is
+  enabled: the value lands in an `href` on every signed-in page, so
+  `javascript:`, a bare path or a cleartext host is a rollout failure, not
+  something shipped to browsers. The chart's values schema applies a coarse
+  version of the same shape before the render; the API's check is the
+  authoritative one, and the two differ at the edges. The schema lets
+  through a port above 65535, port 0, a non-breaking space and a zero-width
+  character, each of which the API then refuses at startup; it refuses an
+  international domain name and an empty port (`https://host:/`), which the
+  API would accept. A value that renders is not yet a value that starts. The link is a same-tab navigation like every other link
+  on the surface, and the page-level `no-referrer` policy keeps this origin
+  out of the billing site's logs.
+
 ### These checks are a rollout gate, not a runtime control
 
 `verify_web_route_protection` and `enforce_web_surface_map_access` run twice —
@@ -644,9 +692,10 @@ checks enforce at rollout that those are present**. A passing startup is not a
 claim about routes that did not exist when it ran. Both halves of that boundary
 are asserted in `test_web_surface.py` so the claim and the code cannot drift.
 
-[#91]: https://github.com/nebari-dev/collab-hub-pack/issues/91
+[#91]: https://github.com/openteams-ai/collab-hub-pack/issues/91
 
-[#87]: https://github.com/nebari-dev/collab-hub-pack/issues/87
+[#87]: https://github.com/openteams-ai/collab-hub-pack/issues/87
+[#275]: https://github.com/openteams-ai/collab-hub-pack/issues/275
 
 ## Invitation acceptance (`/invite/accept`)
 
@@ -848,7 +897,7 @@ exception takes the route out of the shared exception handler's reach, so it
 re-emits `web_forbidden` with the same `reason` field an operator's existing
 query groups by, alongside its own `web_invitation_accept_csrf_refused`.
 
-[#119]: https://github.com/nebari-dev/collab-hub-pack/issues/119
+[#119]: https://github.com/openteams-ai/collab-hub-pack/issues/119
 
 ## Operator invitations (`/admin/invitations`)
 
@@ -978,7 +1027,7 @@ shortened to 48 hours as the display's compensating control
 not a consequence of this one, and it has not been taken.
 
 [an internal issue]: an internal issue
-[#89]: https://github.com/nebari-dev/collab-hub-pack/issues/89
+[#89]: https://github.com/openteams-ai/collab-hub-pack/issues/89
 
 ### Where the surface's URLs point — configuration only, never the request
 

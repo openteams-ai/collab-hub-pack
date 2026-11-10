@@ -8,6 +8,40 @@ reported to whoever ran helm instead of by a crash-looping pod. */}}
 {{- if and .Values.cogs.caBundle.configMap (not .Values.cogs.caBundle.key) }}
 {{- fail "cogs.caBundle.key must name the ConfigMap key holding the PEM bundle when cogs.caBundle.configMap is set." }}
 {{- end }}
+{{- if .Values.cogs.serve.enabled }}
+{{- if not .Values.cogs.registry.sources }}
+{{- fail "cogs.serve.enabled=true with no cogs.registry.sources: a registry endpoint with no source behind it can serve nothing. Add a source or set cogs.serve.enabled=false." }}
+{{- end }}
+{{- /* The registry is the Hub API's own origin, never a hostname of its own:
+a client accepts a registry credential only for the authority it sent the
+exchange to, and /v2 is routed on the API's host. An explicit publicUrl may
+add a port or say http; it may not name another host. */}}
+{{- $routedHost := "" }}
+{{- if and .Values.api.nebariapp.enabled .Values.api.nebariapp.hostname }}
+{{- $routedHost = .Values.api.nebariapp.hostname }}
+{{- else if and .Values.api.ingress.enabled .Values.api.ingress.host }}
+{{- $routedHost = .Values.api.ingress.host }}
+{{- end }}
+{{- if and .Values.cogs.serve.publicUrl $routedHost }}
+{{- $publicHost := regexReplaceAll ":[0-9]*$" (regexReplaceAll "^[A-Za-z][A-Za-z0-9+.-]*://" (toString .Values.cogs.serve.publicUrl) "") "" }}
+{{- if ne (lower $publicHost) (lower $routedHost) }}
+{{- fail (printf "cogs.serve.publicUrl names host %s, but the Hub API is served on %s: the Hub serves /v2 on the same origin as its API, and clients accept a registry credential only for that origin. Drop cogs.serve.publicUrl to derive it, or make the hosts match." $publicHost $routedHost) }}
+{{- end }}
+{{- end }}
+{{- if not (include "collab-hub.cogs-serve-public-url" .) }}
+{{- fail "cogs.serve.enabled=true but the Hub's public URL is unknown: set cogs.serve.publicUrl (https://host[:port], no path), or enable api.nebariapp / api.ingress with a host for it to be derived from." }}
+{{- end }}
+{{- end }}
+{{- /* Publishing through the Hub (issue #180): pushes are written to exactly
+one source, and they arrive on the /v2 surface that serving mounts. */}}
+{{- $publishing := list }}
+{{- range .Values.cogs.registry.sources }}{{- if .publish }}{{- $publishing = append $publishing .id }}{{- end }}{{- end }}
+{{- if gt (len $publishing) 1 }}
+{{- fail (printf "cogs.registry.sources marks %d sources publish: true (%s): pushes through the Hub are written to exactly one source." (len $publishing) (join ", " $publishing)) }}
+{{- end }}
+{{- if and $publishing (not .Values.cogs.serve.enabled) }}
+{{- fail (printf "cogs.registry.sources source %s is publish: true but cogs.serve.enabled is false: pushes arrive on the Hub's /v2 surface, which serving mounts." (first $publishing)) }}
+{{- end }}
 {{- $ids := list }}
 {{- $envIds := list }}
 {{- range $index, $source := .Values.cogs.registry.sources }}
@@ -40,8 +74,8 @@ values.schema.json carries the same pattern; this check names the field. */}}
 {{- fail (printf "%s is kind=harbor and does not read repositories or indexUrl; those belong to kind=static." $label) }}
 {{- end }}
 {{- else if eq $source.kind "static" }}
-{{- if and (not $source.repositories) (not $source.indexUrl) }}
-{{- fail (printf "%s is kind=static and needs repositories and/or indexUrl: it has no listing API to ask." $label) }}
+{{- if and (not $source.repositories) (not $source.indexUrl) (not $source.publish) }}
+{{- fail (printf "%s is kind=static and needs repositories and/or indexUrl (or publish: true, whose repositories are the ones published through the Hub): it has no listing API to ask." $label) }}
 {{- end }}
 {{- if or $source.projects $source.apiUrl }}
 {{- fail (printf "%s is kind=static and does not read projects or apiUrl; those belong to kind=harbor." $label) }}
@@ -66,6 +100,6 @@ bypassing both the schema and the checks above. */}}
 {{- range .Values.api.deployment.extraEnv }}
 {{- $name := upper (toString (.name | default "")) }}
 {{- if or (eq $name "COLLAB_HUB_API__COGS") (hasPrefix "COLLAB_HUB_API__COGS__" $name) (hasPrefix "COLLAB_HUB_COGS_SOURCE_" $name) }}
-{{- fail (printf "api.deployment.extraEnv may not set %s: configure the Cog registry through cogs.* (sources, credentials.existingSecret, webhook.existingSecret, caBundle, index), which the chart validates." .name) }}
+{{- fail (printf "api.deployment.extraEnv may not set %s: configure the Cog registry through cogs.* (sources, credentials.existingSecret, webhook.existingSecret, caBundle, index, serve, publish), which the chart validates." .name) }}
 {{- end }}
 {{- end }}

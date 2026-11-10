@@ -64,10 +64,15 @@ history are checkpoint machinery; nothing reads run status from them.
 **D4 — Runs advance in a run controller.** A *run controller* process runs the
 lifecycle runner and owns the executor; it is the only identity with permission
 to create workloads. The public API records a run's intent and reads its Track,
-and never calls the executor. Under `none`, controllers coordinate through *run
-pickup* — an atomic record that lets exactly one of them start a submitted run;
-`dbos` and `temporal` use their own queues instead. *(Preserves ADR-0001
-invariant 2; answers #6.)*
+and never calls the executor. Under every backend, controllers coordinate through
+*run pickup* — an atomic record, naming the controller, that lets exactly one
+of them start a submitted run. What differs is ownership after pickup: under
+`none` the run belongs to the controller that picked it up and ends
+`interrupted` with it, while under `dbos` and `temporal` that controller hands
+the run to the engine's queue, and the engine decides which replica resumes it.
+*(Preserves ADR-0001 invariant 2; answers #6. Amended by the run controller's
+phase, which built pickup: the first wording had `dbos` and `temporal` replace
+pickup rather than take ownership after it.)*
 
 **D5 — Workers are harness-neutral.** The hub speaks only the seam — task entry
 point, result envelope, health probe, catalog card — and never learns which

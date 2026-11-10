@@ -3,9 +3,12 @@
 name = "slow"
 channels = ["conda-forge"]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64", "osx-64"]
+# 0.82.1 is the first pixi whose bundled roots exclude the compromised eMudhra chain.
+requires-pixi = ">=0.82.1"
 
 [tasks]
 serve = "python serve.py"
 
 [dependencies]
-python = "3.12.*"
+# 3.12.16 is the first 3.12 whose ssl module refuses the compromised eMudhra intermediates (#285).
+python = ">=3.12.16,<3.13"

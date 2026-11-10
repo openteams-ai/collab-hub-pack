@@ -7,8 +7,8 @@ deployments use. A refactor once swallowed
 with auto-migration enabled would have crashed at startup with
 ``AttributeError``. These tests construct every Postgres store against a
 stubbed pooled database and assert the migration DDL actually runs — and that
-no store ever opens a direct ``psycopg.connect`` (issue #58: everything goes
-through the shared connection pool).
+no store ever opens a direct ``psycopg.connect`` — everything goes through the
+shared connection pool.
 
 The stub keeps this a fast startup-path test that needs no database. Verifying
 the DDL against a real server (that the statements are valid Postgres and are
@@ -382,9 +382,7 @@ def test_live_ensure_schema_is_idempotent_across_restarts(clean_live_database):
 
     PostgresUsageStore(database, auto_migrate=True)
     with database.connection() as conn:
-        conn.execute(
-            "INSERT INTO frames_server_usage_users (org_id, workspace_id, user_id) VALUES ('o', 'w', 'u')"
-        )
+        conn.execute("INSERT INTO frames_server_usage_users (org_id, workspace_id, user_id) VALUES ('o', 'w', 'u')")
 
     # A second (and third) replica running the same startup DDL must not
     # disturb data the first one already wrote.

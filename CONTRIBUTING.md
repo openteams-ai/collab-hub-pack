@@ -22,7 +22,30 @@ setup each connector needs. CI exercises all four —
 [`.github/workflows/dev-env.yaml`](.github/workflows/dev-env.yaml).
 
 The API itself lives in [`api/`](api/) and uses
-[uv](https://docs.astral.sh/uv/), if you would rather drive it directly:
+[uv](https://docs.astral.sh/uv/), if you would rather drive it directly. Use
+uv 0.13.6 or later: 0.13.5 is the first to reject the compromised eMudhra
+intermediates itself, and 0.13.6 the first to install CPython builds (3.11.18,
+3.12.16, 3.13.18, 3.14.10, 3.15.2) whose `ssl` module refuses them too (#285).
+Upgrade with `uv self update` (standalone installer) or your package manager,
+then move uv's managed Pythons to those builds, before running anything that
+reaches the network:
+
+```sh
+uv python upgrade           # move managed Pythons to the latest patch release
+uv run --directory api python -V   # expect 3.14.10 or later
+```
+
+A virtual environment uv created on a managed Python follows the upgrade on
+its own. One on a system Python (Homebrew, python.org, a distro), or created
+before uv could upgrade, keeps the interpreter it was made with, and
+`uv python upgrade` leaves a system Python alone. If `python -V` reports an
+older version, recreate the environment on a uv-managed build:
+
+```sh
+uv venv --directory api --clear --managed-python --python 3.14
+```
+
+Then:
 
 ```sh
 cd api
@@ -35,10 +58,23 @@ points at a throwaway database (they drop and recreate every `collab_`
 table). CI's `test` job starts a Postgres service and sets it, so those tests
 run there.
 
+The Cog packages ([`cogs/`](cogs/), [`dev/cogs/`](dev/cogs/) and the
+[`examples/`](examples/)) are [pixi](https://pixi.sh/) projects and need pixi
+0.82.1 or later, which their manifests state with `requires-pixi`; earlier
+releases trust the same compromised CA chain. Update via `pixi self-update` or
+the package manager you installed it with.
+
+The tool versions CI installs each live in one file, so a bump is a one-line
+change: uv in [`.github/uv.toml`](.github/uv.toml), pixi in
+[`.github/pixi-version`](.github/pixi-version), and Node in the `.node-version`
+beside each package that needs it ([`api/admin-ui/`](api/admin-ui/) and
+[`scripts/release/semantic-release/`](scripts/release/semantic-release/)).
+Dependabot bumps action and image versions, not these.
+
 The admin panel is a Vite and React app in [`api/admin-ui/`](api/admin-ui/)
 with its own Vitest suite. The same project builds the registration pages (the
 invitation-acceptance page) from `api/admin-ui/registration/` as a separate
-bundle. It needs Node (CI uses Node 24):
+bundle:
 
 ```sh
 cd api/admin-ui
@@ -53,10 +89,28 @@ the version the image runs, and CI runs the suite on 3.13 as well
 `UV_PYTHON=3.13`. Keep code valid on 3.13: ruff targets `py313` and reports
 newer syntax.
 
-Running it by hand needs **all three** dev-auth switches —
+Running the API by hand needs **all three** dev-auth switches —
 `FRAMES_UNSAFE_AUTH_ENABLED=true`, `DEV_AUTH_ENABLED=true` and
 `DEV_AUTH_USER=<name>`. Setting only `DEV_AUTH_USER` authenticates nothing and
 every route answers 401, which is why `make api` is the easier path.
+
+Lint and format the API with the ruff version `uv.lock` pins. The `Ruff` CI
+check runs `ruff check` and `ruff format --check`:
+
+```sh
+cd api
+uv run --only-group lint ruff check src tests
+uv run --only-group lint ruff format src tests
+```
+
+Bulk reformatting commits like the one that introduced `ruff format` are listed
+in [`.git-blame-ignore-revs`](.git-blame-ignore-revs). GitHub's blame view skips
+them automatically; to have `git blame` do the same locally, run once in your
+clone:
+
+```sh
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
 
 The Helm chart is in [`helm/collab-hub/`](helm/collab-hub/):
 
@@ -67,12 +121,18 @@ helm template helm/collab-hub | kubeconform -strict -ignore-missing-schemas -
 
 ## Pull requests
 
+Follow [the PR style guide](docs/pr-style-guide.md) for descriptions and squash
+commit messages. Include applicable validation and review evidence below the
+reviewer-context marker. Complete the applicable template checklist items
+and explain any that do not apply.
+
 - Open an issue first for anything non-trivial, and link it from the PR with a
   closing keyword (`Fixes #123`).
 - CI (`lint`, `test`, including the `admin-ui` job) must pass. Add tests with your change: unit tests for new
   functionality, regression tests for bug fixes.
 - A [code owner](.github/CODEOWNERS) must approve before merge. Take PRs out of
   draft before requesting code-owner review.
+- User-facing UI changes include useful before/after screenshots.
 - Keep the change focused; describe *how* it addresses the issue.
 - Work that lands on `main` before it's ready to expose goes behind a feature
   flag: declare the flag, gate the code on it, and retire it once the feature
@@ -86,9 +146,16 @@ helm template helm/collab-hub | kubeconform -strict -ignore-missing-schemas -
 
 ## PR titles and releases
 
-PRs are squash-merged, and the squash commit takes the PR title as its
-subject and the PR description as its body. Leave both as they are in the
-merge dialog: the squash commit is what the release reads. Every merge to
+PRs are squash-merged. Keep the Conventional Commits PR title as the subject
+in the merge dialog. The merger must drop the reviewer context: in the GitHub
+UI, delete `<!-- reviewer-context -->` and below (and any Dependabot
+`<details>`) directly in the dialog; on the CLI, run
+`python3 scripts/strip_pr_body.py` on the PR description and pass its output
+with `--body-file`.
+Preserve issue references, `BREAKING CHANGE:` footers, and revert metadata
+as described in the [PR style guide](docs/pr-style-guide.md).
+
+The squash commit is what the release reads. Every merge to
 `main` whose title calls for a release is released automatically, so the
 title decides the version.
 
@@ -128,5 +195,5 @@ its `collab-hub-<version>` tag.
 ## Reporting security issues
 
 Do not open a public issue for vulnerabilities. Use GitHub's
-[Report a vulnerability](https://github.com/nebari-dev/collab-hub-pack/security/advisories/new)
+[Report a vulnerability](https://github.com/openteams-ai/collab-hub-pack/security/advisories/new)
 to open a private advisory with the maintainers.

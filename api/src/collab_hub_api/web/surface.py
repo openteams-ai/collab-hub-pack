@@ -87,11 +87,10 @@ down rather than leaving for the next reader to re-derive. The protection map
 must leave these prefixes public (see
 :func:`enforce_web_surface_preconditions`), so while ``/admin`` and ``/org``
 carry no routes, a request to one of them matches nothing in this app and
-falls through to the MCP catch-all mounted at ``/`` (issue #86). That is fine,
-and specifically it is not an authentication hole: that mount runs its own
-``McpAuthMiddleware``, which authenticates the request on the API axis before
-the sub-application sees it. Map-public means "the *web* surface's own session
-flow decides this path", never "unauthenticated".
+answers the router's own 404 once the session guard, which authenticates by
+path before routing, has let it through. That is fine, and specifically it is
+not an authentication hole: a 404 serves nothing. Map-public means "the *web*
+surface's own session flow decides this path", never "unauthenticated".
 """
 
 ALLOWED_WEB_MOUNTS: frozenset[str] = frozenset()
@@ -186,7 +185,7 @@ ORG_INVITATIONS_PATH = "/web/org/invitations"
 """The owner invitation page (#142): ``GET`` renders it, ``POST`` issues.
 
 Under ``/web``, **not** at the reserved top-level ``/org`` prefix, by the
-routing decision recorded on nebari-dev/collab-hub-pack#142. The public
+routing decision recorded on openteams-ai/collab-hub-pack#142. The public
 Collab Hub fronts browser paths with a gateway auth wall that exempts only the
 prefixes named in ``nebariapp.routing.publicRoutes`` (``/web``, ``/invite``
 and ``/admin`` were added by an internal issue after the
@@ -523,6 +522,8 @@ class WebSurface:
     codec: SessionCodec
     session_lifetime_seconds: int
     public_base_url: str
+    account_page_url: str = ""
+    """The external account page the signed-in navigation links to; empty = no link."""
 
     def __post_init__(self) -> None:
         if self.session_lifetime_seconds <= 0:
@@ -585,7 +586,22 @@ def build_web_surface(config: BaseConfig) -> WebSurface:
         codec=SessionCodec(web.session_secret),
         session_lifetime_seconds=web.session_lifetime_seconds,
         public_base_url=web.public_base_url.strip(),
+        account_page_url=web.account_page_url,
     )
+
+
+def account_page_url(request: Request) -> str:
+    """The configured account link for the app serving ``request``; ``""`` = none.
+
+    Read from the surface the app was built with -- configuration, never
+    anything the request carries -- so the one ``href`` every signed-in page
+    renders cannot be steered by a caller. Empty, the same spelling
+    ``WebConfig`` and ``WebSurface`` use, when the deployment set nothing
+    (the default) or the surface is not mounted at all.
+    """
+
+    surface = getattr(request.app.state, "web_surface", None)
+    return surface.account_page_url if surface is not None else ""
 
 
 def _resolve_issuer_url(configured: str) -> str:
@@ -792,10 +808,7 @@ def enforce_web_surface_map_access(
 def on_admin_panel(path: str) -> bool:
     """Whether *path* is the panel's document or one of its bundle files."""
 
-    return (
-        path in (ADMIN_PANEL_DOCUMENT, ADMIN_PANEL_REDIRECT)
-        or path.startswith(ADMIN_PANEL_ASSETS_PREFIX)
-    )
+    return path in (ADMIN_PANEL_DOCUMENT, ADMIN_PANEL_REDIRECT) or path.startswith(ADMIN_PANEL_ASSETS_PREFIX)
 
 
 def on_registration_app(path: str) -> bool:

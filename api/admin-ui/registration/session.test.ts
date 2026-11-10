@@ -41,6 +41,7 @@ describe("loadSession", () => {
       identity: "",
       requireVerifiedEmail: true,
       dataStatement: "What we store.",
+      accountUrl: "",
     });
   });
 
@@ -52,6 +53,7 @@ describe("loadSession", () => {
       identity: "Alice Example",
       require_verified_email: false,
       data_statement: "What we store.",
+      account_url: "https://billing.example.com/account",
     });
 
     expect(await loadSession(fetchImpl)).toMatchObject({
@@ -60,6 +62,7 @@ describe("loadSession", () => {
       csrfToken: "csrf-value",
       identity: "Alice Example",
       requireVerifiedEmail: false,
+      accountUrl: "https://billing.example.com/account",
     });
   });
 

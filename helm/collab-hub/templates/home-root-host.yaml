@@ -1,0 +1,86 @@
+{{- /* The hub's pages on its root host (home.hubDomain): "/" opens the home
+page on the same host, and the browser pages' prefixes go to the API. Nothing
+else is routed there, so /v1 and /mcp stay on the API's own host. An exact "/"
+and these prefixes outrank another app's "/" prefix on the same host. */ -}}
+{{- if .Values.home.rootHost.enabled }}
+{{- if not .Values.home.hubDomain }}
+{{- fail "home.rootHost needs home.hubDomain: the root host to serve the hub's pages on" }}
+{{- end }}
+{{- $component := "home" }}
+{{- $routeNamespace := .Values.home.rootHost.namespace | default .Release.Namespace }}
+{{- $api := include "collab-hub.component-name" (dict "top" . "component" "api") }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "collab-hub.component-name" (dict "top" . "component" $component) }}
+  namespace: {{ $routeNamespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+spec:
+  parentRefs:
+    {{- /* group and kind are the API's own defaults, written out so the
+    rendered route matches the stored one and ArgoCD does not report drift. */}}
+    {{- range .Values.home.rootHost.parentRefs }}
+    - group: {{ .group | default "gateway.networking.k8s.io" | quote }}
+      kind: {{ .kind | default "Gateway" | quote }}
+      name: {{ .name | quote }}
+      {{- with .namespace }}
+      namespace: {{ . | quote }}
+      {{- end }}
+      {{- with .sectionName }}
+      sectionName: {{ . | quote }}
+      {{- end }}
+      {{- with .port }}
+      port: {{ . }}
+      {{- end }}
+    {{- end }}
+  hostnames:
+    - {{ .Values.home.hubDomain | quote }}
+  rules:
+    - matches:
+        - path:
+            type: Exact
+            value: /
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /web/home
+            statusCode: 302
+    - matches:
+        {{- range list "/web" "/invite" "/admin" }}
+        - path:
+            type: PathPrefix
+            value: {{ . }}
+        {{- end }}
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: {{ $api }}
+          {{- if ne $routeNamespace .Release.Namespace }}
+          namespace: {{ .Release.Namespace }}
+          {{- end }}
+          port: {{ .Values.api.service.port }}
+{{- if ne $routeNamespace .Release.Namespace }}
+---
+{{- /* The route lives in another namespace (the listener's), so the API's
+namespace grants it this one Service and nothing else. */}}
+apiVersion: {{ if .Capabilities.APIVersions.Has "gateway.networking.k8s.io/v1/ReferenceGrant" }}gateway.networking.k8s.io/v1{{ else }}gateway.networking.k8s.io/v1beta1{{ end }}
+kind: ReferenceGrant
+metadata:
+  name: {{ include "collab-hub.component-name" (dict "top" . "component" $component) }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: {{ $routeNamespace }}
+  to:
+    - group: ""
+      kind: Service
+      name: {{ $api }}
+{{- end }}
+{{- end }}

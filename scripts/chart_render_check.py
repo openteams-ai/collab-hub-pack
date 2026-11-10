@@ -313,59 +313,76 @@ def case_home_page(r: Rendered) -> None:
     assert r.value("COLLAB_HUB_API__WEB__DOCS_URL") == "https://docs.example.com/collab"
 
 
-def case_root_redirect(r: Rendered) -> None:
-    # The hub's root host answers "/" with a redirect to the home page on the
-    # host that serves the web surface, and routes nothing else.
-    routes = [d for d in r.docs if d.get("kind") == "HTTPRoute"]
-    assert len(routes) == 1, routes
-    spec = routes[0]["spec"]
-    assert spec["hostnames"] == ["example.org"], spec["hostnames"]
-    # group and kind are written out: the API server fills them in anyway, and
-    # leaving them to it makes ArgoCD report the route as drifted forever.
-    assert spec["parentRefs"] == [
-        {
-            "group": "gateway.networking.k8s.io",
-            "kind": "Gateway",
-            "name": "nebari-gateway",
-            "namespace": "envoy-gateway-system",
-        }
-    ], spec["parentRefs"]
-    assert spec["rules"] == [
+GATEWAY_REF = {"group": "gateway.networking.k8s.io", "kind": "Gateway"}
+WEB_PREFIXES = ("/web", "/invite", "/admin")
+
+
+def root_host_rules(backend: dict) -> list:
+    """The root host's rules: "/" opens the home page on the same host, and
+    the browser pages' prefixes go to the API. Nothing else is routed there,
+    so /v1 and /mcp stay on the API's own host."""
+
+    return [
         {
             "matches": [{"path": {"type": "Exact", "value": "/"}}],
             "filters": [
                 {
                     "type": "RequestRedirect",
                     "requestRedirect": {
-                        "scheme": "https",
-                        "hostname": "frames.example.org",
                         "path": {"type": "ReplaceFullPath", "replaceFullPath": "/web/home"},
                         "statusCode": 302,
                     },
                 }
             ],
-        }
-    ], spec["rules"]
+        },
+        {
+            "matches": [{"path": {"type": "PathPrefix", "value": prefix}} for prefix in WEB_PREFIXES],
+            "backendRefs": [backend],
+        },
+    ]
 
 
-def case_root_redirect_listener(r: Rendered) -> None:
+def case_root_host(r: Rendered) -> None:
+    # The hub's pages on the root host, from a route in the release namespace:
+    # the API Service is reached directly and no ReferenceGrant is needed.
+    routes = [d for d in r.docs if d.get("kind") == "HTTPRoute"]
+    assert len(routes) == 1, routes
+    route = routes[0]
+    assert route["metadata"]["namespace"] == "nebari-nexus", route["metadata"]
+    spec = route["spec"]
+    assert spec["hostnames"] == ["example.org"], spec["hostnames"]
+    # group and kind are written out: the API server fills them in anyway, and
+    # leaving them to it makes ArgoCD report the route as drifted forever.
+    assert spec["parentRefs"] == [
+        {**GATEWAY_REF, "name": "nebari-gateway", "namespace": "envoy-gateway-system"}
+    ], spec["parentRefs"]
+    api = {"group": "", "kind": "Service", "name": "t-collab-hub-api", "port": 80}
+    assert spec["rules"] == root_host_rules(api), spec["rules"]
+    assert kind(r, "ReferenceGrant") is None
+
+
+def case_root_host_listener(r: Rendered) -> None:
     # On a cluster where another app owns a listener for the root host (the
     # Nebari operator gives nebari-landing one, open to its namespace only),
-    # the route is created in that namespace and attaches to that listener.
+    # the route is created in that namespace, attaches to that listener, and
+    # reaches the API across namespaces through a ReferenceGrant beside it.
     route = kind(r, "HTTPRoute")
     assert route["metadata"]["namespace"] == "nebari-system", route["metadata"]
     assert route["spec"]["parentRefs"] == [
-        {
-            "group": "gateway.networking.k8s.io",
-            "kind": "Gateway",
-            "name": "nebari-gateway",
-            "namespace": "envoy-gateway-system",
-            "sectionName": "tls-landing",
-        }
+        {**GATEWAY_REF, "name": "nebari-gateway", "namespace": "envoy-gateway-system", "sectionName": "tls-landing"}
     ], route["spec"]["parentRefs"]
+    api = {"group": "", "kind": "Service", "name": "t-collab-hub-api", "namespace": "nebari-nexus", "port": 80}
+    assert route["spec"]["rules"] == root_host_rules(api), route["spec"]["rules"]
+    grant = kind(r, "ReferenceGrant")
+    assert grant is not None, "a cross-namespace backend needs a ReferenceGrant"
+    assert grant["metadata"]["namespace"] == "nebari-nexus", grant["metadata"]
+    assert grant["spec"] == {
+        "from": [{"group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "namespace": "nebari-system"}],
+        "to": [{"group": "", "kind": "Service", "name": "t-collab-hub-api"}],
+    }, grant["spec"]
 
 
-def case_no_root_redirect(r: Rendered) -> None:
+def case_no_root_host(r: Rendered) -> None:
     assert kind(r, "HTTPRoute") is None
 
 
@@ -619,9 +636,9 @@ def case_web(r: Rendered) -> None:
 CASES = {
     "web": case_web,
     "home-page": case_home_page,
-    "root-redirect": case_root_redirect,
-    "root-redirect-listener": case_root_redirect_listener,
-    "no-root-redirect": case_no_root_redirect,
+    "root-host": case_root_host,
+    "root-host-listener": case_root_host_listener,
+    "no-root-host": case_no_root_host,
     "sharepoint": case_sharepoint,
     "serve-off": case_serve_off,
     "serve-with-indexer": case_serve_with_indexer,

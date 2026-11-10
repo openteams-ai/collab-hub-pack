@@ -866,13 +866,14 @@ home:
   # -- Where the home page's docs link points. Empty renders no link. Same
   # rules as accountPageUrl.
   docsUrl: ""
-  rootRedirect:
-    # -- Answer the hub's root host (home.hubDomain) with a redirect to the
-    # home page: an HTTPRoute matching exactly "/" that sends the browser to
-    # https://<api.nebariapp.hostname>/web/home. An exact match is more
-    # specific than another app's "/" prefix on the same host, so it takes
-    # the root without that app being removed; every other path on the host
-    # is left to whoever routes it.
+  rootHost:
+    # -- Serve the hub's pages on its root host (home.hubDomain): "/" opens
+    # the home page on that host, and /web, /invite and /admin go to the API.
+    # The exact "/" and these prefixes outrank another app's "/" prefix on
+    # the same host, so they take over from it without it being removed;
+    # nothing else is routed there. Point COLLAB_HUB_API__WEB__PUBLIC_BASE_URL
+    # at this host so sign-in returns here, and register
+    # https://<home.hubDomain>/web/oidc/callback with the Keycloak client.
     enabled: false
     # -- Namespace the route is created in. Empty is the release namespace.
     # Set it when another app owns a listener for the root host that only

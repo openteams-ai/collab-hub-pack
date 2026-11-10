@@ -1318,9 +1318,9 @@
           "description": "The home page's docs link; empty renders none. Same shape as accountPageUrl.",
           "pattern": "^$|^([Hh][Tt][Tt][Pp][Ss]://([A-Za-z0-9._-]+|\\[[0-9A-Fa-f:.]+\\])|[Hh][Tt][Tt][Pp]://([Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|127\\.0\\.0\\.1|\\[::1\\]))(:[0-9]{1,5})?([/?#][^\\s\\x00-\\x1f\\x7f]*)?$"
         },
-        "rootRedirect": {
+        "rootHost": {
           "type": "object",
-          "description": "An HTTPRoute on home.hubDomain sending / to the home page.",
+          "description": "The hub's pages on home.hubDomain: / opens the home page, /web, /invite and /admin go to the API.",
           "properties": {
             "enabled": {
               "type": "boolean"

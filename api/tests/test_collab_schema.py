@@ -56,6 +56,8 @@ COLLAB_TABLES = (
     "collab_cog_publication_attempts",
     "collab_cog_upload_sessions",
     "collab_cog_artifacts",
+    "collab_cog_installs",
+    "collab_cog_install_events",
     "collab_service_access_grants",
     "collab_provisioned_accounts",
     "collab_invitations",
@@ -808,6 +810,7 @@ def clean_database():
         with database.connection() as conn:
             for table in COLLAB_TABLES:
                 conn.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
+            conn.execute("DROP SEQUENCE IF EXISTS collab_cog_install_event_sequence")
 
     database = _database()
     try:

@@ -351,7 +351,7 @@ def case_root_host(r: Rendered) -> None:
     assert spec["parentRefs"] == [
         {**GATEWAY_REF, "name": "nebari-gateway", "namespace": "envoy-gateway-system"}
     ], spec["parentRefs"]
-    api = {"group": "", "kind": "Service", "name": "t-collab-hub-api", "port": 80}
+    api = {"group": "", "kind": "Service", "name": "t-collab-hub-api", "port": 80, "weight": 1}
     assert spec["rules"] == root_host_rules(api), spec["rules"]
     assert kind(r, "ReferenceGrant") is None
 
@@ -366,7 +366,7 @@ def case_root_host_listener(r: Rendered) -> None:
     assert route["spec"]["parentRefs"] == [
         {**GATEWAY_REF, "name": "nebari-gateway", "namespace": "envoy-gateway-system", "sectionName": "tls-landing"}
     ], route["spec"]["parentRefs"]
-    api = {"group": "", "kind": "Service", "name": "t-collab-hub-api", "namespace": "nebari-nexus", "port": 80}
+    api = {"group": "", "kind": "Service", "name": "t-collab-hub-api", "namespace": "nebari-nexus", "port": 80, "weight": 1}
     assert route["spec"]["rules"] == root_host_rules(api), route["spec"]["rules"]
     grant = kind(r, "ReferenceGrant")
     assert grant is not None, "a cross-namespace backend needs a ReferenceGrant"

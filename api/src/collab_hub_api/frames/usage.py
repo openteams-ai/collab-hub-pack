@@ -391,9 +391,7 @@ class InMemoryUsageStore(UsageStore):
             users_total=len(people),
             events_total=len(events),
             events=sorted(by_kind.items()),
-            organizations=_organizations(
-                {org_id: len(members) for org_id, members in org_users.items()}, org_events
-            ),
+            organizations=_organizations({org_id: len(members) for org_id, members in org_users.items()}, org_events),
         )
 
     def count_events(
@@ -619,9 +617,7 @@ class PostgresUsageStore(UsageStore):
                 ORDER BY org_id
                 """
             ).fetchall()
-            people = conn.execute(
-                "SELECT count(DISTINCT user_id) AS users FROM frames_server_usage_users"
-            ).fetchone()
+            people = conn.execute("SELECT count(DISTINCT user_id) AS users FROM frames_server_usage_users").fetchone()
             event_rows = conn.execute(
                 f"""
                 SELECT org_id, event, count(*) AS count
@@ -674,10 +670,7 @@ class PostgresUsageStore(UsageStore):
                 """,
                 tuple(params),
             ).fetchall()
-        return [
-            UsageEventCount(event=row["event"], user=row["user_id"], count=row["count"])
-            for row in rows
-        ]
+        return [UsageEventCount(event=row["event"], user=row["user_id"], count=row["count"]) for row in rows]
 
     def _ensure_schema(self) -> None:
         # Advisory-locked (issue #42): bare CREATE TABLE IF NOT EXISTS races

@@ -208,9 +208,7 @@ def test_ses_provider_sends_one_plain_text_recipient_with_configuration_set():
     assert request["Destination"] == {"ToAddresses": [RECIPIENT]}
     assert request["ConfigurationSetName"] == "collab-invitations"
     assert request["EmailTags"] == [{"Name": "invitation_id", "Value": INVITATION_ID}]
-    assert request["Content"]["Simple"]["Headers"] == [
-        {"Name": "Auto-Submitted", "Value": "auto-generated"}
-    ]
+    assert request["Content"]["Simple"]["Headers"] == [{"Name": "Auto-Submitted", "Value": "auto-generated"}]
     assert "Html" not in request["Content"]["Simple"]["Body"]
     assert quote(SECRET, safe="") in request["Content"]["Simple"]["Body"]["Text"]["Data"]
 
@@ -273,9 +271,7 @@ def test_sdk_retries_are_disabled_for_non_idempotent_send_email():
         request_timeout_seconds=7,
         client_factory=factory,
     )
-    message = InvitationEmailMessage(
-        recipient=RECIPIENT, subject="Subject", text_body=InvitationSecret("Body")
-    )
+    message = InvitationEmailMessage(recipient=RECIPIENT, subject="Subject", text_body=InvitationSecret("Body"))
 
     provider.send(message, invitation_id=INVITATION_ID)
 
@@ -567,9 +563,7 @@ class _Capturing:
     ("require_verified_email", "expect_verification_copy"),
     [(True, True), (False, False)],
 )
-def test_the_sent_copy_follows_the_delivery_setting(
-    require_verified_email, expect_verification_copy
-) -> None:
+def test_the_sent_copy_follows_the_delivery_setting(require_verified_email, expect_verification_copy) -> None:
     """Through ``deliver()``, which is the only production path that renders a
     sent email.
 

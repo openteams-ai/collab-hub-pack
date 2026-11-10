@@ -388,9 +388,7 @@ async def test_suggestions_flow_and_frame_delete_cleanup(client):
     assert [item["id"] for item in closed_response.json()] == [suggestion.json()["id"]]
 
     assert (await client.delete(f"/v1/frames/{frame_id}", cookies=auth_cookie("alice"))).status_code == 204
-    assert (
-        await client.get(f"/v1/frames/{frame_id}/suggestions", cookies=auth_cookie("alice"))
-    ).status_code == 404
+    assert (await client.get(f"/v1/frames/{frame_id}/suggestions", cookies=auth_cookie("alice"))).status_code == 404
 
 
 async def test_frame_owner_can_close_any_suggestion(client):
@@ -1304,9 +1302,7 @@ async def test_an_already_active_corrupt_frame_does_not_block_toggles(client, tm
     a = await create_frame(client)
     b = await create_frame(client)
     c = await create_frame(client)
-    first = await client.put(
-        "/v1/active-frames", cookies=auth_cookie("alice"), json={"frame_ids": [a["id"], b["id"]]}
-    )
+    first = await client.put("/v1/active-frames", cookies=auth_cookie("alice"), json={"frame_ids": [a["id"], b["id"]]})
     assert first.status_code == 200
     metadata_path = tmp_path / "frames" / b["id"] / "metadata.json"
     healthy = metadata_path.read_bytes()

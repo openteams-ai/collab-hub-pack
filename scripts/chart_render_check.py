@@ -32,6 +32,13 @@ INDEX_VARS = (
     "COLLAB_HUB_API__COGS__INDEX__RUN_ON_STARTUP",
     "COLLAB_HUB_API__COGS__INDEX__REMOVED_SOURCE_RETENTION_HOURS",
 )
+# The browser pages' settings render on the API only; the indexer serves no pages.
+WEB_PAGE_VARS = (
+    "COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL",
+    "COLLAB_HUB_API__WEB__HUB_DOMAIN",
+    "COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL",
+    "COLLAB_HUB_API__WEB__DOCS_URL",
+)
 
 
 class Workload:
@@ -113,7 +120,7 @@ class Rendered:
         assert indexer.pod["serviceAccountName"] == api.pod["serviceAccountName"]
         assert indexer.pod.get("securityContext") == api.pod.get("securityContext")
         assert indexer.container.get("securityContext") == api.container.get("securityContext")
-        api_env = {name: entry for name, entry in api.env.items() if name not in INDEX_VARS}
+        api_env = {name: entry for name, entry in api.env.items() if name not in INDEX_VARS + WEB_PAGE_VARS}
         indexer_env = {name: entry for name, entry in indexer.env.items() if name not in INDEX_VARS}
         assert indexer_env == api_env, "the indexer's environment differs from the API's beyond the index switch"
         # Nothing routes to it: its component label is its own, and no
@@ -255,6 +262,17 @@ def case_features(r: Rendered) -> None:
     }, flags
 
 
+def case_sharepoint(r: Rendered) -> None:
+    # values.yaml numbers reach templates as floats: without `| int64` the caps
+    # render as 2.62144e+07, which the API's config refuses at startup.
+    for name, want in (
+        ("COLLAB_HUB_API__CONNECTORS__SHAREPOINT__MAX_DOWNLOAD_BYTES", "26214400"),
+        ("COLLAB_HUB_API__CONNECTORS__SHAREPOINT__EXTRACTION_MEMORY_LIMIT_BYTES", "268435456"),
+    ):
+        value = r.value(name)
+        assert value == want, f"{name}: {value}"
+
+
 SERVE_PREFIX = "COLLAB_HUB_API__COGS__SERVE__"
 
 
@@ -276,6 +294,64 @@ def case_publish_with_indexer(r: Rendered) -> None:
     }, publish
     assert r.indexer is not None
     assert not [n for n in r.indexer.env if n.startswith("COLLAB_HUB_API__COGS__PUBLISH__")], sorted(r.indexer.env)
+
+
+def case_account_link_with_indexer(r: Rendered) -> None:
+    # The account link (issue #275) is a page footer, and only the API serves
+    # pages: the API replicas carry it, the indexer carries nothing.
+    name = "COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL"
+    assert r.value(name) == "https://billing.example.com/account", r.value(name)
+    assert r.indexer is not None
+    assert name not in r.indexer.env, sorted(r.indexer.env)
+
+
+def case_home_page(r: Rendered) -> None:
+    # The home page's links: the domain and the two named links reach the API
+    # replicas as the settings the API reads.
+    assert r.value("COLLAB_HUB_API__WEB__HUB_DOMAIN") == "example.org"
+    assert r.value("COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL") == "https://downloads.example.com/collab"
+    assert r.value("COLLAB_HUB_API__WEB__DOCS_URL") == "https://docs.example.com/collab"
+
+
+def case_root_redirect(r: Rendered) -> None:
+    # The hub's root host answers "/" with a redirect to the home page on the
+    # host that serves the web surface, and routes nothing else.
+    routes = [d for d in r.docs if d.get("kind") == "HTTPRoute"]
+    assert len(routes) == 1, routes
+    spec = routes[0]["spec"]
+    assert spec["hostnames"] == ["example.org"], spec["hostnames"]
+    assert spec["parentRefs"] == [{"name": "nebari-gateway", "namespace": "envoy-gateway-system"}], spec["parentRefs"]
+    assert spec["rules"] == [
+        {
+            "matches": [{"path": {"type": "Exact", "value": "/"}}],
+            "filters": [
+                {
+                    "type": "RequestRedirect",
+                    "requestRedirect": {
+                        "scheme": "https",
+                        "hostname": "frames.example.org",
+                        "path": {"type": "ReplaceFullPath", "replaceFullPath": "/web/home"},
+                        "statusCode": 302,
+                    },
+                }
+            ],
+        }
+    ], spec["rules"]
+
+
+def case_root_redirect_listener(r: Rendered) -> None:
+    # On a cluster where another app owns a listener for the root host (the
+    # Nebari operator gives nebari-landing one, open to its namespace only),
+    # the route is created in that namespace and attaches to that listener.
+    route = kind(r, "HTTPRoute")
+    assert route["metadata"]["namespace"] == "nebari-system", route["metadata"]
+    assert route["spec"]["parentRefs"] == [
+        {"name": "nebari-gateway", "namespace": "envoy-gateway-system", "sectionName": "tls-landing"}
+    ], route["spec"]["parentRefs"]
+
+
+def case_no_root_redirect(r: Rendered) -> None:
+    assert kind(r, "HTTPRoute") is None
 
 
 def case_serve_with_indexer(r: Rendered) -> None:
@@ -527,8 +603,14 @@ def case_web(r: Rendered) -> None:
 
 CASES = {
     "web": case_web,
+    "home-page": case_home_page,
+    "root-redirect": case_root_redirect,
+    "root-redirect-listener": case_root_redirect_listener,
+    "no-root-redirect": case_no_root_redirect,
+    "sharepoint": case_sharepoint,
     "serve-off": case_serve_off,
     "serve-with-indexer": case_serve_with_indexer,
+    "account-link-with-indexer": case_account_link_with_indexer,
     "publish-with-indexer": case_publish_with_indexer,
     "serve-nebariapp": case_serve_nebariapp,
     "serve-nebariapp-no-timeout": case_serve_nebariapp_no_timeout,

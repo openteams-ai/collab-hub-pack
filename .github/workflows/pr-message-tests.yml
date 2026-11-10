@@ -1,0 +1,29 @@
+name: PR message helper tests
+
+on:
+  pull_request:
+    paths:
+      - "scripts/strip_pr_body.py"
+      - "scripts/test_strip_pr_body.py"
+      - ".github/workflows/pr-message-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/strip_pr_body.py"
+      - "scripts/test_strip_pr_body.py"
+      - ".github/workflows/pr-message-tests.yml"
+  merge_group: {}
+
+permissions:
+  contents: read
+
+jobs:
+  helper-tests:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test squash message cleanup
+        run: python -m unittest discover -s scripts -p test_strip_pr_body.py

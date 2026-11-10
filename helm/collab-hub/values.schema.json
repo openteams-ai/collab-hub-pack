@@ -931,6 +931,45 @@
             }
           },
           "additionalProperties": false
+        },
+        "sharepoint": {
+          "type": "object",
+          "properties": {
+            "brokerTokenUrl": {
+              "type": "string"
+            },
+            "apiBaseUrl": {
+              "type": "string"
+            },
+            "requestTimeoutSeconds": {
+              "type": "number",
+              "minimum": 1
+            },
+            "downloadTimeoutSeconds": {
+              "type": "number",
+              "minimum": 1
+            },
+            "maxDownloadBytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "extractionTimeoutSeconds": {
+              "type": "number",
+              "minimum": 1
+            },
+            "extractionMemoryLimitBytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "extractionWaitSeconds": {
+              "type": "number",
+              "minimum": 0
+            },
+            "includePersonalOnedrive": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -1101,122 +1140,6 @@
       },
       "additionalProperties": false
     },
-    "features": {
-      "type": "object",
-      "description": "Feature flags for work in progress. Every flag is off until it is listed here and set to true; each entry becomes COLLAB_HUB_API__FEATURES__<NAME>.",
-      "propertyNames": {
-        "pattern": "^[a-z][a-z0-9]*(_[a-z0-9]+)*$"
-      },
-      "additionalProperties": {
-        "type": "boolean"
-      }
-    },
-    "runs": {
-      "type": "object",
-      "description": "The run API is always served; a run controller beside it runs the Cogs launched through it.",
-      "properties": {
-        "controller": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean",
-              "description": "Run a run controller, so this hub runs the Cogs launched through /v1/runs."
-            },
-            "id": {
-              "type": "string",
-              "minLength": 1,
-              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
-              "description": "The controller's id, the same across restarts and rollouts."
-            },
-            "waitSeconds": {
-              "type": "integer",
-              "minimum": 0,
-              "description": "Seconds to wait at start for the Track's tables and the controller's id."
-            },
-            "environment": {
-              "type": "string",
-              "enum": [
-                "pixi",
-                "host"
-              ],
-              "description": "How a Cog's serve runs."
-            },
-            "interactionTimeoutSeconds": {
-              "type": "integer",
-              "minimum": 0,
-              "description": "Seconds one interaction may take; 0 for no limit."
-            },
-            "models": {
-              "type": "string",
-              "description": "The models block, in TOML."
-            },
-            "extraEnv": {
-              "type": "array",
-              "items": {
-                "type": "object"
-              },
-              "description": "Extra environment for the controller."
-            },
-            "cacheSizeLimit": {
-              "type": "string",
-              "description": "The size limit of the volume Cog environments and run output are kept on."
-            },
-            "healthPort": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 65535,
-              "description": "The port of the controller's /healthz."
-            },
-            "resources": {
-              "type": "object",
-              "description": "Resources for the controller container."
-            },
-            "workerStartSeconds": {
-              "type": "integer",
-              "minimum": 1,
-              "description": "Seconds a worker may take to start, building a Cog's environment on its first launch included."
-            },
-            "tmpSizeLimit": {
-              "type": "string",
-              "description": "The size limit of the controller's /tmp, where Cogs write."
-            },
-            "location": {
-              "type": "string",
-              "enum": [
-                "local",
-                "remote"
-              ],
-              "description": "Where a Cog's worker runs: a pod of its own (remote), or a process of the API's pod (local, the default)."
-            },
-            "serviceAccountAnnotations": {
-              "type": "object",
-              "description": "Annotations on the controller's ServiceAccount, at the remote location."
-            },
-            "worker": {
-              "type": "object",
-              "additionalProperties": false,
-              "description": "At the remote location, each worker pod: its resources and the size limits of its cache and /tmp volumes.",
-              "properties": {
-                "resources": {
-                  "type": "object",
-                  "description": "Resources for a worker pod's container."
-                },
-                "cacheSizeLimit": {
-                  "type": "string",
-                  "description": "The size limit of a worker's cache volume, where pixi builds the Cog's environment."
-                },
-                "tmpSizeLimit": {
-                  "type": "string",
-                  "description": "The size limit of a worker's /tmp, its HOME."
-                }
-              }
-            }
-          },
-          "additionalProperties": false
-        }
-      },
-      "additionalProperties": false
-    },
     "web": {
       "type": "object",
       "additionalProperties": false,
@@ -1368,8 +1291,190 @@
         "requestTimeoutSeconds": {
           "type": "integer",
           "minimum": 15
+        },
+        "accountPageUrl": {
+          "type": "string",
+          "description": "External account page the signed-in navigation links to; empty renders no link. Absolute https URL (http only on loopback), no credentials; the API applies the full rule at startup.",
+          "pattern": "^$|^([Hh][Tt][Tt][Pp][Ss]://([A-Za-z0-9._-]+|\\[[0-9A-Fa-f:.]+\\])|[Hh][Tt][Tt][Pp]://([Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|127\\.0\\.0\\.1|\\[::1\\]))(:[0-9]{1,5})?([/?#][^\\s\\x00-\\x1f\\x7f]*)?$"
         }
       }
+    },
+    "home": {
+      "type": "object",
+      "description": "The Collab Hub home page: its links, and the root-host redirect to it.",
+      "properties": {
+        "hubDomain": {
+          "type": "string",
+          "description": "Domain the home page builds its links from; empty takes the issuer's host without keycloak. A bare host name.",
+          "pattern": "^$|^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$"
+        },
+        "desktopDownloadUrl": {
+          "type": "string",
+          "description": "The home page's desktop download link; empty renders none. Same shape as accountPageUrl.",
+          "pattern": "^$|^([Hh][Tt][Tt][Pp][Ss]://([A-Za-z0-9._-]+|\\[[0-9A-Fa-f:.]+\\])|[Hh][Tt][Tt][Pp]://([Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|127\\.0\\.0\\.1|\\[::1\\]))(:[0-9]{1,5})?([/?#][^\\s\\x00-\\x1f\\x7f]*)?$"
+        },
+        "docsUrl": {
+          "type": "string",
+          "description": "The home page's docs link; empty renders none. Same shape as accountPageUrl.",
+          "pattern": "^$|^([Hh][Tt][Tt][Pp][Ss]://([A-Za-z0-9._-]+|\\[[0-9A-Fa-f:.]+\\])|[Hh][Tt][Tt][Pp]://([Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|127\\.0\\.0\\.1|\\[::1\\]))(:[0-9]{1,5})?([/?#][^\\s\\x00-\\x1f\\x7f]*)?$"
+        },
+        "rootRedirect": {
+          "type": "object",
+          "description": "An HTTPRoute on home.hubDomain sending / to the home page.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "parentRefs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "namespace": {
+                    "type": "string"
+                  },
+                  "sectionName": {
+                    "type": "string"
+                  },
+                  "port": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "namespace": {
+              "type": "string",
+              "description": "Namespace the route is created in; empty is the release namespace."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "features": {
+      "type": "object",
+      "description": "Feature flags for work in progress. Every flag is off until it is listed here and set to true; each entry becomes COLLAB_HUB_API__FEATURES__<NAME>.",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9]*(_[a-z0-9]+)*$"
+      },
+      "additionalProperties": {
+        "type": "boolean"
+      }
+    },
+    "runs": {
+      "type": "object",
+      "description": "The run API is always served; a run controller beside it runs the Cogs launched through it.",
+      "properties": {
+        "controller": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Run a run controller, so this hub runs the Cogs launched through /v1/runs."
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+              "description": "The controller's id, the same across restarts and rollouts."
+            },
+            "waitSeconds": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Seconds to wait at start for the Track's tables and the controller's id."
+            },
+            "environment": {
+              "type": "string",
+              "enum": [
+                "pixi",
+                "host"
+              ],
+              "description": "How a Cog's serve runs."
+            },
+            "interactionTimeoutSeconds": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Seconds one interaction may take; 0 for no limit."
+            },
+            "models": {
+              "type": "string",
+              "description": "The models block, in TOML."
+            },
+            "extraEnv": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "Extra environment for the controller."
+            },
+            "cacheSizeLimit": {
+              "type": "string",
+              "description": "The size limit of the volume Cog environments and run output are kept on."
+            },
+            "healthPort": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "The port of the controller's /healthz."
+            },
+            "resources": {
+              "type": "object",
+              "description": "Resources for the controller container."
+            },
+            "workerStartSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Seconds a worker may take to start, building a Cog's environment on its first launch included."
+            },
+            "tmpSizeLimit": {
+              "type": "string",
+              "description": "The size limit of the controller's /tmp, where Cogs write."
+            },
+            "location": {
+              "type": "string",
+              "enum": [
+                "local",
+                "remote"
+              ],
+              "description": "Where a Cog's worker runs: a pod of its own (remote), or a process of the API's pod (local, the default)."
+            },
+            "serviceAccountAnnotations": {
+              "type": "object",
+              "description": "Annotations on the controller's ServiceAccount, at the remote location."
+            },
+            "worker": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "At the remote location, each worker pod: its resources and the size limits of its cache and /tmp volumes.",
+              "properties": {
+                "resources": {
+                  "type": "object",
+                  "description": "Resources for a worker pod's container."
+                },
+                "cacheSizeLimit": {
+                  "type": "string",
+                  "description": "The size limit of a worker's cache volume, where pixi builds the Cog's environment."
+                },
+                "tmpSizeLimit": {
+                  "type": "string",
+                  "description": "The size limit of a worker's /tmp, its HOME."
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,

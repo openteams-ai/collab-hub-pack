@@ -643,6 +643,36 @@ connectors:
     notionVersion: "2022-06-28"
     # -- Timeout for broker and Notion API requests.
     requestTimeoutSeconds: 10
+  sharepoint:
+    # -- Keycloak broker token endpoint for the linked Microsoft identity (IdP
+    # alias `microsoft`). Normal hub users must also receive the broker client
+    # role `read-token` through their default role or group; otherwise Keycloak
+    # returns 403. See docs/sharepoint-connector.md.
+    brokerTokenUrl: ""
+    # -- Microsoft Graph API base URL. Override for local fake Graph API smoke tests.
+    apiBaseUrl: https://graph.microsoft.com/v1.0
+    # -- Timeout for broker, Graph search and metadata requests.
+    requestTimeoutSeconds: 15
+    # -- Timeout for file downloads and Office -> PDF conversion.
+    downloadTimeoutSeconds: 30
+    # -- Largest file (bytes) the read route downloads before extracting text.
+    # Larger files are reported as unsupported with their metadata.
+    maxDownloadBytes: 26214400
+    # -- Text extraction runs in a separate worker process, one at a time. A
+    # parse that overruns this deadline is killed and the file is reported as
+    # unsupported; the API keeps serving.
+    extractionTimeoutSeconds: 30
+    # -- Memory ceiling (bytes) for that worker. Keep it inside the pod's
+    # headroom: the chart's default memory limit is 512Mi.
+    extractionMemoryLimitBytes: 268435456
+    # -- Document reads (PDF and Office) are admitted one at a time, from before
+    # the download to after the parse, so a waiting read never holds a body. A
+    # read not admitted within this many seconds answers 503 with Retry-After.
+    extractionWaitSeconds: 10
+    # -- Whether search also returns files from each user's personal OneDrive.
+    # Off: SharePoint document libraries only, so a daily digest never surfaces
+    # someone's private drafts by default.
+    includePersonalOnedrive: false
 
 userDirectory:
   # -- Whether to configure Collab Hub API access to the hub user directory.
@@ -725,7 +755,8 @@ cogs:
     # -- ConfigMap holding the CA certificate(s) that signed the registries'
     # gateway-issued certificates (dev clusters run a private CA). Mounted
     # read-only at /etc/collab-hub/cogs-ca and passed to every source that
-    # does not set its own caBundlePath. Empty means system trust only.
+    # does not set its own caBundlePath. Empty means httpx's default: the
+    # certifi Mozilla bundle, or SSL_CERT_FILE / SSL_CERT_DIR when set.
     configMap: ""
     # -- Key in that ConfigMap holding the PEM bundle.
     key: ca.crt
@@ -816,6 +847,46 @@ cogs:
     # outage. Publishing again to a pending name is never refused by it.
     maxPendingRepositories: 20
 
+# The browser web surface (docs/web-surface.md). Enabling it -- the OIDC client,
+# its secret, the session secret -- goes through api.deployment.extraEnv, where
+# valueFrom is accepted; only the settings that are safe in a rendered manifest
+# live here.
+# The Collab Hub home page (/web/home): where its links point, and whether
+# the hub's root host answers with it. See docs/web-surface.md.
+home:
+  # -- The domain the home page (/web/home) builds its links from: the web
+  # client and its Frames page at collab.<domain>. Empty takes the
+  # issuer's host without its leading "keycloak.", as the desktop does. A bare
+  # host name. Becomes COLLAB_HUB_API__WEB__HUB_DOMAIN on the API only.
+  hubDomain: ""
+  # -- Where the home page's desktop download link points: the Collab macOS
+  # installer, the same file for every hub. Empty renders no link. Same rules
+  # as accountPageUrl.
+  desktopDownloadUrl: "https://openteams-collab.s3.us-west-2.amazonaws.com/collab-desktop-macos.dmg"
+  # -- Where the home page's docs link points. Empty renders no link. Same
+  # rules as accountPageUrl.
+  docsUrl: ""
+  rootRedirect:
+    # -- Answer the hub's root host (home.hubDomain) with a redirect to the
+    # home page: an HTTPRoute matching exactly "/" that sends the browser to
+    # https://<api.nebariapp.hostname>/web/home. An exact match is more
+    # specific than another app's "/" prefix on the same host, so it takes
+    # the root without that app being removed; every other path on the host
+    # is left to whoever routes it.
+    enabled: false
+    # -- Namespace the route is created in. Empty is the release namespace.
+    # Set it when another app owns a listener for the root host that only
+    # admits routes from its own namespace: the Nebari operator gives
+    # nebari-landing such a listener, open to nebari-system only.
+    namespace: ""
+    # -- Gateways the route attaches to. The default is the Nebari gateway;
+    # no sectionName, so it attaches to every listener that admits it. Name
+    # the root host's own listener (sectionName) where one exists, since a
+    # listener for the exact host takes that host's traffic from the others.
+    parentRefs:
+      - name: nebari-gateway
+        namespace: envoy-gateway-system
+
 # Feature flags for work in progress that is on main but not yet exposed. Every
 # flag is off until it is listed here and set to true; each entry becomes
 # COLLAB_HUB_API__FEATURES__<NAME>. See docs/feature-flags.md.
@@ -889,6 +960,12 @@ runs:
 # browser, on a host of its own behind the gateway, with a chat service that
 # acts as the signed-in user. Its images are built by apollo-desktop.
 web:
+  # -- Where the signed-in navigation's "Account" link points: an external page
+  # (plan, usage, invoices) that an add-on provides. Empty (default) renders no
+  # link and needs no billing configuration. Must be an absolute https URL
+  # (http only on loopback) with no credentials; the API applies the full rule
+  # at startup. Becomes COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL on the API only.
+  accountPageUrl: ""
   # -- Whether to deploy the web client.
   enabled: false
   image:

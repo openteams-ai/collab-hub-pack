@@ -240,9 +240,7 @@ async def test_notion_search_returns_hits_and_drops_urls(tmp_path, monkeypatch):
     _install_mock_client(monkeypatch, handler)
     app = make_app(_config(tmp_path))
     async with _client(app) as client:
-        response = await client.post(
-            "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "roadmap"}
-        )
+        response = await client.post("/v1/connectors/notion/search", headers=_auth_header(), json={"query": "roadmap"})
     assert response.status_code == 200
     body = response.json()
     assert body["content_trust"] == "external_untrusted"
@@ -366,9 +364,7 @@ async def test_notion_read_page_assembles_text_and_drops_href(tmp_path, monkeypa
     _install_mock_client(monkeypatch, handler)
     app = make_app(_config(tmp_path))
     async with _client(app) as client:
-        response = await client.post(
-            f"/v1/connectors/notion/pages/{PAGE_ID}/read", headers=_auth_header(), json={}
-        )
+        response = await client.post(f"/v1/connectors/notion/pages/{PAGE_ID}/read", headers=_auth_header(), json={})
     assert response.status_code == 200
     body = response.json()
     assert body["title"] == "Design Notes"
@@ -408,9 +404,7 @@ async def test_notion_read_page_rejects_bad_id(tmp_path, monkeypatch):
     _install_mock_client(monkeypatch, _ok_status_handler)
     app = make_app(_config(tmp_path))
     async with _client(app) as client:
-        response = await client.post(
-            "/v1/connectors/notion/pages/not-a-real-id/read", headers=_auth_header(), json={}
-        )
+        response = await client.post("/v1/connectors/notion/pages/not-a-real-id/read", headers=_auth_header(), json={})
     assert response.status_code == 422
 
 
@@ -456,9 +450,7 @@ async def test_notion_query_database_rejects_bad_id(tmp_path, monkeypatch):
     _install_mock_client(monkeypatch, _ok_status_handler)
     app = make_app(_config(tmp_path))
     async with _client(app) as client:
-        response = await client.post(
-            "/v1/connectors/notion/databases/bad/query", headers=_auth_header(), json={}
-        )
+        response = await client.post("/v1/connectors/notion/databases/bad/query", headers=_auth_header(), json={})
     assert response.status_code == 422
 
 
@@ -469,9 +461,7 @@ async def test_notion_search_provider_timeout_is_502(tmp_path, monkeypatch):
     _install_mock_client(monkeypatch, handler)
     app = make_app(_config(tmp_path))
     async with _client(app) as client:
-        response = await client.post(
-            "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"}
-        )
+        response = await client.post("/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"})
     assert response.status_code == 502
 
 
@@ -499,9 +489,7 @@ async def test_notion_search_broker_not_connected_is_409(tmp_path, monkeypatch):
     _install_mock_client(monkeypatch, handler)
     app = make_app(config)
     async with _client(app) as client:
-        response = await client.post(
-            "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"}
-        )
+        response = await client.post("/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"})
     assert response.status_code == 409
 
 
@@ -510,9 +498,7 @@ async def test_notion_search_broker_reconnect_is_409(tmp_path, monkeypatch):
     _install_mock_client(monkeypatch, handler)
     app = make_app(config)
     async with _client(app) as client:
-        response = await client.post(
-            "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"}
-        )
+        response = await client.post("/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"})
     assert response.status_code == 409
 
 
@@ -521,9 +507,7 @@ async def test_notion_search_broker_token_error_is_503(tmp_path, monkeypatch):
     _install_mock_client(monkeypatch, handler)
     app = make_app(config)
     async with _client(app) as client:
-        response = await client.post(
-            "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"}
-        )
+        response = await client.post("/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"})
     assert response.status_code == 503
 
 
@@ -536,9 +520,7 @@ async def test_notion_read_page_upstream_error_is_502(tmp_path, monkeypatch):
     _install_mock_client(monkeypatch, handler)
     app = make_app(_config(tmp_path))
     async with _client(app) as client:
-        response = await client.post(
-            f"/v1/connectors/notion/pages/{PAGE_ID}/read", headers=_auth_header(), json={}
-        )
+        response = await client.post(f"/v1/connectors/notion/pages/{PAGE_ID}/read", headers=_auth_header(), json={})
     assert response.status_code == 502
 
 
@@ -549,9 +531,7 @@ async def test_notion_read_page_transport_error_is_502(tmp_path, monkeypatch):
     _install_mock_client(monkeypatch, handler)
     app = make_app(_config(tmp_path))
     async with _client(app) as client:
-        response = await client.post(
-            f"/v1/connectors/notion/pages/{PAGE_ID}/read", headers=_auth_header(), json={}
-        )
+        response = await client.post(f"/v1/connectors/notion/pages/{PAGE_ID}/read", headers=_auth_header(), json={})
     assert response.status_code == 502
 
 
@@ -606,9 +586,7 @@ async def test_notion_search_invalid_json_is_502(tmp_path, monkeypatch):
     _install_mock_client(monkeypatch, handler)
     app = make_app(_config(tmp_path))
     async with _client(app) as client:
-        response = await client.post(
-            "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"}
-        )
+        response = await client.post("/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"})
     assert response.status_code == 502
 
 
@@ -631,9 +609,7 @@ async def test_notion_search_skips_non_content_results(tmp_path, monkeypatch):
     _install_mock_client(monkeypatch, handler)
     app = make_app(_config(tmp_path))
     async with _client(app) as client:
-        response = await client.post(
-            "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"}
-        )
+        response = await client.post("/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"})
     body = response.json()
     assert [hit["title"] for hit in body["hits"]] == ["Real"]
 
@@ -673,9 +649,7 @@ async def test_notion_search_stuck_cursor_is_502(tmp_path, monkeypatch):
     _install_mock_client(monkeypatch, handler)
     app = make_app(_config(tmp_path))
     async with _client(app) as client:
-        response = await client.post(
-            "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"}
-        )
+        response = await client.post("/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"})
     assert response.status_code == 502
 
 
@@ -733,9 +707,7 @@ async def test_notion_read_page_walks_nested_and_paginated_blocks(tmp_path, monk
     _install_mock_client(monkeypatch, handler)
     app = make_app(_config(tmp_path))
     async with _client(app) as client:
-        response = await client.post(
-            f"/v1/connectors/notion/pages/{PAGE_ID}/read", headers=_auth_header(), json={}
-        )
+        response = await client.post(f"/v1/connectors/notion/pages/{PAGE_ID}/read", headers=_auth_header(), json={})
     body = response.json()
     assert "Parent" in body["text"]
     assert "Child line" in body["text"]
@@ -845,9 +817,7 @@ async def test_notion_search_sanitizes_urls_in_titles(tmp_path, monkeypatch):
     _install_mock_client(monkeypatch, handler)
     app = make_app(_config(tmp_path))
     async with _client(app) as client:
-        response = await client.post(
-            "/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"}
-        )
+        response = await client.post("/v1/connectors/notion/search", headers=_auth_header(), json={"query": "x"})
     body = response.json()
     assert [hit["title"] for hit in body["hits"]] == ["Notes [link]", "Board [link]"]
     assert "example.com" not in response.text
@@ -869,9 +839,7 @@ async def test_notion_read_page_sanitizes_url_in_title(tmp_path, monkeypatch):
     _install_mock_client(monkeypatch, handler)
     app = make_app(_config(tmp_path))
     async with _client(app) as client:
-        response = await client.post(
-            f"/v1/connectors/notion/pages/{PAGE_ID}/read", headers=_auth_header(), json={}
-        )
+        response = await client.post(f"/v1/connectors/notion/pages/{PAGE_ID}/read", headers=_auth_header(), json={})
     body = response.json()
     assert body["title"] == "Spec [link]"
     assert "example.com" not in response.text

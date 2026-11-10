@@ -807,9 +807,7 @@ def auth_context_from_claims(claims: dict) -> AuthContext | None:
     if not user:
         return None
     org_id = _claim_value(claims, ("org_id", "organization_id", "org")) or _env_value("FRAMES_AUTH_DEFAULT_ORG")
-    workspace_id = _claim_value(claims, ("workspace_id", "workspace")) or _env_value(
-        "FRAMES_AUTH_DEFAULT_WORKSPACE"
-    )
+    workspace_id = _claim_value(claims, ("workspace_id", "workspace")) or _env_value("FRAMES_AUTH_DEFAULT_WORKSPACE")
     if not org_id or not workspace_id:
         return None
     return AuthContext(
@@ -984,9 +982,7 @@ def resolve_auth_context(request: Request, claims: dict) -> AuthContext | None:
     """Build the auth context for accepted claims via the configured org source."""
 
     if org_source_resolves_membership():
-        return auth_context_from_membership(
-            claims, _request_org_store(request), auto_admit=single_org_declaration()
-        )
+        return auth_context_from_membership(claims, _request_org_store(request), auto_admit=single_org_declaration())
     return auth_context_from_claims(claims)
 
 

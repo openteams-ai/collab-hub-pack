@@ -172,9 +172,7 @@ class ConfiguredInvitationEmailDelivery:
         # fail at startup, not silently produce a message with a placeholder in
         # it for the first real person who is invited.
         if not app_instructions.strip():
-            raise ValueError(
-                "app_instructions is required when invitation email is enabled"
-            )
+            raise ValueError("app_instructions is required when invitation email is enabled")
         self._app_instructions = app_instructions
         # Render one probe message now, for the same reason the check above
         # happens here: a deployment that enables invitation email and cannot
@@ -219,8 +217,7 @@ class ConfiguredInvitationEmailDelivery:
             )
         except ValueError as exc:
             raise ValueError(
-                "invitation email is enabled but a message cannot be rendered, so no"
-                f" invitation could be sent: {exc}"
+                f"invitation email is enabled but a message cannot be rendered, so no invitation could be sent: {exc}"
             ) from exc
 
     def deliver(

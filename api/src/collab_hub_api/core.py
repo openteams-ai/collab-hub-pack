@@ -10,7 +10,7 @@ from fastapi.exception_handlers import http_exception_handler, request_validatio
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -91,6 +91,7 @@ from .web.authz import platform_role_source_name, verify_web_route_protection
 from .web.guard import WebSessionGuardMiddleware
 from .web.pages import WebSecurityHeadersMiddleware
 from .web.surface import (
+    HOME_PATH,
     WEB_SURFACE_PREFIXES,
     build_web_surface,
     enforce_web_surface_map_access,
@@ -294,9 +295,7 @@ def make_app(config: BaseConfig) -> FastAPI:
     # Pulls through the Hub (issue #179), when cogs.serve.enabled: the /v2/
     # surface and the registry sources it reads from, built on every replica
     # that serves it and independent of whether this process indexes.
-    cog_registry_serving = build_cog_registry_serving(
-        config, cog_catalog_store, postgres_pools, cog_publish_store
-    )
+    cog_registry_serving = build_cog_registry_serving(config, cog_catalog_store, postgres_pools, cog_publish_store)
     # The run API (/v1/runs): its Track is runs.track_path, else the hub's own database, else none
     # (the routes answer 503). Its router is the one module of the API that imports the execution
     # package, which writes intent and reads runs and never constructs an executor.
@@ -382,9 +381,7 @@ def make_app(config: BaseConfig) -> FastAPI:
             # Created once here, where the sizing config is in hand and we're
             # already inside the event loop — so the route needs no lazy
             # get-or-create dance and its no-await-between invariant disappears.
-            app.state.github_api_get_semaphore = asyncio.Semaphore(
-                config.connectors.github.api_get_max_concurrency
-            )
+            app.state.github_api_get_semaphore = asyncio.Semaphore(config.connectors.github.api_get_max_concurrency)
             # Observe-only gauge of how many requests are in the acquire phase
             # (queued for a permit). A plain int is safe here: asyncio is
             # single-threaded and the route never awaits between reading and
@@ -604,10 +601,13 @@ def make_app(config: BaseConfig) -> FastAPI:
         app.add_middleware(WebSecurityHeadersMiddleware, prefixes=WEB_SURFACE_PREFIXES)
 
     @app.get("/", include_in_schema=False)
-    async def home() -> HTMLResponse:
-        # The hub landing-page tile points at this origin, so the root serves
-        # a small directory of the browser-facing pages instead of jumping
-        # straight to the API docs.
+    async def home() -> Response:
+        # Where the browser pages run, the root opens the Collab Hub home page,
+        # so this host and the hub's address show the same page. Otherwise it
+        # serves a small directory of the browser-facing pages instead of
+        # jumping straight to the API docs.
+        if config.web.enabled:
+            return RedirectResponse(f"{app.root_path}{HOME_PATH}", status_code=status.HTTP_303_SEE_OTHER)
         return HTMLResponse(
             """<!DOCTYPE html>
 <html lang="en">

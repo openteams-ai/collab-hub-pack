@@ -279,11 +279,7 @@ class InMemoryFrameHistoryStore(FrameHistoryStore):
         counts: dict[tuple[str, str], int] = {}
         with self._lock:
             for entry in self._entries:
-                if (
-                    entry.org_id != org_id
-                    or entry.workspace_id != workspace_id
-                    or entry.entity_type != entity_type
-                ):
+                if entry.org_id != org_id or entry.workspace_id != workspace_id or entry.entity_type != entity_type:
                     continue
                 if since is not None and entry.created_at < since:
                     continue
@@ -423,10 +419,7 @@ class PostgresFrameHistoryStore(FrameHistoryStore):
                 """,
                 tuple(params),
             ).fetchall()
-        return [
-            HistoryEventCount(event=row["event"], actor=row["actor"], count=row["count"])
-            for row in rows
-        ]
+        return [HistoryEventCount(event=row["event"], actor=row["actor"], count=row["count"]) for row in rows]
 
     def _ensure_schema(self) -> None:
         # Advisory-locked (issue #42): bare CREATE TABLE IF NOT EXISTS races

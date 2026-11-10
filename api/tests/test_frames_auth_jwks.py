@@ -255,9 +255,7 @@ def test_id_token_fallback_still_honors_a_dedicated_issuer(jwks, monkeypatch):
     assert accepted["preferred_username"] == "signed-user"
 
     with pytest.raises(auth.TokenDecodeError):
-        auth.decode_id_token_payload(
-            _issuer_token(KEY_1_PEM, "key-1", "https://idp.example.com/realms/bearer-realm")
-        )
+        auth.decode_id_token_payload(_issuer_token(KEY_1_PEM, "key-1", "https://idp.example.com/realms/bearer-realm"))
 
 
 def test_separate_urls_do_not_share_a_client(jwks):

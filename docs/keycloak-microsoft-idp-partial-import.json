@@ -1,0 +1,24 @@
+{
+  "_comment": "Keycloak partial-import for the Microsoft identity provider used by the Collab SharePoint connector. Import into the hub's realm (Realm settings -> Action -> Partial import, or kcadm). Fill in the two REPLACE_ id values from the Entra app registration; inject clientSecret from your secret store rather than committing it. Alias MUST match the hub's brokerTokenUrl (which ends in /broker/microsoft/token): the hub derives the alias the desktop links from that URL. tenantId is required because the Entra app is single-tenant (Keycloak >= 23 exposes it on the built-in Microsoft provider). See docs/sharepoint-connector.md.",
+  "identityProviders": [
+    {
+      "alias": "microsoft",
+      "displayName": "Microsoft",
+      "providerId": "microsoft",
+      "enabled": true,
+      "storeToken": true,
+      "addReadTokenRoleOnCreate": true,
+      "trustEmail": false,
+      "linkOnly": true,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "config": {
+        "clientId": "REPLACE_WITH_ENTRA_APPLICATION_CLIENT_ID",
+        "clientSecret": "REPLACE_WITH_ENTRA_CLIENT_SECRET_FROM_SECRET_STORE",
+        "tenantId": "REPLACE_WITH_ENTRA_DIRECTORY_TENANT_ID",
+        "defaultScope": "openid profile email offline_access User.Read Sites.Read.All Files.Read.All",
+        "hideOnLoginPage": "true",
+        "syncMode": "IMPORT"
+      }
+    }
+  ]
+}

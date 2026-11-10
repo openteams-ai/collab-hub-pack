@@ -94,12 +94,11 @@ jobs:
           print(f"api.deployment.image.tag = {tag}")
           EOF
 
-      - uses: azure/setup-helm@v5
+      - name: Install Helm
         if: steps.exists.outputs.exists == 'false'
-        with:
-          # Pinned to match lint.yaml: when the latest-release lookup fails the
-          # action falls back to Helm 3.
-          version: v4.3.0
+        # The same pinned version and sha256 lint.yaml and dev-env.yaml
+        # install, from the one script they share (#205).
+        run: scripts/ci/install_helm.sh
 
       - name: Package the chart
         if: steps.exists.outputs.exists == 'false'

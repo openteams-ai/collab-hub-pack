@@ -41,6 +41,7 @@ from ..web.authz import (
 )
 from ..web.data_statement import data_statement_page
 from ..web.forms import FormRefused
+from ..web.home import COLLAB_MARK_SVG, HOME_STYLESHEET, account_page, home_page
 from ..web.pages import (
     SECURITY_HEADERS,
     STYLE_PATH,
@@ -67,9 +68,14 @@ from ..web.session import (
     set_transient_cookie,
 )
 from ..web.surface import (
+    ACCOUNT_PATH,
     ADMIN_INVITATIONS_PATH,
     CALLBACK_PATH,
     DATA_STATEMENT_PATH,
+    HOME_ASSETS,
+    HOME_MARK_PATH,
+    HOME_PATH,
+    HOME_STYLE_PATH,
     LANDING_PATH,
     ORG_INVITATIONS_PATH,
     PRIVACY_PATH,
@@ -80,6 +86,7 @@ from ..web.surface import (
     TERMS_PATH,
     WEB_LOGO_PATH,
     WebSurface,
+    account_page_url,
     answers_json,
     clamped_session_lifetime,
 )
@@ -246,9 +253,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         return response
 
     @app.exception_handler(WebAuthorizationUnavailable)
-    async def _authorization_unavailable(
-        request: Request, exc: WebAuthorizationUnavailable
-    ) -> Response:
+    async def _authorization_unavailable(request: Request, exc: WebAuthorizationUnavailable) -> Response:
         # Error level, and a 503 rather than a 403: this is a deployment that
         # cannot decide operator authority at all, which would otherwise look
         # exactly like a correct refusal and lock every operator out silently.
@@ -461,9 +466,7 @@ def make_router(
         """
 
         transient_value = request.cookies.get(TRANSIENT_COOKIE)
-        transient = (
-            surface.codec.decode(TRANSIENT_PURPOSE, transient_value) if transient_value else None
-        )
+        transient = surface.codec.decode(TRANSIENT_PURPOSE, transient_value) if transient_value else None
         if transient is None:
             return _failed_sign_in(request, "missing or invalid transient state cookie")
         if request.query_params.get("error"):
@@ -548,9 +551,7 @@ def make_router(
         return response
 
     @router.get(LANDING_PATH)
-    async def overview(
-        request: Request, session: WebSession = Depends(require_web_session)
-    ) -> Response:
+    async def overview(request: Request, session: WebSession = Depends(require_web_session)) -> Response:
         """The signed-in overview: proves the session and hosts the sign-out form.
 
         The operator invitation page (#91) is linked unconditionally rather
@@ -587,7 +588,17 @@ def make_router(
                 root_path=_root_path(request),
                 identity_label=identity,
                 csrf_token=session.csrf,
+                account_url=account_page_url(request),
             )
+        )
+
+    @router.get(ACCOUNT_PATH)
+    async def account(request: Request, session: WebSession = Depends(require_web_session)) -> Response:
+        """The signed-in person's account page, in the home page's look."""
+
+        return page_response(
+            account_page(surface=surface, session=session, root_path=_root_path(request)),
+            path=ACCOUNT_PATH,
         )
 
     @router.post(SIGNOUT_PATH)
@@ -615,6 +626,16 @@ def make_router(
                 root_path=_root_path(request),
                 next_path=None if next_path == LANDING_PATH else next_path,
             )
+        )
+
+    @public_router.get(HOME_PATH)
+    async def home(request: Request) -> Response:
+        """The Collab Hub home page. Anonymous by design; the argument lives
+        on the path's PUBLIC_WEB_PATHS entry."""
+
+        return page_response(
+            home_page(surface=surface, session=get_web_session(request), root_path=_root_path(request)),
+            path=HOME_PATH,
         )
 
     @public_router.get(DATA_STATEMENT_PATH)
@@ -672,6 +693,25 @@ def make_router(
             media_type="text/css; charset=utf-8",
             headers=dict(SECURITY_HEADERS),
         )
+
+    @public_router.get(HOME_STYLE_PATH)
+    async def home_stylesheet() -> Response:
+        return Response(HOME_STYLESHEET, media_type="text/css; charset=utf-8", headers=dict(SECURITY_HEADERS))
+
+    def _asset_route(body: bytes, media_type: str):
+        async def asset() -> Response:
+            return Response(body, media_type=media_type, headers=dict(SECURITY_HEADERS))
+
+        return asset
+
+    # Read once at startup, like the wordmark: fixed files for the life of the process.
+    for asset_path, (asset_file, media_type) in HOME_ASSETS.items():
+        body = (Path(__file__).parent.parent / "web" / asset_file).read_bytes()
+        public_router.add_api_route(asset_path, _asset_route(body, media_type), methods=["GET"])
+
+    @public_router.get(HOME_MARK_PATH)
+    async def collab_mark() -> Response:
+        return Response(COLLAB_MARK_SVG, media_type="image/svg+xml", headers=dict(SECURITY_HEADERS))
 
     for page_router in page_routers:
         router.include_router(page_router)

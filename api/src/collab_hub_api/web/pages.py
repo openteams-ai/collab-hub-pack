@@ -50,8 +50,7 @@ SECURITY_HEADERS = {
 intermediary treats the whole surface alike."""
 
 CONTENT_SECURITY_POLICY = (
-    "default-src 'none'; style-src 'self'; img-src 'self'; "
-    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 )
 """No script source at all: the surface serves none, so none may run.
 
@@ -106,6 +105,24 @@ exfiltrate to another origin is refused by the browser.
 ADMIN_PANEL_HEADERS = {**SECURITY_HEADERS, "Content-Security-Policy": ADMIN_PANEL_CONTENT_SECURITY_POLICY}
 
 
+HOME_PAGE_CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; "
+    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+)
+"""The home and account pages' policy: :data:`CONTENT_SECURITY_POLICY` plus
+this origin's fonts and this origin's scripts.
+
+The scripts are the theme switch and menus (``/web/theme.js``) and, on the
+home page, the demo Collab window (``/web/home.js``): a model picker and a
+mock chat that never leaves the page. ``'self'`` only: no inline script, no
+``eval``, no other origin, and no ``connect-src``, so they cannot call
+anything. The pages carry no secret worth reading; their one form is the
+sign-out POST.
+"""
+
+HOME_PAGE_HEADERS = {**SECURITY_HEADERS, "Content-Security-Policy": HOME_PAGE_CONTENT_SECURITY_POLICY}
+
+
 def headers_for_path(path: str) -> dict[str, str]:
     """The response headers this surface serves for *path*.
 
@@ -127,6 +144,10 @@ def headers_for_path(path: str) -> dict[str, str]:
         # ``/admin``: the policy below forbids form submission outright, which
         # the operator invitation page could not live under.
         return ADMIN_PANEL_HEADERS
+    from .surface import ACCOUNT_PATH, HOME_PATH
+
+    if path in (HOME_PATH, ACCOUNT_PATH):
+        return HOME_PAGE_HEADERS
     return _script_page_headers().get(path, PAGE_HEADERS)
 
 
@@ -141,6 +162,7 @@ def _script_page_headers() -> dict[str, dict[str, str]]:
     from .acceptance import ACCEPT_PAGE_PATH, ACCEPTANCE_PAGE_HEADERS
 
     return {ACCEPT_PAGE_PATH: ACCEPTANCE_PAGE_HEADERS}
+
 
 STYLESHEET = """\
 :root { color-scheme: light dark; }
@@ -273,6 +295,7 @@ def render_page(
     root_path: str = "",
     identity_label: str | None = None,
     csrf_token: str | None = None,
+    account_url: str | None = None,
 ) -> str:
     """Render one page of the surface into a complete document.
 
@@ -285,13 +308,26 @@ def render_page(
     the signed-in footer with the sign-out form; the CSRF token rides a
     hidden field of that form, which is the pattern every future POST form on
     this surface follows.
+
+    ``account_url`` is the deployment's external account page
+    (``web.account_page_url``, issue #275). It is rendered only in that
+    signed-in footer and only when set; routes read it from configuration
+    through :func:`~.surface.account_page_url`, never from the request. This
+    is the one place the link exists, so a page cannot grow a second copy
+    with a different rule.
     """
 
     footer = ""
     if identity_label is not None and csrf_token is not None:
+        account = ""
+        if account_url:
+            # Same-tab navigation, like every other link here; the page-level
+            # no-referrer meta already keeps this origin out of the Referer.
+            account = f'<a href="{html.escape(account_url)}">Account</a> · '
         footer = (
             '<div class="identity">Signed in as '
             f"<strong>{html.escape(identity_label)}</strong> · "
+            f"{account}"
             f'<form method="post" action="{html.escape(root_path)}/web/signout">'
             f'<input type="hidden" name="csrf_token" value="{html.escape(csrf_token)}">'
             '<button type="submit" class="link">Sign out</button>'
@@ -378,10 +414,7 @@ def body_refused_page(*, root_path: str = "", status_code: int) -> str:
         )
     else:
         heading = "That request was too large"
-        detail = (
-            "The form you sent is larger than this page will read, so nothing"
-            " was changed."
-        )
+        detail = "The form you sent is larger than this page will read, so nothing was changed."
     return render_page(
         title=heading,
         body=(

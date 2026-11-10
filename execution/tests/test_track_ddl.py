@@ -79,7 +79,7 @@ def test_the_sqlite_store_has_the_same_tables_and_columns(tmp_path):
 
 
 def test_the_claim_stores_create_exactly_what_the_hub_s_migrations_create(tmp_path):
-    # The keyed claim's table (migration 17), held equal across the same three copies.
+    # The keyed claim's table (migration 19), held equal across the same three copies.
     assert [_normalize(s) for s in PostgresClaimStore._SCHEMA] == _registry_track_statements("collab_claims")
     path = tmp_path / "track.sqlite"
     SqliteClaimStore.ensure_schema(path)

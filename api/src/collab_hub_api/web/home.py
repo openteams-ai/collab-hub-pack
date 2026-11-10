@@ -589,7 +589,7 @@ def _chrome(surface: WebSurface, session: WebSession | None, root_path: str, bac
     nav = [f'<a href="{html.escape(web_client)}">Collab</a>', f'<a href="{html.escape(frames)}">Frames</a>']
     if docs:
         nav.append(f'<a href="{html.escape(docs)}">Docs</a>')
-    if download and session is None:
+    if download:
         nav.append(f'<a href="{html.escape(download)}">Download</a>')
 
     product_links = [("Open Collab", web_client)]

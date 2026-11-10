@@ -1,9 +1,12 @@
 # Dependabot covers every lockfile and pinned tool in the repo, not only the
-# ones it finds by default (/api and /api/admin-ui). The seven pixi.lock files
-# (cogs/hermes, dev/cogs/*, examples/cog-local/cogs/hello) have no Dependabot
-# ecosystem and are refreshed by hand with `pixi update`. Minor and patch
-# version updates arrive grouped per ecosystem (one PR per directory a week);
-# majors and security updates come on their own, so each gets its own review.
+# ones it finds by default (/api and /api/admin-ui), plus the images in
+# dev/compose.yaml. The seven pixi.lock files (cogs/hermes, dev/cogs/*,
+# examples/cog-local/cogs/hello) have no Dependabot ecosystem and are refreshed
+# by hand with `pixi update`. The oras version and sha256 ARGs in
+# scripts/cog-serve-e2e/Dockerfile are bumped by hand too: Dependabot does not
+# read ARGs. Minor and patch version updates arrive grouped per ecosystem (one
+# PR per directory a week); majors and security updates come on their own, so
+# each gets its own review.
 version: 2
 updates:
   - package-ecosystem: uv
@@ -11,6 +14,7 @@ updates:
       - /api
       - /cli
       - /execution
+      - /worker
     schedule:
       interval: weekly
     commit-message:
@@ -37,6 +41,7 @@ updates:
     directories:
       - /api
       - /scripts/cog-execution-e2e
+      - /scripts/cog-serve-e2e
     schedule:
       interval: weekly
     commit-message:
@@ -44,6 +49,18 @@ updates:
       include: scope
     groups:
       docker-minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+  - package-ecosystem: docker-compose
+    directories:
+      - /dev
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      docker-compose-minor-and-patch:
         applies-to: version-updates
         update-types: ["minor", "patch"]
   - package-ecosystem: github-actions

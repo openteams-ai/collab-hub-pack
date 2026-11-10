@@ -96,6 +96,7 @@ from .frames.usage import (
 )
 from .tasks.store import InMemoryTaskStore, PostgresTaskStore
 from .user_directory import DisabledUserDirectoryClient, KeycloakUserDirectoryClient, UserDirectoryClient
+from .web.oidc import invalid_link_url_reason
 
 
 def interactive_session() -> bool:
@@ -135,13 +136,11 @@ class ServerConfig(BaseModel):
     def _root_path_is_a_prefix(cls, value: str) -> str:
         if value and not value.startswith("/"):
             raise ValueError(
-                'root_path must start with "/": use "" to serve at the root of the host, '
-                'or a prefix such as "/hub"'
+                'root_path must start with "/": use "" to serve at the root of the host, or a prefix such as "/hub"'
             )
         if value.endswith("/"):
             raise ValueError(
-                'root_path must not end with "/": use "" to serve at the root of the host, '
-                'or a prefix such as "/hub"'
+                'root_path must not end with "/": use "" to serve at the root of the host, or a prefix such as "/hub"'
             )
         return value
 
@@ -350,6 +349,23 @@ class WebConfig(BaseModel):
     revoked.
     """
 
+    account_page_url: str = ""
+    """Where the signed-in navigation's "Account" link points, if anywhere.
+
+    Empty (the default) renders no link: a Hub install shows nothing and
+    needs no billing configuration. The page itself -- plan, usage,
+    invoices -- belongs to whichever add-on provides it; the Hub only links
+    to it, from this value and never from the request (issue #275).
+
+    When set it follows the same rules as ``public_base_url``, except that a
+    query and fragment are allowed
+    (:func:`~.web.oidc.invalid_link_url_reason`): absolute ``https://`` (plain
+    ``http://`` only on loopback), a real host, a valid port, no credentials,
+    no control characters. The value is written into an ``href`` on every
+    signed-in page, so a ``javascript:`` or cleartext value is refused at
+    startup rather than shipped to every browser.
+    """
+
     @field_validator(
         "client_id",
         "client_secret",
@@ -358,6 +374,7 @@ class WebConfig(BaseModel):
         "public_base_url",
         "admin_ui_dist",
         "admin_group",
+        "account_page_url",
         mode="before",
     )
     @classmethod
@@ -373,6 +390,22 @@ class WebConfig(BaseModel):
         """
 
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("account_page_url", mode="after")
+    @classmethod
+    def _check_account_page_url(cls, value: str) -> str:
+        # Checked whether or not the surface is enabled: a value that cannot
+        # be a link is a configuration error now, not when someone later
+        # sets web.client_id and every signed-in page starts carrying it.
+        if not value:
+            return value
+        reason = invalid_link_url_reason(value)
+        if reason:
+            raise ValueError(
+                f"web.account_page_url is unusable ({reason}), got {value!r}: set it to an"
+                " absolute https URL (http only on loopback), e.g. https://billing.example.com/account"
+            )
+        return value
 
     @property
     def enabled(self) -> bool:
@@ -706,6 +739,7 @@ class FramesInvitationsConfig(BaseModel):
     friction rather than assurance.
     """
 
+
 class FramesConfig(BaseModel):
     storage_backend: str = "local"
     s3: FramesS3Config = Field(default_factory=FramesS3Config)
@@ -800,11 +834,43 @@ class NotionConnectorConfig(BaseModel):
     request_timeout_seconds: float = 10.0
 
 
+class SharePointConnectorConfig(BaseModel):
+    # Keycloak broker token endpoint for the linked Microsoft identity (alias
+    # ``microsoft``). The same per-user brokering as GitHub: the Hub never holds
+    # the Entra client secret; Keycloak refreshes the ~1h Graph token itself.
+    broker_token_url: str = ""
+    api_base_url: str = "https://graph.microsoft.com/v1.0"
+    static_access_token: str = ""  # dev/CI only -- never in prod values
+    # Graph search and document conversion are slower than a plain REST read.
+    request_timeout_seconds: float = 15.0
+    # File downloads (and Office -> PDF conversion) get a longer budget than JSON.
+    download_timeout_seconds: float = 30.0
+    # Largest file the read route will download before extracting text. Larger
+    # files are reported as unsupported with their metadata, never fetched.
+    max_download_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
+    # Text extraction runs in a separate worker process, one at a time. A parse
+    # that overruns this deadline is killed, and one that needs more memory
+    # than this ceiling fails inside the worker; either way the file is
+    # reported as unsupported and the API keeps serving. The ceiling must stay
+    # inside the pod's memory headroom (the chart's default limit is 512Mi).
+    extraction_timeout_seconds: float = 30.0
+    extraction_memory_limit_bytes: int = Field(default=256 * 1024 * 1024, ge=1)
+    # Document reads (PDF and Office) are admitted one at a time, from before
+    # the download to after the parse, so a waiting read holds no body. A read
+    # not admitted within this wait answers 503 with Retry-After.
+    extraction_wait_seconds: float = Field(default=10.0, ge=0)
+    # Search covers SharePoint document libraries. The user's personal OneDrive
+    # is reachable with the same scopes; it is excluded unless a hub opts in,
+    # so a daily digest never surfaces someone's private drafts by default.
+    include_personal_onedrive: bool = False
+
+
 class ConnectorsConfig(BaseModel):
     google: GoogleConnectorConfig = Field(default_factory=GoogleConnectorConfig)
     slack: SlackConnectorConfig = Field(default_factory=SlackConnectorConfig)
     github: GitHubConnectorConfig = Field(default_factory=GitHubConnectorConfig)
     notion: NotionConnectorConfig = Field(default_factory=NotionConnectorConfig)
+    sharepoint: SharePointConnectorConfig = Field(default_factory=SharePointConnectorConfig)
 
 
 class KeycloakUserDirectoryConfig(BaseModel):
@@ -939,9 +1005,7 @@ class CogServeConfig(BaseModel):
         default=300, ge=COGS_SERVE_TOKEN_TTL_MIN_SECONDS, le=COGS_SERVE_TOKEN_TTL_MAX_SECONDS
     )
     max_blob_bytes: int = Field(default=1024 * 1024 * 1024, ge=1)
-    max_blob_seconds: int = Field(
-        default=900, ge=COGS_SERVE_MAX_BLOB_SECONDS_MIN, le=COGS_SERVE_MAX_BLOB_SECONDS_MAX
-    )
+    max_blob_seconds: int = Field(default=900, ge=COGS_SERVE_MAX_BLOB_SECONDS_MIN, le=COGS_SERVE_MAX_BLOB_SECONDS_MAX)
 
     @field_validator("public_url", mode="before")
     @classmethod
@@ -1258,9 +1322,11 @@ appears: set in the environment or the chart, it stops startup; passed to
 instead of silently reading as off.
 """
 
-RETIRED_FEATURE_FLAGS: frozenset[str] = frozenset({
-    "cog_runs",  # the run API (/v1/runs) is always served since the hub ships the execution package
-})
+RETIRED_FEATURE_FLAGS: frozenset[str] = frozenset(
+    {
+        "cog_runs",  # the run API (/v1/runs) is always served since the hub ships the execution package
+    }
+)
 """Flags that have been removed but that deployments may still set.
 
 When a flag's feature ships, move its name here from :data:`FEATURE_FLAGS`.

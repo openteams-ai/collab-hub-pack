@@ -39,8 +39,9 @@ from collab_hub_api.core import make_app
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "execution" / "tests"))
 from fake_registry import FakeRegistry  # noqa: E402  - the execution suite's registry, after the path is set
 
-MODELS = ModelsBlock.parse({"models": {"fake": {"endpoint": "http://127.0.0.1:8090/v1", "model": "fake-model",
-                                                "auth_ref": "env:FAKE_KEY"}}})
+MODELS = ModelsBlock.parse(
+    {"models": {"fake": {"endpoint": "http://127.0.0.1:8090/v1", "model": "fake-model", "auth_ref": "env:FAKE_KEY"}}}
+)
 ENVIRON = {"FAKE_KEY": "fake-secret"}
 OTHER = {"IdToken-test": _jwt({"preferred_username": "bob", "org_id": "org-b", "workspace_id": "workspace-b"})}
 
@@ -55,13 +56,15 @@ def registry():
 @pytest.fixture
 def config(tmp_path) -> Config:
     package(tmp_path / "cogs", "echo")
-    return Config.parse({
-        "storage": {"frames_path": str(tmp_path / "frames")},
-        "frames": {"mcp_session_manager_enabled": False},
-        "tasks": {"backend": "memory"},
-        "cogs": {"catalog": {"backend": "memory"}},
-        "runs": {"track_path": str(tmp_path / "track.sqlite"), "packages": [str(tmp_path / "cogs")]},
-    })
+    return Config.parse(
+        {
+            "storage": {"frames_path": str(tmp_path / "frames")},
+            "frames": {"mcp_session_manager_enabled": False},
+            "tasks": {"backend": "memory"},
+            "cogs": {"catalog": {"backend": "memory"}},
+            "runs": {"track_path": str(tmp_path / "track.sqlite"), "packages": [str(tmp_path / "cogs")]},
+        }
+    )
 
 
 @pytest_asyncio.fixture
@@ -82,9 +85,19 @@ async def api(config, monkeypatch, registry, tmp_path):
         card = fixture_card("pixi-context")
         store.upsert(row("4", card, repository="cogs/cog-meeting-notes", host=registry.host))
         # The row's digest is the artifact's, so the reference the API pins is what the registry holds.
-        store.upsert(CogArtifact(source_id=SOURCE, host=registry.host, repository="cogs/cog-meeting-notes",
-                                 digest=reference.digest, status="indexed", tags=("1",), pushed_at=T0, card=card,
-                                 **card_search_fields(card)))
+        store.upsert(
+            CogArtifact(
+                source_id=SOURCE,
+                host=registry.host,
+                repository="cogs/cog-meeting-notes",
+                digest=reference.digest,
+                status="indexed",
+                tags=("1",),
+                pushed_at=T0,
+                card=card,
+                **card_search_fields(card),
+            )
+        )
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", cookies=AUTH) as client:
             yield client, store, reference
 
@@ -92,18 +105,22 @@ async def api(config, monkeypatch, registry, tmp_path):
 def selecting(check_ok=True):
     def handle(entry_point, value, **feedback):
         if entry_point == "resolve":
-            chosen = {r["capability"]: next(s["id"] for s in value["inventory"]
-                                            if r["capability"] in s["provides"]) for r in value["requires"]}
+            chosen = {
+                r["capability"]: next(s["id"] for s in value["inventory"] if r["capability"] in s["provides"])
+                for r in value["requires"]
+            }
             return {"selections": chosen}
         if entry_point == "check":
             return {"probed": True} if check_ok else ResultEnvelope.failure("model-unavailable", "503")
         return {"answer": "hi"}
+
     return handle
 
 
 @pytest.fixture
 def controller(config, registry):
     """A controller over the API's Track and install store, with an in-memory executor and the fake registry."""
+
     def make(check_ok=True):
         track = SqliteTrackStore(config.runs.track_path)
         installs = SqliteInstallStore(config.runs.track_path)
@@ -117,13 +134,19 @@ def controller(config, registry):
         executor = Delivering({})
         executor.handlers = _Any(selecting(check_ok))
         runner = LifecycleRunner(executor=executor, track=track, controller="one")
-        install = Installer(installs, executor, controller="one", environ=ENVIRON,
-                            registry=RegistryClient(plain_http={registry.host}),
-                            inventory=lambda org: inventory(MODELS, harnesses_installed(installs, org)))
+        install = Installer(
+            installs,
+            executor,
+            controller="one",
+            environ=ENVIRON,
+            registry=RegistryClient(plain_http={registry.host}),
+            inventory=lambda org: inventory(MODELS, harnesses_installed(installs, org)),
+        )
         delivery.installer = install
         controller = RunController(runner, poll_interval=0.01, installer=install)
         controller.executor = executor
         return controller
+
     return make
 
 
@@ -204,13 +227,22 @@ async def test_an_installed_cog_runs_once_with_its_binding_and_an_uninstalled_di
     install = (await client.get(f"/v1/cogs/installs/{install['id']}")).json()
     assert install["invokable"]
     for named_by in (str(reference), reference.digest, install["id"]):
-        created = await client.post("/v1/runs", json={"cog": named_by, "entry_point": "ask", "input": {"q": 1},
-                                                      "gate": {"escalate": "never"}})
+        created = await client.post(
+            "/v1/runs", json={"cog": named_by, "entry_point": "ask", "input": {"q": 1}, "gate": {"escalate": "never"}}
+        )
         assert created.status_code == 201, created.text
         run = created.json()
         [step] = run["steps"]
-        assert step == {"name": "cog-meeting-notes", "cog": str(reference), "entry_point": "ask", "state": "pending",
-                        "attempt": None, "error": None, "output": None, "output_ref": None}
+        assert step == {
+            "name": "cog-meeting-notes",
+            "cog": str(reference),
+            "entry_point": "ask",
+            "state": "pending",
+            "attempt": None,
+            "error": None,
+            "output": None,
+            "output_ref": None,
+        }
         settle(one, until=lambda: True)
         done = (await client.get(f"/v1/runs/{run['id']}")).json()
         assert done["status"] == "COMPLETED", done
@@ -227,12 +259,21 @@ async def test_an_installed_cog_runs_once_with_its_binding_and_an_uninstalled_di
         assert given.env == {"COLLAB_MODEL_API_KEY": "fake-secret"}
         assert "fake-secret" not in json.dumps(events)
     # A multi-step Op may name the installed Cog beside a package, and the run-one form takes one shape only.
-    mixed = await client.post("/v1/runs", json={"steps": [
-        {"name": "ask", "cog": str(reference), "entry_point": "ask"},
-        {"name": "echo", "cog": "echo", "entry_point": "run"}]})
+    mixed = await client.post(
+        "/v1/runs",
+        json={
+            "steps": [
+                {"name": "ask", "cog": str(reference), "entry_point": "ask"},
+                {"name": "echo", "cog": "echo", "entry_point": "run"},
+            ]
+        },
+    )
     assert mixed.status_code == 201
-    for bad in ({"cog": str(reference)}, {"cog": str(reference), "entry_point": "ask", "steps": []},
-                {"steps": [{"name": "a", "cog": "echo", "entry_point": "run"}], "input": 1}):
+    for bad in (
+        {"cog": str(reference)},
+        {"cog": str(reference), "entry_point": "ask", "steps": []},
+        {"steps": [{"name": "a", "cog": "echo", "entry_point": "run"}], "input": 1},
+    ):
         assert (await client.post("/v1/runs", json=bad)).status_code == 422, bad
     # Another organization's install is not this one's to run.
     theirs = await client.post("/v1/runs", json={"cog": install["id"], "entry_point": "ask"}, cookies=OTHER)
@@ -263,8 +304,9 @@ async def test_what_the_catalog_does_not_hold_cannot_be_installed(api):
     client, store, reference = api
     missing = await client.post("/v1/cogs/installs", json={"cog_id": "example/absent"})
     assert missing.status_code == 404 and missing.json()["error"]["code"] == "cog_not_found"
-    version = await client.post("/v1/cogs/installs", json={"cog_id": "example/cog-meeting-notes",
-                                                           "digest": "sha256:" + "9" * 64})
+    version = await client.post(
+        "/v1/cogs/installs", json={"cog_id": "example/cog-meeting-notes", "digest": "sha256:" + "9" * 64}
+    )
     assert version.status_code == 404 and version.json()["error"]["code"] == "cog_version_not_found"
     unknown = await client.post("/v1/cogs/installs", json={"reference": f"{HOST}/cogs/x@sha256:" + "8" * 64})
     assert unknown.status_code == 404
@@ -272,8 +314,9 @@ async def test_what_the_catalog_does_not_hold_cannot_be_installed(api):
     assert bad.status_code == 422 and bad.json()["error"]["code"] == "reference_invalid"
     for body in ({}, {"cog_id": "a", "reference": "b"}, {"digest": "sha256:" + "1" * 64}):
         assert (await client.post("/v1/cogs/installs", json=body)).status_code == 422, body
-    pinned = await client.post("/v1/cogs/installs", json={"cog_id": "example/cog-meeting-notes",
-                                                          "digest": reference.digest})
+    pinned = await client.post(
+        "/v1/cogs/installs", json={"cog_id": "example/cog-meeting-notes", "digest": reference.digest}
+    )
     assert pinned.status_code == 202 and pinned.json()["digest"] == reference.digest
 
 
@@ -295,9 +338,16 @@ def test_the_install_routes_sit_under_the_cogs_prefix_and_before_the_catalogs_co
 async def test_without_an_install_store_the_routes_say_so(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
     monkeypatch.setenv("FRAMES_IDTOKEN_ALLOW_UNSIGNED", "true")
-    app = make_app(Config.parse({"storage": {"frames_path": str(tmp_path / "frames")},
-                                 "frames": {"mcp_session_manager_enabled": False}, "tasks": {"backend": "memory"},
-                                 "cogs": {"catalog": {"backend": "memory"}}}))
+    app = make_app(
+        Config.parse(
+            {
+                "storage": {"frames_path": str(tmp_path / "frames")},
+                "frames": {"mcp_session_manager_enabled": False},
+                "tasks": {"backend": "memory"},
+                "cogs": {"catalog": {"backend": "memory"}},
+            }
+        )
+    )
     async with app.router.lifespan_context(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", cookies=AUTH) as client:
             answer = await client.post("/v1/cogs/installs", json={"cog_id": "x/y"})

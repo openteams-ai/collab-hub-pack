@@ -25,7 +25,7 @@ kind load docker-image "$IMAGE" --name "$CLUSTER"
 
 echo "== lock the fake Cog's environment (pixi.lock is what the cache is keyed by)"
 if [ ! -f "$HERE/cog/pixi.lock" ]; then
-  docker run --rm -v "$HERE/cog:/cog" -w /cog ghcr.io/prefix-dev/pixi:0.83.0-bookworm-slim pixi lock
+  docker run --rm -v "$HERE/cog:/cog" -w /cog ghcr.io/prefix-dev/pixi:0.84.1-bookworm-slim pixi lock
 fi
 
 echo "== apply namespace, RBAC, the registry, the cache, the fake Cog's files, and the driver Job"

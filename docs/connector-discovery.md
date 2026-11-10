@@ -16,13 +16,13 @@ A connector is listed when both hold:
   (`connectors.<provider>.brokerTokenUrl`, or a static token in development);
 - an operator has not switched the provider off in the admin panel (see
   [Frames operations](frames-operations.md)). The panel switches `google`,
-  `slack` and `github`; `notion` has no switch and is listed whenever it is
-  configured.
+  `slack`, `github` and `sharepoint`; `notion` has no switch and is listed
+  whenever it is configured.
 
 `[]` means this hub offers no connectors. It is an answer, not an error.
 
 Connectors come back in a fixed display order: Google Drive, Gmail, Google
-Calendar, Slack, GitHub, Notion.
+Calendar, Slack, GitHub, Notion, SharePoint.
 
 ## Entry fields
 
@@ -49,11 +49,11 @@ Calendar, Slack, GitHub, Notion.
 | `name` | Display name. |
 | `short_name` | Compact label for menus. |
 | `description` | One sentence on what the connector lets an assistant do. Safe to show a user. |
-| `provider` | The configuration section the connector belongs to, which is also its operator switch where it has one: `google`, `slack`, `github` or `notion`. Connectors that share a provider share one linked account. |
+| `provider` | The configuration section the connector belongs to, which is also its operator switch where it has one: `google`, `slack`, `github`, `notion` or `sharepoint`. Connectors that share a provider share one linked account; SharePoint's `link` names the Microsoft identity provider (`microsoft`) its broker URL points at. |
 | `link` | How a user connects it, or `null` when there is nothing for the user to do (a static token serves every caller). |
 | `connect_hint` | A sentence the user should read before they start connecting, or `null`. Slack uses it to say the workspace is chosen on Slack's own screen. Show it next to the connect action, not after a failure. |
 | `connected`, `state`, `scopes`, `detail` | The caller's connection state, as the connector's own status route reports it. `state` is one of `connected`, `not_connected`, `reconnect_required`, `unavailable`. |
-| `account` | The linked account or workspace where the connector knows it (GitHub login, Notion workspace name), otherwise `""`. |
+| `account` | The linked account or workspace where the connector knows it (GitHub login, Notion workspace name, the SharePoint user's display name), otherwise `""`. |
 
 ### `link`
 

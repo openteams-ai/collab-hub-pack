@@ -25,12 +25,13 @@ from collab_hub_api.core import make_app
 from collab_hub_api.routers import connectors as connectors_router
 
 BROKER = "https://keycloak.test/realms/hub/broker/{alias}/token"
-PROVIDERS = ("google", "slack", "github", "notion")
+PROVIDERS = ("google", "slack", "github", "notion", "sharepoint")
 IDS_BY_PROVIDER = {
     "google": ["google-drive", "gmail", "google-calendar"],
     "slack": ["slack"],
     "github": ["github"],
     "notion": ["notion"],
+    "sharepoint": ["sharepoint"],
 }
 
 
@@ -67,6 +68,12 @@ def _provider_api(request: httpx.Request) -> httpx.Response:
         if path == "/v1/users/me":
             return httpx.Response(200, json={"bot": {"workspace_name": "Acme Wiki"}})
         return httpx.Response(200, json={"results": []})
+    if host == "graph.microsoft.com":
+        if path == "/v1.0/me":
+            return httpx.Response(200, json={"displayName": "Alice Example"})
+        return httpx.Response(
+            200, json={"value": [{"hitsContainers": [{"hits": [], "total": 0, "moreResultsAvailable": False}]}]}
+        )
     if host == "slack.com":
         return httpx.Response(200, json={"ok": True}, headers={"X-OAuth-Scopes": "search:read"})
     if host == "gmail.googleapis.com":
@@ -152,7 +159,7 @@ async def test_a_static_token_counts_as_configured(hub):
     assert [item["id"] for item in listed] == ["github"]
 
 
-@pytest.mark.parametrize("provider", ["google", "slack", "github"])
+@pytest.mark.parametrize("provider", ["google", "slack", "github", "sharepoint"])
 async def test_a_switched_off_provider_leaves_the_list_and_comes_back(hub, provider):
     store = Store()
     app = hub(_brokered(*PROVIDERS), store)
@@ -211,6 +218,15 @@ async def test_the_link_names_the_alias_in_the_configured_broker_url(hub):
     assert listed[0]["link"] == {"type": "identity_provider", "alias": "acme-slack", "prompt": None}
 
 
+async def test_sharepoint_links_the_microsoft_identity_its_broker_url_names(hub):
+    """SharePoint hangs off a linked Microsoft account; the alias comes from the broker URL, not the catalog."""
+
+    listed = await _listed(hub({"sharepoint": {"broker_token_url": BROKER.format(alias="microsoft")}}))
+
+    assert [item["id"] for item in listed] == ["sharepoint"]
+    assert listed[0]["link"] == {"type": "identity_provider", "alias": "microsoft", "prompt": None}
+
+
 async def test_google_connectors_ask_for_consent_again_and_the_others_do_not(hub):
     listed = await _listed(hub(_brokered(*PROVIDERS)))
 
@@ -222,6 +238,7 @@ async def test_google_connectors_ask_for_consent_again_and_the_others_do_not(hub
         "slack": None,
         "github": None,
         "notion": None,
+        "sharepoint": None,
     }
 
 
@@ -249,6 +266,7 @@ async def test_the_linked_account_is_listed_where_the_connector_knows_it(hub):
     assert listed["github"]["account"] == "octo-alice"
     assert listed["notion"]["account"] == "Acme Wiki"
     assert listed["slack"]["account"] == ""
+    assert listed["sharepoint"]["account"] == "Alice Example"
 
 
 # --- one connector's trouble stays its own ----------------------------------

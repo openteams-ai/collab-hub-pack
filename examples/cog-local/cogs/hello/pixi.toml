@@ -11,4 +11,5 @@ requires-pixi = ">=0.82.1"
 serve = "python serve.py"
 
 [dependencies]
-python = "3.12.*"
+# 3.12.16 is the first 3.12 whose ssl module refuses the compromised eMudhra intermediates (#285).
+python = ">=3.12.16,<3.13"

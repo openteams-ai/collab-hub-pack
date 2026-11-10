@@ -120,6 +120,30 @@ Outside the chart (a bare process, docker-compose), the same mechanism works
 with any variable names: put `"password_env": "MY_VAR"` in the JSON and set
 `MY_VAR`.
 
+### What the credential must be allowed to do
+
+The Secret says *where* the credential lives; the registry decides what it
+may do, and the indexer needs more than a pull-only credential. Harbor's
+`repository:list` is a separate permission from `repository:pull`, and the
+sweep's very first call — listing a project's repositories — needs it. A robot
+account created with Harbor's usual pull-only set fails every sweep at that
+call with a bare `403 forbidden`, before any artifact is read:
+
+```
+GET /api/v2.0/projects/cogs/repositories -> 403
+cog_index_source_failed source=harbor-dev reason="list_repositories: RegistrySourceAuthError: source 'harbor-dev': the registry API refused the configured credential for /projects/cogs/repositories (HTTP 403); the credential is probably missing the project-scoped repository:list permission, or the credential does not have access to the configured project"
+```
+
+| Kind | Grant the credential | Why |
+| --- | --- | --- |
+| `harbor` | Project-scoped `repository:list`, `repository:pull`, `artifact:list` on each project in `projects` | `repository:list` enumerates the project's repositories, `artifact:list` enumerates what is in each one, and `repository:pull` fetches the manifests and the `COG.md` blobs. |
+| `static` | Pull on each repository in `repositories` (and in the index document, if `indexUrl` is set) | A static source enumerates through the OCI distribution API alone, so tag listing, manifest reads and blob reads are all covered by the registry's pull right. |
+
+The indexer only reads; none of these needs push, delete, or project
+admin. A project-scoped robot account in Harbor (*Project → Robot Accounts*)
+with exactly the 3 permissions above is enough. A system-scoped robot works
+too but grants more than the indexer uses.
+
 ## CA bundle
 
 Dev clusters front the registry with a certificate from a private CA. Put the
@@ -136,7 +160,8 @@ The chart mounts it read-only at `/etc/collab-hub/cogs-ca/<key>` (the API
 container runs with a read-only root filesystem, so this is a volume, not a
 file written at startup) and passes that path as `ca_bundle_path` to every
 source that does not set its own `caBundlePath`. Leave `configMap` empty to
-use system trust only.
+use httpx's default trust: certifi's Mozilla bundle, or `SSL_CERT_FILE` /
+`SSL_CERT_DIR` when either is set in the API's environment.
 
 ## Indexer
 

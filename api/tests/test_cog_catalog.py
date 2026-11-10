@@ -1205,6 +1205,7 @@ def test_live_a_sweep_and_publishes_of_the_same_digests_do_not_deadlock(live_sto
     assert failures == [], [type(failure).__name__ for failure in failures]
     assert all(store.get(digest(seed)).published_by is not None for seed in seeds)
 
+
 def _exercise_blob_bookkeeping(store, count_rows) -> None:
     """A lookup says whether a manifest's descriptors are recorded; removal deletes them."""
 

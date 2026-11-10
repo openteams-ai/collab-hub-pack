@@ -989,9 +989,7 @@ async def test_slack_read_rejects_invalid_channel_id(tmp_path, monkeypatch):
     assert response.status_code == 422
 
 
-async def test_slack_read_accepts_private_channel_absent_from_channel_list(
-    tmp_path, monkeypatch
-):
+async def test_slack_read_accepts_private_channel_absent_from_channel_list(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
     monkeypatch.setenv("FRAMES_BEARER_ALLOW_UNSIGNED", "true")
 
@@ -1037,9 +1035,7 @@ async def test_slack_read_accepts_private_channel_absent_from_channel_list(
     assert response.json()["messages"] == []
 
 
-async def test_slack_read_missing_info_scope_uses_split_channel_lists(
-    tmp_path, monkeypatch
-):
+async def test_slack_read_missing_info_scope_uses_split_channel_lists(tmp_path, monkeypatch):
     monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
     monkeypatch.setenv("FRAMES_BEARER_ALLOW_UNSIGNED", "true")
     requested_types: list[str] = []
@@ -1231,9 +1227,7 @@ async def test_slack_channel_listing_accepts_legacy_raw_cursor(monkeypatch):
     requests: list[tuple[str, str]] = []
 
     def handler(request: httpx.Request) -> Response:
-        requests.append(
-            (request.url.params["types"], request.url.params.get("cursor", ""))
-        )
+        requests.append((request.url.params["types"], request.url.params.get("cursor", "")))
         return Response(
             200,
             json={
@@ -1246,9 +1240,7 @@ async def test_slack_channel_listing_accepts_legacy_raw_cursor(monkeypatch):
     _install_mock_client(monkeypatch, handler)
     slack = SlackClient(access_token="token", api_base_url="https://slack.test/api")
 
-    channels, next_cursor = await slack.list_channels(
-        limit=10, cursor="legacy-slack-cursor"
-    )
+    channels, next_cursor = await slack.list_channels(limit=10, cursor="legacy-slack-cursor")
 
     assert channels == []
     assert next_cursor == "private:"

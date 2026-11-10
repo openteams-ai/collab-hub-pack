@@ -51,8 +51,12 @@ from .runs import (  # the execution package reaches the API through the run rou
 
 router = APIRouter(prefix="/cogs/installs", tags=["cogs"])
 
-UNAVAILABLE = {503: {"model": CogErrorResponse, "description": "This hub records no installs: it has no database "
-                                                               "and no runs.track_path."}}
+UNAVAILABLE = {
+    503: {
+        "model": CogErrorResponse,
+        "description": "This hub records no installs: it has no database and no runs.track_path.",
+    }
+}
 NOT_FOUND = {404: {"model": CogErrorResponse, "description": "No such install of the caller's organization."}}
 
 INSTALL_ID_PATTERN = r"^inst-[0-9a-f]{12}$"
@@ -121,15 +125,29 @@ def _status(row: InstallRow, events=None) -> InstallStatus:
     card = row.card or {}
     kind = card.get("kind")
     return InstallStatus(
-        id=row.id, reference=row.reference, digest=row.digest, cog_id=row.cog_id, state=row.state,
-        invokable=row.invokable, failed_step=row.failed_step, failure=row.failure, binding_id=row.binding_id,
-        binding=dict(row.binding) if row.binding is not None else None, lock_digest=row.lock_digest,
-        picked_up_by=row.controller, requested_by=row.requested_by,
-        uninstall_requested_by=row.uninstall_requested_by, created_at=_when(row.created_at),
-        updated_at=_when(row.updated_at), kind=kind if isinstance(kind, str) else None,
-        events=None if events is None else [
+        id=row.id,
+        reference=row.reference,
+        digest=row.digest,
+        cog_id=row.cog_id,
+        state=row.state,
+        invokable=row.invokable,
+        failed_step=row.failed_step,
+        failure=row.failure,
+        binding_id=row.binding_id,
+        binding=dict(row.binding) if row.binding is not None else None,
+        lock_digest=row.lock_digest,
+        picked_up_by=row.controller,
+        requested_by=row.requested_by,
+        uninstall_requested_by=row.uninstall_requested_by,
+        created_at=_when(row.created_at),
+        updated_at=_when(row.updated_at),
+        kind=kind if isinstance(kind, str) else None,
+        events=None
+        if events is None
+        else [
             InstallEventStatus(type=e.event_type, occurred_at=_when(e.occurred_at), payload=dict(e.payload))
-            for e in events],
+            for e in events
+        ],
     )
 
 
@@ -153,8 +171,9 @@ def _location_key(row: CogArtifact) -> tuple:
     return (row.removed_at is not None, row.pushed_at is None, -pushed, row.source_id, row.repository)
 
 
-def _from_catalog(body: InstallRequest, store: CogCatalogStore, registry_host: str | None
-                  ) -> tuple[CogArtifact, str] | JSONResponse:
+def _from_catalog(
+    body: InstallRequest, store: CogCatalogStore, registry_host: str | None
+) -> tuple[CogArtifact, str] | JSONResponse:
     """The catalog row an install pins, and the reference it will pull: the hub's own when it serves pulls."""
     if body.reference is not None:
         try:
@@ -163,64 +182,100 @@ def _from_catalog(body: InstallRequest, store: CogCatalogStore, registry_host: s
             return error_response(status.HTTP_422_UNPROCESSABLE_CONTENT, "reference_invalid", str(exc))
         rows = [row for row in store.locations(wanted.digest) if row.status == STATUS_INDEXED]
         if not rows:
-            return error_response(status.HTTP_404_NOT_FOUND, "cog_version_not_found",
-                                  f"The catalog holds no Cog at {wanted.digest}")
+            return error_response(
+                status.HTTP_404_NOT_FOUND, "cog_version_not_found", f"The catalog holds no Cog at {wanted.digest}"
+            )
         preferred = sorted(rows, key=_location_key)
         row = next((r for r in preferred if r.repository == wanted.repository), preferred[0])
     else:
-        versions = [row for row in store.list_versions(body.cog_id, include_removed=False)
-                    if row.status == STATUS_INDEXED]
+        versions = [
+            row for row in store.list_versions(body.cog_id, include_removed=False) if row.status == STATUS_INDEXED
+        ]
         if body.digest is not None:
             versions = [row for row in versions if row.digest == body.digest]
         if not versions:
             code = "cog_version_not_found" if body.digest else "cog_not_found"
-            return error_response(status.HTTP_404_NOT_FOUND, code,
-                                  f"The catalog holds no {'such version of ' if body.digest else ''}{body.cog_id}")
+            return error_response(
+                status.HTTP_404_NOT_FOUND,
+                code,
+                f"The catalog holds no {'such version of ' if body.digest else ''}{body.cog_id}",
+            )
         row = sorted(versions, key=_location_key)[0]
     if not row.present:
-        return error_response(status.HTTP_409_CONFLICT, "cog_version_removed",
-                              f"{row.digest} has been removed from every registry the catalog indexes")
+        return error_response(
+            status.HTTP_409_CONFLICT,
+            "cog_version_removed",
+            f"{row.digest} has been removed from every registry the catalog indexes",
+        )
     return row, client_reference(row, registry_host)
 
 
-@router.post("", status_code=status.HTTP_202_ACCEPTED, response_model=InstallStatus,
-             summary="Install a Cog by digest", responses=UNAVAILABLE)
-def install_cog(body: InstallRequest, auth: AuthDep, service: ServiceDep, catalog: CatalogDep,
-                registry_host: RegistryHostDep) -> InstallStatus | JSONResponse:
+@router.post(
+    "",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=InstallStatus,
+    summary="Install a Cog by digest",
+    responses=UNAVAILABLE,
+)
+def install_cog(
+    body: InstallRequest, auth: AuthDep, service: ServiceDep, catalog: CatalogDep, registry_host: RegistryHostDep
+) -> InstallStatus | JSONResponse:
     """Ask for a Cog to be installed on this hub: pinned by digest from the catalog, fetched, bound by its own
     `resolve` and checked by a run controller. Answers at once, `published`; `GET` shows what it reaches."""
     if service.installs is None:
-        return error_response(status.HTTP_503_SERVICE_UNAVAILABLE, "installs_unavailable",
-                              "this hub records no installs: it has no database and no runs.track_path")
+        return error_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "installs_unavailable",
+            "this hub records no installs: it has no database and no runs.track_path",
+        )
     if body.package is not None:
         refusal = service.package_refusal(body.package)
         if refusal is not None:
-            return error_response(status.HTTP_422_UNPROCESSABLE_CONTENT, "cog_not_launchable",
-                                  f"Cannot install {body.package}: {refusal}")
+            return error_response(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "cog_not_launchable", f"Cannot install {body.package}: {refusal}"
+            )
         package = service.packages.resolve(body.package)
-        row = InstallRow(id=new_install_id(), org_id=auth.org_id, reference=package.name, digest=package.digest,
-                         cog_id=package.name, card={"kind": "package", "ops": {"lifecycle": ["serve"]}},
-                         requested_by=auth.user)
+        row = InstallRow(
+            id=new_install_id(),
+            org_id=auth.org_id,
+            reference=package.name,
+            digest=package.digest,
+            cog_id=package.name,
+            card={"kind": "package", "ops": {"lifecycle": ["serve"]}},
+            requested_by=auth.user,
+        )
     else:
         found = _from_catalog(body, catalog, registry_host)
         if isinstance(found, JSONResponse):
             return found
         artifact, reference = found
-        row = InstallRow(id=new_install_id(), org_id=auth.org_id, reference=reference, digest=artifact.digest,
-                         cog_id=artifact.cog_id, card=dict(artifact.card or {}), requested_by=auth.user)
+        row = InstallRow(
+            id=new_install_id(),
+            org_id=auth.org_id,
+            reference=reference,
+            digest=artifact.digest,
+            cog_id=artifact.cog_id,
+            card=dict(artifact.card or {}),
+            requested_by=auth.user,
+        )
     try:
         created = service.installs.create(row)
     except InstallExists:
         existing = service.installs.find(auth.org_id, digest=row.digest)
         held = f"{existing.id} ({existing.state})" if existing else "another install"
-        return error_response(status.HTTP_409_CONFLICT, "already_installed", f"{row.digest} is installed as {held}",
-                              {"install": existing.id if existing else None})
+        return error_response(
+            status.HTTP_409_CONFLICT,
+            "already_installed",
+            f"{row.digest} is installed as {held}",
+            {"install": existing.id if existing else None},
+        )
     return _status(created)
 
 
 @router.get("", response_model=InstallPage, summary="List installs", responses=UNAVAILABLE)
 def list_installs(
-    auth: AuthDep, service: ServiceDep,
+    auth: AuthDep,
+    service: ServiceDep,
     install_state: Annotated[str | None, Query(alias="state", description="Only installs in this state.")] = None,
     include_uninstalled: Annotated[bool, Query()] = False,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -231,13 +286,19 @@ def list_installs(
     if service.installs is None:
         return InstallPage(items=[])
     if install_state is not None and install_state not in STATES:
-        return error_response(status.HTTP_422_UNPROCESSABLE_CONTENT, "validation_error",
-                              f"state is one of {', '.join(STATES)}")
-    rows = service.installs.list(org_id=auth.org_id, state=install_state,
-                                 include_uninstalled=include_uninstalled or install_state == "uninstalled",
-                                 limit=limit + 1, offset=offset)
-    return InstallPage(items=[_status(row) for row in rows[:limit]],
-                       next_offset=offset + limit if len(rows) > limit else None)
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "validation_error", f"state is one of {', '.join(STATES)}"
+        )
+    rows = service.installs.list(
+        org_id=auth.org_id,
+        state=install_state,
+        include_uninstalled=include_uninstalled or install_state == "uninstalled",
+        limit=limit + 1,
+        offset=offset,
+    )
+    return InstallPage(
+        items=[_status(row) for row in rows[:limit]], next_offset=offset + limit if len(rows) > limit else None
+    )
 
 
 def _visible(service: RunService, install_id: str, auth: AuthContext) -> InstallRow | None:
@@ -247,8 +308,12 @@ def _visible(service: RunService, install_id: str, auth: AuthContext) -> Install
     return row if row is not None and row.org_id == auth.org_id else None
 
 
-@router.get("/{install_id}", response_model=InstallStatus, summary="One install, with its events",
-            responses={**NOT_FOUND, **UNAVAILABLE})
+@router.get(
+    "/{install_id}",
+    response_model=InstallStatus,
+    summary="One install, with its events",
+    responses={**NOT_FOUND, **UNAVAILABLE},
+)
 def get_install(install_id: InstallId, auth: AuthDep, service: ServiceDep) -> InstallStatus | JSONResponse:
     """The install as it stands, with every move its controller recorded: what it reached, and what failed."""
     row = _visible(service, install_id, auth)
@@ -257,8 +322,13 @@ def get_install(install_id: InstallId, auth: AuthDep, service: ServiceDep) -> In
     return _status(row, service.installs.events(install_id))
 
 
-@router.delete("/{install_id}", status_code=status.HTTP_202_ACCEPTED, response_model=InstallStatus,
-               summary="Uninstall a Cog", responses={**NOT_FOUND, **UNAVAILABLE})
+@router.delete(
+    "/{install_id}",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=InstallStatus,
+    summary="Uninstall a Cog",
+    responses={**NOT_FOUND, **UNAVAILABLE},
+)
 def uninstall_cog(install_id: InstallId, auth: AuthDep, service: ServiceDep) -> InstallStatus | JSONResponse:
     """Ask for the install's removal: the controller removes every runtime resource it created and records it
     `uninstalled`. Answers 202 with the install as it stands."""

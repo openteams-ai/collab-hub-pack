@@ -254,6 +254,17 @@ def case_features(r: Rendered) -> None:
     }, flags
 
 
+def case_sharepoint(r: Rendered) -> None:
+    # values.yaml numbers reach templates as floats: without `| int64` the caps
+    # render as 2.62144e+07, which the API's config refuses at startup.
+    for name, want in (
+        ("COLLAB_HUB_API__CONNECTORS__SHAREPOINT__MAX_DOWNLOAD_BYTES", "26214400"),
+        ("COLLAB_HUB_API__CONNECTORS__SHAREPOINT__EXTRACTION_MEMORY_LIMIT_BYTES", "268435456"),
+    ):
+        value = r.value(name)
+        assert value == want, f"{name}: {value}"
+
+
 SERVE_PREFIX = "COLLAB_HUB_API__COGS__SERVE__"
 
 
@@ -275,6 +286,15 @@ def case_publish_with_indexer(r: Rendered) -> None:
     }, publish
     assert r.indexer is not None
     assert not [n for n in r.indexer.env if n.startswith("COLLAB_HUB_API__COGS__PUBLISH__")], sorted(r.indexer.env)
+
+
+def case_account_link_with_indexer(r: Rendered) -> None:
+    # The account link (issue #275) is a page footer, and only the API serves
+    # pages: the API replicas carry it, the indexer carries nothing.
+    name = "COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL"
+    assert r.value(name) == "https://billing.example.com/account", r.value(name)
+    assert r.indexer is not None
+    assert name not in r.indexer.env, sorted(r.indexer.env)
 
 
 def case_serve_with_indexer(r: Rendered) -> None:
@@ -468,8 +488,10 @@ def case_run_controller_remote_artifacts(r: Rendered) -> None:
 
 
 CASES = {
+    "sharepoint": case_sharepoint,
     "serve-off": case_serve_off,
     "serve-with-indexer": case_serve_with_indexer,
+    "account-link-with-indexer": case_account_link_with_indexer,
     "publish-with-indexer": case_publish_with_indexer,
     "serve-nebariapp": case_serve_nebariapp,
     "serve-nebariapp-no-timeout": case_serve_nebariapp_no_timeout,

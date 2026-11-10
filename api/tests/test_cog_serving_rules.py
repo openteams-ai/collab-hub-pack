@@ -386,9 +386,7 @@ async def test_a_manifest_read_writes_its_descriptors_once(hub: Hub, monkeypatch
     headers = await hub.pull_token(REPO)
     writes: list[str] = []
     record = hub.catalog.record_manifest_blobs
-    monkeypatch.setattr(
-        hub.catalog, "record_manifest_blobs", lambda *args: (writes.append(args[2]), record(*args))[1]
-    )
+    monkeypatch.setattr(hub.catalog, "record_manifest_blobs", lambda *args: (writes.append(args[2]), record(*args))[1])
     for method, reference in (("HEAD", "latest"), ("GET", ALPHA.digest), ("GET", "latest"), ("HEAD", ALPHA.digest)):
         assert (await hub.request(method, f"/v2/{REPO}/manifests/{reference}", headers=headers)).status_code == 200
     assert writes == [ALPHA.digest]
@@ -409,6 +407,7 @@ async def test_a_reader_that_stops_reading_does_not_keep_the_upstream_open(hub: 
     headers = await hub.pull_token(REPO)
     assert (await hub.get(f"/v2/{REPO}/manifests/latest", headers=headers)).status_code == 200
     big = sha256(large.files["model.bin"][1])
+
     # The source's body as a real stream, a chunk at a time, so the relay cannot have drained it early.
     async def body(data: bytes):
         for offset in range(0, len(data), 65536):

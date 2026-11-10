@@ -162,9 +162,7 @@ class GroupMembershipClient:
 
         group_id = self._group_ids.get(group_path)
         if not group_id:
-            raise GroupMembershipError(
-                f"{group_path!r} is not a group this deployment manages from the admin panel"
-            )
+            raise GroupMembershipError(f"{group_path!r} is not a group this deployment manages from the admin panel")
         return group_id
 
     def _request(self, method: str, path: str, *, params: dict | None = None):

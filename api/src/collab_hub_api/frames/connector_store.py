@@ -42,9 +42,7 @@ class PostgresConnectorStore:
 
         try:
             with self._db.connection() as conn:
-                rows = conn.execute(
-                    "SELECT connector FROM collab_connector_state WHERE enabled = false"
-                ).fetchall()
+                rows = conn.execute("SELECT connector FROM collab_connector_state WHERE enabled = false").fetchall()
         except psycopg.errors.UndefinedTable:
             # A database that predates this migration has switched nothing off.
             # Failing closed here would disable every connector on a deployment

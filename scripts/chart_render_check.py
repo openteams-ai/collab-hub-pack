@@ -315,7 +315,16 @@ def case_root_redirect(r: Rendered) -> None:
     assert len(routes) == 1, routes
     spec = routes[0]["spec"]
     assert spec["hostnames"] == ["example.org"], spec["hostnames"]
-    assert spec["parentRefs"] == [{"name": "nebari-gateway", "namespace": "envoy-gateway-system"}], spec["parentRefs"]
+    # group and kind are written out: the API server fills them in anyway, and
+    # leaving them to it makes ArgoCD report the route as drifted forever.
+    assert spec["parentRefs"] == [
+        {
+            "group": "gateway.networking.k8s.io",
+            "kind": "Gateway",
+            "name": "nebari-gateway",
+            "namespace": "envoy-gateway-system",
+        }
+    ], spec["parentRefs"]
     assert spec["rules"] == [
         {
             "matches": [{"path": {"type": "Exact", "value": "/"}}],
@@ -341,7 +350,13 @@ def case_root_redirect_listener(r: Rendered) -> None:
     route = kind(r, "HTTPRoute")
     assert route["metadata"]["namespace"] == "nebari-system", route["metadata"]
     assert route["spec"]["parentRefs"] == [
-        {"name": "nebari-gateway", "namespace": "envoy-gateway-system", "sectionName": "tls-landing"}
+        {
+            "group": "gateway.networking.k8s.io",
+            "kind": "Gateway",
+            "name": "nebari-gateway",
+            "namespace": "envoy-gateway-system",
+            "sectionName": "tls-landing",
+        }
     ], route["spec"]["parentRefs"]
 
 

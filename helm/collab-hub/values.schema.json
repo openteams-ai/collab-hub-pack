@@ -1195,6 +1195,12 @@
                   },
                   "port": {
                     "type": "integer"
+                  },
+                  "group": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string"
                   }
                 },
                 "required": [

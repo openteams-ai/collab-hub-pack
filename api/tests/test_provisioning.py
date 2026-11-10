@@ -179,9 +179,7 @@ def test_live_two_requests_for_one_address_yield_one_creator(live_db):
     # not issuance. Two live invitations for one address stay legal (#91's
     # scope, pinned in test_operator_invite_page.py).
     with live_db.connection() as conn:
-        rows = conn.execute(
-            "SELECT id FROM collab_invitations WHERE id IN ('inv-race-a', 'inv-race-b')"
-        ).fetchall()
+        rows = conn.execute("SELECT id FROM collab_invitations WHERE id IN ('inv-race-a', 'inv-race-b')").fetchall()
     assert len(rows) == 2
 
 
@@ -319,8 +317,7 @@ def test_the_forwards_only_guard_is_in_the_write_not_in_front_of_it():
 
     before_update = body[: body.index("UPDATE")]
     assert "_read_on" not in before_update, (
-        "advance must not read before it writes -- a snapshot taken here is what the "
-        "defect was made of"
+        "advance must not read before it writes -- a snapshot taken here is what the defect was made of"
     )
 
 

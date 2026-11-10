@@ -315,17 +315,13 @@ def offending_web_routes(
     return offenders
 
 
-def unprotected_web_routes(
-    routes: Iterable[object], *, prefixes: Sequence[str] | None = None
-) -> list[str]:
+def unprotected_web_routes(routes: Iterable[object], *, prefixes: Sequence[str] | None = None) -> list[str]:
     """The offending paths, sorted — the readable form of the check."""
 
     return sorted({getattr(route, "path", "") for route, _ in offending_web_routes(routes, prefixes=prefixes)})
 
 
-def stray_page_routes(
-    routes: Iterable[object], *, prefixes: Sequence[str] | None = None
-) -> list[str]:
+def stray_page_routes(routes: Iterable[object], *, prefixes: Sequence[str] | None = None) -> list[str]:
     """Browser-page routes registered outside every guarded prefix.
 
     A page is identified by the thing that makes it one: it depends on
@@ -358,9 +354,7 @@ def stray_page_routes(
     return sorted(set(stray))
 
 
-def stale_csrf_exemptions(
-    routes: Iterable[object], *, prefixes: Sequence[str] | None = None
-) -> list[str]:
+def stale_csrf_exemptions(routes: Iterable[object], *, prefixes: Sequence[str] | None = None) -> list[str]:
     """Declared CSRF exemptions that a mounted route contradicts.
 
     An entry in :data:`~.surface.CSRF_ENFORCED_IN_ROUTE` is a reviewed claim:
@@ -444,9 +438,7 @@ def stale_csrf_exemptions(
     return sorted(set(stale))
 
 
-def verify_csrf_exemptions_are_live(
-    routes: Iterable[object], *, prefixes: Sequence[str] | None = None
-) -> None:
+def verify_csrf_exemptions_are_live(routes: Iterable[object], *, prefixes: Sequence[str] | None = None) -> None:
     """Refuse a rollout whose CSRF exemptions no longer describe their routes."""
 
     stale = stale_csrf_exemptions(routes, prefixes=prefixes)
@@ -460,9 +452,7 @@ def verify_csrf_exemptions_are_live(
     )
 
 
-def verify_web_route_protection(
-    routes: Iterable[object], *, prefixes: Sequence[str] | None = None
-) -> None:
+def verify_web_route_protection(routes: Iterable[object], *, prefixes: Sequence[str] | None = None) -> None:
     """Refuse to serve a surface with an unprotected route. Raises on offenders.
 
     **This is a rollout gate, not a runtime control**, and the distinction is
@@ -585,9 +575,7 @@ def _platform_role_from_source(request: Request, user: str):
     resolve_principal = getattr(store, "resolve_principal", None)
     if resolve_principal is not None:
         return resolve_principal(user).platform_role
-    resolver: PlatformRoleResolver | None = getattr(
-        request.app.state, PLATFORM_ROLE_RESOLVER_STATE_ATTR, None
-    )
+    resolver: PlatformRoleResolver | None = getattr(request.app.state, PLATFORM_ROLE_RESOLVER_STATE_ATTR, None)
     if resolver is not None:
         return resolver(user)
     raise WebAuthorizationUnavailable(
@@ -596,9 +584,7 @@ def _platform_role_from_source(request: Request, user: str):
     )
 
 
-def require_operator(
-    request: Request, session: WebSession = Depends(require_web_session)
-) -> WebSession:
+def require_operator(request: Request, session: WebSession = Depends(require_web_session)) -> WebSession:
     """Dependency for pages requiring ``platform_role = 'operator'``.
 
     Resolved per request — a revoked operator is refused on their next
@@ -620,9 +606,7 @@ def _org_store(request: Request) -> OrgStore:
     return store
 
 
-def require_org_owner(
-    request: Request, session: WebSession = Depends(require_web_session)
-) -> WebSession:
+def require_org_owner(request: Request, session: WebSession = Depends(require_web_session)) -> WebSession:
     """Dependency for pages requiring org ``role = 'owner'``.
 
     Membership is read live from the org store (a plain ``def`` dependency,
@@ -637,9 +621,7 @@ def require_org_owner(
     return session
 
 
-async def require_csrf(
-    request: Request, session: WebSession = Depends(require_web_session)
-) -> WebSession:
+async def require_csrf(request: Request, session: WebSession = Depends(require_web_session)) -> WebSession:
     """Dependency: every POST of this surface passes or it does not run.
 
     The token is read from the ``X-CSRF-Token`` header or the ``csrf_token``

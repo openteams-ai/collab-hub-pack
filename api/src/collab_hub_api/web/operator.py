@@ -62,9 +62,7 @@ from .session import WebSession
 __all__ = ["operator_context"]
 
 
-def operator_context(
-    request: Request, session: WebSession = Depends(require_operator)
-) -> AuthContext:
+def operator_context(request: Request, session: WebSession = Depends(require_operator)) -> AuthContext:
     """The caller's :class:`~..frames.auth.AuthContext`, for an operator action.
 
     The bridge between the two authentication axes: the browser surface

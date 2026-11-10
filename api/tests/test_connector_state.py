@@ -19,6 +19,7 @@ def configured() -> ConnectorsConfig:
             "slack": {"broker_token_url": "https://broker.example.com/token"},
             "github": {"static_access_token": "gh-not-a-real-token"},
             "google": {"broker_token_url": "https://broker.example.com/token"},
+            "sharepoint": {"broker_token_url": "https://broker.example.com/microsoft/token"},
         }
     )
 
@@ -31,6 +32,18 @@ def test_a_disabled_connector_looks_unconfigured_to_everything_downstream():
     # Its neighbours are untouched.
     assert result.github.static_access_token == "gh-not-a-real-token"
     assert result.google.broker_token_url == "https://broker.example.com/token"
+    assert result.sharepoint.broker_token_url == "https://broker.example.com/microsoft/token"
+
+
+def test_sharepoint_is_switchable_and_keeps_its_non_credential_settings():
+    result = apply_disabled(configured(), {"sharepoint"})
+
+    assert result.sharepoint.broker_token_url == ""
+    assert result.sharepoint.static_access_token == ""
+    # Base URL and limits are not credentials; they stay so the section still
+    # reads as "configured endpoint, no token" downstream.
+    assert result.sharepoint.api_base_url == "https://graph.microsoft.com/v1.0"
+    assert result.sharepoint.include_personal_onedrive is False
 
 
 def test_disabling_nothing_returns_the_configuration_unchanged():
@@ -40,7 +53,7 @@ def test_disabling_nothing_returns_the_configuration_unchanged():
 
 
 def test_an_unknown_name_cannot_disable_something_by_accident():
-    result = apply_disabled(configured(), {"sharepoint"})
+    result = apply_disabled(configured(), {"fax"})
 
     assert result.slack.broker_token_url == "https://broker.example.com/token"
 

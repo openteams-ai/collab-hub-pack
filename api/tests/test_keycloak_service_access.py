@@ -89,9 +89,7 @@ def test_a_same_named_group_at_the_wrong_path_does_not_satisfy_the_config():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith(TOKEN_PATH):
             return _token(request)
-        return httpx.Response(
-            200, json=[{"id": "group-elsewhere", "name": "llm", "path": "/somewhere/llm"}]
-        )
+        return httpx.Response(200, json=[{"id": "group-elsewhere", "name": "llm", "path": "/somewhere/llm"}])
 
     granter = _granter(handler)
     with pytest.raises(ServiceAccessError, match="does not exist in the realm"):
@@ -100,7 +98,7 @@ def test_a_same_named_group_at_the_wrong_path_does_not_satisfy_the_config():
 
 
 def test_a_missing_group_names_itself_in_the_error():
-    """"A group is missing" makes the reader compare two lists by hand."""
+    """ "A group is missing" makes the reader compare two lists by hand."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith(TOKEN_PATH):
@@ -232,9 +230,7 @@ def test_groups_without_a_credential_refuses_to_start():
     from collab_hub_api.config import Config, build_service_access_granter
 
     with pytest.raises(RuntimeError, match="frames.service_access.keycloak"):
-        build_service_access_granter(
-            Config.parse({"frames": {"service_access": {"grant_on_acceptance": ["/llm"]}}})
-        )
+        build_service_access_granter(Config.parse({"frames": {"service_access": {"grant_on_acceptance": ["/llm"]}}}))
 
 
 def test_the_refusal_names_the_groups_and_the_missing_fields():

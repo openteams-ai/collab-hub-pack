@@ -20,7 +20,7 @@ The API is a FastAPI service exposing:
 - **Frames** — workspace-scoped saved Markdown context, suggestions, and
   active-frame selection.
 - **Connectors** — read access to workspace tools: Slack, Gmail, Google
-  Calendar, and Google Drive.
+  Calendar, Google Drive, GitHub, Notion, and SharePoint.
 - **User directory** — org/workspace identity resolved from Keycloak.
 - **Scheduled tasks**, **usage**, and an **MCP server** exposing the above to
   MCP-speaking clients.

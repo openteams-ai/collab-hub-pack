@@ -22,8 +22,9 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
-from cog_registry_fakes import HOST, URL, FakeOCIFactory, manifest_for
+from cog_registry_fakes import API_URL, HOST, URL, FakeOCIFactory, manifest_for
 
 from collab_hub_api.cogs.adapters.static import MAX_TAGS_PER_REPOSITORY
 from collab_hub_api.cogs.bundle import COG_ENTRY_FILE, read_cog_bundle
@@ -54,6 +55,7 @@ from collab_hub_api.cogs.oci import (
 from collab_hub_api.cogs.registry import (
     ArtifactRef,
     CogRegistrySourceConfig,
+    RegistrySourceAuthError,
     RegistrySourceError,
     build_registry_sources,
 )
@@ -397,10 +399,11 @@ class FlakySource:
         self.host = inner.host
         self.fail_repositories = fail_repositories
         self.fail_repo = fail_repo
+        self.repositories_error: Exception = RegistrySourceError("listing API answered HTTP 502")
 
     async def list_repositories(self):
         if self.fail_repositories:
-            raise RegistrySourceError("listing API answered HTTP 502")
+            raise self.repositories_error
         return await self.inner.list_repositories()
 
     async def list_artifacts(self, repo):
@@ -432,9 +435,62 @@ async def test_source_enumeration_failure_skips_removal_and_continues():
     summary = await broken.sweep()
 
     assert summary.sources_failed == 1 and summary.removed == 0
-    # Class name only: adapter error messages may quote configured URLs.
+    # Class name only: a generic adapter error's message may quote configured
+    # URLs. (RegistrySourceAuthError is the exception; see the next two tests.)
     assert summary.errors == [f"{SOURCE_ID}: list_repositories: RegistrySourceError"]
     assert all(row.present for row in store.list_current()) and len(store.list_current()) == 2
+
+
+async def test_refused_credential_message_reaches_the_sweep_summary():
+    indexer, store, _client = make()
+    await indexer.sweep()
+    (real,) = indexer.sources
+
+    refused = FlakySource(real, fail_repositories=True)
+    refused.repositories_error = RegistrySourceAuthError(
+        "source 'x': the registry API refused the configured credential for /projects/cogs/repositories (HTTP 403)"
+        "; the credential is probably missing the project-scoped repository:list permission"
+    )
+    summary = await CogIndexer(store, [refused]).sweep()
+
+    assert summary.sources_failed == 1 and summary.removed == 0
+    # The auth error's contract is that its message names only the path and
+    # status, so unlike other adapter errors it is kept: it is the one place
+    # an operator learns which permission the robot account lacks.
+    (error,) = summary.errors
+    assert error.startswith(f"{SOURCE_ID}: list_repositories: RegistrySourceAuthError: ")
+    assert "repository:list" in error
+
+
+async def test_harbor_403_names_the_missing_permission_in_the_sweep_summary(caplog):
+    # End to end through the real Harbor adapter: the operator's view of the
+    # pull-only-robot failure is the sweep summary and the log line, not
+    # str(exc) off the adapter, and the credential must reach neither.
+    credentials = {"username": "robot$cogs+indexer", "password": "robot-secret-value"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"errors": [{"code": "FORBIDDEN", "message": "forbidden"}]})
+
+    config = CogRegistrySourceConfig(
+        id="harbor-dev", kind="harbor", url=URL, api_url=API_URL, projects=["cogs"], credentials=credentials
+    )
+    (source,) = build_registry_sources(
+        [config], oci_client_factory=FakeOCIFactory({}), http_transport=httpx.MockTransport(handler)
+    )
+    store = InMemoryCogCatalogStore()
+
+    with caplog.at_level(logging.WARNING, logger="frames_server.cogs.indexer"):
+        summary = await CogIndexer(store, [source]).sweep()
+
+    assert summary.sources_failed == 1
+    (error,) = summary.errors
+    assert error.startswith("harbor-dev: list_repositories: RegistrySourceAuthError: ")
+    assert "/projects/cogs/repositories (HTTP 403)" in error
+    assert "repository:list" in error
+    assert credentials["password"] not in error and "forbidden" not in error
+    logged = "\n".join(record.getMessage() + str(record.__dict__.get("reason", "")) for record in caplog.records)
+    assert "repository:list" in logged
+    assert credentials["password"] not in logged
 
 
 async def test_one_repository_failing_reconciles_the_rest_but_skips_removal():

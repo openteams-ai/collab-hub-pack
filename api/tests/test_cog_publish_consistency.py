@@ -393,8 +393,11 @@ async def test_a_moved_tag_leaves_the_digest_it_was_on_and_a_put_by_digest_does_
     assert served.headers["docker-content-digest"] == newer.digest and served.content == newer.manifest
     listed = (await hub.get(f"/v2/{REPO}/tags/list", headers=client.headers)).json()["tags"]
     assert listed == ["1.0.0", "latest"]
-    by_tag = {tag: v["digest"] for v in (await hub.get(f"/v1/cogs/{COG_ID}", headers=ALICE)).json()["versions"]
-              for tag in v["tags"]}
+    by_tag = {
+        tag: v["digest"]
+        for v in (await hub.get(f"/v1/cogs/{COG_ID}", headers=ALICE)).json()["versions"]
+        for tag in v["tags"]
+    }
     assert by_tag == {"1.0.0": older.digest, "latest": newer.digest}
     # Moved back by tag, it is on the older digest alone again.
     assert (await client.manifest(older, "latest")).status_code == 201
@@ -680,6 +683,7 @@ async def test_the_slot_is_taken_first_and_a_session_past_the_cap_is_cancelled_a
     now = [datetime.now(UTC)]
     client, store = await pusher(hub), store_of(hub)
     store.clock = lambda: now[0]
+
     async def start() -> httpx.Response:
         now[0] += timedelta(seconds=1)
         return await client.start()

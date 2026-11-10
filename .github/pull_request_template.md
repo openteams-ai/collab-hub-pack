@@ -1,10 +1,27 @@
-## Linked Issue
+Fixes #
 
-<!-- Link the parent issue with a closing keyword, e.g. "Fixes #123". -->
+SUMMARY_HERE
 
-## What's Changed
+<!-- reviewer-context -->
 
-<!-- What this PR does and how it addresses the issue. -->
+<!-- Everything above the review-context marker becomes the squash commit body.
+Add the issue number this fixes after 'Fixes #' (e.g. Fixes #123).
+Replace SUMMARY_HERE with a one to three short paragraph summary of
+the problem and resulting behavior, lasting compat or migration implications,
+and any release metadata (docs/pr-style-guide.md). -->
+
+<!-- Everything at and below the review-context marker is for reviewers
+and must be dropped by the merger (manually if merging from the web UI,
+or via running scripts/strip_pr_body.py if merging from the command line). -->
+
+## Validation
+
+<!-- State what you checked and the results. Note relevant gaps. -->
+
+## Additional context
+
+<!-- Include relevant risks, rollout details, screenshots, or demos.
+Remove this section if unused. -->
 
 ## Contribution Checklist
 

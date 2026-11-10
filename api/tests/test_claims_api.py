@@ -32,8 +32,16 @@ def _append(track, run_id, kind, **payload):
 def _worker_of(track, run_id, instance="s:0"):
     """A worker the controller started on the run: its token, with the hash the Track records."""
     token = run_tokens.mint()
-    _append(track, run_id, "worker_started", step="s", attempt=0, instance=instance, location="local",
-            run_token_sha256=run_tokens.digest(token))
+    _append(
+        track,
+        run_id,
+        "worker_started",
+        step="s",
+        attempt=0,
+        instance=instance,
+        location="local",
+        run_token_sha256=run_tokens.digest(token),
+    )
     return token
 
 
@@ -87,8 +95,9 @@ async def test_a_key_reserved_by_a_worker_that_was_replaced_is_outcome_unknown(r
     replay = await runs_client.post(f"/v1/claims/{key}/reserve", headers=_bearer(replacement))
     assert replay.status_code == 200 and replay.json()["state"] == "outcome_unknown"
     assert replay.json()["yours"] is False
-    refused = await runs_client.post(f"/v1/claims/{key}/commit", json={"envelope": ENVELOPE},
-                                     headers=_bearer(replacement))
+    refused = await runs_client.post(
+        f"/v1/claims/{key}/commit", json={"envelope": ENVELOPE}, headers=_bearer(replacement)
+    )
     assert refused.status_code == 409 and refused.json()["error"]["code"] == "claim_refused"
 
 
@@ -109,14 +118,16 @@ async def test_a_run_token_reaches_only_its_own_runs_keys_and_only_while_its_wor
     # Its own key, while it is up; not once the worker was stopped.
     assert (await runs_client.post(f"/v1/claims/{mine}:s:0/reserve", headers=_bearer(token))).status_code == 201
     _append(track, mine, "worker_stopped", step="s", attempt=0, instance="s:0")
-    stopped = await runs_client.post(f"/v1/claims/{mine}:s:0/commit", json={"envelope": ENVELOPE},
-                                     headers=_bearer(token))
+    stopped = await runs_client.post(
+        f"/v1/claims/{mine}:s:0/commit", json={"envelope": ENVELOPE}, headers=_bearer(token)
+    )
     assert stopped.status_code == 401
     assert (await runs_client.get(f"/v1/claims/{mine}:s:0", headers=_bearer(token))).status_code == 401
 
 
 async def test_a_commit_is_refused_without_a_reservation_or_with_something_that_is_no_envelope(
-        runs_client, runs_config):
+    runs_client, runs_config
+):
     track = SqliteTrackStore(runs_config.runs.track_path)
     run_id = await _run(runs_client, track)
     token = _worker_of(track, run_id)
@@ -125,8 +136,9 @@ async def test_a_commit_is_refused_without_a_reservation_or_with_something_that_
     assert never.status_code == 409 and "never reserved" in never.json()["error"]["message"]
     assert (await runs_client.get(f"/v1/claims/{key}", headers=_bearer(token))).status_code == 404
     await runs_client.post(f"/v1/claims/{key}/reserve", headers=_bearer(token))
-    invalid = await runs_client.post(f"/v1/claims/{key}/commit", json={"envelope": {"pause": True}},
-                                     headers=_bearer(token))
+    invalid = await runs_client.post(
+        f"/v1/claims/{key}/commit", json={"envelope": {"pause": True}}, headers=_bearer(token)
+    )
     assert invalid.status_code == 422 and invalid.json()["error"]["code"] == "envelope_invalid"
     malformed = await runs_client.post(f"/v1/claims/{key}/commit", json={"result": ENVELOPE}, headers=_bearer(token))
     assert malformed.status_code == 422
@@ -142,16 +154,19 @@ async def hardened_client(runs_config, monkeypatch):
     monkeypatch.setenv("DEV_AUTH_ORG", "dev-org")
     monkeypatch.setenv("DEV_AUTH_WORKSPACE", "default")
     values = runs_config.model_dump(mode="json")
-    values["security"] = {"paths": [rule.model_dump() for rule in recommended_path_rules()],
-                          "default_access": "authenticated"}
+    values["security"] = {
+        "paths": [rule.model_dump() for rule in recommended_path_rules()],
+        "default_access": "authenticated",
+    }
     app = make_app(Config.parse(values))
     async with app.router.lifespan_context(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             yield client
 
 
-async def test_the_claim_routes_take_the_run_token_under_the_hardened_map_and_nothing_else(hardened_client,
-                                                                                            runs_config):
+async def test_the_claim_routes_take_the_run_token_under_the_hardened_map_and_nothing_else(
+    hardened_client, runs_config
+):
     # The map's bearer auth would refuse a run token before the route saw it: the claim routes authenticate
     # themselves, outside it, and a request with no run token is still a 401 in the API's envelope.
     track = SqliteTrackStore(runs_config.runs.track_path)
@@ -169,8 +184,10 @@ async def test_a_run_whose_step_ended_outcome_unknown_is_not_retried_until_recon
     track = SqliteTrackStore(runs_config.runs.track_path)
     unknown = ResultEnvelope.failure("outcome-unknown", "the key was reserved by a worker that never committed")
     answers = iter([unknown, ResultEnvelope.success({"sent": "once"})])
-    controller = RunController(LifecycleRunner(executor=InMemoryCogExecutor(
-        {"echo": lambda e, v, **f: next(answers)}), track=track), poll_interval=0.01)
+    controller = RunController(
+        LifecycleRunner(executor=InMemoryCogExecutor({"echo": lambda e, v, **f: next(answers)}), track=track),
+        poll_interval=0.01,
+    )
     run_id = (await runs_client.post("/v1/runs", json=ECHO)).json()["id"]
     settle(controller)
     failed = (await runs_client.get(f"/v1/runs/{run_id}")).json()
@@ -207,17 +224,27 @@ async def test_on_the_hubs_database_the_claims_live_in_the_table_its_migrations_
                 conn.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
         run_collab_schema_migrations(database)  # collab_claims comes from migration 17
         package(tmp_path / "cogs", "echo")
-        config = Config.parse({
-            "storage": {"frames_path": str(tmp_path / "frames")},
-            "frames": {"postgres": {"url": POSTGRES_URL}, "active_state": {"backend": "memory"},
-                       "history": {"backend": "memory"}, "usage": {"backend": "memory"},
-                       "mcp_session_manager_enabled": False},
-            "tasks": {"backend": "memory"},
-            "runs": {"packages": [str(tmp_path / "cogs")]},
-        })
-        for name, value in {"FRAMES_UNSAFE_AUTH_ENABLED": "true", "DEV_AUTH_ENABLED": "true",
-                            "DEV_AUTH_USER": "dev-user", "DEV_AUTH_ORG": "dev-org",
-                            "DEV_AUTH_WORKSPACE": "default"}.items():
+        config = Config.parse(
+            {
+                "storage": {"frames_path": str(tmp_path / "frames")},
+                "frames": {
+                    "postgres": {"url": POSTGRES_URL},
+                    "active_state": {"backend": "memory"},
+                    "history": {"backend": "memory"},
+                    "usage": {"backend": "memory"},
+                    "mcp_session_manager_enabled": False,
+                },
+                "tasks": {"backend": "memory"},
+                "runs": {"packages": [str(tmp_path / "cogs")]},
+            }
+        )
+        for name, value in {
+            "FRAMES_UNSAFE_AUTH_ENABLED": "true",
+            "DEV_AUTH_ENABLED": "true",
+            "DEV_AUTH_USER": "dev-user",
+            "DEV_AUTH_ORG": "dev-org",
+            "DEV_AUTH_WORKSPACE": "default",
+        }.items():
             monkeypatch.setenv(name, value)
         app = make_app(config)
         track = PostgresTrackStore(database)
@@ -227,8 +254,9 @@ async def test_on_the_hubs_database_the_claims_live_in_the_table_its_migrations_
                 token = _worker_of(track, run_id)
                 key = f"{run_id}:s:0"
                 assert (await client.post(f"/v1/claims/{key}/reserve", headers=_bearer(token))).status_code == 201
-                committed = await client.post(f"/v1/claims/{key}/commit", json={"envelope": ENVELOPE},
-                                              headers=_bearer(token))
+                committed = await client.post(
+                    f"/v1/claims/{key}/commit", json={"envelope": ENVELOPE}, headers=_bearer(token)
+                )
                 assert committed.status_code == 200, committed.text
         claim = PostgresClaimStore(database).get(run_id, key)
         assert claim is not None and claim.state == "committed" and claim.envelope == ENVELOPE

@@ -643,6 +643,36 @@ connectors:
     notionVersion: "2022-06-28"
     # -- Timeout for broker and Notion API requests.
     requestTimeoutSeconds: 10
+  sharepoint:
+    # -- Keycloak broker token endpoint for the linked Microsoft identity (IdP
+    # alias `microsoft`). Normal hub users must also receive the broker client
+    # role `read-token` through their default role or group; otherwise Keycloak
+    # returns 403. See docs/sharepoint-connector.md.
+    brokerTokenUrl: ""
+    # -- Microsoft Graph API base URL. Override for local fake Graph API smoke tests.
+    apiBaseUrl: https://graph.microsoft.com/v1.0
+    # -- Timeout for broker, Graph search and metadata requests.
+    requestTimeoutSeconds: 15
+    # -- Timeout for file downloads and Office -> PDF conversion.
+    downloadTimeoutSeconds: 30
+    # -- Largest file (bytes) the read route downloads before extracting text.
+    # Larger files are reported as unsupported with their metadata.
+    maxDownloadBytes: 26214400
+    # -- Text extraction runs in a separate worker process, one at a time. A
+    # parse that overruns this deadline is killed and the file is reported as
+    # unsupported; the API keeps serving.
+    extractionTimeoutSeconds: 30
+    # -- Memory ceiling (bytes) for that worker. Keep it inside the pod's
+    # headroom: the chart's default memory limit is 512Mi.
+    extractionMemoryLimitBytes: 268435456
+    # -- Document reads (PDF and Office) are admitted one at a time, from before
+    # the download to after the parse, so a waiting read never holds a body. A
+    # read not admitted within this many seconds answers 503 with Retry-After.
+    extractionWaitSeconds: 10
+    # -- Whether search also returns files from each user's personal OneDrive.
+    # Off: SharePoint document libraries only, so a daily digest never surfaces
+    # someone's private drafts by default.
+    includePersonalOnedrive: false
 
 userDirectory:
   # -- Whether to configure Collab Hub API access to the hub user directory.
@@ -725,7 +755,8 @@ cogs:
     # -- ConfigMap holding the CA certificate(s) that signed the registries'
     # gateway-issued certificates (dev clusters run a private CA). Mounted
     # read-only at /etc/collab-hub/cogs-ca and passed to every source that
-    # does not set its own caBundlePath. Empty means system trust only.
+    # does not set its own caBundlePath. Empty means httpx's default: the
+    # certifi Mozilla bundle, or SSL_CERT_FILE / SSL_CERT_DIR when set.
     configMap: ""
     # -- Key in that ConfigMap holding the PEM bundle.
     key: ca.crt
@@ -815,6 +846,18 @@ cogs:
     # so this bounds the names an organization can hold through a registry
     # outage. Publishing again to a pending name is never refused by it.
     maxPendingRepositories: 20
+
+# The browser web surface (docs/web-surface.md). Enabling it -- the OIDC client,
+# its secret, the session secret -- goes through api.deployment.extraEnv, where
+# valueFrom is accepted; only the settings that are safe in a rendered manifest
+# live here.
+web:
+  # -- Where the signed-in navigation's "Account" link points: an external page
+  # (plan, usage, invoices) that an add-on provides. Empty (default) renders no
+  # link and needs no billing configuration. Must be an absolute https URL
+  # (http only on loopback) with no credentials; the API applies the full rule
+  # at startup. Becomes COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL on the API only.
+  accountPageUrl: ""
 
 # Feature flags for work in progress that is on main but not yet exposed. Every
 # flag is off until it is listed here and set to true; each entry becomes

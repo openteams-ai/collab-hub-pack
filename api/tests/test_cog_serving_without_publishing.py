@@ -124,14 +124,24 @@ def literal_error(given) -> dict:
             {"scope": "publish", "extra": True},
             [
                 literal_error("publish"),
-                {"type": "extra_forbidden", "loc": ["body", "extra"], "msg": "Extra inputs are not permitted",
-                 "input": True},
+                {
+                    "type": "extra_forbidden",
+                    "loc": ["body", "extra"],
+                    "msg": "Extra inputs are not permitted",
+                    "input": True,
+                },
             ],
         ),
         (
             {"scope": "pull", "extra": 1},
-            [{"type": "extra_forbidden", "loc": ["body", "extra"], "msg": "Extra inputs are not permitted",
-              "input": 1}],
+            [
+                {
+                    "type": "extra_forbidden",
+                    "loc": ["body", "extra"],
+                    "msg": "Extra inputs are not permitted",
+                    "input": 1,
+                }
+            ],
         ),
         ({"scope": None}, [literal_error(None)]),
     ],

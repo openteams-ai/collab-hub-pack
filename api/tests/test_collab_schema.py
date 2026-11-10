@@ -492,7 +492,8 @@ def test_migration_creates_the_claims_table():
     assert "worker text," in claims and "envelope jsonb," in claims
     assert "reserved_at timestamptz NOT NULL" in claims and "updated_at timestamptz NOT NULL" in claims
     assert "CREATE INDEX IF NOT EXISTS collab_claims_updated ON collab_claims (updated_at)" in " ".join(
-        server.statements)
+        server.statements
+    )
     # Appended as version 17: nothing earlier mentions it, and it alters nothing that exists.
     statements = dict(COLLAB_SCHEMA_MIGRATIONS)[17]
     assert all("ALTER" not in statement and "DROP" not in statement for statement in statements)

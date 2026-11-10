@@ -254,23 +254,26 @@ class PostgresPlatformRoleSync(_PlatformRoleSync):
         # row is read on a different connection from the one that writes,
         # so a hand-run grant landing in between must not be overwritten by
         # a decision taken against the row as it used to be.
-        return self._write(
-            AUDIT_ACTION_PLATFORM_ROLE_REVOKE,
-            user_id=user_id,
-            display=display,
-            sql="""
+        return (
+            self._write(
+                AUDIT_ACTION_PLATFORM_ROLE_REVOKE,
+                user_id=user_id,
+                display=display,
+                sql="""
                 UPDATE collab_platform_roles
                    SET status = %s
                  WHERE user_id = %s AND source = %s AND status = %s
                 """,
-            params=(
-                PLATFORM_ROLE_REVOKED,
-                user_id,
-                PLATFORM_ROLE_SOURCE_IDP,
-                PLATFORM_ROLE_ACTIVE,
-            ),
-            keep_last_operator=True,
-        ) != _KEPT_LAST_OPERATOR
+                params=(
+                    PLATFORM_ROLE_REVOKED,
+                    user_id,
+                    PLATFORM_ROLE_SOURCE_IDP,
+                    PLATFORM_ROLE_ACTIVE,
+                ),
+                keep_last_operator=True,
+            )
+            != _KEPT_LAST_OPERATOR
+        )
 
     def _write(
         self,

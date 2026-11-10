@@ -353,7 +353,7 @@ async def test_the_billing_page_is_empty_for_now(tmp_path, idp):
     assert "<h1>Billing</h1>" in page.text
 
 
-async def test_a_logged_in_visitor_is_not_offered_the_download_in_the_header(tmp_path, idp):
+async def test_the_header_offers_the_download_whether_or_not_signed_in(tmp_path, idp):
     app = make_web_app(tmp_path, idp, web={"desktop_download_url": DOWNLOAD_URL})
     async with web_client(app) as client:
         anonymous = await client.get(HOME)
@@ -365,4 +365,4 @@ async def test_a_logged_in_visitor_is_not_offered_the_download_in_the_header(tmp
         return text[start : text.index("</nav>", start)]
 
     assert link(DOWNLOAD_URL) in header_nav(anonymous.text)
-    assert link(DOWNLOAD_URL) not in header_nav(signed_in.text)
+    assert link(DOWNLOAD_URL) in header_nav(signed_in.text)

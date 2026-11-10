@@ -416,7 +416,8 @@ def _chat_replica(root: str) -> str:
         f'<img src="{root}{HOME_MARK_PATH}" alt="" width="40" height="40">'
         "<p>Ask anything. Your Frames and connected tools are ready.</p>"
         '<div class="starters">'
-        '<button type="button" data-starter>Draft the launch update for Friday</button>'
+        '<button type="button" data-starter>Create a report for Q4</button>'
+        '<button type="button" data-starter>Which customers are at risk of churning?</button>'
         '<button type="button" data-starter>Search my Drive for healthcare past performance</button>'
         "</div></div></div>"
         '<form class="composer" data-form>'
@@ -1160,6 +1161,31 @@ h3 { margin: 0 0 6px; font-size: 17px; font-weight: 600; }
 .toolcall summary { cursor: pointer; font-weight: 600; }
 .toolbody { display: grid; gap: 2px; margin-top: 6px; font-family: var(--font-mono); font-size: 11px; color: var(--app-muted); }
 .toolbody code { color: var(--app-active); font-family: inherit; }
+.msg-after { margin-top: 12px; }
+/* A chart drawn into a reply: its bars grow in one after another. */
+.chart {
+  margin: 12px 0 0; width: min(420px, 100%); padding: 12px 14px 8px; border: 1px solid var(--app-line);
+  border-radius: 10px; background: var(--app-bg); white-space: normal; animation: rise 0.4s ease both;
+}
+.chart-head { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; font-weight: 600; }
+.chart-legend { display: flex; gap: 12px; font-weight: 400; color: var(--app-muted); }
+.chart-key { display: inline-flex; align-items: center; gap: 5px; }
+.chart-key i { width: 8px; height: 8px; border-radius: 2px; }
+.chart svg { display: block; width: 100%; height: auto; margin-top: 6px; overflow: visible; }
+.chart .grid { stroke: var(--app-line); stroke-dasharray: 2 3; }
+.chart .base { stroke: var(--app-muted); }
+.chart .axis { fill: var(--app-muted); font-size: 10px; font-family: var(--font-mono); }
+.chart .num { fill: var(--app-text); font-size: 10px; font-weight: 600; font-family: var(--font-mono); animation: num-in 0.3s ease both; }
+.chart .hi { fill: var(--app-active); }
+.chart .lo { fill: color-mix(in srgb, var(--app-muted) 40%, transparent); }
+.chart-key i.hi { background: var(--app-active); }
+.chart-key i.lo { background: color-mix(in srgb, var(--app-muted) 40%, transparent); }
+.chart .bar { transform-box: fill-box; transform-origin: 50% 100%; animation: col-up 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.chart .hbar { transform-box: fill-box; transform-origin: 0 50%; animation: bar-out 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@keyframes col-up { from { transform: scaleY(0); } }
+@keyframes bar-out { from { transform: scaleX(0); } }
+@keyframes num-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .chart, .chart .bar, .chart .hbar, .chart .num { animation: none; } }
 .composer { margin: 0 14px 14px; border: 1px solid var(--app-line); border-radius: 12px; overflow: visible; }
 .frame-bar {
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 7px 10px;

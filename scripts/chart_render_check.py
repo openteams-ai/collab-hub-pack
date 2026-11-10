@@ -293,6 +293,27 @@ def case_account_link_with_indexer(r: Rendered) -> None:
     assert name not in r.indexer.env, sorted(r.indexer.env)
 
 
+MEMBERSHIP_API_PREFIX = "COLLAB_HUB_API__FRAMES__MEMBERSHIP_API__"
+
+
+def case_membership_api(r: Rendered) -> None:
+    # The membership API for add-on services (issue #270): the client ids as
+    # JSON and the audience reach the API replicas; the indexer serves no
+    # requests and carries neither.
+    settings = {n: r.value(n) for n in r.env if n.startswith(MEMBERSHIP_API_PREFIX)}
+    assert settings == {
+        MEMBERSHIP_API_PREFIX + "CLIENT_IDS": '["usage-control","subscription-manager"]',
+        MEMBERSHIP_API_PREFIX + "AUDIENCE": "collab-hub-membership",
+    }, settings
+    assert r.indexer is not None
+    assert not [n for n in r.indexer.env if n.startswith(MEMBERSHIP_API_PREFIX)], sorted(r.indexer.env)
+
+
+def case_membership_api_off(r: Rendered) -> None:
+    # Off by default: nothing rendered, so an upgrade changes nothing.
+    assert not [n for n in r.env if n.startswith(MEMBERSHIP_API_PREFIX)], sorted(r.env)
+
+
 def case_serve_with_indexer(r: Rendered) -> None:
     # Serving and sweeping both on: /v2 routes to the API replicas only, but
     # the indexer carries the same serve settings. A sweep is held to the
@@ -462,6 +483,8 @@ def case_run_controller_remote(r: Rendered) -> None:
 
 
 CASES = {
+    "membership-api": case_membership_api,
+    "membership-api-off": case_membership_api_off,
     "sharepoint": case_sharepoint,
     "serve-off": case_serve_off,
     "serve-with-indexer": case_serve_with_indexer,

@@ -740,6 +740,47 @@ class FramesInvitationsConfig(BaseModel):
     """
 
 
+class FramesMembershipApiConfig(BaseModel):
+    """Which add-on services may read organization membership (issue #270).
+
+    The service-to-service API under ``/v1/membership`` tells add-on services
+    (for example usage control and a subscription manager) who belongs to each
+    organization and who owns it. It is **off unless ``client_ids`` names at
+    least one client**: nothing is mounted and nothing changes for a deployment
+    that has not opted in.
+
+    Each entry is the identity-provider client id of one add-on's own
+    client-credentials client. A caller is accepted only with an access token
+    whose ``azp`` is one of these *and* which carries the same id in Keycloak's
+    ``client_id`` claim (``clientId`` before Keycloak 25) -- a claim only the
+    client-credentials grant sets, so a person signing in through the same
+    client is not taken for the service. See ``docs/membership-api.md``.
+    """
+
+    client_ids: list[str] = Field(default_factory=list)
+
+    audience: str = ""
+    """The audience a service token must carry, when set. Empty skips the
+    audience check (signature, issuer, token type and the client checks above
+    still apply); set it, with an audience mapper on each add-on client, so a
+    token minted for some other resource server is not accepted here."""
+
+    @model_validator(mode="after")
+    def _validate(self) -> "FramesMembershipApiConfig":
+        for client_id in self.client_ids:
+            if not client_id or client_id != client_id.strip() or any(c.isspace() for c in client_id):
+                raise ValueError(
+                    f"frames.membership_api.client_ids entry {client_id!r} is blank or contains whitespace: "
+                    "a client id is matched exactly against the token's azp"
+                )
+        duplicates = {c for c in self.client_ids if self.client_ids.count(c) > 1}
+        if duplicates:
+            raise ValueError(f"frames.membership_api.client_ids lists {sorted(duplicates)} more than once")
+        if self.audience != self.audience.strip():
+            raise ValueError("frames.membership_api.audience has surrounding whitespace")
+        return self
+
+
 class FramesConfig(BaseModel):
     storage_backend: str = "local"
     s3: FramesS3Config = Field(default_factory=FramesS3Config)
@@ -753,6 +794,7 @@ class FramesConfig(BaseModel):
     service_access: FramesServiceAccessConfig = Field(default_factory=FramesServiceAccessConfig)
     model_access: ModelAccessConfig = Field(default_factory=ModelAccessConfig)
     invitations: FramesInvitationsConfig = Field(default_factory=FramesInvitationsConfig)
+    membership_api: FramesMembershipApiConfig = Field(default_factory=FramesMembershipApiConfig)
     mcp_session_manager_enabled: bool = True
 
 

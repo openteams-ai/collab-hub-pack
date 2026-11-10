@@ -796,6 +796,26 @@
             }
           }
         },
+        "membershipApi": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "clientIds": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^\\S+$"
+              },
+              "description": "Client ids of the add-on services allowed to read organization membership. Empty mounts nothing."
+            },
+            "audience": {
+              "type": "string",
+              "pattern": "^(\\S(.*\\S)?)?$",
+              "description": "Audience a service token must carry; empty skips the audience check."
+            }
+          }
+        },
         "invitations": {
           "type": "object",
           "additionalProperties": false,

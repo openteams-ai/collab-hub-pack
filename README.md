@@ -133,7 +133,8 @@ production build.
 ## Documentation
 
 Setup and reference docs — connector setup, [connector discovery](docs/connector-discovery.md), Frames, operations, the
-[Cog registry](docs/cog-registry.md), [feature flags](docs/feature-flags.md) — live in [`docs/`](docs/).
+[Cog registry](docs/cog-registry.md), [feature flags](docs/feature-flags.md), the
+[organization membership API for add-on services](docs/membership-api.md) — live in [`docs/`](docs/).
 
 The basis for Cog and Op execution — vocabulary, the Op–Cog seam, the
 result envelope, the sensitivity model — is in

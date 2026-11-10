@@ -56,6 +56,8 @@ API_PATH_PREFIXES = (
     "/v1/invitations",
     "/v1/operator/invitations",
     "/v1/orgs",
+    # The membership API for add-on services (issue #270).
+    "/v1/membership",
 )
 
 

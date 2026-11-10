@@ -563,7 +563,8 @@ def case_web(r: Rendered) -> None:
     # without a session with a 401 rather than a redirect it cannot follow.
     assert app["spec"]["hostname"] == "collab.example.test"
     assert auth["enforceAtGateway"] is True and auth["forwardAccessToken"] is True, auth
-    assert {"name": "Sec-Fetch-Mode", "value": "cors"} in auth["denyRedirect"], auth.get("denyRedirect")
+    # type is the operator's default, written out so ArgoCD sees no drift.
+    assert {"name": "Sec-Fetch-Mode", "value": "cors", "type": "Exact"} in auth["denyRedirect"], auth.get("denyRedirect")
     assert "routing" not in app["spec"] or not app["spec"]["routing"].get("publicRoutes"), "nothing may skip sign-in"
     # The operator names the client "<namespace>-<NebariApp name>"; its tokens
     # must name it as their audience, which the chat service checks.

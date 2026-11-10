@@ -4,7 +4,9 @@ The store and its stores are ``test_claims_conformance.py``; what a replay does
 to a run is in the lifecycle and durability suites. Here: the hub's URL reaches
 a local and a remote worker's environment, the controller takes it as an option,
 and the reference worker of ``dev/cogs`` reserves and commits its key over HTTP
-with the run token the executor minted, and is refused another run's key.
+with the run token the executor minted. That a token reaches its own step
+attempt's key and no other is the hub's routes' to refuse, asserted against them
+in the API suite (``api/tests/test_claims_api.py``).
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from locations_support import local_executor
@@ -53,8 +55,12 @@ class _Hub:
                 self.wfile.write(data)
 
             def _claim(self, action):
-                parts = self.path.split("/")
-                key = unquote(parts[3])
+                if action == "get":
+                    key = parse_qs(urlsplit(self.path).query)["key"][0]
+                    body = {}
+                else:
+                    body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                    key = body["key"]
                 token = self.headers.get("Authorization", "").removeprefix("Bearer ")
                 run_id = run_of(key)
                 started = run_tokens.verify(hub.track.replay(run_id), token) if run_id else None
@@ -66,8 +72,11 @@ class _Hub:
                     claim, acts = hub.store.reserve(run_id, key, worker=worker)
                     code = 201 if acts else 200
                 elif action == "commit":
-                    body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
                     claim, code = hub.store.commit(run_id, key, worker=worker, envelope=body["envelope"]), 200
+                elif action == "release":
+                    hub.store.release(run_id, key, worker=worker)
+                    hub.calls.append((action, key, 204))
+                    return self._answer(204, {})
                 else:
                     claim = hub.store.get(run_id, key)
                     if claim is None:
@@ -108,7 +117,7 @@ def _stderr(track, run_id):
     return (Path(started["logs"]) / "stderr.log").read_text()
 
 
-def test_a_local_worker_reserves_and_commits_its_key_over_http_and_is_refused_another_runs_key(tmp_path, hub):
+def test_a_local_worker_reserves_and_commits_its_key_over_http_with_the_token_the_executor_minted(tmp_path, hub):
     stand_in, track = hub
     executor = local_executor(tmp_path, hub_url=stand_in.url)
     runner = LifecycleRunner(executor=executor, track=track)
@@ -117,11 +126,19 @@ def test_a_local_worker_reserves_and_commits_its_key_over_http_and_is_refused_an
     assert claim is not None and claim.state == "committed" and claim.envelope["payload"] == {"echo": {"n": 1}}
     [started] = [e.payload for e in track.replay("r") if e.event_type == "worker_started"]
     assert claim.worker == started["run_token_sha256"]  # reserved with the token the executor minted
-    assert [c for c in stand_in.calls] == [("reserve", "r:s:0", 201), ("get", "run-of-somebody-else:s:0", 401),
-                                           ("commit", "r:s:0", 200)]
+    assert [c for c in stand_in.calls] == [("reserve", "r:s:0", 201), ("commit", "r:s:0", 200)]
     log = _stderr(track, "r")
     assert "claim r:s:0: reserved" in log and "claim r:s:0: committed" in log
-    assert "another run's key, refused with HTTP 401" in log
+
+
+def test_a_step_named_with_a_slash_is_claimed_like_any_other(tmp_path, hub):
+    # The key travels in the request body, never the path: a step name is any text.
+    stand_in, track = hub
+    runner = LifecycleRunner(executor=local_executor(tmp_path, hub_url=stand_in.url), track=track)
+    assert runner.submit(OpDefinition("r", (OpStep("fetch/data:1", "echo", "run", {"n": 1}),))) is RunState.COMPLETED
+    key = "r:fetch/data%3A1:0"
+    assert stand_in.store.get("r", key).state == "committed"
+    assert [c for c in stand_in.calls] == [("reserve", key, 201), ("commit", key, 200)]
 
 
 def test_a_replay_of_a_committed_key_is_answered_from_the_claim_and_the_worker_acts_on_nothing(tmp_path, hub):

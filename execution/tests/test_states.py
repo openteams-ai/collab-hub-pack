@@ -66,6 +66,7 @@ SCENARIOS = [
     (replace(CONTEXTS["step_attempt"], state=StepAttemptState.RESERVED), "commit", {}, StepAttemptState.COMMITTED),
     (replace(CONTEXTS["step_attempt"], state=StepAttemptState.RESERVED), "worker_lost", {},
      StepAttemptState.OUTCOME_UNKNOWN),
+    (replace(CONTEXTS["step_attempt"], state=StepAttemptState.RESERVED), "release", {}, StepAttemptState.INVOKED),
     (replace(CONTEXTS["step_attempt"], state=StepAttemptState.COMMITTED), "record", {}, StepAttemptState.RECORDED),
     (replace(CONTEXTS["step_attempt"], state=StepAttemptState.OUTCOME_UNKNOWN), "reconcile", {"actor": "ops"},
      StepAttemptState.RECORDED),

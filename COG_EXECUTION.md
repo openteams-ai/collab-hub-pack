@@ -747,11 +747,11 @@ A step can be invoked again after it already acted: a durable backend resuming a
 - Every interaction carries an idempotency key, stable for one step attempt.
 - A durable **keyed claim** store on the hub, with two states. A worker *reserves* the key before it acts and *commits* the envelope after; a replay of a committed key returns the envelope without acting. A replay that finds a key reserved but never committed — the worker died between the side effect and its result — must not act again: the step fails as `outcome-unknown`, and only a person, or an entry point the Cog declares idempotent, resolves it. The claim narrows the crash window to the reserve-to-commit gap and makes it visible; it does not pretend to close it.
 - **Two stores, both first-class**: SQLite for level 1 and the desktop, Postgres for the hub, behind one protocol and one suite — the same shape Phase 5 gives the Track, and what keeps level 1 free of containers.
-- **A worker-facing transport**, since the worker is a separate process even at level 1: `POST /v1/claims/{key}/reserve` and `/commit`, and `GET /v1/claims/{key}`, served by the API process, authorized by Phase 9's run token — which the API verifies against the hash the controller recorded, never by asking the controller — and scoped to that run's own keys, so a worker can neither read nor commit another run's. Phase 29's "claim endpoint" is this one, and Phase 14's SDK is its client.
+- **A worker-facing transport**, since the worker is a separate process even at level 1: `POST /v1/claims/reserve`, `/commit` and `/release`, and `GET /v1/claims?key=`, the key in the body or the query so any step name fits, served by the API process, authorized by Phase 9's run token — which the API verifies against the hash the controller recorded, never by asking the controller — and scoped to that worker's own step attempt's key, so a worker can neither read nor commit another step's, another attempt's or another run's. Phase 29's "claim endpoint" is this one, and Phase 14's SDK is its client.
 - The claim contract documented for workers; the reference worker implements it, and the Worker SDK (Phase 14) gains the claim client, so every adapter — Hermes' included — honours it with no change to its Cog.
 - The lifecycle suite gains "retry of an interrupted run does not repeat a completed side effect"; the durability suite gains "a worker replaced after reserving, before committing" (the step ends `outcome-unknown`, nothing acts twice) and "a worker replaced after committing, before the step was recorded" (the envelope is returned). A **claim conformance suite** runs reserve, commit, replay of a committed key, replay of a reserved-but-uncommitted key, and expiry, against SQLite and Postgres alike.
 
-*Dev and CI* — at level 1 the SQLite claim store sits in the SQLite Track's file in `dev/.local/`, so a fake Cog running as a child process (Phase 9) reserves and commits over HTTP with no container; at level 2 the same child processes claim against `make api-pg`, so no compose service is needed. CI: the claim conformance suite runs in `test-execution.yaml` against both stores, and `level-1` asserts a fake Cog child process reserves and commits its key over HTTP with the run token the controller minted, is refused another run's key, and that the retry of a run whose worker was killed after reserving ends `outcome-unknown` and is refused a second retry. The committed-then-interrupted replay runs in the lifecycle and durability suites, with a real worker process in `test_keyed_claim.py`. *Docs* — `op-cog-seam.md` gains the claim contract; `frames-operations.md` lists the claims table and how long claims are kept.
+*Dev and CI* — at level 1 the SQLite claim store sits in the SQLite Track's file in `dev/.local/`, so a fake Cog running as a child process (Phase 9) reserves and commits over HTTP with no container; at level 2 the same child processes claim against `make api-pg`, so no compose service is needed. CI: the claim conformance suite runs in `test-execution.yaml` against both stores, and `level-1` asserts a fake Cog child process reserves and commits its key over HTTP with the run token the controller minted, and that the retry of a run whose worker was killed after reserving ends `outcome-unknown` and is refused a second retry; that a token reaches its own step attempt's key and no other is the API suite's (`test_claims_api.py`). The committed-then-interrupted replay runs in the lifecycle and durability suites, with a real worker process in `test_keyed_claim.py`. *Docs* — `op-cog-seam.md` gains the claim contract; `frames-operations.md` lists the claims table and how long claims are kept.
 
 *Acceptance*
 - [x] Re-invoking a step whose side effect already happened returns the recorded envelope and does not act again, under `none` retry.
@@ -1252,9 +1252,9 @@ sequenceDiagram
   Exec->>W: the launcher spawns serve in its own process group<br/>run token in the environment, binding file from models:
   Exec->>W: GET /healthz until ready
   Ctl->>W: POST /invoke (task, idempotency key, run token)
-  W->>API: POST /v1/claims/{key}/reserve (run token)
+  W->>API: POST /v1/claims/reserve {key} (run token)
   W->>Model: the Harness adapter drives hermes acp, which calls the model
-  W->>API: POST /v1/claims/{key}/commit (envelope)
+  W->>API: POST /v1/claims/commit {key, envelope}
   W-->>Ctl: envelope
   Ctl->>Store: step_completed (binding, problems, usage, payload reference)
   opt the step's Gate escalates
@@ -1302,9 +1302,9 @@ sequenceDiagram
   Exec->>Pod: Deployment, Service, ingress and egress NetworkPolicy<br/>init container: nebi pull, then serve
   Exec->>Pod: GET /healthz until ready
   Ctl->>Pod: POST /invoke (task, idempotency key, run token verified by the SDK)
-  Pod->>API: POST /v1/claims/{key}/reserve (run token)
+  Pod->>API: POST /v1/claims/reserve {key} (run token)
   Pod->>GW: model call over the internal Service, the only egress the policy allows
-  Pod->>API: POST /v1/claims/{key}/commit (envelope)
+  Pod->>API: POST /v1/claims/commit {key, envelope}
   Pod-->>Ctl: envelope
   Ctl->>Store: step_completed
   Ctl->>Store: gate_escalated (escalation id)

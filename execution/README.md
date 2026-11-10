@@ -70,7 +70,8 @@ worker reaches the hub's claim routes with its run token (`COLLAB_HUB_URL`).
 `collab_hub_execution.intents` is the other half, used by the hub's API:
 `submit()`, `request_cancel()`, `request_turn()`, `request_decision()` and
 `request_retry()` record what a client asked for, `reconcile_outcome()` what a
-person settled of a step that ended `outcome-unknown`, and `describe()` and
+person settled of a step that ended `outcome-unknown` (on the Track and, given
+the claim store, on the attempt's claim), and `describe()` and
 `list_runs()` read runs back, each step with its state and its output, and the
 controller that owns it. The claim stores the API serves (`claims`) are the
 third: in memory, SQLite in the Track's file, Postgres beside the hub's Track. Neither half calls the other; the Track is all they share. See

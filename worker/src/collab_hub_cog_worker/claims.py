@@ -2,14 +2,16 @@
 
 Every task the hub sends carries an idempotency key, stable for one step
 attempt. Before an entry point acts, the worker reserves that key on the hub
-(``POST /v1/claims/{key}/reserve``, with its run token); after it answered,
-the worker commits the envelope (``POST /v1/claims/{key}/commit``). A replay
-of a committed key is answered with the committed envelope and the entry point
-never runs; a replay of a key another worker reserved and never committed, one
-lost between its side effect and its result, fails the step ``outcome-unknown``
-and runs nothing either. The hub is ``COLLAB_HUB_URL`` in the worker's
-environment; a worker given none claims nothing, and acts on every invocation.
-Standard library only, like the rest of the SDK.
+(``POST /v1/claims/reserve``, with its run token); after it answered, the
+worker commits the envelope (``POST /v1/claims/commit``), or releases the key
+when nothing acted (``POST /v1/claims/release``). The key travels in the
+request body, never the path, so any step name fits. A replay of a committed
+key is answered with the committed envelope and the entry point never runs; a
+replay of a key another worker reserved and never committed, one lost between
+its side effect and its result, fails the step ``outcome-unknown`` and runs
+nothing either. The hub is ``COLLAB_HUB_URL`` in the worker's environment; a
+worker given none claims nothing, and acts on every invocation. Standard
+library only, like the rest of the SDK.
 """
 
 from __future__ import annotations
@@ -77,29 +79,39 @@ class ClaimClient:
         return body if isinstance(body, dict) else {}
 
     @staticmethod
-    def _claim(status: int, body: Mapping[str, Any], key: str, what: str) -> Claim:
+    def _refusal(status: int, body: Mapping[str, Any], key: str, what: str) -> ClaimUnavailable:
+        error = body.get("error") if isinstance(body.get("error"), Mapping) else {}
+        return ClaimUnavailable(f"the hub answered HTTP {status} to the {what} of key {key!r}: "
+                                f"{error.get('code') or 'no claim'}: {error.get('message') or body}")
+
+    @classmethod
+    def _claim(cls, status: int, body: Mapping[str, Any], key: str, what: str) -> Claim:
         state = body.get("state")
         if status not in (200, 201) or not isinstance(state, str):
-            error = body.get("error") if isinstance(body.get("error"), Mapping) else {}
-            raise ClaimUnavailable(f"the hub answered HTTP {status} to the {what} of key {key!r}: "
-                                   f"{error.get('code') or 'no claim'}: {error.get('message') or body}")
+            raise cls._refusal(status, body, key, what)
         return Claim(key=key, state=state, yours=bool(body.get("yours")), envelope=body.get("envelope"))
 
     def reserve(self, key: str) -> Claim:
         """Reserve ``key`` before acting. ``yours`` says to act; ``committed`` carries the envelope to answer
         with; ``outcome_unknown`` says nothing acts again."""
-        status, body = self._call("POST", f"/v1/claims/{urllib.parse.quote(key, safe='')}/reserve")
+        status, body = self._call("POST", "/v1/claims/reserve", {"key": key})
         return self._claim(status, body, key, "reserve")
 
     def commit(self, key: str, envelope: Mapping[str, Any]) -> Claim:
         """Commit the envelope the entry point answered with, under the key this worker reserved."""
-        status, body = self._call("POST", f"/v1/claims/{urllib.parse.quote(key, safe='')}/commit",
-                                  {"envelope": dict(envelope)})
+        status, body = self._call("POST", "/v1/claims/commit", {"key": key, "envelope": dict(envelope)})
         return self._claim(status, body, key, "commit")
+
+    def release(self, key: str) -> None:
+        """Let go of the key this worker reserved and acted on nothing under: the next reserve is a fresh one.
+        :class:`ClaimUnavailable` when the hub did not take it, a key this worker does not hold included."""
+        status, body = self._call("POST", "/v1/claims/release", {"key": key})
+        if status != 204:
+            raise self._refusal(status, body, key, "release")
 
     def get(self, key: str) -> Claim | None:
         """What became of ``key``, or ``None`` for a key never reserved."""
-        status, body = self._call("GET", f"/v1/claims/{urllib.parse.quote(key, safe='')}")
+        status, body = self._call("GET", f"/v1/claims?key={urllib.parse.quote(key, safe='')}")
         if status == 404:
             return None
         return self._claim(status, body, key, "read")

@@ -145,7 +145,8 @@ The process that accepts runs is not the one that advances them (ADR-0002 D4).
 | `GET /v1/runs/{id}/steps/{step}/payload` | A completed step's output, read back whole even when the Track keeps it by reference, or a failed step's `error` (`code`, `message`); a step still running is a 409 |
 | `POST /v1/runs/{id}/steps/{step}/decision` | Decide the Gate the run waits at: `escalation`, `outcome` (`approve`, `reject`, `send_back`) and `findings`. Records `decision_requested` and answers 202; the controller delivers it. Who may decide is the Gate's `approvers`, matched against the caller's organization and platform roles; on a hub that resolves no roles (claims-sourced auth), the run's submitter decides. An escalation that is not the open one is a 409 `stale_decision` naming the open one; a second, different decision while one waits is a 409 `decision_pending`; the same decision asked again is the one recorded |
 | `POST /v1/runs/{id}/retry` | Ask for an ended run to run again: records `retry_asked` and answers 202; a controller takes it. After an interruption the step in flight resumes under its attempt and key, so a committed claim answers instead of the work running twice; after a failure it runs again as a new attempt. A completed, rejected or cancelled run, or one that exhausted its budget, is a 409 `run_not_retryable`; so is a run whose step ended `outcome-unknown`, naming the step: it is reconciled by a person, not retried (below) |
-| `POST /v1/claims/{key}/reserve`, `POST /v1/claims/{key}/commit`, `GET /v1/claims/{key}` | The keyed claim, for workers, not clients: authorized by the worker's run token and scoped to its run's keys ([the seam](op-cog-seam.md#the-keyed-claim)) |
+| `POST /v1/runs/{id}/steps/{step}/reconcile` | Record that the caller settled what a lost worker did on a step that ended `outcome-unknown`, with a `note`: `outcome_reconciled` on the Track, and the attempt's claim `recorded`. 200 with the run, which stays `FAILED` until retried; a step that did not end so is a 409 `run_not_reconcilable`. A platform operator's act, on any organization's run; anyone else is a 403 |
+| `POST /v1/claims/reserve`, `POST /v1/claims/commit`, `POST /v1/claims/release`, `GET /v1/claims?key=` | The keyed claim, for workers, not clients: authorized by the worker's run token and scoped to its own step attempt's key ([the seam](op-cog-seam.md#the-keyed-claim)) |
 | `GET /v1/runs/{id}/events` | The run's Track: the events after `after` (a sequence), `limit` at a time, with `next_after` when there are more. Asked for `text/event-stream`, a live stream instead: each event as it lands, named by its sequence, then an `end` event with the run's status once it has ended; a client that lost the connection reconnects with `Last-Event-ID` and misses nothing and repeats nothing. Each event's payload carries only the fields named for its type (an allowlist, so a field recorded later is not served until it is named); where a local worker is on the controller's host (`pid`, `pgid`, `logs`) is never among them |
 | `GET /v1/runs/launchable` | The Cog packages a step's `cog` may name |
 | `POST /v1/runs/{id}/turns` | Ask a Cog whose step holds a session something: records `turn_requested` with the caller and answers 202 with the turn, `pending`. A run that has ended is a 409 |
@@ -173,13 +174,22 @@ included, and the worker acts on nothing. A replay of a key reserved by a
 worker that was lost before committing fails the step `outcome-unknown`: the
 run ends `FAILED` with that code, `POST /v1/runs/{id}/retry` refuses it naming
 the step (409 `run_not_retryable`), and nothing acts on that step again until
-a person has established what the lost worker did and recorded it on the Track
-(`intents.reconcile_outcome`, the `outcome_reconciled` event, with the actor
-and a note); the run is then retried as a new attempt under a new key. The
-controller tells each worker where the hub is (`--hub-url`, `COLLAB_HUB_URL`
-in the worker's environment); a worker given none claims nothing, which is
-what `make op` runs. The claims a run token verifies against are read from the
-Track by the API, which never asks the controller.
+a platform operator has established what the lost worker did and recorded it
+(`POST /v1/runs/{id}/steps/{step}/reconcile`, `collab-hub run reconcile RUN
+STEP --note ...`; `intents.reconcile_outcome` underneath, which writes the
+`outcome_reconciled` event with the actor and the note, and moves the
+attempt's claim to `recorded`, so the Track and the claim agree); the run is
+then retried as a new attempt under a new key. A worker that acted on nothing
+(its task was refused before its entry point ran, or the interaction was
+cancelled) releases its key instead of committing, so the retry runs the step.
+A worker whose controller died keeps acting and commits once it has: the
+commit takes the run token for as long as the attempt has no outcome on the
+Track, whether or not the run was since recorded `interrupted`, so the retry
+is answered with the envelope rather than finding a reservation nobody can
+account for. The controller tells each worker where the hub is (`--hub-url`,
+`COLLAB_HUB_URL` in the worker's environment); a worker given none claims
+nothing, which is what `make op` runs. The claims a run token verifies against
+are read from the Track by the API, which never asks the controller.
 
 ### Pickup and ownership
 

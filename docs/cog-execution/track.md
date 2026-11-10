@@ -78,8 +78,9 @@ workloads' `name` and `namespace`, by which a later controller reaps a pod.
 settled what a lost worker did, after the step's attempt ended
 `outcome-unknown` under the keyed claim ([runs.md](runs.md#the-keyed-claim)):
 written with `append_if` only while the run has ended on that step's unknown
-outcome. It moves nothing; a retry asked after it runs the step as a new
-attempt.
+outcome, through `POST /v1/runs/{id}/steps/{step}/reconcile`, which also moves
+the attempt's claim to `recorded`. It moves nothing on the run; a retry asked
+after it runs the step as a new attempt.
 
 `retry_asked` (`actor`) is a client's request that an ended run run again,
 written with `append_if` only while the run has ended in a state the run
@@ -211,10 +212,13 @@ never both start it.
 
 The keyed claim's stores (`collab_hub_execution.claims`) have the same shape
 beside each Track store: in memory, in the SQLite Track's own file, and
-`collab_claims` on Postgres from migration 17, under one conformance suite
+`collab_claims` on Postgres from migration 19, under one conformance suite
 (`execution/tests/test_claims_conformance.py`). A claim is kept for thirty
-days after it last changed; the API prunes older ones as the claim routes are
-used.
+days after it last changed, and then only until its attempt is settled on the
+Track (its `step_completed` or `step_failed`, or a run that ended where no
+retry reaches it); the API prunes those as the claim routes are used. A
+reservation whose attempt has no outcome yet is kept however old: it is what a
+retry of the interrupted run resumes.
 
 **A stream never skips an event.** A reader follows a run with a cursor: the
 last sequence it saw. On Postgres a sequence is drawn when a row is inserted

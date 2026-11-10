@@ -35,9 +35,14 @@ STATUS_FOR_CODE: Mapping[str, int] = {
 }
 
 # ...and the code the client assumes when one of those statuses arrives without
-# a parseable envelope body (a proxy's 502 page, a crashed worker's 503).
-CODE_FOR_STATUS: Mapping[int, str] = {
-    409: "outcome-unknown", 422: "invalid-input", 502: "model-call-failed", 503: "model-unavailable"}
+# a parseable envelope body (a proxy's 502 page, a crashed worker's 503). A bare
+# 409 is not among them: only an envelope that says so records outcome-unknown,
+# which no retry runs again on its own; a 409 without one fails the step as a
+# transport error, and the step may be retried.
+CODE_FOR_STATUS: Mapping[int, str] = {422: "invalid-input", 502: "model-call-failed", 503: "model-unavailable"}
+
+# The statuses an error envelope arrives under: one of these with an envelope body is read as the envelope.
+ERROR_STATUSES = frozenset(STATUS_FOR_CODE.values())
 
 SEVERITIES = ("error", "warn")
 

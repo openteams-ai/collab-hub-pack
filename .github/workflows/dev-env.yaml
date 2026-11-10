@@ -166,9 +166,10 @@ jobs:
       # run cancelled through the API mid-step ends cancelled with no worker left, its events stream
       # until it ends, and a controller killed with SIGKILL records its run interrupted when it starts
       # again. The keyed claim (Phase 17): each fake Cog, a child process of the controller, reserves
-      # and commits its step's key over HTTP with the run token the controller minted, and is refused
-      # another run's key; a worker killed after reserving leaves its step outcome-unknown on retry,
-      # on which nothing acts again, and a second retry is refused.
+      # and commits its step's key over HTTP with the run token the controller minted (that the token
+      # reaches no other key is the API suite's, test_claims_api.py); a worker killed after reserving
+      # leaves its step outcome-unknown on retry, on which nothing acts again, and a second retry is
+      # refused.
       - name: make submit launches through the run API, make controller runs it, claims, cancel and kill
         run: |
           set -euo pipefail
@@ -204,14 +205,12 @@ jobs:
           grep -q '^event: completed$' /tmp/events-echo.log && grep -q '^event: end$' /tmp/events-echo.log \
             || { echo "the event stream did not end with the run"; cat /tmp/events-echo.log; exit 1; }
           # Each step's worker, a child process, reserved and committed its key on `make api` with the run
-          # token the controller minted, and was refused another run's key; its stderr says so.
+          # token the controller minted; its stderr says so.
           claims=$(cat dev/.local/runs/"$echo_run"-*/*/stderr.log)
           [ "$(echo "$claims" | grep -c "claim $echo_run:.*: reserved$")" = 2 ] \
             || { echo "the fake Cogs did not reserve their keys over HTTP"; echo "$claims"; exit 1; }
           [ "$(echo "$claims" | grep -c "claim $echo_run:.*: committed$")" = 2 ] \
             || { echo "the fake Cogs did not commit their keys over HTTP"; echo "$claims"; exit 1; }
-          echo "$claims" | grep -q "another run's key, refused with HTTP 401" \
-            || { echo "a worker was not refused another run's key"; echo "$claims"; exit 1; }
 
           # Cancel through the API, mid-step: the run ends cancelled, and no worker is left.
           workers() { pgrep -f '[p]ython serve.py' || true; }

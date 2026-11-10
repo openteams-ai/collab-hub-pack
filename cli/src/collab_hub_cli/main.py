@@ -842,6 +842,34 @@ def run_retry(
         typer.echo(run["status"])
 
 
+@run_app.command("reconcile")
+@handled
+def run_reconcile(
+    run_id: Annotated[str, typer.Argument(help="The run's id.")],
+    step: Annotated[str, typer.Argument(help="The step whose attempt ended outcome-unknown.")],
+    note: Annotated[str | None, typer.Option(
+        "--note", help="What was established of the lost worker's side effect, and what was done about it; "
+                       "kept on the run's Track.")] = None,
+    as_json: JsonOption = False,
+) -> None:
+    """Record that you settled what a lost worker did on a step that ended outcome-unknown.
+
+    The step's worker reserved its key and was lost before committing its
+    result, so whether its side effect happened is for a person to establish.
+    Once recorded, `run retry` runs the step again as a new attempt. A platform
+    operator's act: the hub refuses anyone else.
+    """
+
+    with Hub(_target()) as hub:
+        run = hub.request_json("POST", f"/v1/runs/{run_id}/steps/{step}/reconcile",
+                               json={"note": note} if note else {})
+    _err(f"{run_id}: step {step} reconciled; `run retry {run_id}` runs it again as a new attempt.")
+    if as_json:
+        _print_json(run)
+    else:
+        typer.echo(run["status"])
+
+
 @run_app.command("say")
 @handled
 def run_say(

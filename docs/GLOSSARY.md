@@ -228,9 +228,9 @@ D1; issue #1.)
 **Outcome-unknown.** The state of a step attempt whose worker reserved its key
 and was lost before committing its result: its side effect may have happened.
 The step fails with that code, the run API refuses to retry the run, and a
-person settles what the worker did and records it on the Track
-(`outcome_reconciled`); the run is then retried as a new attempt.
-([states](cog-execution/states.md).)
+platform operator settles what the worker did and records it
+(`collab-hub run reconcile`, the `outcome_reconciled` event on the Track);
+the run is then retried as a new attempt. ([states](cog-execution/states.md).)
 
 **Lifecycle runner.** The one component that runs a Cog's lifecycle —
 resolve, materialize, interact, read the envelope, Guards, Gate, idle or

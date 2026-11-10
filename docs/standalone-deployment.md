@@ -220,8 +220,13 @@ combination, but not restating the list is the better habit.)
 - `/v1/claims/**`, the keyed claim's routes for workers, is outside the map
   altogether, like the registry surface: every request is authenticated by
   the route itself with a worker's run token, which the hub's bearer auth would
-  refuse before the route saw it, and a request without one is a 401. No map
-  entry can open it ([the seam](cog-execution/op-cog-seam.md#the-keyed-claim)).
+  refuse before the route saw it. A request without one, or whose bearer has
+  not the shape of a run token, is a 401 before anything is read; a key that
+  is no idempotency key is a 422 before anything is read; only then is the
+  run's Track read, and only that run's. No map entry can open the routes
+  ([the seam](cog-execution/op-cog-seam.md#the-keyed-claim)). Workers reach
+  them inside the cluster by the API's Service, so an installation whose
+  ingress lists its paths need not expose `/v1/claims`.
 - The API routes under `/v1` need no entry: the default covers them, and each
   also carries its own auth dependency, so a `public` entry does not make
   frames or tasks anonymous. The one exception is the Cog catalog: a `public`

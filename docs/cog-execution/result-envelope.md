@@ -116,8 +116,8 @@ As the hub's worker client implements it (`collab_hub_execution.kubernetes`):
 | 422 | an envelope with `error.code: invalid-input` or `context-exhausted` | the envelope's code |
 | 502 | an envelope with `model-call-failed` or `model-response-malformed` | the envelope's code |
 | 503 | an envelope with `model-unavailable`, `binding-invalid` or `hub-unavailable` | the envelope's code |
-| 409 / 422 / 502 / 503 | not an envelope — a proxy's error page, a worker that died mid-answer | an error envelope with the status's own code: `outcome-unknown`, `invalid-input`, `model-call-failed`, `model-unavailable` |
-| anything else | — | a transport error; the step fails by the exception's name, not a code |
+| 422 / 502 / 503 | not an envelope — a proxy's error page, a worker that died mid-answer | an error envelope with the status's own code: `invalid-input`, `model-call-failed`, `model-unavailable` |
+| 409 without an envelope, anything else | — | a transport error; the step fails by the exception's name, not a code, and may be retried. Only an envelope that says `outcome-unknown` records it, since that code is the one no retry runs again on its own |
 
 A 200 whose body is not an envelope, and an error status carrying `ok: true`,
 are invalid answers (`EnvelopeInvalid`) and fail the step as such. The `usage`

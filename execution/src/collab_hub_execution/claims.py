@@ -20,14 +20,15 @@ outcome, ``recorded``; every move goes through that machine. Three stores
 keep them behind one protocol and one conformance suite, the shape the Track
 has: in memory, SQLite beside the SQLite Track, and Postgres beside the hub's,
 whose table comes from the hub's migrations. The hub serves them to workers as
-``/v1/claims``, authorized by the run token and scoped to that run's own keys.
+``/v1/claims``, authorized by the run token and scoped to that worker's own
+step attempt.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -39,8 +40,8 @@ from .states import InvalidTransition
 from .states.step import STEP_ATTEMPT, StepAttempt
 
 CLAIM_RETENTION = timedelta(days=30)
-"""How long a claim is kept after it last changed. An attempt's claim matters until the attempt's outcome
-is on the Track, which a retry or a durable resume reaches long before this; what outlives it is history."""
+"""How long a claim is kept after it last changed, once its attempt's outcome is on the Track. A claim whose
+attempt has no outcome yet is never pruned, however old: a retry of an interrupted run resumes that key."""
 
 RESERVED, COMMITTED, OUTCOME_UNKNOWN, RECORDED = "reserved", "committed", "outcome_unknown", "recorded"
 
@@ -57,6 +58,10 @@ def key_component(value: str) -> str:
     return value.replace("%", "%25").replace(":", "%3A")
 
 
+def _unescape(component: str) -> str:
+    return component.replace("%3A", ":").replace("%25", "%")
+
+
 def run_of(key: str) -> str | None:
     """The run an idempotency key belongs to, read from its first component; ``None`` for a key of no run.
 
@@ -65,13 +70,32 @@ def run_of(key: str) -> str | None:
     """
     if not key or ":" not in key:
         return None
-    first = key.split(":", 1)[0]
-    return first.replace("%3A", ":").replace("%25", "%") or None
+    return _unescape(key.split(":", 1)[0]) or None
+
+
+def own_key(run_id: str, instance: str) -> str:
+    """The idempotency key of the step attempt a worker was started for: the run's component and the
+    ``instance`` its ``worker_started`` records (``{step}:{attempt}``, the step escaped). The hub admits a
+    worker to this key and no other."""
+    return f"{key_component(run_id)}:{instance}"
+
+
+def attempt_of(key: str) -> tuple[str, str, int] | None:
+    """The run, step and attempt number an idempotency key names, or ``None`` for text that is no key."""
+    parts = key.split(":")
+    if len(parts) != 3 or not all(parts) or not parts[2].isdigit():
+        return None
+    return _unescape(parts[0]), _unescape(parts[1]), int(parts[2])
 
 
 class ClaimRefused(ValueError):
-    """A commit, or a reconciliation, the claim's state does not allow: never reserved, reserved by another
-    worker, or already past the state the move leaves."""
+    """A commit, a release or a reconciliation the claim's state does not allow: never reserved, reserved by
+    another worker, or already past the state the move leaves."""
+
+
+Settled = Callable[["Claim"], bool]
+"""Whether a claim's attempt is settled on the Track: its outcome recorded, or its run ended where no retry
+reaches it. What :meth:`ClaimStore.prune` asks of each claim past the retention before deleting it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +142,10 @@ class ClaimStore(Protocol):
         commits again.
         """
 
+    def release(self, run_id: str, key: str, *, worker: str) -> None:
+        """Let go of the key ``worker`` holds, having acted on nothing: the next reserve is a fresh one.
+        :class:`ClaimRefused` for a key the worker does not hold."""
+
     def get(self, run_id: str, key: str) -> Claim | None:
         """The claim under ``key`` for ``run_id``, or ``None``."""
 
@@ -125,8 +153,10 @@ class ClaimStore(Protocol):
         """A person settles an unknown outcome: the claim is ``recorded`` and names them. :class:`ClaimRefused`
         for a claim that is not ``outcome_unknown``."""
 
-    def prune(self, *, now: datetime | None = None) -> int:
-        """Delete the claims that last changed longer ago than the store's retention; how many went."""
+    def prune(self, settled: Settled, *, now: datetime | None = None) -> int:
+        """Delete the claims that last changed longer ago than the store's retention and whose attempt
+        ``settled`` says is settled on the Track; how many went. A claim ``settled`` keeps is read again next
+        time: a reservation whose attempt has no outcome yet is what a retry resumes, however old."""
 
 
 def _attempt(claim: Claim) -> StepAttempt:
@@ -160,6 +190,18 @@ def _commit(existing: Claim | None, key: str, worker: str, envelope: Mapping[str
     except InvalidTransition as exc:
         raise ClaimRefused(f"key {key!r} cannot be committed: {exc}") from exc
     return replace(existing, state=committed.state.value, envelope=dict(envelope), committed_at=now, updated_at=now)
+
+
+def _release(existing: Claim | None, key: str, worker: str) -> None:
+    """Check the release the machine allows: the row goes, as if the key was never reserved."""
+    if existing is None:
+        raise ClaimRefused(f"key {key!r} was never reserved: there is nothing to release")
+    if existing.state == RESERVED and existing.worker != worker:
+        raise ClaimRefused(f"key {key!r} is reserved by another worker")
+    try:
+        _attempt(existing).release()
+    except InvalidTransition as exc:
+        raise ClaimRefused(f"key {key!r} cannot be released: {exc}") from exc
 
 
 def _reconcile(existing: Claim | None, key: str, actor: str, now: datetime) -> Claim:
@@ -196,6 +238,11 @@ class InMemoryClaimStore:
             self._claims[(run_id, key)] = claim
             return claim
 
+    def release(self, run_id: str, key: str, *, worker: str) -> None:
+        with self._lock:
+            _release(self._claims.get((run_id, key)), key, worker)
+            del self._claims[(run_id, key)]
+
     def get(self, run_id: str, key: str) -> Claim | None:
         with self._lock:
             return self._claims.get((run_id, key))
@@ -206,13 +253,16 @@ class InMemoryClaimStore:
             self._claims[(run_id, key)] = claim
             return claim
 
-    def prune(self, *, now: datetime | None = None) -> int:
+    def prune(self, settled: Settled, *, now: datetime | None = None) -> int:
         cutoff = (now or _now()) - self.retention
         with self._lock:
-            old = [which for which, claim in self._claims.items() if claim.updated_at < cutoff]
-            for which in old:
-                del self._claims[which]
-            return len(old)
+            old = [claim for claim in self._claims.values() if claim.updated_at < cutoff]
+        gone = [claim for claim in old if settled(claim)]
+        with self._lock:
+            for claim in gone:
+                if self._claims.get((claim.run_id, claim.key)) == claim:
+                    del self._claims[(claim.run_id, claim.key)]
+            return len(gone)
 
 
 _COLUMNS = "run_id, key, state, worker, envelope, reserved_at, committed_at, updated_at, actor"
@@ -313,6 +363,11 @@ class SqliteClaimStore:
             self._upsert(connection, claim)
             return claim
 
+    def release(self, run_id: str, key: str, *, worker: str) -> None:
+        with self._write() as connection:
+            _release(self._select(connection, run_id, key), key, worker)
+            connection.execute("DELETE FROM collab_claims WHERE run_id = ? AND key = ?", (run_id, key))
+
     def get(self, run_id: str, key: str) -> Claim | None:
         with closing(sqlite3.connect(self.path, timeout=5)) as connection, connection:
             return self._select(connection, run_id, key)
@@ -323,10 +378,22 @@ class SqliteClaimStore:
             self._upsert(connection, claim)
             return claim
 
-    def prune(self, *, now: datetime | None = None) -> int:
+    def prune(self, settled: Settled, *, now: datetime | None = None) -> int:
         cutoff = ((now or _now()) - self.retention).isoformat()
+        # The candidates are read, and judged, outside the write lock: `settled` reads the Track, which may
+        # be this same file.
+        with closing(sqlite3.connect(self.path, timeout=5)) as connection, connection:
+            rows = connection.execute(f"SELECT {_COLUMNS} FROM collab_claims WHERE updated_at < ?",
+                                      (cutoff,)).fetchall()
+        gone = [claim for claim in map(_claim_row, rows) if settled(claim)]
+        if not gone:
+            return 0
         with self._write() as connection:
-            return connection.execute("DELETE FROM collab_claims WHERE updated_at < ?", (cutoff,)).rowcount
+            return sum(
+                connection.execute(
+                    "DELETE FROM collab_claims WHERE run_id = ? AND key = ? AND updated_at = ?",
+                    (claim.run_id, claim.key, claim.updated_at.isoformat())).rowcount
+                for claim in gone)
 
 
 class PostgresClaimStore:
@@ -403,6 +470,11 @@ class PostgresClaimStore:
             self._upsert(connection, claim)
             return claim
 
+    def release(self, run_id: str, key: str, *, worker: str) -> None:
+        with self.pool.connection() as connection:
+            _release(self._lock(connection, run_id, key), key, worker)
+            connection.execute("DELETE FROM collab_claims WHERE run_id = %s AND key = %s", (run_id, key))
+
     def get(self, run_id: str, key: str) -> Claim | None:
         with self.pool.connection() as connection:
             row = connection.execute(f"SELECT {_COLUMNS} FROM collab_claims WHERE run_id = %s AND key = %s",
@@ -415,13 +487,24 @@ class PostgresClaimStore:
             self._upsert(connection, claim)
             return claim
 
-    def prune(self, *, now: datetime | None = None) -> int:
+    def prune(self, settled: Settled, *, now: datetime | None = None) -> int:
         cutoff = (now or _now()) - self.retention
         with self.pool.connection() as connection:
-            return connection.execute("DELETE FROM collab_claims WHERE updated_at < %s", (cutoff,)).rowcount
+            rows = connection.execute(f"SELECT {_COLUMNS} FROM collab_claims WHERE updated_at < %s",
+                                      (cutoff,)).fetchall()
+        gone = [claim for claim in map(_claim_row, rows) if settled(claim)]
+        if not gone:
+            return 0
+        with self.pool.connection() as connection:
+            return sum(
+                connection.execute(
+                    "DELETE FROM collab_claims WHERE run_id = %s AND key = %s AND updated_at = %s",
+                    (claim.run_id, claim.key, claim.updated_at)).rowcount
+                for claim in gone)
 
 
 __all__ = [
     "CLAIM_RETENTION", "COMMITTED", "OUTCOME_UNKNOWN", "RECORDED", "RESERVED", "Claim", "ClaimRefused",
-    "ClaimStore", "InMemoryClaimStore", "PostgresClaimStore", "SqliteClaimStore", "key_component", "run_of",
+    "ClaimStore", "InMemoryClaimStore", "PostgresClaimStore", "Settled", "SqliteClaimStore", "attempt_of",
+    "key_component", "own_key", "run_of",
 ]

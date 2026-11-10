@@ -24,6 +24,9 @@ class StepAttemptState(State):
     def commit(self, attempt: StepAttempt, **_: Any) -> Transition[StepAttempt]:
         return self.refuse("commit")
 
+    def release(self, attempt: StepAttempt, **_: Any) -> Transition[StepAttempt]:
+        return self.refuse("release")
+
     def record(self, attempt: StepAttempt, **_: Any) -> Transition[StepAttempt]:
         return self.refuse("record")
 
@@ -56,6 +59,12 @@ class Reserved(StepAttemptState):
     def worker_lost(self, attempt: StepAttempt, **_: Any) -> Transition[StepAttempt]:
         # The side effect may have happened: nothing may act again until someone reconciles.
         return move(attempt, StepAttemptState.OUTCOME_UNKNOWN, Record("outcome_unknown", {"key": attempt.key}))
+
+    @accepts("INVOKED")
+    def release(self, attempt: StepAttempt, **_: Any) -> Transition[StepAttempt]:
+        # The worker holding the key acted on nothing (the entry point was never called, or the interaction
+        # was cancelled before it answered): the key is free again, and a replay reserves it afresh.
+        return move(attempt, StepAttemptState.INVOKED, Record("claim_released", {"key": attempt.key}))
 
 
 class Committed(StepAttemptState):
@@ -104,6 +113,9 @@ class StepAttempt(Context):
 
     def commit(self) -> Transition[StepAttempt]:
         return self.dispatch("commit")
+
+    def release(self) -> Transition[StepAttempt]:
+        return self.dispatch("release")
 
     def record(self) -> Transition[StepAttempt]:
         return self.dispatch("record")

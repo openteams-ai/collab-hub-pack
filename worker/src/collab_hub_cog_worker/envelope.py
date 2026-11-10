@@ -90,6 +90,16 @@ def status_for(error: WorkerError | None) -> int:
     return 200 if error is None else STATUS_FOR_CODE[error.code]
 
 
+def status_of(answer: Mapping[str, Any]) -> int:
+    """The HTTP status an envelope already written is answered with: 200 when ``ok``, its error code's status
+    otherwise, and 502 for a code this version does not know. What a committed envelope is replayed with."""
+    if answer.get("ok"):
+        return 200
+    error = answer.get("error")
+    code = error.get("code") if isinstance(error, Mapping) else None
+    return STATUS_FOR_CODE.get(code, 502)
+
+
 class Stopwatch:
     """Wall-clock latency of one interaction, for the envelope's ``timing``."""
 

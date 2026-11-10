@@ -206,10 +206,14 @@ def test_a_reconciled_outcome_lets_the_step_run_again_as_a_new_attempt():
     host.start()
     assert host.retry("r") is RunState.FAILED
     with pytest.raises(intents.NotRetryable, match="nothing to reconcile"):
-        intents.reconcile_outcome(track, "r", step="other", actor="ops")
-    executor.store.reconcile("r", "r:s:0", actor="ops")  # the claim, settled by a person
-    view = intents.reconcile_outcome(track, "r", step="s", actor="ops", note="the email was sent once")
+        intents.reconcile_outcome(track, "r", step="other", actor="ops", claims=executor.store)
+    assert executor.store.get("r", "r:s:0").state == "outcome_unknown"  # a refusal moves nothing
+    view = intents.reconcile_outcome(track, "r", step="s", actor="ops", note="the email was sent once",
+                                     claims=executor.store)
     assert view.state is RunState.FAILED and intents.outcome_unknown_step(track.replay("r")) is None
+    # The Track and the claim agree: both are settled, naming the person.
+    claim = executor.store.get("r", "r:s:0")
+    assert claim.state == "recorded" and claim.actor == "ops"
     with pytest.raises(intents.NotRetryable):
         intents.reconcile_outcome(track, "r", step="s", actor="ops")  # once
     assert intents.request_retry(track, "r", actor="bob").retry_asked_by == "bob"

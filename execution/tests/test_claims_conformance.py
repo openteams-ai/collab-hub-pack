@@ -1,8 +1,8 @@
 """The claim conformance suite: every claim store passes it.
 
-Reserve, commit, a replay of a committed key, a replay of a key reserved by a
-worker that never committed, reconciliation and expiry, the same assertions
-against the in-memory, SQLite and Postgres stores. Postgres needs
+Reserve, commit, release, a replay of a committed key, a replay of a key
+reserved by a worker that never committed, reconciliation and expiry, the same
+assertions against the in-memory, SQLite and Postgres stores. Postgres needs
 ``TEST_POSTGRES_URL``, as the Track's suite does.
 """
 
@@ -22,7 +22,16 @@ from collab_hub_execution import (
     SqliteClaimStore,
     SqliteTrackStore,
 )
-from collab_hub_execution.claims import COMMITTED, OUTCOME_UNKNOWN, RECORDED, RESERVED, key_component, run_of
+from collab_hub_execution.claims import (
+    COMMITTED,
+    OUTCOME_UNKNOWN,
+    RECORDED,
+    RESERVED,
+    attempt_of,
+    key_component,
+    own_key,
+    run_of,
+)
 
 TEST_PG = os.environ.get("TEST_POSTGRES_URL")
 _NEEDS_PG = pytest.mark.skipif(not TEST_PG, reason="set TEST_POSTGRES_URL to run the suite against Postgres")
@@ -112,6 +121,27 @@ def test_a_person_reconciles_an_unknown_outcome(store):
         store.reconcile("r", "r:never:0", actor="ops@example.com")
 
 
+def test_a_worker_that_acted_on_nothing_releases_its_key_and_the_next_reserve_is_fresh(store):
+    with pytest.raises(ClaimRefused, match="nothing to release"):
+        store.release("r", KEY, worker="w1")
+    store.reserve("r", KEY, worker="w1")
+    with pytest.raises(ClaimRefused, match="another worker"):
+        store.release("r", KEY, worker="w2")
+    assert store.get("r", KEY).state == RESERVED  # the refusal moved nothing
+    store.release("r", KEY, worker="w1")
+    assert store.get("r", KEY) is None
+    # As if never reserved: the replacement reserves it as new and acts, instead of finding a lost worker's.
+    claim, acts = store.reserve("r", KEY, worker="w2")
+    assert acts and claim.state == RESERVED and claim.worker == "w2"
+    store.commit("r", KEY, worker="w2", envelope=ENVELOPE)
+    with pytest.raises(ClaimRefused, match="cannot be released"):
+        store.release("r", KEY, worker="w2")  # committed: the envelope stands
+    store.reserve("r", "r:lost:0", worker="w1")
+    store.reserve("r", "r:lost:0", worker="w2")
+    with pytest.raises(ClaimRefused, match="cannot be released"):
+        store.release("r", "r:lost:0", worker="w1")  # an unknown outcome is a person's to settle
+
+
 def test_committing_a_key_the_worker_does_not_hold_is_refused(store):
     with pytest.raises(ClaimRefused, match="never reserved"):
         store.commit("r", KEY, worker="w1", envelope=ENVELOPE)
@@ -154,21 +184,42 @@ def test_of_two_workers_reserving_one_key_at_once_exactly_one_acts(store):
     assert store.get("r", "r:race:0").worker == acting[0]
 
 
-def test_claims_past_their_retention_are_pruned_and_the_rest_kept(store):
+def test_claims_past_their_retention_are_pruned_once_settled_and_the_rest_kept(store):
     store.reserve("r", "r:old:0", worker="w1")
     store.commit("r", "r:old:0", worker="w1", envelope=ENVELOPE)
+    store.reserve("r", "r:open:0", worker="w1")  # a reservation whose attempt has no outcome yet
     store.reserve("r", "r:new:0", worker="w1")
-    assert store.prune(now=datetime.now(UTC) + timedelta(hours=12)) == 0  # nothing a day old yet
+    settled = {"r:old:0", "r:new:0"}  # what the Track says of each attempt, as the hub asks it
+    asked = []
+
+    def on_track(claim):
+        asked.append(claim.key)
+        return claim.key in settled
+
+    assert store.prune(on_track, now=datetime.now(UTC) + timedelta(hours=12)) == 0  # nothing a day old yet
+    assert asked == []  # nothing past the retention was asked about
     assert store.get("r", "r:old:0") is not None and store.get("r", "r:new:0") is not None
-    assert store.prune(now=datetime.now(UTC) + timedelta(days=2)) == 2
+    assert store.prune(on_track, now=datetime.now(UTC) + timedelta(days=2)) == 2
+    assert sorted(asked) == ["r:new:0", "r:old:0", "r:open:0"]
     assert store.get("r", "r:old:0") is None and store.get("r", "r:new:0") is None
+    # The open reservation is kept, however old: a retry of the interrupted run resumes that key, and finds
+    # it reserved by the lost worker rather than acting a second time.
+    claim = store.get("r", "r:open:0")
+    assert claim is not None and claim.state == RESERVED
+    replay, acts = store.reserve("r", "r:open:0", worker="w2")
+    assert not acts and replay.state == OUTCOME_UNKNOWN
+    # ...and is asked about again, and pruned once the Track says its attempt is settled.
+    assert store.prune(on_track, now=datetime.now(UTC) + timedelta(days=4)) == 0
+    settled.add("r:open:0")
+    assert store.prune(on_track, now=datetime.now(UTC) + timedelta(days=4)) == 1
+    assert store.get("r", "r:open:0") is None
 
 
 def test_a_pruned_key_is_reserved_afresh(store):
-    # After the retention, a key is a new key: what outlives an attempt's recorded outcome is history.
+    # After the retention, a settled key is a new key: what outlives an attempt's recorded outcome is history.
     store.reserve("r", KEY, worker="w1")
     store.commit("r", KEY, worker="w1", envelope=ENVELOPE)
-    store.prune(now=datetime.now(UTC) + timedelta(days=2))
+    store.prune(lambda claim: True, now=datetime.now(UTC) + timedelta(days=2))
     claim, acts = store.reserve("r", KEY, worker="w2")
     assert acts and claim.state == RESERVED and claim.worker == "w2"
 
@@ -182,3 +233,11 @@ def test_the_run_is_read_from_the_key_and_escaped_components_round_trip():
     assert run_of("no-delimiter") is None and run_of("") is None and run_of(":s:0") is None
     # Distinct (run, step) pairs stay distinct, however the ids are spelt.
     assert f"{key_component('a:b')}:{key_component('c')}:0" != f"{key_component('a')}:{key_component('b:c')}:0"
+    # The whole key reads back, and a worker's own key is its run's component and the instance it was started
+    # for, as `worker_started` records it.
+    assert attempt_of("run-1:send:0") == ("run-1", "send", 0)
+    assert attempt_of(f"{key_component('a:b')}:{key_component('fetch/data:x')}:12") == ("a:b", "fetch/data:x", 12)
+    for text in ("", "run-1", "run-1:send", "run-1:send:x", "run-1::0", "run-1:send:0:more"):
+        assert attempt_of(text) is None, text
+    assert own_key("run-1", f"{key_component('a:b')}:3") == f"run-1:{key_component('a:b')}:3"
+    assert own_key("a:b", "s:0") == f"{key_component('a:b')}:s:0"

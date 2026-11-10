@@ -39,7 +39,7 @@ from typing import Any, Protocol
 from httpx import ConnectError, ConnectTimeout
 
 from . import run_tokens
-from .envelope import CODE_FOR_STATUS, EnvelopeInvalid, ResultEnvelope
+from .envelope import CODE_FOR_STATUS, ERROR_STATUSES, EnvelopeInvalid, ResultEnvelope
 from .ops import _NO_SIGNAL
 
 _log = logging.getLogger(__name__)
@@ -656,15 +656,16 @@ class _KubernetesWorker:
             # A Cog cannot pause a run: an answer that is not an envelope, a
             # `{"pause": true}` included, fails the step as EnvelopeInvalid.
             return ResultEnvelope.parse(body)
+        if status in ERROR_STATUSES and isinstance(body, dict) and "envelope" in body:
+            # The envelope document's error statuses, carrying an error envelope: its code is the failure.
+            envelope = ResultEnvelope.parse(body)
+            if envelope.ok:
+                raise EnvelopeInvalid(f"HTTP {status} carried an ok: true envelope")
+            return envelope
         if status in CODE_FOR_STATUS:
-            # The envelope document's error statuses. The body is an error
-            # envelope; when it is not one (a proxy's page, a worker that died
-            # mid-answer) the status alone still names the failure.
-            if isinstance(body, dict) and "envelope" in body:
-                envelope = ResultEnvelope.parse(body)
-                if envelope.ok:
-                    raise EnvelopeInvalid(f"HTTP {status} carried an ok: true envelope")
-                return envelope
+            # No envelope (a proxy's page, a worker that died mid-answer): the status alone names the
+            # failure. A bare 409 is not read as outcome-unknown: it fails the step below, as a transport
+            # error a retry runs again.
             return ResultEnvelope.failure(CODE_FOR_STATUS[status], f"HTTP {status} from the worker without an envelope")
         response.raise_for_status()
         raise EnvelopeInvalid(f"unexpected HTTP {status} from /invoke")

@@ -119,8 +119,11 @@ and `truncated` is `false` once the listing is exhausted; on a continued read
 `max_items` (up to 500) only when the full listing is needed in one call.
 Pagination is not a snapshot of the board: if items are added, removed, or
 reordered between requests, a later page may overlap an earlier page or omit
-items. Callers that need a stable working set should deduplicate by item ID
-and refresh the listing when consistency matters.
+items. The response does not expose a stable project item ID, so callers cannot
+reliably deduplicate all items, particularly draft items. Linked issues and PRs
+can be identified by their `repo` and `number`, but those fields are absent on
+draft items. Refresh the listing when consistency matters; pagination alone
+does not provide a stable snapshot.
 An optional `query` narrows the items with GitHub board filter DSL
 (e.g., `status:"In Progress"`, `assignee:octocat`). The response echoes the
 applied filter as `query` and reports `matched_count` (how many items it
@@ -132,9 +135,10 @@ can't be mistaken for an empty board. GitHub matches `status:` values ignoring
 case but not emoji, so `status:"In Progress"` finds nothing on a board whose
 column is `In progress 🏗`. In that one case -- `matched_count: 0` against a
 non-zero `total_count` -- the response also carries a `note` saying the filter
-matched nothing and listing the board's real Status column names to retry with;
-`note` is `null` on every other read. `counts` below stays board-wide regardless
-of either and is never what the filter matched.
+matched nothing and, when the filter has a `status:` term, listing the board's
+real Status column names to retry with; `note` is `null` on every other read.
+`counts` below stays board-wide regardless of either and is never what the
+filter matched.
 
 The read also returns a `counts` object with the board's aggregate breakdowns: an
 exact non-archived `total` (scope recorded in `archived_policy`), per-status-column

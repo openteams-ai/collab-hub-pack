@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 
 import httpx
@@ -1251,9 +1252,68 @@ async def test_github_read_project_empty_filter_note_names_real_columns(tmp_path
     assert body["counts"]["by_status"][1] == {"name": "In progress 🏗", "count": 21}
     assert body["note"] == (
         "The filter matched 0 of the board's 21 items; counts.by_status is board-wide, not what the filter matched."
-        " status: values must match a column name exactly, including any emoji."
+        " status: values must match a column name, ignoring case but including any emoji."
         ' Columns here: "Todo", "In progress 🏗", "Done".'
     )
+
+
+@pytest.mark.parametrize("query", ["assignee:nobody", "no:status", "sub-status:Done", 'label:"status: blocked"'])
+async def test_github_read_project_empty_filter_note_skips_columns_without_status_term(tmp_path, monkeypatch, query):
+    # A column name can't fix a filter that has no status: term, so the note
+    # stops at "matched 0" even though counts (and the columns) are available.
+    handler = _counts_handler(
+        read_node=_board_node(board_total=21, nodes=[]),
+        options=["Todo", "Done"],
+        aggregates={
+            "total": 21,
+            "issue": 21,
+            "pull_request": 0,
+            "board_draft": 0,
+            "opened": 21,
+            "closed": 0,
+            "no_status": 0,
+        },
+        status_counts=[20, 1],
+    )
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/projects/1/read",
+            headers=_auth_header(),
+            json={"owner": "openteams-ai", "query": query},
+        )
+    body = response.json()
+    assert body["counts"] is not None
+    assert body["note"] == (
+        "The filter matched 0 of the board's 21 items; counts.by_status is board-wide, not what the filter matched."
+    )
+
+
+async def test_github_read_project_empty_filter_note_names_columns_for_negated_status(tmp_path, monkeypatch):
+    handler = _counts_handler(
+        read_node=_board_node(board_total=3, nodes=[]),
+        options=["Todo"],
+        aggregates={
+            "total": 3,
+            "issue": 3,
+            "pull_request": 0,
+            "board_draft": 0,
+            "opened": 3,
+            "closed": 0,
+            "no_status": 0,
+        },
+        status_counts=[3],
+    )
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/projects/1/read",
+            headers=_auth_header(),
+            json={"owner": "openteams-ai", "query": "is:open -Status:todo"},
+        )
+    assert response.json()["note"].endswith('Columns here: "Todo".')
 
 
 async def test_github_read_project_empty_filter_note_without_counts(tmp_path, monkeypatch):
@@ -3390,6 +3450,47 @@ async def test_github_graphql_rate_limit_error_maps_to_429(tmp_path, monkeypatch
             "/v1/connectors/github/projects/1/read", headers=_auth_header(), json={"owner": "openteams-ai"}
         )
     assert response.status_code == 429
+    assert response.headers["retry-after"] == "45"
+
+
+@pytest.mark.parametrize(
+    ("reset_offset", "low", "high"),
+    [(90, 85, 90), (-30, 1, 1)],  # a reset already past (clock skew) floors at 1
+)
+async def test_github_graphql_rate_limit_derives_retry_after_from_reset(tmp_path, monkeypatch, reset_offset, low, high):
+    # The GraphQL primary limit usually carries x-ratelimit-reset (epoch
+    # seconds) and no Retry-After; the 429 must still give a backoff hint.
+    def handler(request: httpx.Request) -> Response:
+        return Response(
+            200,
+            headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(int(time.time()) + reset_offset)},
+            json={"data": None, "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]},
+        )
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/projects/1/read", headers=_auth_header(), json={"owner": "openteams-ai"}
+        )
+    assert response.status_code == 429
+    assert low <= int(response.headers["retry-after"]) <= high
+
+
+async def test_github_graphql_rate_limit_without_backoff_headers_omits_retry_after(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> Response:
+        return Response(
+            200, json={"data": None, "errors": [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]}
+        )
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/projects/1/read", headers=_auth_header(), json={"owner": "openteams-ai"}
+        )
+    assert response.status_code == 429
+    assert "retry-after" not in response.headers
 
 
 async def test_github_read_project_pages_with_next_cursor(tmp_path, monkeypatch):

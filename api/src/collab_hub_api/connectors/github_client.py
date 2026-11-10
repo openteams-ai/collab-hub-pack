@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 from urllib.parse import quote
@@ -677,13 +678,12 @@ class GitHubClient:
             raise
         try:
             read.counts = await counts_task
-        except Exception:
+        except Exception as exc:
             # Expected degrade (upstream/network, rejected filter DSL, non-reconciling
             # self-check) logs at WARNING. Anything else is a coding bug (bad query
             # edit, upstream shape change, TypeError in parsing) that would otherwise
             # become permanent silent degradation, so keep its own ERROR event.
             # Either way the read still returns, with counts=None.
-            exc = counts_task.exception()
             if isinstance(exc, (GitHubUpstreamError, httpx.HTTPError)):
                 logger.warning("github_project_counts_unavailable", exc_info=exc)
             else:
@@ -822,7 +822,7 @@ class GitHubClient:
                 operation=operation,
                 status_code=429,
                 message="GitHub rate limit exceeded",
-                retry_after=response.headers.get("retry-after", ""),
+                retry_after=_graphql_retry_after(response.headers),
             )
         if data is None:
             message = ""
@@ -1294,6 +1294,21 @@ def _parse_oauth_scopes(header: str) -> list[str]:
     return [scope.strip() for scope in header.split(",") if scope.strip()]
 
 
+def _graphql_retry_after(headers: httpx.Headers) -> str:
+    """Backoff hint for a GraphQL RATE_LIMITED error. That shape is the primary
+    limit, which GitHub reports through x-ratelimit-reset (epoch seconds) and
+    usually without a Retry-After header, so derive delta-seconds from the
+    reset time when Retry-After is absent. "" when neither header is usable."""
+    retry_after = headers.get("retry-after", "")
+    if retry_after:
+        return retry_after
+    reset = headers.get("x-ratelimit-reset", "").strip()
+    if not reset.isdigit():
+        return ""
+    # A reset already in the past (clock skew) still means "not yet": floor at 1.
+    return str(max(1, int(reset) - int(time.time())))
+
+
 def _raise_for_github_status(response: httpx.Response, *, operation: str, body: bytes | None = None) -> None:
     # `body` lets a streamed caller (api_get) pass the already-read, size-capped
     # bytes so the message is parsed from those rather than a second full read.
@@ -1461,7 +1476,9 @@ def _project(node: dict) -> GitHubProject:
     # The board size is the unfiltered `board` alias on a read (whose `items`
     # may be narrowed by a filter) and plain `items` on a list, which has no
     # alias. Checking for the alias rather than threading a flag keeps one
-    # parser for both queries.
+    # parser for both queries. The read query always selects `board`, so it is
+    # null there only if GitHub nulls that one field (a partial GraphQL error);
+    # items_count would then be the filtered `items` count, not the board size.
     source = "board" if node.get("board") is not None else "items"
     return GitHubProject(
         number=int(node.get("number", 0) or 0),

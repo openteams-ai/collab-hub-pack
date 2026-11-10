@@ -692,7 +692,8 @@ class GitHubProjectReadResponse(UntrustedConnectorResponse):
     # 'In progress 🏗') with zero items and no error, and in evals a reader then
     # took counts.by_status for the filter's result; the tool description alone
     # did not stop that (apollo-desktop#1013). The note says the filter matched
-    # 0 and lists the board's real Status column names to retry with.
+    # 0 and, when the filter has a `status:` term, lists the board's real Status
+    # column names to retry with.
     note: str | None = None
 
 

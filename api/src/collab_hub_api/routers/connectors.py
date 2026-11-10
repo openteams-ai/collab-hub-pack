@@ -913,11 +913,19 @@ async def read_github_project(
     )
 
 
+# A `status:` term in a board filter, plain or negated (`-status:Done`), but not
+# a custom field whose name merely ends in "status" (`sub-status:x`) or the
+# valueless `no:status`.
+_GITHUB_STATUS_TERM_RE = re.compile(r"(?:^|\s)-?status:", re.IGNORECASE)
+
+
 def _github_empty_filter_note(*, query: str, read: GitHubProjectRead) -> str | None:
-    """Explain a filter that selected nothing on a non-empty board, naming the
-    real Status columns (already sanitized by the client) so the caller tells a
-    mistyped or emoji-mismatched filter from an empty board and does not read
-    counts.by_status as what the filter matched. None on every other read:
+    """Explain a filter that selected nothing on a non-empty board so the caller
+    tells a mistyped filter from an empty board and does not read
+    counts.by_status as what the filter matched. When the filter has a
+    `status:` term, also name the real Status columns (already sanitized by
+    the client) to retry with; other filters (`assignee:nobody`) get no column
+    list, since a column name would not fix them. None on every other read:
     unfiltered, a filter that matched something, or an empty board."""
     if not query or read.matched or not read.project.items_count:
         return None
@@ -926,9 +934,11 @@ def _github_empty_filter_note(*, query: str, read: GitHubProjectRead) -> str | N
         "counts.by_status is board-wide, not what the filter matched."
     )
     columns = [c.name for c in read.counts.by_status] if read.counts else []
-    if columns:
+    if columns and _GITHUB_STATUS_TERM_RE.search(query):
         names = ", ".join(json.dumps(name, ensure_ascii=False) for name in columns)
-        note += f" status: values must match a column name exactly, including any emoji. Columns here: {names}."
+        note += (
+            f" status: values must match a column name, ignoring case but including any emoji. Columns here: {names}."
+        )
     return note
 
 

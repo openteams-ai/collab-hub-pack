@@ -233,7 +233,7 @@ chat service checks; the operator names it "<namespace>-<NebariApp name>". */}}
       "enforceAtGateway" true
       "forwardAccessToken" true
       "scopes" (list "openid" "profile" "email")
-      "denyRedirect" (list (dict "name" "Sec-Fetch-Mode" "value" "cors"))
+      "denyRedirect" (list (dict "name" "Sec-Fetch-Mode" "value" "cors" "type" "Exact"))
       "keycloakConfig" (dict "protocolMappers" (list (dict
         "name" "self-audience"
         "protocolMapper" "oidc-audience-mapper"

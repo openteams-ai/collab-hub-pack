@@ -212,6 +212,9 @@ ACCOUNT_PATH = "/web/account"
 """The signed-in person's account page, in the home page's look and theme.
 Requires a session like every route not in :data:`PUBLIC_WEB_PATHS`."""
 
+BILLING_PATH = f"{ACCOUNT_PATH}/billing"
+"""The account dashboard's billing page. Empty for now; requires a session."""
+
 HOME_STYLE_PATH = f"{WEB_PATH_PREFIX}/home.css"
 """The home page's stylesheet. Public like :data:`STYLE_ASSET_PATH`: the page
 it styles is shown to people with no session."""

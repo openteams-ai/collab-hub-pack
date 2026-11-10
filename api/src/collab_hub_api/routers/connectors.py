@@ -876,11 +876,18 @@ async def read_github_project(
     if number < 1:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "A positive GitHub project number is required")
     client = await _github_client(request, config)
+    # Counts are requested by default even on continuation pages. Callers
+    # retaining the board-wide breakdown can explicitly opt out.
     try:
         # Counts run concurrently with the enumeration and never raise; only the
         # board read's own failure surfaces here to be mapped.
         read = await client.read_project_with_counts(
-            owner=body.owner, number=number, max_items=body.max_items, query=body.query, after=body.after
+            owner=body.owner,
+            number=number,
+            max_items=body.max_items,
+            query=body.query,
+            after=body.after,
+            include_counts=body.include_counts,
         )
     except GitHubProjectReadError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 
@@ -3533,6 +3534,142 @@ async def test_github_read_project_pages_with_next_cursor(tmp_path, monkeypatch)
     assert len(third.json()["items"]) == 1 and third.json()["next_cursor"] is None
     assert third.json()["truncated"] is False
     assert third.json()["matched_count"] == 7
+
+
+def _counted_board_handler(nodes: list[dict], ops: list[str], documents: dict[str, str] | None = None):
+    """_paged_board_handler's paged board, but with count queries that succeed
+    (every item in one Todo column). `ops` collects the GraphQL operation name
+    of every request, to assert which reads paid for the counts; `documents`,
+    when given, keeps the last query text sent per operation."""
+    paged = _paged_board_handler(nodes)
+    total = len(nodes)
+    issues = (total + 1) // 2
+
+    def handler(request: httpx.Request) -> Response:
+        if not request.url.path.endswith("/graphql"):
+            return Response(404, json={"message": "Not Found"})
+        query = json.loads(request.content.decode("utf-8"))["query"]
+        op = next(name for name in ("ProjectStatusCounts", "ProjectCounts", "ProjectRead") if name in query)
+        ops.append(op)
+        if documents is not None:
+            documents[op] = query
+        if op == "ProjectStatusCounts":
+            node = {"projectV2": {"s0": {"totalCount": total}}}
+        elif op == "ProjectCounts":
+            aggregates = {
+                "total": total,
+                "issue": issues,
+                "pull_request": total - issues,
+                "board_draft": 0,
+                "opened": issues,
+                "closed": total - issues,
+                "no_status": 0,
+            }
+            node = {
+                "projectV2": {
+                    "statusField": {"options": [{"name": "Todo"}]},
+                    **{alias: {"totalCount": n} for alias, n in aggregates.items()},
+                }
+            }
+        else:
+            return paged(request)
+        return Response(200, json={"data": {"organization": node, "user": None}})
+
+    return handler
+
+
+async def test_github_read_project_continued_read_opt_out_skips_counts(tmp_path, monkeypatch):
+    # Counts are board-wide; consumers can explicitly skip the extra GraphQL
+    # requests on continued reads while preserving exact listing metadata.
+    ops: list[str] = []
+    _install_mock_client(monkeypatch, _counted_board_handler(_board_items(7), ops))
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        first = await client.post(
+            "/v1/connectors/github/projects/1/read",
+            headers=_auth_header(),
+            json={"owner": "openteams-ai", "max_items": 3},
+        )
+        assert sorted(ops) == ["ProjectCounts", "ProjectRead", "ProjectStatusCounts"]
+        assert first.json()["counts"]["total"] == 7
+        assert first.json()["counts"]["by_status"] == [{"name": "Todo", "count": 7}]
+
+        ops.clear()
+        second = await client.post(
+            "/v1/connectors/github/projects/1/read",
+            headers=_auth_header(),
+            json={
+                "owner": "openteams-ai",
+                "max_items": 3,
+                "after": first.json()["next_cursor"],
+                "include_counts": False,
+            },
+        )
+    assert ops == ["ProjectRead"]  # one request for the page, none for counts
+    body = second.json()
+    assert second.status_code == 200
+    assert body["counts"] is None
+    assert len(body["items"]) == 3
+    assert body["total_count"] == 7 and body["matched_count"] == 7
+    assert body["truncated"] is True
+
+
+async def test_github_read_project_include_counts_opt_out_and_default(tmp_path, monkeypatch):
+    # Explicit false skips counts on first read; omitted include_counts still
+    # enables counts on the continued read (backward-compatible default).
+    ops: list[str] = []
+    _install_mock_client(monkeypatch, _counted_board_handler(_board_items(7), ops))
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        first = await client.post(
+            "/v1/connectors/github/projects/1/read",
+            headers=_auth_header(),
+            json={"owner": "openteams-ai", "max_items": 3, "include_counts": False},
+        )
+        assert ops == ["ProjectRead"]
+        assert first.json()["counts"] is None
+        assert first.json()["total_count"] == 7  # the board size never needed counts
+
+        ops.clear()
+        second = await client.post(
+            "/v1/connectors/github/projects/1/read",
+            headers=_auth_header(),
+            json={
+                "owner": "openteams-ai",
+                "max_items": 3,
+                "after": first.json()["next_cursor"],
+            },
+        )
+    assert sorted(ops) == ["ProjectCounts", "ProjectRead", "ProjectStatusCounts"]
+    assert second.json()["counts"]["total"] == 7
+
+
+async def test_github_read_project_pins_one_archive_policy(tmp_path, monkeypatch):
+    # total_count (the `board` alias), matched_count (the filtered `items`) and
+    # counts.total are documented as describing the same non-archived board.
+    # That holds by construction only if every items connection in every query
+    # of a read pins the same archivedStates, rather than the count queries
+    # pinning it and the read relying on GitHub's default.
+    ops: list[str] = []
+    documents: dict[str, str] = {}
+    _install_mock_client(monkeypatch, _counted_board_handler(_board_items(3), ops, documents))
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/github/projects/1/read",
+            headers=_auth_header(),
+            json={"owner": "openteams-ai", "query": "is:open"},
+        )
+    assert response.status_code == 200
+    assert set(documents) == {"ProjectRead", "ProjectCounts", "ProjectStatusCounts"}
+    for op, document in documents.items():
+        connections = re.findall(r"\bitems\(([^)]*)\)", document)
+        assert connections, op
+        for arguments in connections:
+            assert "archivedStates: [NOT_ARCHIVED]" in arguments, (op, arguments)
+    # The read has both connections: the unfiltered board size and the listing.
+    assert "board: items(first: 0, archivedStates: [NOT_ARCHIVED])" in documents["ProjectRead"]
+    assert response.json()["counts"]["archived_policy"] == "excluded"
 
 
 async def test_github_read_project_rejects_cursor_from_other_query(tmp_path, monkeypatch):

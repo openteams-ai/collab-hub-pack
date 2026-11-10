@@ -651,10 +651,15 @@ class GitHubProjectReadRequest(BaseModel):
     # items 51-100 cost one more page rather than a re-download of the first 50
     # under a larger max_items. The cursor is bound to the (owner, number,
     # query) that issued it; reusing it with any of those changed is a 422.
+    # `include_counts` controls the board-wide `counts`, which cost two extra
+    # GraphQL requests. Counts are included on every page by default, even
+    # when `after` is supplied. Set false to avoid the count requests when
+    # the caller already holds board-wide counts from an earlier page.
     owner: str = Field(min_length=1, max_length=100)
     max_items: int = Field(default=50, ge=1, le=500)
     query: str = Field(default="", max_length=256)
     after: str | None = Field(default=None, max_length=512)
+    include_counts: bool = True
 
 
 class GitHubProjectReadResponse(UntrustedConnectorResponse):
@@ -680,8 +685,9 @@ class GitHubProjectReadResponse(UntrustedConnectorResponse):
     next_cursor: str | None = None
     # Board-wide aggregate breakdowns (per status column, by type, open/closed),
     # independent of max_items and query, from exact server-side count queries.
-    # Null when those queries failed; total_count / matched_count / truncated
-    # above are still exact. (A filter that matched nothing shows as
+    # Null when explicitly skipped with include_counts=false or when the count
+    # queries failed. total_count / matched_count / truncated remain exact.
+    # (A filter that matched nothing shows as
     # matched_count=0 against a non-zero total_count, not as an empty board;
     # the real Status column names are in counts.by_status.)
     counts: GitHubProjectCounts | None = None

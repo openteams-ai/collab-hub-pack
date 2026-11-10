@@ -102,14 +102,21 @@ query ProjectsList($login: String!, $first: Int!) {{
 }}
 """
 
+# One archive policy for every items connection on a board read: the enumerated
+# `items`, the `board` size and the count queries below all pin it, so
+# total_count, matched_count and counts.total describe the same non-archived
+# board by construction (archived_policy="excluded") rather than by GitHub's
+# default for an unpinned connection.
+_NOT_ARCHIVED = "archivedStates: [NOT_ARCHIVED]"
+
 # `board` is the unfiltered item count so project.items_count keeps meaning
 # "the board size" (as it does in projects/list) even when `query` narrows
 # the enumerated `items`; the filtered connection's own totalCount is the
 # matched count. first: 0 keeps the extra alias a scalar, not a second page.
 _PROJECT_READ_BODY = f"""projectV2(number: $number) {{
       number title shortDescription closed
-      board: items(first: 0) {{ totalCount }}
-      items(first: $first, after: $after, query: $query) {{ {_PROJECT_ITEM_FIELDS} }}
+      board: items(first: 0, {_NOT_ARCHIVED}) {{ totalCount }}
+      items(first: $first, after: $after, query: $query, {_NOT_ARCHIVED}) {{ {_PROJECT_ITEM_FIELDS} }}
     }}"""
 
 _PROJECT_READ_QUERY = f"""
@@ -194,9 +201,8 @@ _API_GET_OWNER_SCOPED_COLLECTIONS = ("repos", "orgs", "users")
 # totalCount on the items connection. But items() accepts a board-filter `query`
 # and an `archivedStates` argument, so one totalCount-only query per bucket gives
 # an EXACT count regardless of the item-enumeration cap above. Every count query
-# pins archivedStates:[NOT_ARCHIVED] so the buckets share one policy and the
-# status columns provably reconcile to the total (archived_policy="excluded").
-_COUNTS_ARCHIVED = "archivedStates: [NOT_ARCHIVED]"
+# pins _NOT_ARCHIVED (as the read query does) so the buckets share one policy and
+# the status columns provably reconcile to the total (archived_policy="excluded").
 # A1: options + total + by-type + by-state + blank-status, all in one request.
 # The by_type/by_state aliases lean on the `query` filter DSL, so a rejection of
 # that DSL surfaces here and drops the whole count path (counts come back null).
@@ -207,13 +213,13 @@ _COUNTS_ARCHIVED = "archivedStates: [NOT_ARCHIVED]"
 # form an exact, non-overlapping partition of the total.
 _PROJECT_COUNTS_BODY = f"""projectV2(number: $number) {{
       statusField: field(name: "Status") {{ ... on ProjectV2SingleSelectField {{ options {{ name }} }} }}
-      total: items(first: 0, {_COUNTS_ARCHIVED}) {{ totalCount }}
-      issue: items(first: 0, {_COUNTS_ARCHIVED}, query: "is:issue") {{ totalCount }}
-      pull_request: items(first: 0, {_COUNTS_ARCHIVED}, query: "is:pr") {{ totalCount }}
-      board_draft: items(first: 0, {_COUNTS_ARCHIVED}, query: "is:draft is:issue") {{ totalCount }}
-      opened: items(first: 0, {_COUNTS_ARCHIVED}, query: "is:open") {{ totalCount }}
-      closed: items(first: 0, {_COUNTS_ARCHIVED}, query: "is:closed") {{ totalCount }}
-      no_status: items(first: 0, {_COUNTS_ARCHIVED}, query: "no:status") {{ totalCount }}
+      total: items(first: 0, {_NOT_ARCHIVED}) {{ totalCount }}
+      issue: items(first: 0, {_NOT_ARCHIVED}, query: "is:issue") {{ totalCount }}
+      pull_request: items(first: 0, {_NOT_ARCHIVED}, query: "is:pr") {{ totalCount }}
+      board_draft: items(first: 0, {_NOT_ARCHIVED}, query: "is:draft is:issue") {{ totalCount }}
+      opened: items(first: 0, {_NOT_ARCHIVED}, query: "is:open") {{ totalCount }}
+      closed: items(first: 0, {_NOT_ARCHIVED}, query: "is:closed") {{ totalCount }}
+      no_status: items(first: 0, {_NOT_ARCHIVED}, query: "no:status") {{ totalCount }}
     }}"""
 
 _PROJECT_COUNTS_QUERY = f"""
@@ -235,7 +241,7 @@ def _status_counts_query(option_count: int) -> str:
     interpolated, so an option name cannot inject query text."""
     var_decls = "".join(f", $q{i}: String!" for i in range(option_count))
     aliases = "\n      ".join(
-        f"s{i}: items(first: 0, {_COUNTS_ARCHIVED}, query: $q{i}) {{ totalCount }}" for i in range(option_count)
+        f"s{i}: items(first: 0, {_NOT_ARCHIVED}, query: $q{i}) {{ totalCount }}" for i in range(option_count)
     )
     body = f"projectV2(number: $number) {{\n      {aliases}\n    }}"
     return (
@@ -291,7 +297,8 @@ class GitHubProjectRead:
     with no filter); items is the page(s) actually returned, at most max_items.
     truncated means more matching items remain after `items` (see cursor).
     counts is filled by read_project_with_counts and is board-wide; None when
-    the server-side count queries failed (the read itself still succeeded)."""
+    the counts were explicitly skipped or the server-side count queries failed (the
+    read itself still succeeded)."""
 
     project: GitHubProject
     items: list[GitHubProjectItem]
@@ -659,15 +666,28 @@ class GitHubClient:
         return _ItemsWalk(project, collected[:cap], cursor)
 
     async def read_project_with_counts(
-        self, *, owner: str, number: int, max_items: int, query: str = "", after: str | None = None
+        self,
+        *,
+        owner: str,
+        number: int,
+        max_items: int,
+        query: str = "",
+        after: str | None = None,
+        include_counts: bool = True,
     ) -> GitHubProjectRead:
         """read_project plus board-wide aggregate counts, computed concurrently.
 
         Counts never break the read: on any count failure the read still
         returns with counts=None, and total_count / matched_count / truncated
         remain exact without them. A read_project failure propagates after the
-        counts task is cancelled so it can't leak."""
+        counts task is cancelled so it can't leak.
+
+        include_counts=False skips the two count round-trips entirely (counts
+        stays None). Counts are requested on every page by default for backward
+        compatibility; callers can explicitly opt out on continuation pages."""
         login = owner.strip()
+        if not include_counts:
+            return await self.read_project(owner=login, number=number, max_items=max_items, query=query, after=after)
         counts_task = asyncio.ensure_future(self._authoritative_counts(login=login, number=number))
         try:
             read = await self.read_project(owner=login, number=number, max_items=max_items, query=query, after=after)

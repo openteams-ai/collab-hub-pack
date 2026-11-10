@@ -105,8 +105,10 @@ login) and returns each board's number/title/description/item count.
 `state` (open/closed of the linked issue/PR), and — when the item is a linked
 issue or PR — the `repo` (owner/name), `number`, `assignees`, and `labels`, so a
 caller can triage by person or label and chain `items/{number}/read` to read
-that issue/PR. The item read excludes archived items (`archived_policy:
-"excluded"` on `counts`).
+that issue/PR. The read excludes archived items throughout: the listing,
+`total_count`, `matched_count` and `counts` all pin the same non-archived scope
+(`archived_policy: "excluded"` on `counts`), so the three totals describe the
+same board.
 
 By default the read returns one small page (`max_items: 50`) rather than the
 whole board (see the compatibility note at the end of this section if you
@@ -124,6 +126,10 @@ reliably deduplicate all items, particularly draft items. Linked issues and PRs
 can be identified by their `repo` and `number`, but those fields are absent on
 draft items. Refresh the listing when consistency matters; pagination alone
 does not provide a stable snapshot.
+Counts are requested on every page by default, including a continued `after`
+read. Since they are board-wide, a caller retaining counts from the first page
+may set `include_counts: false` to avoid two extra GitHub requests on subsequent
+pages. The response then has `counts: null`; all listing counts remain exact.
 An optional `query` narrows the items with GitHub board filter DSL
 (e.g., `status:"In Progress"`, `assignee:octocat`). The response echoes the
 applied filter as `query` and reports `matched_count` (how many items it
@@ -147,10 +153,11 @@ total), `by_type` (issue / pull_request / draft / redacted), and `by_state`
 (open / closed of linked issues/PRs). Projects V2 has **no** group-by aggregate,
 so each bucket is a `totalCount`-only count query under one `archivedStates`
 policy — which makes the counts accurate **even when the returned item list is
-truncated**. If those count queries fail (GitHub rate limiting or erroring, a
-rejected filter, or buckets that don't reconcile to the total) the read still
-succeeds and `counts` is `null`; `total_count`, `matched_count` and `truncated`
-stay exact without it. There is no sampled approximation, so a `counts` object,
+truncated**. `counts` is `null` when explicitly skipped (`include_counts: false`)
+or when those count queries fail (GitHub rate
+limiting or erroring, a rejected filter, or buckets that don't reconcile to the
+total); the read still succeeds either way, and `total_count`, `matched_count`
+and `truncated` stay exact without it. There is no sampled approximation, so a `counts` object,
 when present, is always the exact board-wide breakdown. `by_status` +
 `no_status` and `by_type` are each independent partitions of `total` and should
 not be cross-added; `by_state` covers only linked issues/PRs so it need not sum
@@ -160,8 +167,10 @@ to `total`.
 changed shape in one release:
 
 - `counts` is now nullable. Earlier versions always returned a `counts` object,
-  substituting a sampled breakdown when the exact one was unavailable. Check
-  for `null` before reading any of its fields.
+  substituting a sampled breakdown when the exact one was unavailable. It is
+  now `null` when the exact counts are unavailable or the caller sends
+  `include_counts: false`. Counts remain enabled by default on all pages.
+  Check for `null` before reading any of its fields.
 - `counts.authoritative` and `counts.counted_items` are gone. Both existed to
   qualify the sampled fallback; with no fallback, a present `counts` is always
   exact, so the flags carried no information. A caller that branched on
@@ -169,7 +178,8 @@ changed shape in one release:
 - `max_items` defaults to 50 instead of 500, so an unparameterised read no
   longer returns a whole board. Pass `max_items` explicitly (or page with
   `after`) to keep the old behaviour.
-- New fields `query`, `matched_count`, `next_cursor` and `note` are additive; existing
+- New request field `include_counts` and new response fields `query`,
+  `matched_count`, `next_cursor` and `note` are additive; existing
   fields `project`, `items`, `total_count` and `truncated` keep their names
   and types. `truncated` now means "more matching items remain after this
   response" (equivalently, `next_cursor` is non-null) rather than

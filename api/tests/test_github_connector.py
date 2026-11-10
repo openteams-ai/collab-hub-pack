@@ -3452,6 +3452,8 @@ async def test_github_graphql_rate_limit_error_maps_to_429(tmp_path, monkeypatch
         )
     assert response.status_code == 429
     assert response.headers["retry-after"] == "45"
+    # Apollo surfaces only the detail string, so the hint must be in it too.
+    assert "retry after 45 seconds" in response.json()["detail"]
 
 
 @pytest.mark.parametrize(
@@ -3476,6 +3478,8 @@ async def test_github_graphql_rate_limit_derives_retry_after_from_reset(tmp_path
         )
     assert response.status_code == 429
     assert low <= int(response.headers["retry-after"]) <= high
+    # The derived delay reaches the model-visible detail as well as the header.
+    assert f"retry after {response.headers['retry-after']} seconds" in response.json()["detail"]
 
 
 async def test_github_graphql_rate_limit_without_backoff_headers_omits_retry_after(tmp_path, monkeypatch):
@@ -3492,6 +3496,7 @@ async def test_github_graphql_rate_limit_without_backoff_headers_omits_retry_aft
         )
     assert response.status_code == 429
     assert "retry-after" not in response.headers
+    assert "retry after" not in response.json()["detail"]
 
 
 async def test_github_read_project_pages_with_next_cursor(tmp_path, monkeypatch):

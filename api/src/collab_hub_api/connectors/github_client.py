@@ -838,11 +838,18 @@ class GitHubClient:
         # typed RATE_LIMITED (data may be null or partial). Normalise it to the
         # same 429 as the REST/HTTP limits so callers see one shape.
         if any(str(e.get("type", "") or "").upper() == "RATE_LIMITED" for e in errors):
+            retry_after = _graphql_retry_after(response.headers)
+            message = "GitHub rate limit exceeded"
+            # Same rule as _raise_for_github_status: both apollo tool paths surface
+            # only the detail string, so the backoff hint must live in the message
+            # too, and only when it is plain integer seconds (not an HTTP-date).
+            if retry_after.strip().isdigit():
+                message = f"{message}; retry after {retry_after.strip()} seconds"
             raise GitHubUpstreamError(
                 operation=operation,
                 status_code=429,
-                message="GitHub rate limit exceeded",
-                retry_after=_graphql_retry_after(response.headers),
+                message=message,
+                retry_after=retry_after,
             )
         if data is None:
             message = ""

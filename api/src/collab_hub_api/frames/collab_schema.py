@@ -1021,6 +1021,43 @@ COLLAB_SCHEMA_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        # 17 and 18 are taken by pull requests ahead of this one in the queue (#176 and #105's); the
+        # runner applies versions above the highest applied, so this one must land after them.
+        19,
+        (
+            # The keyed claim (issue #104): what became of each step attempt's
+            # idempotency key, beside the Track. A worker reserves the key on
+            # the hub before it acts and commits its result envelope after, so
+            # a replay of a committed key is answered with the envelope, and a
+            # replay of a key reserved by a worker that was lost before
+            # committing moves it to `outcome_unknown`, on which nothing acts
+            # again until a person reconciles it (`recorded`, naming them).
+            # `worker` is the sha256 of the run token of the worker holding
+            # the reservation. The execution package's `PostgresClaimStore`
+            # reads and writes it; the API serves it to workers as
+            # /v1/claims, authorized by the run token. Appended to that
+            # store's `_SCHEMA` too; test_track_ddl.py holds them equal. Rows
+            # past the claim retention (30 days since they last changed) whose
+            # attempt's outcome is on the Track are pruned by the API as the
+            # routes are used; a reservation with no outcome yet is kept.
+            """
+            CREATE TABLE IF NOT EXISTS collab_claims (
+                run_id       text NOT NULL,
+                key          text NOT NULL,
+                state        text NOT NULL,
+                worker       text,
+                envelope     jsonb,
+                reserved_at  timestamptz NOT NULL,
+                committed_at timestamptz,
+                updated_at   timestamptz NOT NULL,
+                actor        text,
+                PRIMARY KEY (run_id, key)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS collab_claims_updated ON collab_claims (updated_at)",
+        ),
+    ),
 )
 
 

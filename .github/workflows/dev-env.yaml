@@ -165,8 +165,12 @@ jobs:
       # POST /v1/runs on `make api`, and the controller, another process, picks it up and runs it. A
       # run cancelled through the API mid-step ends cancelled with no worker left, its events stream
       # until it ends, and a controller killed with SIGKILL records its run interrupted when it starts
-      # again.
-      - name: make submit launches through the run API, make controller runs it, cancel and kill
+      # again. The keyed claim (Phase 17): each fake Cog, a child process of the controller, reserves
+      # and commits its step's key over HTTP with the run token the controller minted (that the token
+      # reaches no other key is the API suite's, test_claims_api.py); a worker killed after reserving
+      # leaves its step outcome-unknown on retry, on which nothing acts again, and a second retry is
+      # refused.
+      - name: make submit launches through the run API, make controller runs it, claims, cancel and kill
         run: |
           set -euo pipefail
           # Stopped, and gone, before the next step: a controller left running would pick up its runs.
@@ -200,6 +204,13 @@ jobs:
           make -s -C dev run-events RUN="$echo_run" > /tmp/events-echo.log  # it closes once the run has ended
           grep -q '^event: completed$' /tmp/events-echo.log && grep -q '^event: end$' /tmp/events-echo.log \
             || { echo "the event stream did not end with the run"; cat /tmp/events-echo.log; exit 1; }
+          # Each step's worker, a child process, reserved and committed its key on `make api` with the run
+          # token the controller minted; its stderr says so.
+          claims=$(cat dev/.local/runs/"$echo_run"-*/*/stderr.log)
+          [ "$(echo "$claims" | grep -c "claim $echo_run:.*: reserved$")" = 2 ] \
+            || { echo "the fake Cogs did not reserve their keys over HTTP"; echo "$claims"; exit 1; }
+          [ "$(echo "$claims" | grep -c "claim $echo_run:.*: committed$")" = 2 ] \
+            || { echo "the fake Cogs did not commit their keys over HTTP"; echo "$claims"; exit 1; }
 
           # Cancel through the API, mid-step: the run ends cancelled, and no worker is left.
           workers() { pgrep -f '[p]ython serve.py' || true; }
@@ -238,6 +249,20 @@ jobs:
             || { echo "the killed controller's run did not end interrupted"; cat /tmp/submit-killed.log; exit 1; }
           grep -q "interrupted $run: this controller stopped" /tmp/controller.log \
             || { echo "the restarted controller did not record it"; cat /tmp/controller.log; exit 1; }
+          # The killed worker had reserved its key and never committed: the retry's worker finds it so, acts
+          # on nothing, and the step ends outcome-unknown; a second retry is refused, naming the step.
+          make -s -C dev run-retry RUN="$run" > /tmp/retry.log
+          for _ in $(seq 1 60); do
+            curl -sf "http://127.0.0.1:8000/v1/runs/$run" | grep -q '"status":"FAILED"' && break; sleep 1
+          done
+          curl -sf "http://127.0.0.1:8000/v1/runs/$run" | python3 -c "
+          import json, sys
+          run = json.load(sys.stdin)
+          assert run['status'] == 'FAILED' and run['error'] == 'outcome-unknown', run
+          print('the retried step ended', run['error'])"
+          code=$(curl -s -o /tmp/retry-again.log -w '%{http_code}' -X POST "http://127.0.0.1:8000/v1/runs/$run/retry")
+          [ "$code" = 409 ] && grep -q 'outcome-unknown' /tmp/retry-again.log \
+            || { echo "a second retry of an outcome-unknown step was not refused ($code)"; cat /tmp/retry-again.log; exit 1; }
 
       # The `local` agent location: the same fake Cog as a real process, its `serve` task run in the
       # package's own pixi environment by the local executor. A host killed with SIGKILL runs no

@@ -80,10 +80,13 @@ controllers, one picks up each run
 ## Known limitations
 
 - **The `none` durability backend does not survive a restart.** Cog execution
-  runs Ops on `none` today: nothing is checkpointed, so a run in flight — or
+  runs Ops on `none`: nothing is checkpointed, so a run in flight — or
   waiting at a Gate — when its host stops is recorded `interrupted` when a host
-  starts again, and continues only when someone retries it. `dbos` (#104) is
-  the backend that resumes runs; see
+  starts again, and continues only when someone retries it. The retry never
+  repeats a step's side effect: a worker reserves its step's key on the hub
+  before it acts and commits its result after (the keyed claim), so the retry
+  is answered with that result, or ends `outcome-unknown` for a person to
+  settle. `dbos` (#104) is the backend that resumes runs; see
   [`docs/cog-execution/runs.md`](docs/cog-execution/runs.md).
 - **Cogs on a deployed hub run in the API's pod.** Every hub serves the run
   API (`/v1/runs`) on its own database. With `runs.controller.enabled`, a run

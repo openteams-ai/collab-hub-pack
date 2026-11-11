@@ -556,6 +556,15 @@ def make_app(config: BaseConfig) -> FastAPI:
             return get_caller_identity(request)
         return get_auth_context(request)
 
+    def _self_authenticating(registry_served: bool):
+        # The claim routes (/v1/claims) authenticate every request with a worker's run token, which
+        # the hub's bearer auth would refuse before they could; the registry surface likewise, with
+        # the challenge its clients need. Neither is a map entry, so no operator rule can undo it.
+        def passes(path: str) -> bool:
+            return runs_router.claims_path(path) or (registry_served and registry.registry_path(path))
+
+        return passes
+
     # The same map, readable by a route that honors a `public` entry itself
     # (the Cog catalog's anonymous discovery, issue #85).
     app.state.path_rules = tuple(config.security.paths)
@@ -568,7 +577,7 @@ def make_app(config: BaseConfig) -> FastAPI:
         # itself, with the challenge registry clients need to find its token
         # endpoint; this middleware's refusal would pre-empt it with the Hub
         # API's envelope. Not a map entry, so no operator rule can undo it.
-        self_authenticating=registry.registry_path if cog_registry_serving is not None else None,
+        self_authenticating=_self_authenticating(cog_registry_serving is not None),
         unauthorized_response=_unauthorized_response,
         authenticate_error_response=_authenticate_error_response,
     )
@@ -802,6 +811,8 @@ def make_app(config: BaseConfig) -> FastAPI:
         # /v2/ there and nowhere else. Absent unless cogs.serve.enabled.
         app.include_router(registry.router)
     app.include_router(runs_router.router, prefix="/v1")
+    # The keyed claim, for workers, authorized by the run token (docs/cog-execution/op-cog-seam.md).
+    app.include_router(runs_router.claims_router, prefix="/v1")
     # Who is calling, and how the collab-hub CLI signs in. /auth/cli is public:
     # the hardened map lists it, since a client asks it before it holds a token.
     app.include_router(identity.router, prefix="/v1")

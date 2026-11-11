@@ -395,6 +395,8 @@ def case_run_controller(r: Rendered) -> None:
     assert env["COLLAB_CONTROLLER_ID"]["value"] == "hub" and env["COLLAB_CONTROLLER_WAIT"]["value"] == "600"
     assert env["COLLAB_CONTROLLER_MODELS"]["value"] == "/etc/collab-hub/runs/models.toml"
     assert env["COLLAB_CONTROLLER_WORKER_START_TIMEOUT"]["value"] == "900"
+    # Each worker claims against the API in this pod, with its run token.
+    assert env["COLLAB_CONTROLLER_HUB_URL"]["value"] == "http://127.0.0.1:8000"
     # The pod rolls when its models block changes: the controller reads it once, at start.
     assert re.fullmatch(r"[0-9a-f]{64}", r.annotations.get("checksum/run-models", "")), r.annotations
     # No AWS web identity in the container Cogs run in.
@@ -441,6 +443,8 @@ def case_run_controller_remote(r: Rendered) -> None:
     assert controller.value("COLLAB_CONTROLLER_ID") == "hub"
     assert controller.env["COLLAB_CONTROLLER_TRACK"]["valueFrom"]["secretKeyRef"] == {"name": "hub-db", "key": "url"}
     assert controller.value("COLLAB_CONTROLLER_MODELS") == "/etc/collab-hub/runs/models.toml"
+    # Each worker pod claims against the API's Service, inside the cluster, with its run token.
+    assert re.fullmatch(r"http://[a-z0-9-]+\.[a-z0-9-]+\.svc:80", controller.value("COLLAB_CONTROLLER_HUB_URL"))
     assert "livenessProbe" in controller.container and "readinessProbe" not in controller.container
     assert re.fullmatch(r"[0-9a-f]{64}", controller.annotations.get("checksum/run-models", "")), controller.annotations
     role, workers = workers_namespace_of_their_own(r, workers=f"{r.release_namespace}-workers")

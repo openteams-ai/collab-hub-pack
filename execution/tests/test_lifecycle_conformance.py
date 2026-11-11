@@ -11,6 +11,7 @@ from __future__ import annotations
 import threading
 
 import pytest
+from claims_support import ClaimingExecutor, HostStops
 
 from collab_hub_execution import (
     DURABILITY_BACKENDS,
@@ -118,6 +119,23 @@ def test_a_failed_run_is_retried_as_a_new_attempt_with_a_new_key(backend):
     assert runner.submit(OpDefinition("r", (OpStep("s", "c", "run"),))) is RunState.FAILED
     assert runner.retry("r") is RunState.COMPLETED
     assert keys == ["r:s:0", "r:s:1"]
+
+
+def test_a_retry_of_an_interrupted_run_does_not_repeat_a_completed_side_effect(backend):
+    # The worker of step b committed its envelope under the keyed claim, and the host stopped before the
+    # Track recorded the step. The retry invokes b again under the same key: the claim answers with the
+    # envelope, and the side effect happens once.
+    executor = ClaimingExecutor({"c": lambda entry, value: {"sent": value}}, stop_after={"r:b:0": "committed"})
+    track = InMemoryTrackStore()
+    op = OpDefinition("r", (OpStep("a", "c", "run", 1), OpStep("b", "c", "run", 2)))
+    with pytest.raises(HostStops):
+        _runner(backend, {}, track=track, executor=executor).submit(op)
+    host = _runner(backend, {}, track=track, executor=executor)
+    assert host.start() == ("r",)
+    assert host.retry("r") is RunState.COMPLETED
+    assert executor.acted == ["r:a:0", "r:b:0"]  # once each: b's second invocation acted on nothing
+    completed = {e.payload["step"]: e.payload for e in track.replay("r") if e.event_type == "step_completed"}
+    assert completed["b"]["payload"] == {"sent": 2} and completed["b"]["attempt"] == 0
 
 
 # --- cancel ---------------------------------------------------------------------------------------

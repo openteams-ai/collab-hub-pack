@@ -36,6 +36,10 @@ def packages(tmp_path: Path) -> Path:
     """A copy of the fake Cog packages whose ``serve`` task runs under this interpreter, so no pixi is needed."""
     root = tmp_path / "cogs"
     shutil.copytree(DEV_COGS, root, ignore=shutil.ignore_patterns(".pixi", "__pycache__"))
+    # The reference worker reads the envelope's status table from the SDK, found beside it in the repository;
+    # the copy is given the SDK package next to it, where the serve scripts already put `fake_worker`.
+    shutil.copytree(DEV_COGS.parents[1] / "worker" / "src" / "collab_hub_cog_worker", root / "collab_hub_cog_worker",
+                    ignore=shutil.ignore_patterns("__pycache__"))
     (root / "env").mkdir()
     (root / "env" / "serve.py").write_text(ENV_COG)
     for file in ("pixi.toml", "pixi.lock"):

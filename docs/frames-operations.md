@@ -388,7 +388,23 @@ shared `frames.postgres.url`, migrated by the same
   `PostgresTrackStore` reads and writes them; on the hub they are created here
   and never by that store's own `ensure_schema`, which serves the standalone
   package and local use. A partial unique index admits one `op_submitted` per
-  run, so two replicas cannot both start it.
+  run, so two replicas cannot both start it. `collab_track_runs` (version 15)
+  is the index of runs the listing reads.
+- `collab_claims` (version 19) — the keyed claim
+  ([runs](cog-execution/runs.md#the-keyed-claim)): one row per step attempt's
+  idempotency key, scoped to its run, with its state (`reserved`, `committed`,
+  `outcome_unknown`, `recorded`), the sha256 of the run token of the worker
+  holding it, and the committed result envelope. The API serves it to workers
+  as `/v1/claims`; `PostgresClaimStore` in the execution package reads and
+  writes it. A claim is kept thirty days after it last changed, and then only
+  until its attempt is settled on the Track (its `step_completed` or
+  `step_failed`, or a run that ended where no retry reaches it); the API
+  deletes those as the claim routes are used (a pass of at most a hundred,
+  oldest first, at most once an hour, off the request path). A
+  reservation whose attempt has no outcome yet is never deleted, however old:
+  a retry of the interrupted run resumes that key, and must find it. A row
+  left `outcome_unknown` is the record that a person reconciled nothing, and
+  stays until its attempt's `step_failed` is thirty days old.
 
 Unlike the `frames_server_` tables, these are created by a single **versioned,
 lock-guarded runner**. One transaction takes

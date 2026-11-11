@@ -46,6 +46,7 @@ from collab_hub_api.frames.collab_schema import (  # noqa: E402
 )
 
 COLLAB_TABLES = (
+    "collab_claims",
     "collab_track_runs",
     "collab_connector_state",
     "collab_cog_registry_tokens",
@@ -459,7 +460,7 @@ def test_migration_creates_the_cog_publishing_schema():
         "org_id text",
     ):
         assert name not in earlier, name
-    assert LATEST_COLLAB_SCHEMA_VERSION == 16
+    assert LATEST_COLLAB_SCHEMA_VERSION == 19
 
 
 def test_migration_creates_the_source_activity_table():
@@ -478,6 +479,29 @@ def test_migration_creates_the_source_activity_table():
         statement for version, statements in COLLAB_SCHEMA_MIGRATIONS if version < 16 for statement in statements
     )
     assert "collab_cog_source_activity" not in earlier
+
+
+def test_migration_creates_the_claims_table():
+    server = FakeServer()
+
+    run_collab_schema_migrations(FakeDatabase(server))
+
+    (claims,) = server.ddl_for("collab_claims")
+    # One row per step attempt's idempotency key, scoped to its run (issue #104).
+    assert "PRIMARY KEY (run_id, key)" in claims and "state text NOT NULL" in claims
+    assert "worker text," in claims and "envelope jsonb," in claims
+    assert "reserved_at timestamptz NOT NULL" in claims and "updated_at timestamptz NOT NULL" in claims
+    assert "CREATE INDEX IF NOT EXISTS collab_claims_updated ON collab_claims (updated_at)" in " ".join(
+        server.statements
+    )
+    # Appended as version 19 (17 and 18 are taken by the pull requests ahead of it): nothing earlier mentions
+    # it, and it alters nothing that exists.
+    statements = dict(COLLAB_SCHEMA_MIGRATIONS)[19]
+    assert all("ALTER" not in statement and "DROP" not in statement for statement in statements)
+    earlier = " ".join(
+        statement for version, statements in COLLAB_SCHEMA_MIGRATIONS if version < 19 for statement in statements
+    )
+    assert "collab_claims" not in earlier
 
 
 def test_rerunning_the_migration_applies_nothing():
@@ -526,6 +550,7 @@ PINNED_CHECKSUMS = {
     14: "c3ceed5775cd624aabf1b9b9ac90aa23f8909cf93777f90836c7a263f72a2494",
     15: "94c87d3dc97dfc138ea1ee78bdb067ba114163995f4ef27d44398a930690d84d",
     16: "b2140ce96b42c4e7e9daabbac44b8ee6828d3ce9b39cccd37ca7f818747ca33f",
+    19: "b128d44c95c0c2719207bd1bdd880bd3dcce3777663ced40a1c58767b31929c4",
 }
 
 

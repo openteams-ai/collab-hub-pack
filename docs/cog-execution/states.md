@@ -60,6 +60,7 @@ stateDiagram-v2
     INVOKED --> INVOKED: worker lost before reserving, invoked again
     INVOKED --> RESERVED: the worker reserves the key
     RESERVED --> COMMITTED: the envelope is committed
+    RESERVED --> INVOKED: released, nothing acted
     COMMITTED --> RECORDED: the Track records the step
     RESERVED --> OUTCOME_UNKNOWN: worker lost before committing
     OUTCOME_UNKNOWN --> RECORDED: reconciled by a person
@@ -110,7 +111,7 @@ stateDiagram-v2
 | `TORN_DOWN` | a worker | Gone. Never recorded: the Track records a teardown that failed, not one that worked. | #1 |
 | `WORKER_FAILED` | a worker | Materialization, readiness, an interaction or teardown failed — the last recorded as `teardown_failed`. Terminal for this worker; the run decides what follows. | #1 |
 | `INVOKED` | a step attempt | The controller has sent the task with the attempt's idempotency key. A worker lost before reserving is simply invoked again under the same key: nothing has acted. | #102 |
-| `RESERVED` | a step attempt | The worker reserved the key before acting. | #102; ADR-0002 D1 |
+| `RESERVED` | a step attempt | The worker reserved the key before acting. A worker that then acts on nothing releases it, back to `INVOKED`. | #102; ADR-0002 D1 |
 | `COMMITTED` | a step attempt | The worker committed its envelope; any replay of the key returns that envelope without acting again. | #102 |
 | `RECORDED` | a step attempt | The Track holds `step_completed` or `step_failed` for the attempt. | #5 |
 | `OUTCOME_UNKNOWN` | a step attempt | The key was reserved and never committed: the worker was lost between the side effect and its result. Nothing acts again, an ordinary retry is refused, and a person — or an entry point the Cog declares idempotent — reconciles it. | #102, #103 |
@@ -164,8 +165,9 @@ record (#106).
 | `worker_lost()` | `INVOKED` → `INVOKED`; `RESERVED` → `OUTCOME_UNKNOWN` | `step_reinvoked`; `outcome_unknown` |
 | `reserve()` | `INVOKED` → `RESERVED` | `claim_reserved` |
 | `commit()` | `RESERVED` → `COMMITTED` | `claim_committed` |
+| `release()` | `RESERVED` → `INVOKED` | `claim_released` (the worker holding the key acted on nothing: the task was refused before its entry point was called, or the interaction was cancelled before it answered; a replay reserves the key afresh) |
 | `record()` | `COMMITTED` → `RECORDED` | — (the Track's `step_completed` or `step_failed` is the record) |
-| `reconcile(actor)` | `OUTCOME_UNKNOWN` → `RECORDED` | `outcome_reconciled` |
+| `reconcile(actor)` | `OUTCOME_UNKNOWN` → `RECORDED` | `outcome_reconciled` (on the Track too, through `intents.reconcile_outcome`, which is what lets the run retry) |
 
 **A run** — `Run`, created by `Run.submit(run_id, op)`, which records `op_submitted`
 

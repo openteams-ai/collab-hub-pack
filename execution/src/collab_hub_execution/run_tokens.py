@@ -17,11 +17,17 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
 from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
 RUN_TOKEN_ENV = "COLLAB_RUN_TOKEN"  # noqa: S105 - the variable's name, not a secret
+
+# What ``mint`` produces: 32 random bytes, URL-safe base64 without padding. The hub checks a presented
+# token against this before it reads anything, so a bearer that is no run token costs it no Track read.
+_WELL_FORMED = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_OUTCOMES = frozenset({"step_completed", "step_failed"})
 
 # A run that ended, or whose host stopped, has no worker left: every token it issued has expired.
 _ENDS_EVERY_WORKER = frozenset({"completed", "failed", "cancelled", "interrupted", "budget_exceeded"})
@@ -40,6 +46,11 @@ def mint() -> str:
 def digest(token: str) -> str:
     """What the Track records of a token: its sha256, never the token."""
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+def well_formed(token: str) -> bool:
+    """Whether ``token`` has the shape ``mint`` gives one; what the hub checks before any Track read."""
+    return bool(_WELL_FORMED.match(token))
 
 
 def verify(events: Iterable[_Fact], token: str) -> Mapping[str, Any] | None:
@@ -64,3 +75,29 @@ def verify(events: Iterable[_Fact], token: str) -> Mapping[str, Any] | None:
         if isinstance(recorded, str) and hmac.compare_digest(recorded, presented):
             return started
     return None
+
+
+def verify_attempt(events: Iterable[_Fact], token: str) -> Mapping[str, Any] | None:
+    """The worker a token belongs to on this run's Track, while its step attempt has no outcome recorded there;
+    ``None`` otherwise.
+
+    Unlike :func:`verify`, the worker need not be up, and the run need not be
+    running: a worker whose controller died keeps acting, and commits its
+    envelope once it has, so the retry of the interrupted run is answered with
+    it instead of finding a reservation nobody can account for. The token
+    stops verifying once the attempt's ``step_completed`` or ``step_failed``
+    is on the Track: from there the claim has nothing left to settle, and a
+    retry runs the step as a new attempt under a new key.
+    """
+    presented = digest(token)
+    started: Mapping[str, Any] | None = None
+    for event in events:
+        payload = event.payload
+        if event.event_type == "worker_started" and payload.get("instance") is not None:
+            recorded = payload.get("run_token_sha256")
+            if isinstance(recorded, str) and hmac.compare_digest(recorded, presented):
+                started = payload
+        elif (started is not None and event.event_type in _OUTCOMES and payload.get("step") == started.get("step")
+              and payload.get("attempt") == started.get("attempt")):
+            return None
+    return started

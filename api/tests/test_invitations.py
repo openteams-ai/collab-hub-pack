@@ -1672,8 +1672,10 @@ def test_migrations_are_appended_and_shipped_versions_are_untouched():
     """
 
     versions = [version for version, _ in COLLAB_SCHEMA_MIGRATIONS]
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-    assert LATEST_COLLAB_SCHEMA_VERSION == 16
+    # 17 and 18 are the pull requests ahead of the keyed claim's in the merge queue; the runner applies
+    # what is above the highest applied version, so the gap is filled from below, never from above.
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 19]
+    assert LATEST_COLLAB_SCHEMA_VERSION == 19
 
     version_two = dict(COLLAB_SCHEMA_MIGRATIONS)[2]
     # v2 has shipped, so its statements are frozen text. If this ever fails,

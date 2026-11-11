@@ -62,7 +62,7 @@ The first thing that runs end to end is the primary goal: **the hub launches Her
 | ~~Worker answers `{output, usage}`~~ — *the envelope landed in #120; `{"pause": true}` is still how a Cog pauses* | The result envelope; the **step's Gate** decides a pause, never the Cog | #2 comment, seam note |
 | One engine, durable only through Track replay a caller triggers | One **lifecycle runner**, with the durability engine absent (`none`) or plugged in (`dbos`, `temporal`) | #2 |
 | The executor is whichever class the caller constructs, and the only real one needs a cluster | An **agent location**, `local` or `remote`, chosen by configuration like the backend — and `local`, a child process, first | this plan |
-| At-least-once across pod replacement | A keyed claim, so a re-invoked step never repeats a side effect | #1 comment |
+| ~~At-least-once across pod replacement~~ — *the keyed claim landed in #104's first pull request* | A keyed claim, so a re-invoked step never repeats a side effect | #1 comment |
 | A step event's payload is the raw output; a failure is a class name | Binding identity per step, actor per gate decision, bounded failure records | #5 comment |
 | The Postgres Track creates its own tables | Hub tables through the `collab_schema` migration registry | #84, #42 |
 | The hub's resolver selects the model; the worker only ever gets `COG_ID` | Hub offers inventory, the Cog's `resolve` selects, hub records **and delivers** the binding | #3 comment |
@@ -311,7 +311,7 @@ The open phases are tracked as workstream issues since 2026-10-26, one per piece
 | 14 | #107 | Add a Worker SDK with Harness adapters, ACP first | `feat/cog-worker-sdk` | 2, 9 | M | merged, #224, with Phase 15 |
 | 15 | #108 | Publish a Hermes harness Cog, launched by the hub as a local process | `feat/cog-worker-sdk` | 9, 12, 14 | M | merged, #224, with Phase 14 |
 | 16 | #103, with Phases 18 and 19 | Launch, list and terminate Cogs from the `collab-hub` CLI | `feat/cli-launch` | 6, 10, 12 | S | merged, #251, with Phases 18 and 19 |
-| 17 | #104, with Phase 27 | Never repeat a completed side effect when a step is invoked again | `feat/cog-keyed-claim` | 8, 11, 14 | M | not started |
+| 17 | #104, with Phase 27 | Never repeat a completed side effect when a step is invoked again | `feat/cog-durable-runs-104` | 8, 11, 14 | M | in review, with #104's first pull request |
 | 18 | #103, with Phases 16 and 19 | The hub run API: Frames, payloads, decisions and retry | `feat/cog-run-api` | 12, 15, 17 | M | merged, #251, with Phases 16 and 19 |
 | 19 | #103, with Phases 16 and 18 | Decide, read and retry runs from the `collab-hub` CLI | `feat/cli-runs` | 16, 18 | S | merged, #251, with Phases 16 and 18 |
 | 20 | apollo-desktop#825 | Launch and watch hub runs from the desktop | `feat/hub-run-client-690` | 12, 18 | M | not started |
@@ -739,7 +739,7 @@ The three things a user first asks of a Cog hub, from a terminal: list the Cogs,
 - [x] Exit codes distinguish completed, failed, `interrupted`, waiting at a Gate and cancelled, and every command has `--json`.
 
 #### Phase 17 — No repeated side effects: the keyed claim
-**Issue** #104, with Phase 27 (was #102) · **Branch** `feat/cog-keyed-claim` · **Depends on** Phases 8, 11, 14 · **Size** M
+**Issue** #104, with Phase 27 (was #102) · **Branch** `feat/cog-durable-runs-104` · **Depends on** Phases 8, 11, 14 · **Size** M · **Status** in review, #104's first pull request
 
 A step can be invoked again after it already acted: a durable backend resuming after a crash, or someone retrying an interrupted `none` run. Neither may repeat a side effect.
 
@@ -747,20 +747,20 @@ A step can be invoked again after it already acted: a durable backend resuming a
 - Every interaction carries an idempotency key, stable for one step attempt.
 - A durable **keyed claim** store on the hub, with two states. A worker *reserves* the key before it acts and *commits* the envelope after; a replay of a committed key returns the envelope without acting. A replay that finds a key reserved but never committed — the worker died between the side effect and its result — must not act again: the step fails as `outcome-unknown`, and only a person, or an entry point the Cog declares idempotent, resolves it. The claim narrows the crash window to the reserve-to-commit gap and makes it visible; it does not pretend to close it.
 - **Two stores, both first-class**: SQLite for level 1 and the desktop, Postgres for the hub, behind one protocol and one suite — the same shape Phase 5 gives the Track, and what keeps level 1 free of containers.
-- **A worker-facing transport**, since the worker is a separate process even at level 1: `POST /v1/claims/{key}/reserve` and `/commit`, and `GET /v1/claims/{key}`, served by the API process, authorized by Phase 9's run token — which the API verifies against the hash the controller recorded, never by asking the controller — and scoped to that run's own keys, so a worker can neither read nor commit another run's. Phase 29's "claim endpoint" is this one, and Phase 14's SDK is its client.
+- **A worker-facing transport**, since the worker is a separate process even at level 1: `POST /v1/claims/reserve`, `/commit` and `/release`, and `GET /v1/claims?key=`, the key in the body or the query so any step name fits, served by the API process, authorized by Phase 9's run token — which the API verifies against the hash the controller recorded, never by asking the controller — and scoped to that worker's own step attempt's key, so a worker can neither read nor commit another step's, another attempt's or another run's. Phase 29's "claim endpoint" is this one, and Phase 14's SDK is its client.
 - The claim contract documented for workers; the reference worker implements it, and the Worker SDK (Phase 14) gains the claim client, so every adapter — Hermes' included — honours it with no change to its Cog.
 - The lifecycle suite gains "retry of an interrupted run does not repeat a completed side effect"; the durability suite gains "a worker replaced after reserving, before committing" (the step ends `outcome-unknown`, nothing acts twice) and "a worker replaced after committing, before the step was recorded" (the envelope is returned). A **claim conformance suite** runs reserve, commit, replay of a committed key, replay of a reserved-but-uncommitted key, and expiry, against SQLite and Postgres alike.
 
-*Dev and CI* — at level 1 the SQLite claim store sits beside the SQLite Track in `dev/.local/`, so a fake Cog running as a child process (Phase 9) reserves and commits over HTTP with no container; the `fake-cog` compose service joins the `fakes` profile at level 2. CI: the claim conformance suite runs in `test-execution.yaml` against both stores, and `level-1` asserts a fake Cog child process reserves and commits its key over HTTP with the run token the controller minted, and is refused another run's key. Replaying a claim across a controller restart needs the run API's retry, so it is asserted in Phase 18. *Docs* — `op-cog-seam.md` gains the claim contract; `frames-operations.md` lists the claims table and how long claims are kept.
+*Dev and CI* — at level 1 the SQLite claim store sits in the SQLite Track's file in `dev/.local/`, so a fake Cog running as a child process (Phase 9) reserves and commits over HTTP with no container; at level 2 the same child processes claim against `make api-pg`, so no compose service is needed. CI: the claim conformance suite runs in `test-execution.yaml` against both stores, and `level-1` asserts a fake Cog child process reserves and commits its key over HTTP with the run token the controller minted, and that the retry of a run whose worker was killed after reserving ends `outcome-unknown` and is refused a second retry; that a token reaches its own step attempt's key and no other is the API suite's (`test_claims_api.py`). The committed-then-interrupted replay runs in the lifecycle and durability suites, with a real worker process in `test_keyed_claim.py`. *Docs* — `op-cog-seam.md` gains the claim contract; `frames-operations.md` lists the claims table and how long claims are kept.
 
 *Acceptance*
-- [ ] Re-invoking a step whose side effect already happened returns the recorded envelope and does not act again, under `none` retry.
-- [ ] A worker replaced between reserving a key and committing its envelope leaves the step `outcome-unknown`; nothing acts twice.
-- [ ] Both claim stores pass the claim conformance suite, and a run token reaches only its own run's keys.
-- [ ] The claim contract is documented and implemented by the reference worker and the Worker SDK.
+- [x] Re-invoking a step whose side effect already happened returns the recorded envelope and does not act again, under `none` retry.
+- [x] A worker replaced between reserving a key and committing its envelope leaves the step `outcome-unknown`; nothing acts twice.
+- [x] Both claim stores pass the claim conformance suite, and a run token reaches only its own run's keys.
+- [x] The claim contract is documented and implemented by the reference worker and the Worker SDK.
 
 #### Phase 18 — The hub run API: Frames, payloads, decisions and retry
-**Issue** #103, closes it · **Branch** `feat/cog-run-api-103` · **Depends on** Phases 12, 15, 17 · **Size** M · **Status** merged, #251, with Phases 16 and 19; the claim's part of retry (the `outcome-unknown` step) lands with Phase 17 in #104
+**Issue** #103, closes it · **Branch** `feat/cog-run-api-103` · **Depends on** Phases 12, 15, 17 · **Size** M · **Status** merged, #251, with Phases 16 and 19; the claim's part of retry (the `outcome-unknown` step, refused by `POST .../retry` until a person reconciles it) landed with Phase 17 in #104's first pull request
 
 The rest of the run API: a step grounded in Frames, its output read back, its Gate decided, and a run retried without repeating a side effect.
 
@@ -1253,9 +1253,9 @@ sequenceDiagram
   Exec->>W: the launcher spawns serve in its own process group<br/>run token in the environment, binding file from models:
   Exec->>W: GET /healthz until ready
   Ctl->>W: POST /invoke (task, idempotency key, run token)
-  W->>API: POST /v1/claims/{key}/reserve (run token)
+  W->>API: POST /v1/claims/reserve {key} (run token)
   W->>Model: the Harness adapter drives hermes acp, which calls the model
-  W->>API: POST /v1/claims/{key}/commit (envelope)
+  W->>API: POST /v1/claims/commit {key, envelope}
   W-->>Ctl: envelope
   Ctl->>Store: step_completed (binding, problems, usage, payload reference)
   opt the step's Gate escalates
@@ -1303,9 +1303,9 @@ sequenceDiagram
   Exec->>Pod: Deployment, Service, ingress and egress NetworkPolicy<br/>init container: nebi pull, then serve
   Exec->>Pod: GET /healthz until ready
   Ctl->>Pod: POST /invoke (task, idempotency key, run token verified by the SDK)
-  Pod->>API: POST /v1/claims/{key}/reserve (run token)
+  Pod->>API: POST /v1/claims/reserve {key} (run token)
   Pod->>GW: model call over the internal Service, the only egress the policy allows
-  Pod->>API: POST /v1/claims/{key}/commit (envelope)
+  Pod->>API: POST /v1/claims/commit {key, envelope}
   Pod-->>Ctl: envelope
   Ctl->>Store: step_completed
   Ctl->>Store: gate_escalated (escalation id)

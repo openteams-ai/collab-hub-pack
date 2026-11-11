@@ -44,6 +44,7 @@ API_PATH_PREFIXES = (
     "/v1/task-devices",
     "/v1/task-notifications",
     "/v1/runs",
+    "/v1/claims",
     "/v1/task-runs",
     # The Cog catalog read API (issue #85): its 404 and 503 states carry
     # machine-readable codes (`cog_not_found`, `cog_catalog_unavailable`).

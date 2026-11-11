@@ -553,6 +553,7 @@ async def read_slack_conversation(
             oldest=body.oldest,
             latest=body.latest,
             cursor=body.cursor,
+            max_chars=body.max_chars,
         )
     except SlackConversationNotAllowed as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
@@ -585,6 +586,7 @@ async def read_slack_thread(
             message_ts=message_ts,
             limit=body.limit,
             cursor=body.cursor,
+            max_chars=body.max_chars,
         )
     except SlackConversationNotAllowed as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc

@@ -484,6 +484,44 @@ async def test_invitations_are_listed_for_the_panel(tmp_path, idp: _StubIdp):
     assert "secret" not in response.text and "token" not in response.text
 
 
+class NamedOrganizations(StubInvitations):
+    def organization_names(self, org_ids):
+        return {org_id: name for org_id, name in {"org-a": "Acme Labs"}.items() if org_id in org_ids}
+
+
+@pytest.mark.asyncio
+async def test_hub_usage_names_each_organization_it_can(tmp_path, idp: _StubIdp):
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        grant_operator(app, idp.sub)
+        app.state.invitation_service = NamedOrganizations()
+        app.state.usage_store.record_event("org-a", "default", "u-1", "chat")
+        app.state.usage_store.record_event("org-b", "default", "u-2", "chat")
+        await sign_in(client, idp, next_path="/web")
+        response = await client.get("/admin/api/usage")
+
+    assert response.status_code == 200
+    names = {org["org_id"]: org["name"] for org in response.json()["organizations"]}
+    assert names == {"org-a": "Acme Labs", "org-b": None}
+
+
+@pytest.mark.asyncio
+async def test_hub_usage_still_answers_when_names_cannot_be_read(tmp_path, idp: _StubIdp):
+    """A memory deployment has no organization store; the figures still matter."""
+
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        grant_operator(app, idp.sub)
+        app.state.usage_store.record_event("org-a", "default", "u-1", "chat")
+        await sign_in(client, idp, next_path="/web")
+        response = await client.get("/admin/api/usage")
+
+    assert response.status_code == 200
+    assert [org["name"] for org in response.json()["organizations"]] == [None]
+
+
 class ManyInvitations(StubInvitations):
     """Enough invitations to need more than one page, served by offset."""
 

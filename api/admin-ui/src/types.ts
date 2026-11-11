@@ -25,6 +25,8 @@ export interface ConnectorRow {
 
 export interface OrganizationUsage {
   org_id: string;
+  /** `null` when the hub has no name stored for it, or cannot read names. */
+  name: string | null;
   users: number;
   events: number;
 }

@@ -623,6 +623,7 @@ def make_router() -> APIRouter:
     @router.get("/usage")
     def admin_usage(
         usage_store: Annotated[UsageStore, Depends(get_usage_store)],
+        service: Annotated[InvitationService, Depends(get_invitation_service)],
         since: Annotated[AwareDatetime | None, Query()] = None,
         until: Annotated[AwareDatetime | None, Query()] = None,
     ):
@@ -641,13 +642,20 @@ def make_router() -> APIRouter:
             summary = usage_store.hub_summary(since=since, until=until)
         except UsageUnavailableError:
             return JSONResponse({"error": "usage_unavailable"}, status_code=503)
+        # Names are a label on figures that stand on their own, so a hub that
+        # cannot read them still answers, and the panel shows the id instead.
+        try:
+            names = service.organization_names([org.org_id for org in summary.organizations])
+        except InvitationsUnavailableError:
+            names = {}
 
         return {
             "users_total": summary.users_total,
             "events_total": summary.events_total,
             "events": [{"event": event, "count": count} for event, count in summary.events],
             "organizations": [
-                {"org_id": org.org_id, "users": org.users, "events": org.events} for org in summary.organizations
+                {"org_id": org.org_id, "name": names.get(org.org_id), "users": org.users, "events": org.events}
+                for org in summary.organizations
             ],
         }
 

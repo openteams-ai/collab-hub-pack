@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { invitationNotice, organizationLabel, organizationNotice } from "./invitations";
+import type { Resource } from "./api";
+import { invitationNotice, loadAllOrganizations, organizationLabel, organizationNotice } from "./invitations";
 
 describe("invitationNotice", () => {
   it("reports a delivered invitation as sent", () => {
@@ -56,5 +57,33 @@ describe("organizationNotice", () => {
       /single organization/,
     );
     expect(organizationNotice({ state: "error" })).toEqual({ text: "The organization was not created.", bad: true });
+  });
+});
+
+describe("loadAllOrganizations", () => {
+  type Page = { organizations: { id: string }[]; next_offset: number | null };
+
+  it("follows every page, so an organization past the first hundred can still be picked", async () => {
+    const asked: string[] = [];
+    const get = async (path: string): Promise<Resource<Page>> => {
+      asked.push(path);
+      return path.endsWith("offset=100")
+        ? { state: "ok", data: { organizations: [{ id: "org-101" }], next_offset: null } }
+        : { state: "ok", data: { organizations: [{ id: "org-1" }], next_offset: 100 } };
+    };
+
+    const result = await loadAllOrganizations(get);
+
+    expect(asked).toEqual(["api/organizations", "api/organizations?offset=100"]);
+    expect(result).toEqual({ state: "ok", data: { organizations: [{ id: "org-1" }, { id: "org-101" }] } });
+  });
+
+  it("reports a later page's failure, never the first page as the whole list", async () => {
+    const get = async (path: string): Promise<Resource<Page>> =>
+      path === "api/organizations"
+        ? { state: "ok", data: { organizations: [{ id: "org-1" }], next_offset: 100 } }
+        : { state: "unavailable", reason: "invitations_unavailable" };
+
+    expect(await loadAllOrganizations(get)).toEqual({ state: "unavailable", reason: "invitations_unavailable" });
   });
 });

@@ -35,6 +35,15 @@ export function sinceFor(range: UsageRange, now: Date): string | null {
 }
 
 /**
+ * The organizations the usage table lists. The people count is all-time, so in
+ * a chosen period an organization with no actions in it says nothing about
+ * that period and is left out.
+ */
+export function usageRows(organizations: OrganizationUsage[], range: UsageRange): OrganizationUsage[] {
+  return range === "all" ? organizations : organizations.filter((org) => org.events > 0);
+}
+
+/**
  * A filter tab's label. The count shows only when every row is loaded: on a
  * paged listing it would count one page and read as the total.
  */

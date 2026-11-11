@@ -1,4 +1,4 @@
-import type { Resource } from "./api";
+import { type Resource, getJson } from "./api";
 
 const ISSUE_OUTCOMES: Record<string, string> = {
   sent: "Invitation sent.",
@@ -62,4 +62,23 @@ export function organizationNotice(result: Resource<unknown>): { text: string; b
   const word = outcomeWord(result);
   if (typeof word === "string" && word in CREATE_OUTCOMES) return { text: CREATE_OUTCOMES[word], bad: true };
   return { text: "The organization was not created.", bad: true };
+}
+
+/**
+ * Every organization on the hub, read page by page. The picker filters and
+ * chooses among all of them, so one page standing in for the list would hide
+ * the rest; a failed page fails the whole read.
+ */
+export async function loadAllOrganizations<T>(
+  get: (path: string) => Promise<Resource<{ organizations: T[]; next_offset: number | null }>> = getJson,
+): Promise<Resource<{ organizations: T[] }>> {
+  const organizations: T[] = [];
+  let offset: number | null = 0;
+  while (offset !== null) {
+    const page = await get(offset === 0 ? "api/organizations" : `api/organizations?offset=${offset}`);
+    if (page.state !== "ok") return page;
+    organizations.push(...page.data.organizations);
+    offset = page.data.next_offset;
+  }
+  return { state: "ok", data: { organizations } };
 }

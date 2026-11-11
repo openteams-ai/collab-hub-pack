@@ -10,6 +10,7 @@ import {
   shares,
   sinceFor,
   tabLabel,
+  usageRows,
   usageSummary,
   userSummary,
 } from "./summaries";
@@ -18,14 +19,14 @@ describe("shares", () => {
   it("gives each organization its whole-number share of the actions", () => {
     expect(
       shares([
-        { org_id: "org-a", users: 2, events: 4 },
-        { org_id: "org-b", users: 1, events: 1 },
+        { org_id: "org-a", name: null, users: 2, events: 4 },
+        { org_id: "org-b", name: null, users: 1, events: 1 },
       ]),
     ).toEqual([80, 20]);
   });
 
   it("is zero everywhere when nothing has been recorded, never a division by zero", () => {
-    expect(shares([{ org_id: "org-a", users: 1, events: 0 }])).toEqual([0]);
+    expect(shares([{ org_id: "org-a", name: null, users: 1, events: 0 }])).toEqual([0]);
   });
 });
 
@@ -39,6 +40,21 @@ describe("sinceFor", () => {
   it("counts back whole days from now", () => {
     expect(sinceFor("30d", now)).toBe("2026-08-31T12:00:00.000Z");
     expect(sinceFor("7d", now)).toBe("2026-09-23T12:00:00.000Z");
+  });
+});
+
+describe("usageRows", () => {
+  const organizations = [
+    { org_id: "org-a", name: "Acme Labs", users: 2, events: 4 },
+    { org_id: "org-b", name: null, users: 3, events: 0 },
+  ];
+
+  it("lists every organization that has used the hub over all time", () => {
+    expect(usageRows(organizations, "all").map((org) => org.org_id)).toEqual(["org-a", "org-b"]);
+  });
+
+  it("leaves out an organization with no actions in a chosen period", () => {
+    expect(usageRows(organizations, "7d").map((org) => org.org_id)).toEqual(["org-a"]);
   });
 });
 

@@ -3,13 +3,14 @@ import { useState } from "react";
 
 import { ConnectorIcon, ModelIcon } from "./BrandIcon";
 import { postJson } from "./api";
+import { groupMembersPath, loadGroupSizes } from "./groups";
 import type { Resource } from "./api";
-import { invitationNotice, organizationLabel, organizationNotice } from "./invitations";
+import { invitationNotice, loadAllOrganizations, organizationLabel, organizationNotice } from "./invitations";
 import { Pager, useDebounced, usePages } from "./paging";
-import { type UsageRange, accessLabel, shares, shortDate, sinceFor, tabLabel } from "./summaries";
+import { type UsageRange, accessLabel, shares, shortDate, sinceFor, tabLabel, usageRows } from "./summaries";
 import type { AuditRow, ConnectorRow, HubUsage, InvitationRow, ModelRow, UserRow } from "./types";
 import { Failure, Loading, PageHeader, Person, Tabs } from "./ui";
-import { useResource } from "./useResource";
+import { useLoaded, useResource } from "./useResource";
 
 export function Models({ csrfToken }: { csrfToken: string }) {
   const [reload, setReload] = useState(0);
@@ -18,6 +19,12 @@ export function Models({ csrfToken }: { csrfToken: string }) {
     reload,
   );
   const [openGroup, setOpenGroup] = useState<string | null>(null);
+  const gated = resource?.state === "ok" ? resource.data.models.flatMap((model) => model.group_path ?? []) : [];
+  const sizes = useLoaded<Map<string, number>>(
+    gated.length ? () => loadGroupSizes(gated).then((data) => ({ state: "ok" as const, data })) : null,
+    gated.join("\n"),
+  );
+  const groupSizes = sizes?.state === "ok" ? sizes.data : new Map<string, number>();
 
   const header = (
     <PageHeader title="Models and access">
@@ -80,7 +87,11 @@ export function Models({ csrfToken }: { csrfToken: string }) {
                 <td>{model.owned_by ?? "—"}</td>
                 <td>
                   {model.group_path ? (
-                    <GroupPill groupPath={model.group_path} onOpen={() => setOpenGroup(model.group_path)} />
+                    <GroupPill
+                      groupPath={model.group_path}
+                      size={groupSizes.get(model.group_path)}
+                      onOpen={() => setOpenGroup(model.group_path)}
+                    />
                   ) : (
                     <span className="pill">Everyone who can sign in</span>
                   )}
@@ -114,12 +125,10 @@ function people(count: number): string {
 }
 
 /** The group that gates a model, with its size once the directory has answered. */
-function GroupPill({ groupPath, onOpen }: { groupPath: string; onOpen: () => void }) {
-  const members = useResource<{ members: Member[] }>(`api/model-access?group_path=${encodeURIComponent(groupPath)}`);
-  const size = members?.state === "ok" ? ` · ${people(members.data.members.length)}` : "";
+function GroupPill({ groupPath, size, onOpen }: { groupPath: string; size?: number; onOpen: () => void }) {
   return (
     <button type="button" className="pill brand" onClick={onOpen}>
-      {groupPath} group{size}
+      {groupPath} group{size === undefined ? "" : ` · ${people(size)}`}
     </button>
   );
 }
@@ -139,7 +148,7 @@ function GroupDrawer({
 }) {
   const [reload, setReload] = useState(0);
   const resource = useResource<{ group_path: string; members: Member[] }>(
-    `api/model-access?group_path=${encodeURIComponent(groupPath)}`,
+    groupMembersPath(groupPath),
     reload,
   );
   const [busy, setBusy] = useState(false);
@@ -557,7 +566,8 @@ export function Usage() {
   if (resource === null) return <>{header}<Loading subject="usage" /></>;
   if (resource.state !== "ok") return <>{header}<Failure resource={resource} subject="usage" /></>;
 
-  const { users_total: users, events_total: events, organizations } = resource.data;
+  const { users_total: users, events_total: events } = resource.data;
+  const organizations = usageRows(resource.data.organizations, range);
   const percent = shares(organizations);
 
   return (
@@ -569,16 +579,17 @@ export function Usage() {
         <Figure Icon={Building2} value={organizations.length} label="organizations" />
       </div>
       <p className="empty">
-        Someone is counted once they have used the hub from the desktop app or the API as a member of an organization.
-        The Users screen lists every account the identity provider holds, so it can show a larger number. The period
-        bounds the actions; the people count is always current.
+        Someone is counted once they have used the hub from the desktop app or the API as a member of an organization,
+        and stays counted after their account is removed. The Users screen lists the accounts the identity provider
+        holds now, including people who have never used the hub, so either count can be the larger one. The period
+        bounds the actions and the organizations listed; the people counts are all-time.
       </p>
       <div className="table-card">
         <table>
           <thead>
             <tr>
               <th>Organization</th>
-              <th>People</th>
+              <th>People, all-time</th>
               <th>Actions</th>
               <th>Share of actions</th>
             </tr>
@@ -586,7 +597,7 @@ export function Usage() {
           <tbody>
             {organizations.map((org, index) => (
               <tr key={org.org_id}>
-                <td className="mono">{org.org_id}</td>
+                <td className={org.name ? undefined : "mono"}>{org.name ?? org.org_id}</td>
                 <td className="num">{org.users}</td>
                 <td className="num">{org.events}</td>
                 <td>
@@ -650,7 +661,7 @@ export function Invitations({ csrfToken }: { csrfToken: string }) {
     query ? `api/invitations?${query}` : "api/invitations",
     reload,
   );
-  const organizations = useResource<{ organizations: OrganizationRow[] }>("api/organizations", organizationsReload);
+  const organizations = useLoaded(() => loadAllOrganizations<OrganizationRow>(), String(organizationsReload));
   const [email, setEmail] = useState("");
   const [target, setTarget] = useState(NOT_CHOSEN);
   const [role, setRole] = useState<"member" | "owner">("member");

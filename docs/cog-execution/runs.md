@@ -43,7 +43,10 @@ and asks the executor to tear it down. An executor holds no lifecycle logic.
 
 The setting is the only switch: nothing imports an executor.
 
-**What a remote worker is.** A pod the run controller makes, of the hub's
+**What a remote worker is.** A pod the run controller makes, in a namespace
+of the workers' own (`namespace`, where the controller's Role is and the
+controller's own pod is not, so the identity that makes workers holds
+nothing where the hub's Secrets are; #253), of the hub's
 image, which ships the Cog packages under `/opt/collab-hub/cogs` and pixi:
 the package's `serve` task in the environment its lock pins, built on the
 pod's own volumes (materialization from a published artifact, with a cache,
@@ -54,8 +57,11 @@ the binding delivers (a model key) through a Secret of the worker's own,
 owned by its Deployment (made just after it; the pod waits for it) and read
 by `envFrom`, so neither is on a Deployment or ReplicaSet that `get` reads,
 and garbage collection removes the Secret with the Deployment. It carries no ServiceAccount
-token, and a NetworkPolicy per worker admits only the controller's pods to
-its `/invoke`; the controller presents the run token on every request,
+token, and a NetworkPolicy per worker admits only the controller's pods, from
+the controller's namespace (`allow_ingress_from_namespace`, the namespace's
+`kubernetes.io/metadata.name` label), to its `/invoke`, which the controller
+reaches by the Service's namespace-qualified DNS name; the controller
+presents the run token on every request,
 turns included. The pod runs under the executor's securityContext unless
 given another: `runAsNonRoot`, no privilege escalation, every capability
 dropped, the runtime's seccomp profile, which Pod Security `restricted`
@@ -73,9 +79,11 @@ label value gets its normalized form with a digest of the exact id, so no two
 runs share one), and a controller sweeps its own id's workloads at start,
 when none can be live, and a run's when it takes the run over. The only identity that may create these workloads is
 the controller's; the API never does (ADR-0002 invariant 3). The controller
-takes `--image`, `--namespace` and `--allow-ingress-from` (the labels of its
-own pods, as JSON), or `--insecure-skip-network-policy` for a trusted
-namespace, and `--worker-resources`, `--worker-cache-size-limit` and
+takes `--image`, `--namespace` (the workers' own), `--allow-ingress-from`
+(the labels of its own pods, as JSON) and `--allow-ingress-from-namespace`
+(the labels of the namespace they are in, when it is not the workers'), or
+`--insecure-skip-network-policy` for a trusted namespace, and
+`--worker-resources`, `--worker-cache-size-limit` and
 `--worker-tmp-size-limit` for the pods.
 
 **What a local worker is given.** Its environment, and nothing else of its
@@ -265,7 +273,7 @@ run API's later phase.
 | `--track` | A SQLite file, or a `postgresql://` URL (`collab-hub-execution[postgres]`). On Postgres the Track's tables come from the hub's migrations; the controller refuses a database without them |
 | `--id` | The controller's name, held while it runs, recorded on each run it picks up |
 | `--packages`, `--allow`, `--work-dir`, `--environment` | The `local` location's directory package source, and where workers write their output |
-| `--image`, `--namespace`, `--allow-ingress-from`, `--insecure-skip-network-policy`, `--worker-resources`, `--worker-cache-size-limit`, `--worker-tmp-size-limit` | The `remote` location: the image a worker pod runs, where, which pods may reach it, and the pod's resources and volume limits |
+| `--image`, `--namespace`, `--allow-ingress-from`, `--allow-ingress-from-namespace`, `--insecure-skip-network-policy`, `--worker-resources`, `--worker-cache-size-limit`, `--worker-tmp-size-limit` | The `remote` location: the image a worker pod runs, the workers' namespace, which pods may reach a worker and from which namespace, and the pod's resources and volume limits |
 | `--backend`, `--location` | The two axes: `none` built; `local` and `remote` built |
 | `--models FILE` | The hub's `models:` block, below |
 | `--hub-url URL` | Where a worker reaches the hub's worker-facing endpoints with its run token, the keyed claim first: the API this controller advances runs for, handed to each worker as `COLLAB_HUB_URL`. Without it, workers claim nothing |

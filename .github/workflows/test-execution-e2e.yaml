@@ -56,4 +56,5 @@ jobs:
           set -euo pipefail
           kubectl --context kind-cog-e2e get pods --all-namespaces -o wide || true
           kubectl --context kind-cog-e2e -n cogs-e2e describe pods || true
+          kubectl --context kind-cog-e2e -n cogs-e2e-workers describe pods || true
           kubectl --context kind-cog-e2e -n cogs-e2e logs job/op-driver --tail=300 || true

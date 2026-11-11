@@ -18,7 +18,8 @@ the insecure default by omission:
   NetworkPolicy per worker that admits only the hub to the ``/invoke`` port and
   denies all other ingress. The selector must be non-empty (an empty selector
   matches every pod). Add ``allow_ingress_from_namespace={...}`` when the hub runs
-  in another namespace. Requires a policy-enforcing CNI.
+  in another namespace, as the chart deploys it: workers in a namespace of their
+  own (``namespace``), the controller in the hub's. Requires a policy-enforcing CNI.
 - ``insecure_skip_network_policy=True`` deliberately opts out, for a trusted,
   single-tenant namespace only.
 

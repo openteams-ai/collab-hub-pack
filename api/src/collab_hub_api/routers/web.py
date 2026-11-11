@@ -558,12 +558,14 @@ def make_router(
         own gate.
         """
 
-        identity = session.name or session.email or session.user
+        # A name of only spaces counts as no name.
+        name = (session.name or "").strip()
+        identity = name or session.email or session.user
         roles = viewer_roles(request, session)
         # The header already carries the address, so the page greets the
         # person by their first name and says what this surface is for them.
         # Its links live in the navigation and nowhere else.
-        first_name = (session.name or "").split()[0] if session.name else identity
+        first_name = name.split()[0] if name else identity
         organization = roles.organization or "your organization"
         if roles.owner:
             purpose = (

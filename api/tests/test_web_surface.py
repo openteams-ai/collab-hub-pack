@@ -507,6 +507,16 @@ async def test_full_sign_in_mints_a_session_and_lands_on_next(tmp_path, idp):
         assert "Sign out" in overview.text
 
 
+async def test_a_name_of_only_spaces_greets_the_person_by_their_address(tmp_path, idp):
+    idp.claims_override = {"name": "   "}
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        overview = await client.get("/web")
+    assert overview.status_code == 200
+    assert "Hi, alice@example.com." in overview.text
+
+
 async def test_token_exchange_carries_the_client_secret_and_pkce_verifier(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as client:

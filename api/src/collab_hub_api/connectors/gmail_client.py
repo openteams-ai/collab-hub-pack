@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from email.utils import formataddr, getaddresses, parsedate_to_datetime
 from html.parser import HTMLParser
@@ -15,6 +17,10 @@ from .connector_text import sanitize_connector_text
 from .models import GmailMessageMetadata
 
 _MAX_METADATA_CONCURRENCY = 5
+# Recipients kept per search hit. Every hit repeats its full To/Cc list, so a
+# large distribution list dominates the response a model receives (#140).
+# The message read is uncapped, so the full list stays reachable.
+_SEARCH_MAX_RECIPIENTS = 10
 
 
 class GmailUpstreamError(RuntimeError):
@@ -117,7 +123,7 @@ class GmailClient:
                         operation="message metadata",
                         client=client,
                     )
-                return _message_metadata(detail)
+                return _message_metadata(detail, max_recipients=_SEARCH_MAX_RECIPIENTS)
 
             results = list(await asyncio.gather(*(fetch_metadata(message_id) for message_id in message_ids)))
         next_page_token = _string(payload.get("nextPageToken"))
@@ -139,9 +145,17 @@ class GmailClient:
         message = _message_metadata(payload)
         message_payload = payload.get("payload")
         text = _message_text(message_payload)
+        returned_text = text[:max_chars]
+        if message.snippet and _snippet_is_repeated(message.snippet, returned_text):
+            # Gmail's snippet usually previews the body's opening, which the
+            # returned text then already carries (#140). It is not guaranteed
+            # to: Gmail may build it from a part this read did not select (an
+            # HTML body behind a plain-text stub), and max_chars may cut the
+            # text short. So it is dropped only when it is verifiably repeated.
+            message = message.model_copy(update={"snippet": ""})
         body_format, attachment_count = _message_content_info(message_payload)
         truncated = len(text) > max_chars
-        return message, text[:max_chars], truncated, body_format, attachment_count
+        return message, returned_text, truncated, body_format, attachment_count
 
     async def _get_json(
         self,
@@ -204,8 +218,13 @@ def _gmail_query(
     return " ".join(part for part in parts if part)
 
 
-def _message_metadata(payload: dict) -> GmailMessageMetadata:
+def _message_metadata(payload: dict, *, max_recipients: int | None = None) -> GmailMessageMetadata:
+    """Build safe message metadata. ``max_recipients`` caps the recipient list; None keeps all."""
     headers = _headers(payload.get("payload"))
+    recipients = _recipient_headers(headers)
+    # Slice before sanitizing so dropped addresses are never processed; a None
+    # cap slices nothing off.
+    shown = recipients[:max_recipients]
     raw_label_ids = payload.get("labelIds", [])
     if not isinstance(raw_label_ids, list):
         raw_label_ids = []
@@ -214,7 +233,8 @@ def _message_metadata(payload: dict) -> GmailMessageMetadata:
         thread_id=_string(payload.get("threadId")),
         subject=sanitize_connector_text(headers.get("subject", "")),
         sender=sanitize_connector_text(headers.get("from", "")),
-        recipients=[sanitize_connector_text(value) for value in _recipient_headers(headers)],
+        recipients=[sanitize_connector_text(value) for value in shown],
+        recipients_omitted=len(recipients) - len(shown),
         sent_at=_sent_at(payload, headers),
         snippet=sanitize_connector_text(_string(payload.get("snippet"))),
         label_ids=[value for value in raw_label_ids if isinstance(value, str)],
@@ -333,6 +353,23 @@ def _collect_text_parts(message_payload: object, *, plain_parts: list[str], html
     if isinstance(parts, list):
         for part in parts:
             _collect_text_parts(part, plain_parts=plain_parts, html_parts=html_parts)
+
+
+def _snippet_is_repeated(snippet: str, text: str) -> bool:
+    """Whether ``text`` already says everything ``snippet`` does.
+
+    Strict on purpose, so doubt keeps the snippet: only Gmail's HTML escaping,
+    whitespace, invisible characters and accent encoding are forgiven.
+    """
+    return _comparable(html.unescape(snippet)) in _comparable(text)
+
+
+def _comparable(value: str) -> str:
+    composed = unicodedata.normalize("NFC", value)
+    # Zero-width and other format characters (and the combining grapheme joiner
+    # that marketing mail pads its preview with) render as nothing.
+    visible = "".join(ch for ch in composed if ch != "\u034f" and unicodedata.category(ch) != "Cf")
+    return " ".join(visible.split())
 
 
 def _decode_body(value: str) -> str:

@@ -169,23 +169,25 @@ STYLESHEET = """\
    values; the two surfaces of one product must not disagree about what blue
    means). Fonts are the registration bundle's own files, served from this
    origin: no font host, and a hub with no internet egress still renders them.
+   admin-ui/web-fonts.json lists the files named here, and the admin-ui build
+   fails if the bundle does not contain each one.
    Nothing in this interface is capitalised for emphasis. */
-@font-face { font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400; font-display: swap;
-  src: url(../invite/assets/ibm-plex-sans-latin-400-normal.woff2) format("woff2");
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 400; font-display: swap;
+  src: url(../invite/assets/inter-latin-400-normal.woff2) format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
     U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
-@font-face { font-family: "IBM Plex Sans"; font-style: normal; font-weight: 500; font-display: swap;
-  src: url(../invite/assets/ibm-plex-sans-latin-500-normal.woff2) format("woff2");
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 500; font-display: swap;
+  src: url(../invite/assets/inter-latin-500-normal.woff2) format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
     U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
-@font-face { font-family: "IBM Plex Sans"; font-style: normal; font-weight: 600; font-display: swap;
-  src: url(../invite/assets/ibm-plex-sans-latin-600-normal.woff2) format("woff2");
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 600; font-display: swap;
+  src: url(../invite/assets/inter-latin-600-normal.woff2) format("woff2");
   unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304,
     U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
 
 :root {
   color-scheme: light dark;
-  --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
   --ink: #1a1a2e; --ink-soft: #666; --accent: #3452d9; --line: #ddd;
   --warn: #8a2f2f; --page: #fff; --on-accent: #fff; --tint: rgba(52, 82, 217, 0.06);

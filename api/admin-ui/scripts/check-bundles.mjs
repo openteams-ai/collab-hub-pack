@@ -1,7 +1,8 @@
 // Check the built documents against the Content-Security-Policy they are
 // served under (script-src 'self', style-src 'self'): no inline script or
 // style, and every script and stylesheet a file of this build under
-// ./assets/. Runs at the end of `npm run build`, so the image and CI both
+// ./assets/. Also that the registration build contains every font file the
+// server-rendered /web stylesheet names (web-fonts.json). Runs at the end of `npm run build`, so the image and CI both
 // fail on a document the policy would break, rather than a browser later.
 //
 // Plain Node, no dependencies, so the build needs nothing it did not already.
@@ -29,6 +30,13 @@ export function offences(html, exists) {
   return found;
 }
 
+/** Every name in *fonts* that `exists` does not find in the registration assets. */
+export function missingFonts(fonts, exists) {
+  return fonts
+    .filter((name) => !exists(name))
+    .map((name) => `${name} is named by the /web stylesheet but is not in the registration build`);
+}
+
 const DOCUMENTS = ["dist/index.html", "dist/registration/index.html"];
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -45,6 +53,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     for (const offence of found) console.error(`${document}: ${offence}`);
     failed ||= found.length > 0;
   }
+  const { files: fonts } = JSON.parse(readFileSync(join(root, "web-fonts.json"), "utf8"));
+  const missing = missingFonts(fonts, (name) => existsSync(join(root, "dist/registration/assets", name)));
+  for (const offence of missing) console.error(`web-fonts.json: ${offence}`);
+  failed ||= missing.length > 0;
   if (failed) process.exit(1);
-  console.log(`checked ${DOCUMENTS.join(", ")} against the pages' Content-Security-Policy`);
+  console.log(`checked ${DOCUMENTS.join(", ")} against the pages' Content-Security-Policy, and the /web fonts`);
 }

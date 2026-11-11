@@ -8,7 +8,13 @@ more; what the app renders is the front-end suite's business.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+# The font files the server-rendered pages' stylesheet names. The admin-ui
+# build checks the real bundle contains every one (scripts/check-bundles.mjs),
+# so a stand-in written from this list cannot drift from what the build makes.
+WEB_FONT_FILES: list[str] = json.loads((Path(__file__).parents[1] / "admin-ui" / "web-fonts.json").read_text())["files"]
 
 SHELL = (
     "<!doctype html><title>Accept your invitation</title>"
@@ -31,6 +37,6 @@ def built_dist(tmp_path: Path) -> Path:
     (bundle / "assets" / "index-abc123.css").write_text("body{margin:0}")
     # The typeface files the build keeps under stable names, which the
     # server-rendered pages' stylesheet refers to as well.
-    for weight in (400, 500, 600):
-        (bundle / "assets" / f"ibm-plex-sans-latin-{weight}-normal.woff2").write_bytes(b"wOF2 stand-in")
+    for name in WEB_FONT_FILES:
+        (bundle / "assets" / name).write_bytes(b"wOF2 stand-in")
     return dist

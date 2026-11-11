@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { offences } from "./check-bundles.mjs";
+import { missingFonts, offences } from "./check-bundles.mjs";
 
 const files = new Set(["assets/index-abc.js", "assets/index-abc.css"]);
 const exists = (path: string) => files.has(path);
@@ -34,5 +34,14 @@ describe("offences", () => {
       "a style attribute, which style-src 'self' refuses",
       "an inline <style>, which style-src 'self' refuses",
     ]);
+  });
+});
+
+describe("missingFonts", () => {
+  it("names each font the /web stylesheet refers to that the registration build did not write", () => {
+    const built = new Set(["inter-latin-400-normal.woff2"]);
+    expect(
+      missingFonts(["inter-latin-400-normal.woff2", "plex-latin-400-normal.woff2"], (name) => built.has(name)),
+    ).toEqual(["plex-latin-400-normal.woff2 is named by the /web stylesheet but is not in the registration build"]);
   });
 });

@@ -37,6 +37,13 @@ app.kubernetes.io/instance: {{ .top.Release.Name }}
 app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
+{{- /* At the remote location, the namespace of the workers' own (issue #253): where the run controller makes each
+worker and where its Role is. Named by runs.controller.workerNamespace.name, or the release namespace with
+`-workers` on it. */ -}}
+{{- define "collab-hub.worker-namespace" -}}
+{{- default (printf "%s-workers" .Release.Namespace | trunc 63 | trimSuffix "-") .Values.runs.controller.workerNamespace.name -}}
+{{- end -}}
+
 {{- define "collab-hub.frames-storage-claim" -}}
 {{- if .Values.frames.storage.persistence.existingClaim -}}
 {{- .Values.frames.storage.persistence.existingClaim -}}

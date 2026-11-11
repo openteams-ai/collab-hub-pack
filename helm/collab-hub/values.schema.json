@@ -1237,7 +1237,7 @@
                 "local",
                 "remote"
               ],
-              "description": "Where a Cog's worker runs: a pod of its own (remote), or a process of the API's pod (local, the default)."
+              "description": "Where a Cog's worker runs: a pod of its own in the workers' namespace (remote), or a process of the API's pod (local, the default)."
             },
             "serviceAccountAnnotations": {
               "type": "object",
@@ -1259,6 +1259,30 @@
                 "tmpSizeLimit": {
                   "type": "string",
                   "description": "The size limit of a worker's /tmp, its HOME."
+                }
+              }
+            },
+            "workerNamespace": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "At the remote location, the namespace of the workers' own: where worker pods are made and the controller's Role is. Never the release namespace.",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "maxLength": 63,
+                  "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$",
+                  "description": "The namespace; `<release namespace>-workers` when empty."
+                },
+                "create": {
+                  "type": "boolean",
+                  "description": "Whether the chart makes the Namespace; false for one that exists."
+                },
+                "labels": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "Labels on the Namespace the chart makes; `pod-security.kubernetes.io/enforce: restricted` by default."
                 }
               }
             }

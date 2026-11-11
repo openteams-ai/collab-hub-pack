@@ -103,7 +103,7 @@ fails the step `context-exhausted` ([the envelope](result-envelope.md)).
 | Gates (human sign-off on flagged work) | The three-state result (ok / ok-with-problems / error) is exactly what a gate consumes |
 | Tracks (durable evidence) | Binding record + activity journal: which pinned model, which weights, which evidence, which problems, per run |
 | Data sources per step | Cog-declared requirements + environment connectors |
-| Catalog of workers | `cog.yaml` → catalog card |
+| Catalog of workers | Manifest (`[tool.cog]` in `pixi.toml`) → catalog card |
 
 ## The principle: loose coupling, strict semantics
 

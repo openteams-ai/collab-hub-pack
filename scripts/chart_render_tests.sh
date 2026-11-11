@@ -89,8 +89,16 @@ if [ "$(checksum)" != "$(checksum --set-string runs.controller.models='[models.o
 else
   fail "run controller: a new models block changes the pod template" "the checksum did not change"
 fi
-check "run controller remote: a Deployment of its own with the only workload Role, the API with none, no packages" \
-  run-controller-remote -f "$TESTDATA/run-controller-remote.yaml"
+# Workers in a namespace of their own (issue #253): the Role there, nothing in the release namespace.
+check "run controller remote: a Deployment of its own with the only workload Role, in the workers' namespace, the API with none" \
+  run-controller-remote -f "$TESTDATA/run-controller-remote.yaml" --namespace hub
+check "run controller remote: a workers' namespace that exists is used, not made" \
+  run-controller-remote-existing-namespace -f "$TESTDATA/run-controller-remote.yaml" --namespace hub \
+  --set runs.controller.workerNamespace.name=cog-workers --set runs.controller.workerNamespace.create=false
+refused "run controller remote: the release namespace as the workers' is refused" "namespace of their own" \
+  -f "$TESTDATA/run-controller-remote.yaml" --namespace hub --set runs.controller.workerNamespace.name=hub
+refused "run controller remote: a workers' namespace that is no DNS label is refused" "workerNamespace" \
+  -f "$TESTDATA/run-controller-remote.yaml" --set runs.controller.workerNamespace.name=Cog_Workers
 check "run controller remote: the artifact cache claim and the registry credential reach the controller" \
   run-controller-remote-artifacts -f "$TESTDATA/run-controller-remote-artifacts.yaml"
 # The worker a remote controller makes: from the chart's rendered controller, the Deployment the executor

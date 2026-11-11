@@ -666,10 +666,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="at the remote location, the image a worker pod runs: the hub's own, which ships "
                              "the Cog packages under /opt/collab-hub/cogs")
     parser.add_argument("--namespace", default=env("COLLAB_CONTROLLER_NAMESPACE", "collab-hub"),
-                        help="at the remote location, the namespace worker pods are made in")
+                        help="at the remote location, the namespace worker pods are made in: the workers' own, "
+                             "where this controller's Role is, which need not be the controller's")
     parser.add_argument("--allow-ingress-from", default=env("COLLAB_CONTROLLER_ALLOW_INGRESS_FROM"), metavar="JSON",
                         help="at the remote location, the labels of the pods that may reach a worker's /invoke, "
                              "as a JSON object: the run controller's own; or --insecure-skip-network-policy")
+    parser.add_argument("--allow-ingress-from-namespace", metavar="JSON",
+                        default=env("COLLAB_CONTROLLER_ALLOW_INGRESS_FROM_NAMESPACE"),
+                        help="at the remote location, the labels of the namespace those pods are in, as a JSON "
+                             "object (kubernetes.io/metadata.name names it), when it is not --namespace")
     parser.add_argument("--worker-resources", default=env("COLLAB_CONTROLLER_WORKER_RESOURCES"), metavar="JSON",
                         help="at the remote location, a worker pod's resources (requests and limits), as JSON")
     parser.add_argument("--worker-cache-size-limit", default=env("COLLAB_CONTROLLER_WORKER_CACHE_SIZE_LIMIT"),
@@ -725,16 +730,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     else:
         if not args.image:
             parser.error("--image is required at the remote location: the image a worker pod runs")
-        if args.allow_ingress_from:
+        for option in ("allow_ingress_from", "allow_ingress_from_namespace"):
+            if not getattr(args, option):
+                continue
+            flag = "--" + option.replace("_", "-")
             try:
-                args.allow_ingress_from = json.loads(args.allow_ingress_from)
+                setattr(args, option, json.loads(getattr(args, option)))
             except ValueError:
-                parser.error("--allow-ingress-from is a JSON object of labels")
-            if not isinstance(args.allow_ingress_from, dict) or not args.allow_ingress_from:
-                parser.error("--allow-ingress-from is a JSON object of labels, and not empty")
-        elif not args.insecure_skip_network_policy:
-            parser.error("the remote location needs --allow-ingress-from, the labels of the pods that may reach a "
-                         "worker, or --insecure-skip-network-policy")
+                parser.error(f"{flag} is a JSON object of labels")
+            if not isinstance(getattr(args, option), dict) or not getattr(args, option):
+                parser.error(f"{flag} is a JSON object of labels, and not empty")
+        if not args.allow_ingress_from:
+            if args.allow_ingress_from_namespace:
+                parser.error("--allow-ingress-from-namespace names the namespace of the pods --allow-ingress-from "
+                             "admits, and needs it")
+            if not args.insecure_skip_network_policy:
+                parser.error("the remote location needs --allow-ingress-from, the labels of the pods that may "
+                             "reach a worker, or --insecure-skip-network-policy")
     return args
 
 
@@ -814,6 +826,7 @@ def main(argv: list[str] | None = None) -> int:
         location_settings = {
             "image": args.image, "namespace": args.namespace, "controller": args.id,
             "allow_ingress_from": args.allow_ingress_from or None,
+            "allow_ingress_from_namespace": args.allow_ingress_from_namespace or None,
             "insecure_skip_network_policy": bool(args.insecure_skip_network_policy),
             "cache_claim": args.worker_cache_claim or None, "registry_credential": registry_credential,
             "registry_plain_http": plain_http}

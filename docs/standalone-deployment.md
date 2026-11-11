@@ -79,6 +79,10 @@ fails.
 helm install collab-hub helm/collab-hub -n nebari-nexus --set namespace.create=false
 ```
 
+At `runs.controller.location: remote` the release also owns the workers'
+namespace (`runs.controller.workerNamespace`, [below](#running-cogs-in-pods));
+`workerNamespace.create: false` points it at one that exists.
+
 ## Exposure: Ingress or HTTPRoute
 
 `api.ingress.kind` chooses the routing object.
@@ -463,17 +467,38 @@ runs:
   holds it, and hands it to each worker's init container alone.
 - **The controller is a Deployment of its own**, one replica of the API's
   image running `collab-hub-run-controller`, with a ServiceAccount and a
-  namespace-scoped Role over exactly the kinds it makes (Deployments,
-  Services, NetworkPolicies, and a Secret per worker, which it creates,
-  owned by the worker's Deployment so garbage collection removes it, and
-  never reads, lists or sweeps) and the verbs it uses. The API pod holds no
-  workload permissions, and may have as many replicas as its frame store
-  allows. The Role is in the release namespace, so the controller's identity
-  can start a pod under any ServiceAccount there and mount any Secret there,
-  the database URL among them: what putting workers beside the hub costs. A
-  namespace of the workers' own, holding the Role to them alone, is #253. The controller's id (`id`) is the same across rollouts; the new
-  pod's controller waits (`waitSeconds`) for the old one to let it go, and a
-  run picked up by an id that never returns is ended by a live controller.
+  Role over exactly the kinds it makes (Deployments, Services,
+  NetworkPolicies, and a Secret per worker, which it creates, owned by the
+  worker's Deployment so garbage collection removes it, and never reads,
+  lists or sweeps) and the verbs it uses. The API pod holds no workload
+  permissions, and may have as many replicas as its frame store allows. The
+  controller's id (`id`) is the same across rollouts; the new pod's
+  controller waits (`waitSeconds`) for the old one to let it go, and a run
+  picked up by an id that never returns is ended by a live controller.
+- **Workers run in a namespace of their own** (`workerNamespace`), where the
+  controller's Role and RoleBinding are; its ServiceAccount stays in the
+  release namespace, bound across. The identity that makes workers therefore
+  holds nothing in the release namespace: it can start a pod under no
+  ServiceAccount there and mount no Secret there, the database URL and the
+  Keycloak client secret among them (#253). The namespace is
+  `workerNamespace.name`, `<release namespace>-workers` when empty, and never
+  the release namespace (the chart refuses that). The chart makes it unless
+  `workerNamespace.create: false` says it exists, with `workerNamespace.labels`
+  on it, `pod-security.kubernetes.io/enforce: restricted` by default: a worker
+  pod is what `restricted` admits, and the controller's identity, which may
+  create any Deployment there, is then refused a privileged pod, a `hostPath`
+  mount or `hostNetwork`, with which it could reach the node and the Secrets
+  of every hub pod on it. With `create: false`, put that label on the
+  namespace yourself; the chart labels nothing it did not make. The controller
+  reaches each worker's Service by its namespace-qualified DNS name, and each
+  worker's NetworkPolicy admits the controller's pods from the release
+  namespace, by the `kubernetes.io/metadata.name` label Kubernetes sets on
+  it. Upgrading a `remote` hub whose Role was in the release namespace moves
+  the Role and RoleBinding; runs in flight are interrupted, as any rollout of
+  the controller interrupts them, and a worker the previous controller left
+  in the release namespace is outside the new controller's sweep, so remove
+  it by hand: `kubectl -n <release namespace> delete deploy,svc,netpol -l
+  app.kubernetes.io/managed-by=collab-hub-executor`.
 - **Each worker is a pod of its own**: the hub's image, which ships pixi and
   the artifact puller and no Cog. An init container pulls the Cog's artifact
   at its pinned digest, every blob verified, into the cache under the digest

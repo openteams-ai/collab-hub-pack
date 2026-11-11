@@ -28,7 +28,7 @@ if [ ! -f "$HERE/cog/pixi.lock" ]; then
   docker run --rm -v "$HERE/cog:/cog" -w /cog ghcr.io/prefix-dev/pixi:0.84.1-bookworm-slim pixi lock
 fi
 
-echo "== apply namespace, RBAC, the registry, the cache, the fake Cog's files, and the driver Job"
+echo "== apply the namespaces (the driver's and the workers'), RBAC, the registry, the cache, the fake Cog's files, and the driver Job"
 kubectl --context "$CTX" delete job op-driver -n cogs-e2e --ignore-not-found >/dev/null 2>&1 || true
 kubectl --context "$CTX" apply -f "$HERE/k8s.yaml"
 kubectl --context "$CTX" -n cogs-e2e create configmap e2e-cog \

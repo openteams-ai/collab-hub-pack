@@ -514,6 +514,27 @@ def test_every_option_reads_its_variable_and_the_command_line_wins(monkeypatch, 
         parse_args([])  # a variable's value is checked as the option's would be
 
 
+def test_the_remote_location_takes_the_namespace_of_the_pods_it_admits_only_with_the_pods(monkeypatch, tmp_path):
+    from collab_hub_execution.controller import parse_args
+
+    monkeypatch.setenv("COLLAB_CONTROLLER_TRACK", str(tmp_path / "t.sqlite"))
+    remote = ["--location", "remote", "--image", "hub:1", "--namespace", "hub-workers"]
+    pods = ["--allow-ingress-from", '{"app.kubernetes.io/component": "run-controller"}']
+    args = parse_args(remote + pods)
+    assert args.namespace == "hub-workers" and args.allow_ingress_from_namespace is None
+    # The chart's shape: the controller's pods in the hub's namespace, the workers in one of their own.
+    monkeypatch.setenv("COLLAB_CONTROLLER_ALLOW_INGRESS_FROM_NAMESPACE", '{"kubernetes.io/metadata.name": "hub"}')
+    args = parse_args(remote + pods)
+    assert args.allow_ingress_from == {"app.kubernetes.io/component": "run-controller"}
+    assert args.allow_ingress_from_namespace == {"kubernetes.io/metadata.name": "hub"}
+    for refused in (remote + ["--insecure-skip-network-policy"],  # a namespace without the pods it scopes
+                    remote + pods + ["--allow-ingress-from-namespace", "{}"],  # matches every namespace
+                    remote + pods + ["--allow-ingress-from-namespace", "hub"]):  # not labels
+        with pytest.raises(SystemExit) as stopped:
+            parse_args(refused)
+        assert stopped.value.code == 2
+
+
 def test_a_decision_with_findings_that_are_not_a_sequence_is_refused_before_it_is_recorded():
     track = InMemoryTrackStore()
     one = _named(track, "one", {"echo": lambda e, v: v})

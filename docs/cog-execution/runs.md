@@ -43,8 +43,11 @@ and asks the executor to tear it down. An executor holds no lifecycle logic.
 
 The setting is the only switch: nothing imports an executor.
 
-**What a remote worker is.** A pod the run controller makes, of the hub's
-image, which ships pixi and the artifact puller and no Cog. A step naming an
+**What a remote worker is.** A pod the run controller makes, in a namespace
+of the workers' own (`namespace`, where the controller's Role is and the
+controller's own pod is not, so the identity that makes workers holds
+nothing where the hub's Secrets are; #253), of the hub's image, which ships
+pixi and the artifact puller and no Cog. A step naming an
 installed Cog, by its pinned `<host>/<repository>@<digest>` reference, is
 materialized from its artifact: an init container (`pull`) runs
 `python -m collab_hub_execution.artifacts materialize <reference>`, which
@@ -74,8 +77,11 @@ pod waits for it) and read by `envFrom` and a volume that mounts the file
 alone, so none of it is on a Deployment or ReplicaSet that `get` reads, and
 garbage collection removes the Secrets with the Deployment. It carries no
 ServiceAccount token, and a NetworkPolicy per worker admits only the
-controller's pods to its `/invoke`; the controller presents the run token on
-every request, turns included. The pod runs under the executor's securityContext unless
+controller's pods, from the controller's namespace
+(`allow_ingress_from_namespace`, the namespace's `kubernetes.io/metadata.name`
+label), to its `/invoke`, which the controller reaches by the Service's
+namespace-qualified DNS name; the controller presents the run token on every
+request, turns included. The pod runs under the executor's securityContext unless
 given another: `runAsNonRoot`, no privilege escalation, every capability
 dropped, the runtime's seccomp profile, which Pod Security `restricted`
 admits; its two emptyDirs, the cache pixi builds on and its `/tmp`, have
@@ -93,9 +99,11 @@ label value gets its normalized form with a digest of the exact id, so no two
 runs share one), and a controller sweeps its own id's workloads at start,
 when none can be live, and a run's when it takes the run over. The only identity that may create these workloads is
 the controller's; the API never does (ADR-0002 invariant 3). The controller
-takes `--image`, `--namespace` and `--allow-ingress-from` (the labels of its
-own pods, as JSON), or `--insecure-skip-network-policy` for a trusted
-namespace, `--worker-resources`, `--worker-cache-size-limit` and
+takes `--image`, `--namespace` (the workers' own), `--allow-ingress-from`
+(the labels of its own pods, as JSON) and `--allow-ingress-from-namespace`
+(the labels of the namespace they are in, when it is not the workers'), or
+`--insecure-skip-network-policy` for a trusted namespace,
+`--worker-resources`, `--worker-cache-size-limit` and
 `--worker-tmp-size-limit` for the pods, `--worker-cache-claim` for the shared
 cache and `--worker-cache-path` for where the controller reaches it itself,
 and `--registry-credential-env`, `--registry-token-env` and
@@ -364,7 +372,7 @@ produced until it is removed and installed again.
 | `--track` | A SQLite file, or a `postgresql://` URL (`collab-hub-execution[postgres]`). On Postgres the Track's tables come from the hub's migrations; the controller refuses a database without them |
 | `--id` | The controller's name, held while it runs, recorded on each run it picks up |
 | `--packages`, `--allow`, `--work-dir`, `--environment` | The `local` location's directory package source, and where workers write their output |
-| `--image`, `--namespace`, `--allow-ingress-from`, `--insecure-skip-network-policy`, `--worker-resources`, `--worker-cache-size-limit`, `--worker-tmp-size-limit`, `--worker-cache-claim` | The `remote` location: the image a worker pod runs, where, which pods may reach it, the pod's resources and volume limits, and the claim every worker pod mounts as its cache |
+| `--image`, `--namespace`, `--allow-ingress-from`, `--allow-ingress-from-namespace`, `--insecure-skip-network-policy`, `--worker-resources`, `--worker-cache-size-limit`, `--worker-tmp-size-limit`, `--worker-cache-claim` | The `remote` location: the image a worker pod runs, the workers' namespace, which pods may reach a worker and from which namespace, the pod's resources and volume limits, and the claim every worker pod mounts as its cache |
 | `--worker-cache-path` | Where this controller reaches the cache itself, so an uninstall evicts a package; under `--work-dir` at `local` |
 | `--registry-credential-env`, `--registry-token-env`, `--registry-plain-http` | How a pull reaches the registry: the variable holding a registry credential (`user:secret`, presented to the registry's token endpoint; what `POST /v1/cogs/registry-credentials` exchanges a session for, or the backing registry's own), or one holding a bearer the registry takes as it is; and the hosts reached over plain HTTP |
 | `--backend`, `--location` | The two axes: `none` built; `local` and `remote` built |

@@ -69,10 +69,13 @@ class Rendered:
         deployments = {d["metadata"]["labels"][COMPONENT_LABEL]: d for d in docs if d.get("kind") == "Deployment"}
         assert set(deployments) <= {"api", "indexer", "run-controller"}, sorted(deployments)
         self.api = Workload(deployments["api"])
+        self.release_namespace = deployments["api"]["metadata"]["namespace"]
         self.indexer = Workload(deployments["indexer"]) if "indexer" in deployments else None
         self.controller = Workload(deployments["run-controller"]) if "run-controller" in deployments else None
         self.roles = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "Role"}
         self.bindings = [d for d in docs if d.get("kind") == "RoleBinding"]
+        self.cluster_grants = [d for d in docs if d.get("kind") in ("ClusterRole", "ClusterRoleBinding")]
+        self.namespaces = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "Namespace"}
         self.service_accounts = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "ServiceAccount"}
         self.services = [d for d in docs if d.get("kind") == "Service"]
         self.configmaps = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "ConfigMap"}
@@ -440,17 +443,15 @@ def case_run_controller_remote(r: Rendered) -> None:
     assert controller.container["image"] == r.api.container["image"]
     assert controller.value("COLLAB_CONTROLLER_LOCATION") == "remote"
     assert controller.value("COLLAB_CONTROLLER_IMAGE") == r.api.container["image"]
-    assert controller.value("COLLAB_CONTROLLER_ID") == "hub" and controller.value("COLLAB_CONTROLLER_NAMESPACE")
+    assert controller.value("COLLAB_CONTROLLER_ID") == "hub"
     assert controller.env["COLLAB_CONTROLLER_TRACK"]["valueFrom"]["secretKeyRef"] == {"name": "hub-db", "key": "url"}
     assert controller.value("COLLAB_CONTROLLER_MODELS") == "/etc/collab-hub/runs/models.toml"
-    allow = json.loads(controller.value("COLLAB_CONTROLLER_ALLOW_INGRESS_FROM"))
-    assert allow == controller.selector, (allow, controller.selector)  # only the controller's pods reach a worker
     assert "livenessProbe" in controller.container and "readinessProbe" not in controller.container
     assert re.fullmatch(r"[0-9a-f]{64}", controller.annotations.get("checksum/run-models", "")), controller.annotations
-    sa = controller.pod["serviceAccountName"]
-    assert sa == "t-collab-hub-run-controller" and sa in r.service_accounts
-    [binding] = [b for b in r.bindings if any(s["name"] == sa for s in b["subjects"])]
-    role = r.roles[binding["roleRef"]["name"]]
+    role, workers = workers_namespace_of_their_own(r, workers=f"{r.release_namespace}-workers")
+    assert workers in r.namespaces, "the chart did not make the workers' namespace"
+    # The chart's own default, not a value the test adds: the namespace it makes refuses a privileged pod.
+    assert r.namespaces[workers]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "restricted"
     rules = {(rule["apiGroups"][0], rule["resources"][0]): sorted(rule["verbs"]) for rule in role["rules"]}
     assert rules == {
         ("apps", "deployments"): ["create", "delete", "deletecollection", "get", "list", "patch", "watch"],
@@ -487,6 +488,41 @@ def case_run_controller_remote_artifacts(r: Rendered) -> None:
     assert "COLLAB_HUB_API__RUNS__PACKAGES" not in r.env
 
 
+def workers_namespace_of_their_own(r: Rendered, *, workers: str) -> tuple[dict, str]:
+    """Issue #253: the controller's Role and RoleBinding are in ``workers``, the namespace its workers are made
+    in, bound to its ServiceAccount in the release namespace; the identity holds nothing in the release namespace,
+    and each worker's NetworkPolicy admits the controller's pods from there. Returns the Role and the namespace."""
+    controller = r.controller
+    hub = r.release_namespace
+    assert workers != hub
+    assert controller.deployment["metadata"]["namespace"] == hub
+    assert controller.value("COLLAB_CONTROLLER_NAMESPACE") == workers
+    sa = controller.pod["serviceAccountName"]
+    assert sa == "t-collab-hub-run-controller" and r.service_accounts[sa]["metadata"]["namespace"] == hub
+    [binding] = [b for b in r.bindings if any(s["name"] == sa for s in b["subjects"])]
+    assert binding["metadata"]["namespace"] == workers, binding["metadata"]
+    assert binding["subjects"] == [{"kind": "ServiceAccount", "name": sa, "namespace": hub}]
+    role = r.roles[binding["roleRef"]["name"]]
+    assert role["metadata"]["namespace"] == workers, role["metadata"]
+    # Nothing in the release namespace: no Role or RoleBinding there, and no grant across the cluster.
+    in_hub = [d["metadata"]["name"] for d in [*r.roles.values(), *r.bindings] if d["metadata"]["namespace"] == hub]
+    assert not in_hub, f"the controller's identity holds a grant in the release namespace: {in_hub}"
+    assert not r.cluster_grants, [d["metadata"]["name"] for d in r.cluster_grants]
+    # The NetworkPolicy's peer: the controller's pods, in the release namespace, by the label Kubernetes sets.
+    allow = json.loads(controller.value("COLLAB_CONTROLLER_ALLOW_INGRESS_FROM"))
+    assert allow == controller.selector, (allow, controller.selector)
+    peer_namespace = json.loads(controller.value("COLLAB_CONTROLLER_ALLOW_INGRESS_FROM_NAMESPACE"))
+    assert peer_namespace == {"kubernetes.io/metadata.name": hub}, peer_namespace
+    return role, workers
+
+
+def case_run_controller_remote_existing_namespace(r: Rendered) -> None:
+    # A workers' namespace the operator named and owns: the chart uses it and makes no Namespace for it.
+    role, workers = workers_namespace_of_their_own(r, workers="cog-workers")
+    assert workers not in r.namespaces, "the chart made a Namespace it was told exists"
+    assert role["rules"], role
+
+
 CASES = {
     "sharepoint": case_sharepoint,
     "serve-off": case_serve_off,
@@ -500,6 +536,7 @@ CASES = {
     "run-controller": case_run_controller,
     "run-controller-remote": case_run_controller_remote,
     "run-controller-remote-artifacts": case_run_controller_remote_artifacts,
+    "run-controller-remote-existing-namespace": case_run_controller_remote_existing_namespace,
     "no-run-controller": case_no_run_controller,
     "features": case_features,
     "default": case_default,

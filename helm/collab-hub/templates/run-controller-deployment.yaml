@@ -3,10 +3,11 @@
 {{- $component := "run-controller" }}
 {{- /* The run controller at the remote location (issue #6): a Deployment of its own, the same image as the
 API running `collab-hub-run-controller`, on the hub's database as its Track and its installs. It alone holds
-workload permissions (run-controller-rbac.yaml): each Cog launched through /v1/runs becomes a Deployment and
-a Service it makes, reached by it alone through a NetworkPolicy per worker, and torn down by it; each worker
-pulls the Cog's own artifact at its pinned digest in an init container (issue #105), so the image ships no
-Cog. The API pod constructs no executor and may not create workloads. One replica under one id, Recreate so a
+workload permissions (run-controller-rbac.yaml), in the namespace of the workers' own: each Cog launched
+through /v1/runs becomes a Deployment and a Service it makes there, reached by it alone through a
+NetworkPolicy per worker, and torn down by it; each worker pulls the Cog's own artifact at its pinned digest
+in an init container (issue #105), so the image ships no Cog. The API pod constructs no executor and may not
+create workloads. One replica under one id, Recreate so a
 rollout never runs two under that id; the new pod's controller waits (--wait) for the old one to let
 the id go. Liveness only: a readiness probe on a controller waiting for its id would hold nothing but
 itself, and it serves no traffic. */}}
@@ -66,11 +67,16 @@ spec:
             # from its artifact.
             - name: COLLAB_CONTROLLER_IMAGE
               value: "{{ .Values.api.deployment.image.repository }}:{{ .Values.api.deployment.image.tag | default .Chart.AppVersion }}"
+            # Workers are made in a namespace of their own, where the controller's Role is (run-controller-rbac.yaml).
             - name: COLLAB_CONTROLLER_NAMESPACE
-              value: {{ .Release.Namespace | quote }}
-            # Only this controller's pods may reach a worker's /invoke: the NetworkPolicy each worker gets.
+              value: {{ include "collab-hub.worker-namespace" . | quote }}
+            # Only this controller's pods, in this namespace, may reach a worker's /invoke: the NetworkPolicy each
+            # worker gets, its peer the pod labels and the namespace's own label (kubernetes.io/metadata.name, which
+            # Kubernetes sets on every namespace).
             - name: COLLAB_CONTROLLER_ALLOW_INGRESS_FROM
               value: {{ (fromYaml (include "collab-hub.selectorLabels" (dict "top" . "component" $component))) | toJson | quote }}
+            - name: COLLAB_CONTROLLER_ALLOW_INGRESS_FROM_NAMESPACE
+              value: {{ dict "kubernetes.io/metadata.name" .Release.Namespace | toJson | quote }}
             - name: COLLAB_CONTROLLER_INTERACTION_TIMEOUT
               value: {{ $controller.interactionTimeoutSeconds | quote }}
             - name: COLLAB_CONTROLLER_WAIT

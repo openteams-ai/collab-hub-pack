@@ -1,14 +1,16 @@
 """In-cluster E2E driver: a Cog published by digest, installed, run from its artifact, run again from the cache.
 
-Runs as a Job with the cog-executor ServiceAccount, against a registry in
-the cluster and a cache claim every worker pod mounts. It publishes the fake
-Cog under ``/cog`` as an artifact, installs it (fetch through the registry,
-bind through the Cog's own ``resolve`` over an inventory generated from a
-models block, check on a worker pod with the binding delivered), runs it
-once from its artifact and asserts the worker was configured from its
-delivered binding alone, runs it again and asserts the init container found
-the package in the cache, then runs a gated two-step Op on it. Exits 0 on
-success, 1 on failure.
+Runs as a Job with the cog-executor ServiceAccount, in one namespace, and makes
+its workers in another, where its Role is (issue #253), as the chart deploys a
+hub; against a registry in the cluster and a cache claim every worker pod mounts.
+It publishes the fake Cog under ``/cog`` as an artifact, installs it (fetch
+through the registry, bind through the Cog's own ``resolve`` over an inventory
+generated from a models block, check on a worker pod with the binding
+delivered), runs it once from its artifact and asserts the worker was configured
+from its delivered binding alone, runs it again and asserts the init container
+found the package in the cache, then runs a gated two-step Op on it, and asserts
+that its identity holds nothing in its own namespace. Exits 0 on success, 1 on
+failure.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ from collab_hub_execution.artifacts import RegistryClient, publish
 from collab_hub_execution.controller import BindingDelivery
 from collab_hub_execution.installer import Installer, harnesses_installed
 from collab_hub_execution.installs import InstallRow, new_install_id
-from collab_hub_execution.kubernetes import PULL_CONTAINER, _in_cluster_api
+from collab_hub_execution.kubernetes import PULL_CONTAINER
 
 # The served model the inventory is generated from. The fake Cog calls no model: what is asserted is that
 # its endpoint, id and key reach the worker through the delivered binding alone.
@@ -76,10 +78,12 @@ def wait_for_registry(host: str, within: float = 180.0) -> None:
 
 
 def main() -> int:
-    namespace = os.environ["E2E_NAMESPACE"]
+    namespace = os.environ["E2E_NAMESPACE"]  # the driver's own: the stand-in hub's
+    worker_namespace = os.environ["E2E_WORKER_NAMESPACE"]  # the workers' own, where the Role is
     runner_image = os.environ["E2E_RUNNER_IMAGE"]
     registry_host = os.environ["E2E_REGISTRY"]
     cache_claim = os.environ["E2E_CACHE_CLAIM"]
+    assert worker_namespace != namespace, "the workers' namespace is one of their own"
 
     print("== publish the fake Cog to the cluster's registry", flush=True)
     wait_for_registry(registry_host)
@@ -95,14 +99,22 @@ def main() -> int:
     # configuration too: remote, a worker pod per step, pulled from its artifact, through the one switch.
     engine = LifecycleRunner(track=track, budget=RunBudget(max_tokens=35), backend="none", location="remote",
                              controller="op-driver", location_settings={
-                                 "image": runner_image, "namespace": namespace,
-                                 # Materialize a NetworkPolicy admitting only this driver (the stand-in hub)
-                                 # to each worker. kind's default CNI does not enforce NetworkPolicy, so this
-                                 # exercises the secure code path; a policy-enforcing CNI enforces it.
+                                 "image": runner_image, "namespace": worker_namespace,
+                                 # Materialize a NetworkPolicy admitting only this driver (the stand-in hub),
+                                 # from its own namespace, to each worker. kind's default CNI does not enforce
+                                 # NetworkPolicy, so this exercises the secure code path; a policy-enforcing
+                                 # CNI enforces it.
                                  "allow_ingress_from": {"app": "op-driver"},
+                                 "allow_ingress_from_namespace": {"kubernetes.io/metadata.name": namespace},
                                  "ready_timeout": 600, "poll_interval": 2, "deliver": delivery,
                                  "cache_claim": cache_claim, "registry_plain_http": [registry_host]})
     executor = engine.executor
+    api = executor.api
+    # The identity that makes workers holds nothing where the hub is: a list of its own namespace's
+    # Deployments is forbidden, while the workers' namespace answers.
+    assert api.get(f"/apis/apps/v1/namespaces/{namespace}/deployments").status_code == 403, \
+        "the executor's identity reads Deployments of the hub's namespace"
+    assert api.get(f"/apis/apps/v1/namespaces/{worker_namespace}/deployments").status_code == 200
     installer = Installer(installs, executor, controller="op-driver", registry=client,
                           inventory=lambda org: inventory(models, harnesses_installed(installs, org)))
     delivery.installer = installer
@@ -122,7 +134,6 @@ def main() -> int:
     assert install.binding["model"]["id"] == "model:fake"
     assert install.binding["model"]["auth_ref"] == "env:E2E_MODEL_KEY"
     assert "e2e-model-key-value" not in json.dumps(install.binding)
-    api = _in_cluster_api()
 
     def run_once(run_id: str) -> tuple[dict, str]:
         step = OpStep("ask", str(reference), "run", {"q": run_id}, digest=reference.digest, install=install.id,
@@ -159,7 +170,7 @@ def main() -> int:
 
     def materialize_and_read(cog, run_id, instance=""):
         worker = materialize(cog, run_id, instance)
-        worker_logs[run_id] = pod_log(api, namespace, worker.name, PULL_CONTAINER)
+        worker_logs[run_id] = pod_log(api, worker_namespace, worker.name, PULL_CONTAINER)
         return worker
 
     executor.materialize = materialize_and_read
@@ -191,6 +202,7 @@ def main() -> int:
         assert required in events, f"missing {required!r} in Track"
     started = [e.payload for e in track.replay("e2e-run") if e.event_type == "worker_started"]
     assert started and all(s["location"] == "remote" and len(s["run_token_sha256"]) == 64 for s in started)
+    assert all(s["namespace"] == worker_namespace for s in started), "a worker was made outside its namespace"
     assert all(s["binding_id"] == install.binding_id for s in started)
     review = next(e.payload["payload"] for e in track.replay("e2e-run")
                   if e.event_type == "step_completed" and e.payload["step"] == "review")
@@ -202,8 +214,9 @@ def main() -> int:
     installs.request_uninstall(install.id, "e2e")
     installer.uninstall(install.id)
     assert installs.get(install.id).state == "uninstalled"
-    print("E2E OK: a published Cog installed by digest, run from its artifact with its delivered binding, its "
-          "environment found in the cache on the second run, a Gate sent a step back and approved it",
+    print("E2E OK: a published Cog installed by digest, run from its artifact in a namespace of the workers' own "
+          "with its delivered binding, its environment found in the cache on the second run, a Gate sent a "
+          "step back and approved it",
           flush=True)
     return 0
 

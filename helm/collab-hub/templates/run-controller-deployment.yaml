@@ -2,11 +2,12 @@
 {{- if and .Values.api.enabled $controller.enabled (eq $controller.location "remote") }}
 {{- $component := "run-controller" }}
 {{- /* The run controller at the remote location (issue #6): a Deployment of its own, the same image as the
-API running `collab-hub-run-controller`, on the hub's database as its Track. It alone holds workload
-permissions (run-controller-rbac.yaml), in the namespace of the workers' own: each Cog launched through
-/v1/runs becomes a Deployment and a Service it makes there, reached by it alone through a NetworkPolicy
-per worker, and torn down by it. The API
-pod constructs no executor and may not create workloads. One replica under one id, Recreate so a
+API running `collab-hub-run-controller`, on the hub's database as its Track and its installs. It alone holds
+workload permissions (run-controller-rbac.yaml), in the namespace of the workers' own: each Cog launched
+through /v1/runs becomes a Deployment and a Service it makes there, reached by it alone through a
+NetworkPolicy per worker, and torn down by it; each worker pulls the Cog's own artifact at its pinned digest
+in an init container (issue #105), so the image ships no Cog. The API pod constructs no executor and may not
+create workloads. One replica under one id, Recreate so a
 rollout never runs two under that id; the new pod's controller waits (--wait) for the old one to let
 the id go. Liveness only: a readiness probe on a controller waiting for its id would hold nothing but
 itself, and it serves no traffic. */}}
@@ -62,7 +63,8 @@ spec:
               value: {{ $controller.id | quote }}
             - name: COLLAB_CONTROLLER_LOCATION
               value: "remote"
-            # Each worker pod runs this same image, which ships the Cog packages and pixi.
+            # Each worker pod runs this same image, which ships pixi and the artifact puller; the Cog comes
+            # from its artifact.
             - name: COLLAB_CONTROLLER_IMAGE
               value: "{{ .Values.api.deployment.image.repository }}:{{ .Values.api.deployment.image.tag | default .Chart.AppVersion }}"
             # Workers are made in a namespace of their own, where the controller's Role is (run-controller-rbac.yaml).
@@ -89,6 +91,27 @@ spec:
               value: {{ $controller.worker.cacheSizeLimit | quote }}
             - name: COLLAB_CONTROLLER_WORKER_TMP_SIZE_LIMIT
               value: {{ $controller.worker.tmpSizeLimit | quote }}
+            {{- if $controller.worker.cacheClaim }}
+            # The cache every worker pod mounts: a claim of the workers' namespace, which this pod is not in, so
+            # an uninstall evicts a package through a pod of that namespace (run-controller-rbac.yaml).
+            - name: COLLAB_CONTROLLER_WORKER_CACHE_CLAIM
+              value: {{ $controller.worker.cacheClaim | quote }}
+            {{- end }}
+            {{- if $controller.worker.registryCredential.existingSecret }}
+            # The credential the pull presents to the registry's token endpoint: in this controller's environment,
+            # named to it by the variable, and handed to each worker's init container through a Secret of its own.
+            - name: COLLAB_CONTROLLER_REGISTRY_CREDENTIAL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $controller.worker.registryCredential.existingSecret | quote }}
+                  key: {{ $controller.worker.registryCredential.key | quote }}
+            - name: COLLAB_CONTROLLER_REGISTRY_CREDENTIAL_ENV
+              value: "COLLAB_CONTROLLER_REGISTRY_CREDENTIAL"
+            {{- end }}
+            {{- with $controller.worker.registryPlainHttp }}
+            - name: COLLAB_CONTROLLER_REGISTRY_PLAIN_HTTP
+              value: {{ join "," . | quote }}
+            {{- end }}
             - name: COLLAB_CONTROLLER_HEALTH_HOST
               value: "0.0.0.0"
             - name: COLLAB_CONTROLLER_HEALTH_PORT

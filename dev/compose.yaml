@@ -5,7 +5,8 @@
 #   make postgres   postgres                    (no profile)
 #   make services   postgres + s3               (no profile)
 #   make keycloak   + keycloak                  (profile: auth)
-#   make fakes      + fake Google/Slack         (profile: fakes)
+#   make fakes      + fake Google/Slack/model   (profile: fakes)
+#   make registry   + an OCI registry for Cogs  (profile: registry)
 #   make up         all of the above
 #
 # Profiles keep the heavy pieces optional: a contributor working on a router
@@ -185,6 +186,29 @@ services:
     volumes:
       - ../scripts/testdata:/app:ro
 
+  # An OpenAI-compatible model that answers without one (dev/fake-model), as a container, so the hub's
+  # models block at level 2 has a served model to generate its inventory from. `make fake-model` runs the
+  # same file as a process at level 1.
+  fake-model:
+    image: python:3.14-slim
+    profiles: ["fakes"]
+    command: ["python", "/app/fake_model.py", "--host", "0.0.0.0", "--port", "8090"]
+    working_dir: /app
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - ./fake-model:/app:ro
+
+  # An OCI registry Cogs are published to and installed from at level 2 (`make cog-publish`, `make
+  # cog-install`): the catalog indexes it as a static source, and a worker pulls from it over plain HTTP.
+  registry:
+    image: registry:2.8.3
+    profiles: ["registry"]
+    ports:
+      - "127.0.0.1:5050:5000"
+    volumes:
+      - registry-data:/var/lib/registry
+
   # Fake Microsoft Graph for the SharePoint connector. Its /content redirects
   # must point at the origin the API (on your machine) reaches it through, hence
   # --public-url with the published port.
@@ -212,3 +236,4 @@ volumes:
   postgres-data:
   s3-data:
   keycloak-data:
+  registry-data:

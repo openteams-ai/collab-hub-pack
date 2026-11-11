@@ -86,6 +86,7 @@ from .routers import (
     user_directory,
     web,
 )
+from .routers import installs as installs_router
 from .routers import runs as runs_router
 from .web.authz import platform_role_source_name, verify_web_route_protection
 from .web.guard import WebSessionGuardMiddleware
@@ -794,6 +795,9 @@ def make_app(config: BaseConfig) -> FastAPI:
     app.include_router(tasks.devices_router, prefix="/v1")
     app.include_router(tasks.notifications_router, prefix="/v1")
     app.include_router(tasks.runs_router, prefix="/v1")
+    # The installs (#105), before the catalog's routes: `/v1/cogs/{cog_id}` takes a path, and `installs` is
+    # not a Cog id.
+    app.include_router(installs_router.router, prefix="/v1")
     # The Cog catalog read API (#85). /v1 only: it post-dates the unprefixed
     # legacy mounts, so there is no old client to keep answering.
     app.include_router(cogs.router, prefix="/v1")

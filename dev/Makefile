@@ -22,7 +22,7 @@ CLI_DIR     := $(ROOT)/cli
 CLI         := $(CLI_DIR)/.venv/bin/collab-hub
 LOCAL       := $(CURDIR)/.local
 COMPOSE     := docker compose -f $(CURDIR)/compose.yaml
-ALL_PROFILES := --profile auth --profile fakes --profile desktop
+ALL_PROFILES := --profile auth --profile fakes --profile desktop --profile registry
 
 # --- API process -----------------------------------------------------------
 API_HOST    ?= 127.0.0.1
@@ -134,6 +134,17 @@ RUNS_ENV := \
   COLLAB_HUB_API__RUNS__TRACK_PATH=$(LOCAL)/track.sqlite \
   $(RUNS_PACKAGES_ENV)
 
+# The dev registry (`make registry`, level 2): where `make cog-publish` publishes a Cog and the catalog
+# indexes it from, as a static source reached over plain HTTP. REGISTRY_REPOS lists the repositories the
+# source indexes; `make cog-publish COG=` names its repository cogs/<name>.
+REGISTRY_HOST ?= 127.0.0.1:5050
+REGISTRY_REPOS ?= cogs/echo,cogs/hermes
+REGISTRY_SOURCE_ENV := COLLAB_HUB_API__COGS__REGISTRY_SOURCES=[{"id":"dev","kind":"static","url":"http://$(REGISTRY_HOST)","repositories":[$(shell printf '%s' '$(REGISTRY_REPOS)' | sed 's/[^,]*/"&"/g')]}]
+REGISTRY_ENV := \
+  '$(REGISTRY_SOURCE_ENV)' \
+  COLLAB_HUB_API__COGS__INDEX__ENABLED=true \
+  COLLAB_HUB_API__COGS__INDEX__INTERVAL_SECONDS=10
+
 # Real bearer verification against the local Keycloak realm.
 #
 # FRAMES_AUTH_IDENTITY_CLAIM=sub matches the production convention: the OIDC
@@ -228,7 +239,8 @@ KC_CONNECTOR_ENV := \
         keycloak-admin realm-import broker-role idp-google idp-github idp-microsoft idp-list \
         token sub whoami seed-org psql \
         kind-up kind-cluster kind-image kind-redeploy kind-forward kind-logs \
-        kind-smoke kind-down test lint clean op submit run-events controller models fake-model
+        kind-smoke kind-down test lint clean op submit run-events controller models fake-model \
+        registry api-registry cog-publish cog-install
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "; \
@@ -327,15 +339,18 @@ controller: models | $(LOCAL)/frames ## The run controller: picks up what /v1/ru
 	cd $(ROOT)/execution && uv run --quiet $(TRACK_EXTRA) python -m collab_hub_execution.controller \
 		--track $(TRACK) --id $(CONTROLLER_ID) $(foreach dir,$(subst :, ,$(COGS)),--packages $(dir)) \
 		--work-dir $(LOCAL)/runs --backend $(BACKEND) --location local --environment $(ENVIRONMENT) \
-		--interaction-timeout 0 --models $(MODELS) $(if $(HEALTH_PORT),--health-port $(HEALTH_PORT))
+		--interaction-timeout 0 --models $(MODELS) --registry-plain-http $(REGISTRY_HOST) \
+		$(if $(HEALTH_PORT),--health-port $(HEALTH_PORT))
 
-# The hub's models block, from COLLAB_MODEL_* (below): the one model the Hermes Cog is bound to. The
+# The hub's models block, from COLLAB_MODEL_* (below): the one served model, from which the inventory an
+# installed Cog's `resolve` sees is generated, and which the Hermes package run by name is bound to. The
 # key is never written here: the block names the variable it is in, which the controller reads.
-models: | $(LOCAL)/frames ## Write the models block the controller delivers from (.local/models.toml)
+models: | $(LOCAL)/frames ## Write the models block the controller generates its inventory from (.local/models.toml)
 	@{ printf '[models.default]\nprovider = "%s"\n' "$${COLLAB_MODEL_PROVIDER:-openai-compatible}"; \
 	   [ -z "$$COLLAB_MODEL_BASE_URL" ] || printf 'endpoint = "%s"\n' "$$COLLAB_MODEL_BASE_URL"; \
 	   [ -z "$$COLLAB_MODEL_NAME" ] || printf 'model = "%s"\n' "$$COLLAB_MODEL_NAME"; \
 	   [ -z "$$COLLAB_MODEL_API_KEY" ] || printf 'auth_ref = "env:COLLAB_MODEL_API_KEY"\n'; \
+	   printf 'locality = "%s"\n' "$${COLLAB_MODEL_LOCALITY:-external}"; \
 	   printf '\n[cogs]\nhermes = "default"\n'; } > $(MODELS)
 
 # The model the Hermes Cog calls: `make fake-model` by default. Point it at a real
@@ -358,6 +373,35 @@ fake-model: ## An OpenAI-compatible model that answers without one, for the Herm
 
 api-pg: postgres | $(LOCAL)/frames ## Starts Postgres, then the API: history, groups, orgs, tasks
 	cd $(API_DIR) && env $(BASE_ENV) $(DEV_AUTH_ENV) $(PG_ENV) $(RUNS_PACKAGES_ENV) uv run python -m collab_hub_api
+
+# Level 2 with the dev registry indexed into the catalog, so a Cog published with `make cog-publish` can be
+# installed by digest (`make cog-install`) and run from its artifact by `make controller TRACK=...`, which
+# pulls from the same registry (REGISTRY_PLAIN_HTTP). The indexer sweeps every ten seconds here.
+api-registry: postgres registry | $(LOCAL)/frames ## Level 2 plus the dev registry as a catalog source (make cog-publish, cog-install)
+	cd $(API_DIR) && env $(BASE_ENV) $(DEV_AUTH_ENV) $(PG_ENV) $(RUNS_PACKAGES_ENV) $(REGISTRY_ENV) \
+		uv run python -m collab_hub_api
+
+registry: ## Start the dev OCI registry (127.0.0.1:5050) Cogs are published to and installed from
+	$(COMPOSE) --profile registry up -d --wait registry
+
+# Publish a Cog package to the dev registry as cogs/<COG>:dev with the execution package's publisher, which
+# makes the artifact `nebi publish` makes (one layer per file, titled by its path). COG is a directory under
+# dev/cogs, cogs/ or examples/cog-local/cogs, or a path. Prints the pinned reference.
+COG ?= echo
+cog-publish: ## Publish a Cog package to the dev registry and print its pinned reference (COG=echo|hermes|hello|<path>)
+	@dir="$(COG)"; [ -d "$$dir" ] || for root in $(subst :, ,$(COGS)); do [ -d "$$root/$(COG)" ] && dir="$$root/$(COG)" && break; done; \
+	[ -d "$$dir" ] || { echo "no Cog package '$(COG)' under $(COGS)"; exit 1; }; \
+	staged=$$(mktemp -d) && trap 'rm -rf "$$staged"' EXIT && cp -R "$$dir"/. "$$staged"/ && rm -rf "$$staged"/.pixi && \
+	{ [ ! -f "$$dir/../fake_worker.py" ] || cp "$$dir/../fake_worker.py" "$$staged"/; } && \
+	cd $(ROOT)/execution && COLLAB_REGISTRY_PLAIN_HTTP=$(REGISTRY_HOST) uv run --quiet python -m collab_hub_execution.artifacts \
+		publish "$$staged" $(REGISTRY_HOST)/cogs/$(notdir $(COG)):dev
+
+# Install a Cog on the hub by digest, through the run API, and wait for the controller to make it invokable.
+# At level 2 (`make api-registry`), COG is a catalog Cog id or a pinned reference from `make cog-publish`;
+# at level 1 (`make api`), PACKAGE=1 installs a package of the directory source by name.
+PACKAGE ?=
+cog-install: cli ## Install a Cog by digest and wait until it is invokable (COG=<cog id | reference>, PACKAGE=1 for a level-1 package)
+	$(CLI) --hub $(API_URL) cog install $(COG) $(if $(PACKAGE),--package) --wait
 
 # ---------------------------------------------------------------------------
 ## Level 3 — API with Keycloak (real bearer tokens, web surface, connectors)

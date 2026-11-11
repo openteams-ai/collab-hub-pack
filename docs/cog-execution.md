@@ -21,15 +21,16 @@ redirections.
   --launchable` names; without a controller, a launched run stays `SUBMITTED`.
 
   **On a hub deployed with the Helm chart**, the run controller is off unless
-  `runs.controller.enabled` is set. With it on, the controller runs in the
+  `runs.controller.enabled` is set. With `location: remote`, how a hub is
+  deployed, each Cog runs as a pod of its own, pulled from its published
+  artifact: the Cogs `cog list` shows are the hub's catalog, and one becomes
+  launchable once it is installed by its digest (`cog install acme/reviewer
+  --wait`, then `cog launch <reference>`; [`cli/README.md`](../cli/README.md#installing-a-cog-by-digest)).
+  With `location: local`, for a development hub, the controller runs in the
   API's pod and runs each Cog as a process of that pod: the Cogs the image
   ships, `hello` and `hermes`, which `cog list --launchable` names
-  ([`standalone-deployment.md`](standalone-deployment.md#running-cogs-beside-the-api)).
-  Such a worker is not isolated from the hub, which suits a development hub;
-  Cogs that run as pods of their own come in a later phase of
-  [`COG_EXECUTION.md`](../COG_EXECUTION.md). The Cogs `cog list` shows are the
-  hub's catalog, which is not launchable by name until a Cog is installed by
-  its digest. A hub run from a checkout of this repository works the same way:
+  ([`standalone-deployment.md`](standalone-deployment.md#running-cogs-in-pods)).
+  A hub run from a checkout of this repository works the same way:
   [`dev/`](../dev/README.md#running-cogs-and-ops), or
   [`examples/cog-local`](../examples/cog-local/README.md).
 - An account in the hub's realm.

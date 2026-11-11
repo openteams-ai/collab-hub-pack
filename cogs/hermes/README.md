@@ -6,8 +6,9 @@
 |---|---|
 | `serve.py` | The worker the run controller starts, on the [worker SDK](../../worker/README.md): what is Hermes's own, and nothing of the seam |
 | `hermes_acp.py` | How the worker starts Hermes: `hermes acp`, with no tools |
-| `pixi.toml` | The package: Python 3.12, `hermes-agent[acp,anthropic]`, the SDK by path, the `serve` task, and the pixi it needs |
-| `pixi.lock` | That environment, pinned for Linux and macOS |
+| `pixi.toml` | The package: Python 3.12, `hermes-agent[acp,anthropic]`, the SDK by path, the `serve` task, the pixi it needs, and the Cog's profile (`[tool.cog]`: `kind: harness`, what it provides and requires, its entry points) |
+| `pixi.lock` | That environment, pinned for Linux and macOS: what a hub's environment cache is keyed by |
+| `COG.md` | The card the catalog indexes, so a hub installs this Cog by digest |
 
 ## What the worker does
 
@@ -32,7 +33,7 @@ The binding the controller delivers, to this Cog and no other:
 | `COLLAB_MODEL_API_KEY` | Its key. Required with `anthropic` |
 | `COLLAB_MODEL_CONTEXT_WINDOW`, `COLLAB_MODEL_MAX_OUTPUT_TOKENS` | The model's limits, when the hub knows them: an input that cannot fit fails `context-exhausted` before Hermes is asked |
 
-A model the worker cannot use fails the step `model-unavailable`, saying why. `make -C dev controller` delivers them, with [`dev/fake-model`](../../dev/fake-model/fake_model.py) as the default: an endpoint that answers `The fake model heard: ...` with no account and no network. [`examples/cog-local`](../../examples/cog-local/README.md) switches to Claude when `ANTHROPIC_API_KEY` is set. A binding the Cog's own `resolve` produces replaces this in a later phase of the plan; the SDK reads that file the same way.
+A model the worker cannot use fails the step `model-unavailable`, saying why. `make -C dev controller` delivers them to the package run by name, with [`dev/fake-model`](../../dev/fake-model/fake_model.py) as the default: an endpoint that answers `The fake model heard: ...` with no account and no network. [`examples/cog-local`](../../examples/cog-local/README.md) switches to Claude when `ANTHROPIC_API_KEY` is set. Installed by digest, the Cog is bound by its own `resolve`: the SDK selects a model from the inventory the hub offers (`requires: model`), the hub records it and delivers the binding file (`COLLAB_BINDING_FILE`) with the key by reference, and the SDK reads that file into the same `Binding`; the Cog's `check` then starts Hermes against it.
 
 ## What Hermes sees
 

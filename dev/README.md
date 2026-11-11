@@ -1095,6 +1095,32 @@ Frames and the user directory work immediately. Three things do not:
 - **Slack linking** needs an HTTPS broker endpoint — see
   [Slack](#7-slack) above.
 
+### The run routes the front door carries
+
+Hub runs go through the same front door: the Caddyfile's last `handle` sends
+every request that is not for `keycloak.localhost` to the API, so the run
+routes the desktop client calls
+([apollo-desktop#1145](https://github.com/openteams-ai/apollo-desktop/issues/1145))
+answer at `http://localhost:9080` with the bearer it signed in with:
+
+| Route | |
+|---|---|
+| `POST /v1/runs`, `GET /v1/runs` | submit a run; list the organization's runs |
+| `GET /v1/runs/launchable` | what a run may name: the organization's invokable installs by reference, and the packages of the directory source when the API has one |
+| `GET /v1/runs/{id}` | one run, with its outputs |
+| `GET /v1/runs/{id}/events` | its Track, as a page or, with `Accept: text/event-stream`, as a stream |
+| `GET /v1/runs/{id}/steps/{step}/payload` | one step's result |
+| `POST /v1/runs/{id}/steps/{step}/decision` | decide a step held at a Gate |
+| `POST /v1/runs/{id}/retry`, `POST /v1/runs/{id}/cancel` | retry a run that ended short of completing; cancel one |
+
+`make api-desktop` serves them on the hub's Postgres Track (level 2's
+database) and gives the API no package directory, so what the client can
+launch is what `make cog-install` installed, or what
+`COLLAB_HUB_API__RUNS__PACKAGES` names. A run stays `SUBMITTED` until a
+controller on the same Track advances it: `make controller
+TRACK=postgresql://collab:collab@127.0.0.1:5432/collab` in another terminal
+([Running Cogs and Ops](#running-cogs-and-ops)).
+
 ---
 
 ## Running Cogs and Ops
@@ -1120,7 +1146,7 @@ run directly rather than through `make`, and CI covers them in
 | What | Command | Needs |
 |---|---|---|
 | The execution package's tests | `cd execution && uv run --group test pytest` | nothing — the Postgres Track tests skip unless `TEST_POSTGRES_URL` is set |
-| A gated two-step Op on real worker pods, through `KubernetesCogExecutor` | `scripts/cog-execution-e2e/run.sh`, from the repository root | Docker, kind, `kubectl` |
+| A fake Cog published to a registry in the cluster, installed by digest, run from its artifact with its delivered binding, run again from the cache, then a gated two-step Op on it, through `KubernetesCogExecutor` | `scripts/cog-execution-e2e/run.sh`, from the repository root | Docker, kind, `kubectl` |
 
 **Point `TEST_POSTGRES_URL` at a database of its own.** The Postgres Track tests
 drop and recreate `collab_track_events`. With level 2 up, `make psql`, run
@@ -1208,6 +1234,47 @@ against two stand-ins here that need nothing installed,
 [`fake-agent/fake_acp_agent.py`](fake-agent/fake_acp_agent.py), an ACP agent
 on stdio that echoes and misbehaves on request, and the fake model. `cd
 ../worker && uv run --group test pytest` runs that suite.
+
+### Installing a Cog by digest — `make registry`, `make api-registry`, `make cog-publish`, `make cog-install`
+
+Level 2 with the dev registry: a Cog published as an artifact, indexed into the
+catalog, installed by its digest and run from its artifact, the way a
+deployed hub runs every Cog ([runs.md](../docs/cog-execution/runs.md#installing-a-cog-and-running-it-once)).
+`make registry` starts an OCI registry on `127.0.0.1:5050` (the `registry`
+compose profile); `make api-registry` is level 2 with that registry indexed
+as a static source every ten seconds; `make cog-publish COG=` publishes a
+package to it with the execution package's publisher, which makes the
+artifact `nebi publish` makes, and prints its pinned reference; `make
+cog-install COG=` asks the hub to install it and waits until the controller
+has made it invokable:
+
+```sh
+make api-registry                                  # terminal 1: level 2, the dev registry as a catalog source
+make controller TRACK=postgresql://collab:collab@127.0.0.1:5432/collab   # terminal 2: pulls from the registry over plain HTTP
+make cog-publish COG=echo                          # terminal 3: 127.0.0.1:5050/cogs/echo@sha256:...
+sleep 10                                           # the indexer's next sweep lists it: curl -s localhost:8000/v1/cogs
+make cog-install COG=127.0.0.1:5050/cogs/echo@sha256:...   # fetched, bound, invokable
+cd ../cli && uv run collab-hub --hub http://localhost:8000 cog launch 127.0.0.1:5050/cogs/echo@sha256:... --input '{"x": 1}' --watch
+```
+
+The controller fetches the artifact at its digest, binds it through the Cog's
+own `resolve` over the inventory `make models` generates (the fake model, by
+default: the `fake-model` service of the `fakes` profile at level 2, or `make
+fake-model` as a process), checks it on a worker pulled into
+`.local/runs/artifacts/` (each package under its digest, the environment of
+each lock beside them), and records each
+move; `cog installs` and `cog show-install` show them. The run then names the
+installed Cog by its reference, and its worker is given the binding file and
+the key by reference. `make cog-publish COG=hermes` publishes the Hermes Cog
+the same way; a published Cog carries its `COG.md` and `[tool.cog]` profile,
+which the fake Cogs and `hello` have. At level 1, `make cog-install COG=echo
+PACKAGE=1` installs a package of the directory source by name, through the
+same sequence, with no registry.
+
+**What persists.** The registry's artifacts, in the `registry-data` volume,
+until `make destroy`; the installs, in the hub's database; the pulled
+artifacts and their environments under `.local/runs/artifacts/`, until `make
+clean` or an uninstall of the last install of a lock.
 
 ### The run API and run pickup — `make api`, `make controller`, `make submit`
 
@@ -1362,7 +1429,12 @@ list against Postgres.
 | `make op LOCATION=local` says to install pixi | The `local` location runs each Cog in its own pixi environment | Install [pixi](https://pixi.sh), or drop `LOCATION` to run the fake Cogs in process |
 | `make op LOCATION=local` fails a step with `WorkerStartFailed` | The worker exited or never answered `/healthz`; the reason on the Track ends with its last lines of stderr | Read `stderr.log` in the directory the run's `worker_started` names as `logs`, under `.local/runs/` |
 | `collab-hub cog launch` answers 503 `runs_unavailable` | The API has no Track: no database and no `runs.track_path` | `make api`, which sets the SQLite one, or `make api-pg`, which uses Postgres |
-| `collab-hub cog launch` is refused, naming no Cog it can launch | The API was given no Cog package directories (`runs.packages`) | `make api` and `make api-pg` give it `COGS`; another target needs `COLLAB_HUB_API__RUNS__PACKAGES` |
+| `collab-hub cog launch` is refused, naming no Cog it can launch | The API was given no Cog package directories (`runs.packages`), and no Cog is installed | `make api` and `make api-pg` give it `COGS`; another target needs `COLLAB_HUB_API__RUNS__PACKAGES`; or `make cog-install` |
+| `make cog-install` stays `published` | No controller is watching the install store | `make controller`, on the same Track as the API (`TRACK=postgresql://...` at level 2) |
+| `make cog-install` ends `fetched`, `bind` failed, naming a variable that is not set | The inventory's model names a key by `auth_ref` the controller's environment lacks | Set `COLLAB_MODEL_API_KEY` before `make controller`, or point `make models` at a model with no key (the fake model) |
+| `make cog-install` ends `bound`, `check` or `materialize` failed | The Cog's worker did not come up, or its `check` said no, against the binding it was given; the reason is on the install | `collab-hub cog show-install ID`, and the worker's `stderr.log` under `.local/runs/install_*/` |
+| `make cog-publish` cannot reach `127.0.0.1:5050` | The dev registry is not up | `make registry` |
+| An installed Cog's run fails `WorkerStartFailed` naming no registry | The controller was started without `--registry-plain-http` for the dev registry | `make controller` passes it; a controller started by hand needs it |
 | A launched run stays `SUBMITTED` | No controller is watching the Track | `make controller` in another terminal |
 | `make controller` says a controller named `dev` is running | One controller per id on a Track | Stop the other one, or give this one its own `CONTROLLER_ID` |
 | A run stays `RUNNING` after its controller was killed | Its controller owns it, and records it `interrupted` only when it starts again | Start that controller again, under the same `CONTROLLER_ID` |
@@ -1416,9 +1488,9 @@ that gap.
 | Level | Where | What it asserts |
 |---|---|---|
 | 1 | Linux **and macOS** | `hosts-check` both ways, then a frame written and read back with no token, and the empty Cog catalog (`/v1/cogs`, `/v1/cogs/catalog.v1.json`); every fake Op of `make op` ends as it should, and a run whose host is killed mid-step is reported `interrupted` by the next; `make submit` hands the fake Ops to `make controller`, another process, which picks each up and ends it as it should, and a controller killed with `SIGKILL` mid-run records the run `interrupted` when it starts again; with `LOCATION=local`, `echo` runs as real worker processes in its pixi environment, and a host killed with `SIGKILL` mid-step leaves no worker |
-| 2 | Linux | `/health/db` reports a real database, `/v1/frame-groups` answers 200 instead of 503, and a `/v1/cogs` list with every filter answers 200 from Postgres; two controllers on one Postgres Track complete eight runs submitted at once, and none is picked up twice |
+| 2 | Linux | `/health/db` reports a real database, `/v1/frame-groups` answers 200 instead of 503, and a `/v1/cogs` list with every filter answers 200 from Postgres; two controllers on one Postgres Track complete eight runs submitted at once, and none is picked up twice. The install sequence itself (fetch, bind, check, uninstall) runs against the three install stores in `test-execution.yaml`, and against a registry in a cluster in `test-execution-e2e.yaml` |
 | 3 | Linux | 401 without a bearer, 200 with one, and the token carries a `sub` |
-| 4 | Linux | Rendered only — the chart, the dev-auth switches, the `IMAGE` override and the port overrides |
+| 4 | Linux | Rendered only — the chart, the dev-auth switches, the `IMAGE` override and the port overrides; `lint.yaml`'s render tests also build the worker Deployment a rendered `remote` controller would make and assert its init container pulls the Cog's artifact by digest |
 
 The examples have a workflow of their own,
 [`.github/workflows/examples.yaml`](../.github/workflows/examples.yaml), run on
@@ -1484,6 +1556,9 @@ works as a set:
 | `OP` | `echo` | The Op `make op` runs: a file under `ops/`, without `.yaml` |
 | `BACKEND` | `none` | The durability backend `make op` runs on; only `none` is built |
 | `COGS` | `dev/cogs:cogs:examples/cog-local/cogs` | The directories `make api` and `make controller` find Cog packages in, `:`-separated |
+| `REGISTRY_HOST` | `127.0.0.1:5050` | The dev registry `make cog-publish` publishes to, `make api-registry` indexes and `make controller` pulls from |
+| `REGISTRY_REPOS` | `cogs/echo,cogs/hermes` | The repositories of that registry the catalog indexes |
+| `COG` | `echo` | The Cog `make cog-publish` publishes (a package name or path) and `make cog-install` installs (a catalog id or pinned reference) |
 | `LOCATION` | *(empty)* | Where `make op` runs each step's worker: empty for in process, `local` for a real process per worker (needs pixi) |
 
 ## Files in this directory

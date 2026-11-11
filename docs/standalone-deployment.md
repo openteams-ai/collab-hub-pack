@@ -221,6 +221,12 @@ combination, but not restating the list is the better habit.)
   the organization that launched it, another organization's run being a 404. A
   request without credentials is a 401 there under the hardened map
   ([runs.md](cog-execution/runs.md#the-run-controller-and-the-run-api)).
+  `/v1/cogs/installs/**`, the installs, is the same, and installing or
+  removing takes the organization's owner role, or the platform operator's,
+  where the hub resolves memberships: each route carries its
+  own auth dependency and scopes installs to the caller's organization, so a
+  `public` rule at `/v1/cogs` opens the catalog's discovery and never an
+  install ([runs.md](cog-execution/runs.md#installing-a-cog-and-running-it-once)).
 - The API routes under `/v1` need no entry: the default covers them, and each
   also carries its own auth dependency, so a `public` entry does not make
   frames or tasks anonymous. The one exception is the Cog catalog: a `public`
@@ -438,15 +444,29 @@ runs:
       provider = "anthropic"
       model = "claude-opus-5-5"
       auth_ref = "env:ANTHROPIC_API_KEY"
-
-      [cogs]
-      hermes = "default"
     extraEnv:
       - name: ANTHROPIC_API_KEY
         valueFrom:
           secretKeyRef: {name: claude, key: api-key}
+    worker:
+      cacheClaim: cog-cache                     # a ReadWriteMany claim you create in the workers' namespace; empty for an emptyDir per pod
+      registryCredential:
+        existingSecret: hub-registry-pull       # user:secret for the registry the install references name
+        key: credential
 ```
 
+- **A run names an installed Cog.** At `remote` the API is given no package
+  directory: `POST /v1/cogs/installs` pins a Cog from the catalog by digest,
+  the controller fetches it through the registry, binds it through the Cog's
+  own `resolve` over the inventory the `models` block generates, and checks
+  it on a worker with that binding delivered; then a run names it by its
+  reference, its digest or its install id
+  ([runs.md](cog-execution/runs.md#installing-a-cog-and-running-it-once)).
+  When the hub serves pulls (`cogs.serve.enabled`) the reference names the
+  hub's own `/v2/`, and `worker.registryCredential` is a registry credential
+  for it, `user:secret` as `POST /v1/cogs/registry-credentials` answers;
+  otherwise it is the backing registry's own credential. The controller
+  holds it, and hands it to each worker's init container alone.
 - **The controller is a Deployment of its own**, one replica of the API's
   image running `collab-hub-run-controller`, with a ServiceAccount and a
   Role over exactly the kinds it makes (Deployments, Services,
@@ -481,24 +501,40 @@ runs:
   in the release namespace is outside the new controller's sweep, so remove
   it by hand: `kubectl -n <release namespace> delete deploy,svc,netpol -l
   app.kubernetes.io/managed-by=collab-hub-executor`.
-- **Each worker is a pod of its own**: the same image, running the Cog
-  package's `serve` task in the environment pixi builds on the pod's own
-  volumes the first time, so each pod builds it (`workerStartSeconds` bounds
-  that; materialization from a published artifact with a cache is #105). It
-  carries no ServiceAccount token, and a NetworkPolicy per worker admits only
-  the controller's pods to its `/invoke`, enforced by a policy-enforcing CNI.
-  The run token and the model key its Cog is bound to reach the pod through
-  a Secret of the worker's own (`envFrom`), never the pod template, and only
+- **Each worker is a pod of its own**: the hub's image, which ships pixi and
+  the artifact puller and no Cog. An init container pulls the Cog's artifact
+  at its pinned digest, every blob verified, into the cache under the
+  artifact's digest, with the environment directory of the package's
+  `pixi.lock` beside it, and the pod's container runs the package's own
+  `serve` task there in the environment pixi builds for that lock, locked.
+  The Cog's container mounts its package read-only and, writable, its lock's
+  environment directory alone. With `worker.cacheClaim` naming a claim of
+  the workers' namespace (ReadWriteMany where workers land on several
+  nodes), the next pod of any artifact with that lock finds the environment
+  and solves nothing again (`workerStartSeconds` bounds a first build;
+  several minutes for Hermes), a package found there is verified file for
+  file before a pod trusts it, and an uninstall evicts through a pod of that
+  namespace, which the controller's Role there admits (the controller's own
+  pod mounts nothing of the claim); with it empty, each pod has an `emptyDir`
+  of its own (`worker.cacheSizeLimit`) and builds its environment again. The
+  pod carries no ServiceAccount token, and a NetworkPolicy per
+  worker admits only the controller's pods to its `/invoke`, enforced by a
+  policy-enforcing CNI. The run token, the binding file and the key its
+  binding names reach the pod through a Secret of the worker's own
+  (`envFrom`, and a volume that mounts the file alone under
+  `/etc/collab-hub/binding`), the registry credential through a second
+  Secret the init container alone reads, never the pod template, and only
   the token's hash is on the Track. The pod runs restricted (`runAsNonRoot`,
   no privilege escalation, capabilities dropped, the runtime's seccomp
-  profile), with `worker.resources` and size limits on its two volumes
-  (`worker.cacheSizeLimit`, the environment pixi builds, several GiB for
-  Hermes; `worker.tmpSizeLimit`, its HOME). Workers need egress to
-  conda-forge and PyPI to build their environment, and to the model
-  endpoints the binding names; egress is otherwise open (#11), the database
-  service included.
-- **Its Track** is the hub's database (`frames.postgres`); the chart refuses
-  the controller without it. `models` and `extraEnv` are as below.
+  profile), with `worker.resources` and size limits on its volumes
+  (`worker.tmpSizeLimit`, its HOME). Workers need egress to the registry the
+  reference names, to conda-forge and PyPI to build their environment, and
+  to the model endpoints the binding names; egress is otherwise open (#11),
+  the database service included.
+- **Its Track and its installs** are the hub's database (`frames.postgres`,
+  migrations 12 to 18); the chart refuses the controller without it.
+  `models` and `extraEnv` are as below; `[cogs]` in the block binds only a
+  package run by name, which the `remote` location offers none of.
 
 ## Running Cogs beside the API
 

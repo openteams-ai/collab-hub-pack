@@ -33,6 +33,7 @@ WAITING = replace(CONTEXTS["run"], state=RunState.WAITING_AT_GATE, open_step="s"
 # One event per declared transition, with arguments that reach its target.
 SCENARIOS = [
     (CONTEXTS["install"], "fetch", {}, InstallState.FETCHED),
+    (CONTEXTS["install"], "uninstall", {}, InstallState.UNINSTALLED),
     (replace(CONTEXTS["install"], state=InstallState.FETCHED), "admit_binding", {"binding": "b1"}, InstallState.BOUND),
     (replace(CONTEXTS["install"], state=InstallState.FETCHED), "refuse_binding", {"reason": "no model"},
      InstallState.FETCHED),

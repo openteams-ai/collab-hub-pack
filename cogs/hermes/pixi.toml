@@ -2,6 +2,8 @@
 # in this environment: Python and Hermes Agent with its ACP extra, pinned by pixi.lock.
 [workspace]
 name = "hermes"
+version = "0.2.0"
+description = "Hermes Agent behind the hub's seam, driven over ACP with no tools."
 channels = ["conda-forge"]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64", "osx-64"]
 # 0.82.1 is the first pixi whose bundled roots exclude the compromised eMudhra chain.
@@ -9,6 +11,56 @@ requires-pixi = ">=0.82.1"
 
 [tasks]
 serve = "python serve.py"
+
+# The Cog profile the catalog reads (openteams/cog-manifest 0.1): what this Cog is, what it provides and
+# requires, and its entry points, so the hub installs it by digest, offers its inventory to the worker's
+# `resolve` and checks it. The worker SDK answers `resolve` and `check`; the Cog adds nothing for them.
+[tool.cog]
+schema = "openteams/cog-manifest [0.1]"
+id = "openteams/hermes"
+license = "BSD-3-Clause"
+kind = "harness"
+owner = "collab@openteams.com"
+provides = ["harness", "harness/acp"]
+
+[tool.cog.io]
+accepts = ["prompt"]
+produces = ["answer"]
+
+[[tool.cog.requires]]
+capability = "model"
+locality = "any"
+
+[[tool.cog.interfaces]]
+name = "worker"
+kind = "http-json"
+task = "serve"
+audience = "lifecycle"
+default = true
+
+[[tool.cog.interfaces]]
+name = "resolve"
+kind = "http-json"
+task = "resolve"
+audience = "lifecycle"
+
+[[tool.cog.interfaces]]
+name = "check"
+kind = "http-json"
+task = "check"
+audience = "lifecycle"
+
+[[tool.cog.interfaces]]
+name = "ask"
+kind = "http-json"
+task = "ask"
+audience = "usage"
+
+[[tool.cog.interfaces]]
+name = "session"
+kind = "http-json"
+task = "session"
+audience = "usage"
 
 [dependencies]
 # 3.12.16 is the first 3.12 whose ssl module refuses the compromised eMudhra intermediates (#285).

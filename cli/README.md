@@ -78,6 +78,19 @@ collab-hub cog show acme/reviewer          # one Cog's card and every indexed ve
 
 `cog list` follows every page of `GET /v1/cogs` and takes every filter the catalog API does: `--kind`, `--publisher`, `--provides`, `--requires`, `--accepts`, `--produces`, `--source-id` and `--query`.
 
+## Installing a Cog by digest
+
+```sh
+collab-hub cog install acme/reviewer --wait              # the newest version; follows the install to invokable
+collab-hub cog install acme/reviewer@sha256:3f1c...      # one version
+collab-hub cog install hub.example/cogs/reviewer@sha256:3f1c...   # a pinned reference
+collab-hub cog installs                                  # every install, and what each has reached
+collab-hub cog show-install inst-3a1f0c9e7b2d             # one install: its binding, and every move recorded
+collab-hub cog uninstall inst-3a1f0c9e7b2d --wait        # the controller removes what it created
+```
+
+`cog install COG` asks the hub (`POST /v1/cogs/installs`) to pin a Cog from its catalog by digest; a run controller then fetches it, binds it through the Cog's own `resolve` over the hub's inventory, and checks it with that binding delivered ([runs.md](../docs/cog-execution/runs.md#installing-a-cog-and-running-it-once)). Without `--wait` it prints the install's id and returns; with it, it follows the install until it is `invokable` and prints it, or until a step fails, in which case it prints which step and why and exits 1: an install whose `check` failed stays `bound`, not invokable, and `cog installs` shows it so. `--package` installs a package of a development hub's directory source by name. `cog launch <reference | sha256:digest | install id>` then runs the installed Cog once, under its binding. Installing and uninstalling take the organization's owner role, or the platform operator's, where the hub resolves memberships; a member is refused with 403.
+
 ## Launching a Cog, and its runs
 
 [`docs/cog-execution.md`](../docs/cog-execution.md) walks through it on a hub, from installing the CLI to stopping the Cog.
@@ -92,7 +105,7 @@ collab-hub run watch run-3eb7ab0eaf43                           # follow it unti
 collab-hub run terminate run-3eb7ab0eaf43                       # cancel it, and wait until it has ended
 ```
 
-`cog launch NAME` submits a one-step Op through `POST /v1/runs`, and `--name LABEL` names the run in `run list` (`hermes-on-claude`, say): `NAME` is a Cog package the hub's run controller can launch, and a name it cannot is refused with the names it can. `--entry` names the entry point (`run` by default), `--input` its input as JSON, and `--gate` when the step's Gate asks a person (`never`, `error`, `warn` or `always`). Without `--watch` it prints the run's id and returns; the run controller starts the run. It says which durability backend and which location the run is on, since a run on `none` does not survive a controller restart and a `local` worker shares the controller's host.
+`cog launch NAME` submits a one-step Op through `POST /v1/runs`, and `--name LABEL` names the run in `run list` (`hermes-on-claude`, say): `NAME` is an installed Cog, by its pinned reference, its digest or its install id (the run-one-installed-Cog form, under the binding its install recorded), or a Cog package a development hub's run controller can launch by name; a name the hub cannot launch is refused with the names it can, and an installed Cog that is not invokable with its install and the step that failed. `--entry` names the entry point (`run` by default), `--input` its input as JSON, and `--gate` when the step's Gate asks a person (`never`, `error`, `warn` or `always`). Without `--watch` it prints the run's id and returns; the run controller starts the run. It says which durability backend and which location the run is on, since a run on `none` does not survive a controller restart and a `local` worker shares the controller's host.
 
 ### Talking to a running Cog
 
@@ -129,7 +142,7 @@ Tables for people by default; `--json`, which every command but `run connect` ta
 - `login --json`: what `whoami --json` prints, plus `obtained_by` (`browser` or `token`) and `dev_auth`; against a hub running dev auth, `{hub, profile, signed_in: false, dev_auth: true}`.
 - `logout --json`: `{hub, profile, was_signed_in, revoked, warning}`.
 - `whoami --json`: the hub's `GET /v1/me` answer plus `hub`, `profile`, `signed_in` and `token_expires_at`.
-- `cog list --json` and `cog show --json`: the catalog API's items and Cog, as the hub returns them.
+- `cog list --json` and `cog show --json`: the catalog API's items and Cog, as the hub returns them. `cog install --json`, `cog show-install --json` and `cog uninstall --json`: the install, as `GET /v1/cogs/installs/{id}` returns it; `cog installs --json`: the installs.
 - `run say --json`: the turn, with its `state`, `answer` or `error`. `cog list --launchable --json`: the names.
 - `cog launch --json`, `run submit --json`, `run show --json`, `run decide --json`, `run retry --json` and `run terminate --json`: the run, as `GET /v1/runs/{id}` returns it; `run list --json`: the runs. `run watch --json`: one event per line (`sequence`, `type`, `occurred_at`, `payload`), then the run. `run payload --json`: `{step, state, payload, error}`.
 

@@ -12,6 +12,12 @@ A session entry point holds its ``/invoke`` open and answers turns, each one
 an interaction with the harness, until a farewell or until the run is
 terminated and this process with it. The worker knows nothing of where it
 runs: a process on the controller's host and a pod serve the same seam.
+
+Two lifecycle entry points are built in, for the hub's install: ``resolve``
+selects satisfiers from the inventory the hub offers (``resolve.py``), on a
+worker started with no binding, and ``check`` starts the harness against the
+binding the hub delivered and reports it. A Cog registers its own under
+either name to replace them.
 """
 
 from __future__ import annotations
@@ -31,7 +37,10 @@ from . import binding as bindings
 from .adapter import HarnessAdapter
 from .envelope import Cancelled, Problem, Stopwatch, WorkerError, envelope, status_for
 from .limits import check_fits
+from .resolve import resolve_input, select
 from .task import Context, Frame, Interaction, Prompt, Signal, Task, Usage, frames_from
+
+RESOLVE, CHECK = "resolve", "check"
 
 HOST_ENV, PORT_ENV, COG_ENV, RUN_ENV, TOKEN_ENV = (
     "COLLAB_COG_HOST", "COLLAB_COG_PORT", "COLLAB_COG_ID", "COLLAB_RUN_ID", "COLLAB_RUN_TOKEN")
@@ -130,6 +139,8 @@ class Worker:
         self.farewells = tuple(word.lower() for word in farewells)
         self.work_dir = work_dir
         self._entry_points: dict[str, EntryPoint] = {}
+        self._lifecycle: dict[str, EntryPoint] = {RESOLVE: self._resolve, CHECK: self._check}
+        """The lifecycle entry points the SDK answers for every Cog, unless the Cog registers its own."""
         self._sessions: dict[str, TurnAnswer | None] = {}
         self._session: _Session | None = None
         self._session_lock = threading.Lock()
@@ -164,6 +175,24 @@ class Worker:
     @property
     def entry_points(self) -> tuple[str, ...]:
         return tuple(self._entry_points) + tuple(self._sessions)
+
+    # --- the lifecycle entry points -----------------------------------------------------------
+
+    @staticmethod
+    def _resolve(task: Task, harness: Harness | None) -> Any:
+        """Select from the inventory the hub offers: the SDK's default selection (``resolve.py``)."""
+        requires, inventory = resolve_input(task.input)
+        return select(requires, inventory)
+
+    def _check(self, task: Task, harness: Harness | None) -> Any:
+        """Start the harness against the delivered binding and report it; what the install's check sees."""
+        binding = self.binding()
+        report: dict[str, Any] = {"cog": self.cog, "binding": binding.record() if binding.bound else None,
+                                  "entry_points": list(self.entry_points)}
+        if harness is not None:
+            report["harness"] = harness.name
+            report["alive"] = harness.alive()
+        return report
 
     # --- the binding and the harness --------------------------------------------------------
 
@@ -219,10 +248,15 @@ class Worker:
             if task.entry_point in self._sessions:
                 return self._hold_session(task, clock)
             fn = self._entry_points.get(task.entry_point)
+            lifecycle = fn is None and task.entry_point in self._lifecycle
+            if lifecycle:
+                fn = self._lifecycle[task.entry_point]
             if fn is None:
                 raise WorkerError("invalid-input", f"{self.cog} has no entry point {task.entry_point!r}: "
                                                    f"it has {', '.join(self.entry_points) or 'none'}")
-            if self.make_harness is not None:
+            # resolve runs before any binding exists, so it starts no harness; check starts it against the
+            # delivered binding, which is what it is for.
+            if self.make_harness is not None and task.entry_point != RESOLVE:
                 harness = self._start_harness(task.frames)
             payload = fn(task, harness)  # type: ignore[arg-type]
             if isinstance(payload, Interaction):

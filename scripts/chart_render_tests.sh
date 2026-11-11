@@ -99,6 +99,17 @@ refused "run controller remote: the release namespace as the workers' is refused
   -f "$TESTDATA/run-controller-remote.yaml" --namespace hub --set runs.controller.workerNamespace.name=hub
 refused "run controller remote: a workers' namespace that is no DNS label is refused" "workerNamespace" \
   -f "$TESTDATA/run-controller-remote.yaml" --set runs.controller.workerNamespace.name=Cog_Workers
+check "run controller remote: the artifact cache claim and the registry credential reach the controller" \
+  run-controller-remote-artifacts -f "$TESTDATA/run-controller-remote-artifacts.yaml"
+# The worker a remote controller makes: from the chart's rendered controller, the Deployment the executor
+# would make for an installed Cog pulls its artifact at a pinned digest in an init container.
+# Needs PyYAML and httpx (the execution package's one dependency) on python3.
+if helm_render="$($HELM template t "$CHART" -f "$TESTDATA/run-controller-remote-artifacts.yaml")" \
+    && printf '%s' "$helm_render" | PYTHONPATH="$ROOT/execution/src" python3 "$ROOT/scripts/worker_pod_render_check.py"; then
+  pass "run controller remote: a worker pod pulls its Cog's artifact by digest in an init container"
+else
+  fail "run controller remote: a worker pod pulls its Cog's artifact by digest in an init container" "see above"
+fi
 refused "run controller: refused without the hub's database" "needs frames.postgres" --set runs.controller.enabled=true
 # Frames on S3, so the chart's own storage rules allow more than one API pod and it is this rule that refuses.
 SHARED_FRAMES='--set frames.storage.backend=s3 --set frames.s3.bucket=frames --set frames.activeState.backend=postgres'

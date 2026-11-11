@@ -44,3 +44,37 @@ frames:
   #   postgres:
   #     existingSecret: collab-hub-postgres
   #     databaseUrlKey: DATABASE_URL
+
+# Running Cogs (docs/standalone-deployment.md, "Running Cogs in pods"): a run controller as a Deployment of
+# its own, each Cog installed by digest from the catalog and run as a pod pulled from its own artifact.
+# The models block is what the inventory an installed Cog's `resolve` sees is generated from: one entry
+# per served model, with its key named by reference (`auth_ref = "env:NAME"`, the variable extraEnv puts
+# it in) and never written here.
+runs:
+  controller:
+    enabled: false
+    location: remote
+    models: |
+      [models.default]
+      provider = "openai-compatible"
+      endpoint = "http://llm-serving.llm.svc.cluster.local:8000/v1"
+      model = "served-model"
+      auth_ref = "env:MODEL_KEY"
+      locality = "in-cluster"
+      context_window = 131072
+      max_output_tokens = 8192
+    extraEnv:
+      - name: MODEL_KEY
+        valueFrom:
+          secretKeyRef: {name: model-key, key: api-key}
+    worker:
+      # A ReadWriteMany claim you create in the workers' namespace: the cache every worker pod shares, each
+      # package under its artifact's digest and one environment per pixi.lock digest, so a second run on the
+      # same lock finds the environment; an uninstall evicts through a pod of that namespace. Empty for an
+      # emptyDir per pod.
+      cacheClaim: ""
+      # user:secret for the registry the install references name: the hub's own /v2 when cogs.serve.enabled
+      # (POST /v1/cogs/registry-credentials), else the backing registry's. Read by the init container alone.
+      registryCredential:
+        existingSecret: ""
+        key: credential

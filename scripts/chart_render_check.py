@@ -53,6 +53,14 @@ class Workload:
         return self.env[name]["value"]
 
 
+def secret_ref(env: dict, name: str, secret: str, key: str) -> None:
+    entry = env.get(name)
+    assert entry is not None, f"{name} not rendered"
+    assert "value" not in entry, f"{name} rendered as a literal value"
+    ref = entry["valueFrom"]["secretKeyRef"]
+    assert ref == {"name": secret, "key": key}, f"{name} -> {ref}, expected {secret}/{key}"
+
+
 class Rendered:
     """The release: the API Deployment (always), the indexer Deployment (when indexing is on), the Services."""
 
@@ -131,11 +139,7 @@ class Rendered:
         return self.env[name]["value"]
 
     def secret_ref(self, name: str, secret: str, key: str) -> None:
-        entry = self.env.get(name)
-        assert entry is not None, f"{name} not rendered"
-        assert "value" not in entry, f"{name} rendered as a literal value"
-        ref = entry["valueFrom"]["secretKeyRef"]
-        assert ref == {"name": secret, "key": key}, f"{name} -> {ref}, expected {secret}/{key}"
+        secret_ref(self.env, name, secret, key)
 
     def credentials_attached(self, source_id: str, secret: str, *, username_key="username", password_key="password"):
         source = self.sources[source_id]
@@ -423,9 +427,10 @@ def case_no_run_controller(r: Rendered) -> None:
 
 
 def case_run_controller_remote(r: Rendered) -> None:
-    # The API pod runs the API alone, told where its Cogs and their workers are; it may create nothing.
+    # The API pod runs the API alone, told where its runs' workers are; it may create nothing. It is given no
+    # package directory: at the remote location a run names a Cog installed by digest, not a package of the image.
+    assert "COLLAB_HUB_API__RUNS__PACKAGES" not in r.env
     assert sorted(r.containers) == ["api"], sorted(r.containers)
-    assert r.value("COLLAB_HUB_API__RUNS__PACKAGES") == "/opt/collab-hub/cogs"
     assert r.value("COLLAB_HUB_API__RUNS__LOCATION") == "remote"
     assert r.api.spec["replicas"] == 2  # more than one API pod is fine: the controller is not in it
     api_sa = r.api.pod["serviceAccountName"]
@@ -460,6 +465,32 @@ def case_run_controller_remote(r: Rendered) -> None:
     assert controller.value("COLLAB_CONTROLLER_WORKER_CACHE_SIZE_LIMIT") == "10Gi"
     assert controller.value("COLLAB_CONTROLLER_WORKER_TMP_SIZE_LIMIT") == "2Gi"
     assert "run-cache" not in r.volumes and "run-tmp" not in r.volumes  # nothing of a worker's on the API pod
+    # Without a cache claim or a registry credential, neither reaches the controller: each pod's cache is its own.
+    for absent in ("COLLAB_CONTROLLER_WORKER_CACHE_CLAIM", "COLLAB_CONTROLLER_REGISTRY_CREDENTIAL",
+                   "COLLAB_CONTROLLER_REGISTRY_PLAIN_HTTP"):
+        assert absent not in controller.env, absent
+    assert "worker-cache" not in controller.volumes
+    [role] = [role for role in r.roles.values() if role["metadata"]["name"].endswith("run-controller")]
+    assert not any("pods" in rule["resources"] for rule in role["rules"]), "no eviction pod without a claim"
+
+
+def case_run_controller_remote_artifacts(r: Rendered) -> None:
+    # The cache claim and the registry credential reach the controller, which hands them to each worker pod:
+    # the claim as the cache every pod mounts, the credential to the init container that pulls the artifact, by
+    # the variable's name. The claim is of the workers' namespace, so the controller's pod mounts nothing of
+    # it; its Role there lets it run the eviction pod an uninstall needs.
+    controller = r.controller
+    assert controller is not None, "no run-controller Deployment"
+    assert controller.value("COLLAB_CONTROLLER_WORKER_CACHE_CLAIM") == "cog-cache"
+    assert "COLLAB_CONTROLLER_WORKER_CACHE_PATH" not in controller.env
+    assert "worker-cache" not in controller.volumes and "worker-cache" not in controller.mounts
+    [role] = [role for role in r.roles.values() if role["metadata"]["name"].endswith("run-controller")]
+    pods = [rule for rule in role["rules"] if "pods" in rule["resources"]]
+    assert pods and sorted(pods[0]["verbs"]) == ["create", "delete", "get"], role["rules"]
+    secret_ref(controller.env, "COLLAB_CONTROLLER_REGISTRY_CREDENTIAL", "hub-registry-pull", "credential")
+    assert controller.value("COLLAB_CONTROLLER_REGISTRY_CREDENTIAL_ENV") == "COLLAB_CONTROLLER_REGISTRY_CREDENTIAL"
+    assert controller.value("COLLAB_CONTROLLER_REGISTRY_PLAIN_HTTP") == "registry.cogs.svc:5000"
+    assert "COLLAB_HUB_API__RUNS__PACKAGES" not in r.env
 
 
 def workers_namespace_of_their_own(r: Rendered, *, workers: str) -> tuple[dict, str]:
@@ -509,6 +540,7 @@ CASES = {
     "serve-httproute-no-timeout": case_serve_httproute_no_timeout,
     "run-controller": case_run_controller,
     "run-controller-remote": case_run_controller_remote,
+    "run-controller-remote-artifacts": case_run_controller_remote_artifacts,
     "run-controller-remote-existing-namespace": case_run_controller_remote_existing_namespace,
     "no-run-controller": case_no_run_controller,
     "features": case_features,

@@ -4,9 +4,13 @@ The API records intent on the Track and reads a run's status from it; a run
 controller, a separate process over the same Track, advances the runs (ADR-0002
 D4). The API constructs no executor and never calls the controller.
 
-- ``POST /v1/runs`` -- submit an Op: steps naming a Cog package, an entry
-  point, an input and a Gate. A step whose ``cog`` is not a package the
-  controller can launch is refused with 422, naming the packages it can.
+- ``POST /v1/runs`` -- submit an Op: steps naming a Cog, an entry point, an
+  input and a Gate. A step's ``cog`` is an installed Cog, by its pinned
+  reference, its digest or its install id, or a package of the directory
+  source at a development hub; anything else is refused with 422, naming
+  what can be launched, and an installed Cog that is not invokable with 409.
+  Or, the run-one-installed-Cog form: ``cog``, ``entry_point``, ``input``
+  and ``gate`` at the top, a one-step Op on that install.
 - ``GET /v1/runs``, ``GET /v1/runs/{id}`` -- the caller's organization's runs,
   status and each step's state replayed from the Track. The single run also
   carries each completed step's output.
@@ -53,14 +57,21 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated, Any, Literal
 
-from collab_hub_execution import intents
+from collab_hub_execution import ArtifactReference, InstallExists, PullError, intents, is_reference
 from collab_hub_execution.gates import POLICIES, Gate
+from collab_hub_execution.installs import (
+    InstallRow,
+    InstallStore,
+    PostgresInstallStore,
+    SqliteInstallStore,
+    new_install_id,
+)
 from collab_hub_execution.locations.packages import DirectoryPackageSource, PackageNotFound, PackageRefused
 from collab_hub_execution.ops import FrameRef, OpDefinition, OpStep
 from collab_hub_execution.track import PostgresTrackStore, SqliteTrackStore, TrackEvent, TrackStore, upgrade
 from fastapi import APIRouter, Depends, Header, Path, Query, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..config import RunsConfig
 from ..frames.auth import AuthContext, get_auth_context
@@ -71,6 +82,18 @@ from .frames import StoreDep, error_response, require_readable_frame
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 _log = logging.getLogger(__name__)
+
+__all__ = [
+    "ArtifactReference",
+    "InstallExists",
+    "InstallRow",
+    "PullError",
+    "RunService",
+    "get_run_service",
+    "is_reference",
+    "new_install_id",
+    "router",
+]
 
 RUN_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 
@@ -83,16 +106,24 @@ RUNS_UNAVAILABLE = "runs_unavailable"
 
 
 class RunService:
-    """What the run routes need: the Track, the packages that can be launched, and what runs them."""
+    """What the run routes need: the Track, the installs, the packages that can be launched, and what runs them."""
 
     def __init__(
-        self, track: TrackStore | None, packages: DirectoryPackageSource | None, *, backend: str, location: str
+        self,
+        track: TrackStore | None,
+        packages: DirectoryPackageSource | None,
+        *,
+        backend: str,
+        location: str,
+        installs: InstallStore | None = None,
     ) -> None:
         self.track = track
         """``None`` on a hub with neither Postgres nor ``runs.track_path``: every route answers 503."""
         # Read incrementally: a page costs what changed, not all history.
         self.views = intents.RunViews(track) if track is not None else None
         self.packages = packages
+        self.installs = installs
+        """The installs, beside the Track: what a step may name by reference, digest or install id."""
         self.backend = backend
         self.location = location
 
@@ -116,11 +147,15 @@ class RunService:
         except Exception as exc:  # noqa: BLE001 - the database answers 503 through the routes until it is back
             _log.warning("the Track's index of runs could not be checked: %s", exc)
 
-    def launchable(self) -> tuple[str, ...]:
-        return () if self.packages is None else self.packages.names()
+    def launchable(self, org_id: str | None = None) -> tuple[str, ...]:
+        """What a step's ``cog`` may name: the organization's invokable installs, by reference, and the packages."""
+        installed = ()
+        if self.installs is not None and org_id is not None:
+            installed = tuple(row.reference for row in self.installs.list(org_id=org_id, state="invokable"))
+        return installed + (() if self.packages is None else self.packages.names())
 
-    def refusal(self, cog: str) -> str | None:
-        """Why the controller could not launch ``cog``; ``None`` when it can."""
+    def package_refusal(self, cog: str) -> str | None:
+        """Why the controller could not launch the package ``cog``; ``None`` when it can."""
         if self.packages is None:
             return "no package directory is configured"
         try:
@@ -131,6 +166,32 @@ class RunService:
             # The source's own message names the directories it looked in, which a client has no use for.
             return str(exc).split(" under ")[0]
         return None
+
+    def install_of(self, cog: str, org_id: str | None) -> InstallRow | None:
+        """The organization's live install ``cog`` names: by reference, digest or install id; ``None`` otherwise."""
+        if self.installs is None:
+            return None
+        if cog.startswith("inst-"):
+            row = self.installs.get(cog)
+            return row if row is not None and row.org_id == org_id and row.live else None
+        if is_reference(cog):
+            return self.installs.find(org_id, reference=cog)
+        if cog.startswith("sha256:"):
+            return self.installs.find(org_id, digest=cog)
+        return None
+
+    def refusal(self, cog: str, org_id: str | None = None) -> str | None:
+        """Why ``cog`` cannot be launched; ``None`` when it can. An installed Cog must be invokable; any other
+        name is a package of the directory source."""
+        if cog.startswith("inst-") or is_reference(cog) or cog.startswith("sha256:"):
+            row = self.install_of(cog, org_id)
+            if row is None:
+                return f"{cog} is not installed on this hub; install it first (POST /v1/cogs/installs)"
+            if not row.invokable:
+                why = f": {row.failure}" if row.failure else ""
+                return f"{cog} is installed as {row.id} but {row.state}, not invokable{why}"
+            return None
+        return self.package_refusal(cog)
 
 
 def build_run_service(config: RunsConfig, postgres_url: str | None, pools: PostgresPools) -> RunService:
@@ -149,13 +210,17 @@ def build_run_service(config: RunsConfig, postgres_url: str | None, pools: Postg
             "which is its Track; unset COLLAB_HUB_API__RUNS__TRACK_PATH"
         )
     track: TrackStore | None = None
+    installs: InstallStore | None = None
     if config.track_path:
         SqliteTrackStore.ensure_schema(config.track_path)
+        SqliteInstallStore.ensure_schema(config.track_path)
         track = SqliteTrackStore(config.track_path)
+        installs = SqliteInstallStore(config.track_path)
     elif postgres_url:
         track = PostgresTrackStore(pools.database(postgres_url))
+        installs = PostgresInstallStore(pools.database(postgres_url))
     packages = DirectoryPackageSource(config.packages, config.allow) if config.packages else None
-    service = RunService(track, packages, backend=config.backend, location=config.location)
+    service = RunService(track, packages, backend=config.backend, location=config.location, installs=installs)
     service.ensure_index()  # a database that does not answer at start is tried again on the first listing
     return service
 
@@ -217,21 +282,57 @@ class StepRequest(BaseModel):
 
 
 class RunRequest(BaseModel):
-    """An Op to run: its steps, in order."""
+    """An Op to run: its steps, in order; or one installed Cog, run once: ``cog`` and its entry point."""
 
     model_config = ConfigDict(extra="forbid")
 
-    steps: list[StepRequest] = Field(min_length=1, max_length=64)
+    steps: list[StepRequest] | None = Field(default=None, min_length=1, max_length=64)
     name: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9 ._-]*$")
     """What to call the run in listings, e.g. ``hermes-on-claude``. A label: runs are found by their id."""
+    cog: str | None = Field(default=None, min_length=1, max_length=1024)
+    """The run-one form: an installed Cog, by its pinned reference, its digest or its install id."""
+    entry_point: str | None = Field(default=None, min_length=1, max_length=128)
+    input: Any = None
+    gate: GateRequest | None = None
+    frames: list[Annotated[str, Field(pattern=FRAME_ID_PATTERN)]] | None = Field(
+        default=None, max_length=MAX_FRAMES_PER_STEP
+    )
 
     @field_validator("steps")
     @classmethod
-    def _distinct_names(cls, steps: list[StepRequest]) -> list[StepRequest]:
-        names = [step.name for step in steps]
+    def _distinct_names(cls, steps: list[StepRequest] | None) -> list[StepRequest] | None:
+        names = [step.name for step in steps or ()]
         if len(set(names)) != len(names):
             raise ValueError("each step of an Op has its own name")
         return steps
+
+    @model_validator(mode="after")
+    def _one_form(self) -> RunRequest:
+        if (self.steps is None) == (self.cog is None):
+            raise ValueError("a run is an Op with steps, or one installed Cog (cog) run once; not both, not neither")
+        if self.cog is not None and self.entry_point is None:
+            raise ValueError("the run-one form names the entry_point to invoke")
+        only_with_cog = (self.entry_point, self.input, self.gate, self.frames)
+        if self.steps is not None and any(value is not None for value in only_with_cog):
+            raise ValueError("entry_point, input, gate and frames go with cog, not with steps")
+        return self
+
+    def as_steps(self, install: InstallRow | None) -> list[StepRequest]:
+        """The Op's steps: as given, or the one step of the run-one form, named after the installed Cog."""
+        if self.steps is not None:
+            return self.steps
+        name = ((install.cog_id or install.reference) if install is not None else self.cog).rsplit("/", 1)[-1]
+        name = name.split("@", 1)[0][:128] or "run"
+        return [
+            StepRequest(
+                name=name,
+                cog=self.cog,
+                entry_point=self.entry_point,
+                input=self.input,
+                gate=self.gate or GateRequest(),
+                frames=self.frames or [],
+            )
+        ]
 
 
 class StepStatus(BaseModel):
@@ -345,7 +446,7 @@ class TurnStatus(BaseModel):
 
 class Launchable(BaseModel):
     items: list[str]
-    """The Cog packages a step's ``cog`` may name."""
+    """What a step's ``cog`` may name: the organization's invokable installs, by reference, and the packages."""
 
 
 class RunPage(BaseModel):
@@ -372,7 +473,7 @@ class RunEventPage(BaseModel):
 # controller's host (its pid, process group and log directory) is never among them: the controller
 # needs it to reap the worker, and no client acts on it. An event type not listed is served with an
 # empty payload.
-_STEP = {"step", "attempt"}
+_STEP = {"step", "attempt", "install", "binding_id"}
 _OUTCOME = {"problems", "binding"}
 SERVED_FIELDS: dict[str, frozenset[str]] = {
     name: frozenset(fields)
@@ -406,7 +507,7 @@ SERVED_FIELDS: dict[str, frozenset[str]] = {
         | {"cog", "digest", "usage", "frames", "escalation", "payload", "payload_ref"}
         | _OUTCOME,
         "step_failed": _STEP | {"key", "cog", "digest", "error", "message", "teardown_error"} | _OUTCOME,
-        "worker_started": _STEP | {"instance", "location", "package", "run_token_sha256"},
+        "worker_started": _STEP | {"instance", "location", "package", "run_token_sha256", "artifact", "cache"},
         "worker_stopped": _STEP | {"instance", "reaped"},
         "materialized": {"cog", "digest"},
         "ready": {"cog"},
@@ -511,7 +612,7 @@ RunId = Annotated[str, Path(pattern=RUN_ID_PATTERN)]
 
 
 def _snapshot_frames(
-    body: RunRequest, run_id: str, auth: AuthContext, store: Any, service: RunService
+    steps: list[StepRequest], run_id: str, auth: AuthContext, store: Any, service: RunService
 ) -> dict[str, FrameRef] | JSONResponse:
     """Each Frame the steps name, checked and snapshotted once: its body kept by reference on the Track.
 
@@ -519,7 +620,7 @@ def _snapshot_frames(
     it, as the Frames API answers: never a 403, which would say it exists.
     """
     snapshots: dict[str, FrameRef] = {}
-    for step in body.steps:
+    for step in steps:
         for frame_id in step.frames:
             if frame_id in snapshots:
                 continue
@@ -545,17 +646,27 @@ def _snapshot_frames(
 
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=RunStatus)
 def submit_run(body: RunRequest, auth: AuthDep, service: ServiceDep, store: StoreDep) -> RunStatus | JSONResponse:
-    refused = {step.cog: reason for step in body.steps if (reason := service.refusal(step.cog)) is not None}
+    steps = body.as_steps(service.install_of(body.cog, auth.org_id) if body.cog else None)
+    installs = {step.cog: service.install_of(step.cog, auth.org_id) for step in steps}
+    refused = {step.cog: reason for step in steps if (reason := service.refusal(step.cog, auth.org_id)) is not None}
     if refused:
+        # An installed Cog that is not invokable is a conflict with its install's state; a name nothing holds
+        # is unprocessable, naming what can be launched.
+        stuck = {cog for cog, row in installs.items() if row is not None and not row.invokable and cog in refused}
+        launchable = list(service.launchable(auth.org_id))
         return error_response(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "cog_not_launchable",
-            f"Cannot launch {', '.join(sorted(refused))}; the Cogs this hub launches are: "
-            f"{', '.join(service.launchable()) or 'none'}",
-            {"refused": refused, "launchable": list(service.launchable())},
+            status.HTTP_409_CONFLICT if stuck and stuck == set(refused) else status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "cog_not_installed" if stuck and stuck == set(refused) else "cog_not_launchable",
+            f"Cannot launch {'; '.join(f'{cog}: {why}' for cog, why in sorted(refused.items()))}. The Cogs this "
+            f"hub launches are: {', '.join(launchable) or 'none'}",
+            {
+                "refused": refused,
+                "launchable": launchable,
+                "installs": {cog: row.id for cog, row in installs.items() if row is not None},
+            },
         )
     run_id = f"run-{uuid.uuid4().hex[:12]}"
-    snapshots = _snapshot_frames(body, run_id, auth, store, service)
+    snapshots = _snapshot_frames(steps, run_id, auth, store, service)
     if isinstance(snapshots, JSONResponse):
         return snapshots
     op = OpDefinition(
@@ -563,13 +674,16 @@ def submit_run(body: RunRequest, auth: AuthDep, service: ServiceDep, store: Stor
         tuple(
             OpStep(
                 name=step.name,
-                cog=step.cog,
+                cog=installs[step.cog].reference if installs[step.cog] else step.cog,
                 entry_point=step.entry_point,
                 input=step.input,
+                digest=installs[step.cog].digest if installs[step.cog] else None,
                 gate=Gate(escalate=step.gate.escalate, approvers=tuple(step.gate.approvers)),
                 frames=tuple(snapshots[frame_id] for frame_id in step.frames),
+                install=installs[step.cog].id if installs[step.cog] else None,
+                binding=installs[step.cog].binding_id if installs[step.cog] else None,
             )
-            for step in body.steps
+            for step in steps
         ),
     )
     # `user` is the principal the run is scoped and checked by; `name` is only for showing who it was.
@@ -606,7 +720,7 @@ def list_runs(
 
 @router.get("/launchable", response_model=Launchable)
 def launchable(auth: AuthDep, service: ServiceDep) -> Launchable:
-    return Launchable(items=list(service.launchable()))
+    return Launchable(items=list(service.launchable(auth.org_id)))
 
 
 @router.get("/{run_id}", response_model=RunStatus)

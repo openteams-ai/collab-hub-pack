@@ -1,30 +1,39 @@
-"""Capability resolution and model bindings for Cogs.
+"""Model binding: the inventory the hub offers, the record of what a Cog's ``resolve`` selected, its delivery.
 
-The resolver selects declared providers and projects a model Cog into the
-connection configuration a context Cog needs. Secrets remain references; the
-resolver never loads or embeds their values.
+The hub offers, the Cog selects, the hub records and delivers (ADR-0001 D3).
+The *inventory* is generated from the hub's ``models:`` block, one satisfier
+per served model, plus the harness Cogs installed on the hub; the installed
+Cog's ``resolve`` entry point is handed that inventory and answers with its
+selections; the hub turns them into a *binding record*, keeps it with the
+install, and delivers it to every worker of that Cog as a mounted file plus
+its environment. Secrets stay references: a satisfier names its key by
+``auth_ref``, the record carries that name, and only the worker's own
+environment ever holds the value, resolved by the controller as the worker
+starts. ``refuse_literal_secrets`` holds that line.
+
+Before ``resolve`` sees the inventory it passes through a filter, the plug
+point for sensitivity (#10): ``no_filter`` is the only one built.
+
+The ``models:`` block also still binds a Cog by name (``[cogs]``), for the
+packages a development controller runs straight from a directory; an
+installed Cog is bound by its own ``resolve`` instead.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import re
 import tomllib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Any
 
 
 class BindingResolutionError(LookupError):
     """Raised when a declared Cog dependency cannot be resolved safely."""
-
-
-@dataclass(frozen=True, slots=True)
-class CapabilityRequirement:
-    """A structured capability requirement declared by a Cog."""
-
-    capability: str
-    provider: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,49 +57,8 @@ class ModelCog:
     """The most tokens the model takes in one call, input and output together, when known."""
     max_output_tokens: int | None = None
     """The most tokens the model writes in one call, when known."""
-
-
-@dataclass(frozen=True, slots=True)
-class ContextCog:
-    """A context Cog that points to a model Cog rather than embedding one."""
-
-    name: str
-    model: CapabilityRequirement
-
-
-@dataclass(frozen=True, slots=True)
-class ModelBinding:
-    """The non-secret model configuration delivered to a worker."""
-
-    endpoint: str
-    model_identifier: str
-    auth_ref: str
-    transport: str
-
-
-class CapabilityResolver(Protocol):
-    def resolve_model(self, context: ContextCog, models: tuple[ModelCog, ...]) -> ModelBinding:
-        """Resolve a context Cog's model requirement into a worker binding."""
-
-
-class DeclaredCapabilityResolver(CapabilityResolver):
-    """Resolve model capabilities using only structured declarations."""
-
-    def resolve_model(self, context: ContextCog, models: tuple[ModelCog, ...]) -> ModelBinding:
-        requirement = context.model
-        matching = [model for model in models if requirement.capability in model.provides]
-        if requirement.provider is not None:
-            matching = [model for model in matching if model.name == requirement.provider]
-        if len(matching) != 1:
-            detail = "no matching model Cog" if not matching else "multiple matching model Cogs"
-            raise BindingResolutionError(f"{detail} for {context.name!r}")
-        model = matching[0]
-        return ModelBinding(
-            endpoint=model.endpoint,
-            model_identifier=model.model_identifier,
-            auth_ref=model.auth_ref,
-            transport=model.transport,
-        )
+    locality: str = "external"
+    """Where the model runs and where data goes when it is used: ``in-cluster``, ``on-prem`` or ``external``."""
 
 
 # --- the hub's models: block --------------------------------------------------------------------
@@ -100,7 +68,8 @@ class DeclaredCapabilityResolver(CapabilityResolver):
 # its Cogs, and to no other. Phase 25's inventory is generated from the same block.
 
 PROVIDERS = ("openai-compatible", "anthropic")
-_MODEL_KEYS = {"provider", "endpoint", "model", "auth_ref", "context_window", "max_output_tokens"}
+LOCALITIES = ("in-cluster", "on-prem", "external")
+_MODEL_KEYS = {"provider", "endpoint", "model", "auth_ref", "context_window", "max_output_tokens", "locality"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,10 +118,18 @@ class ModelsBlock:
                 value = spec.get(limit)
                 if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 1):
                     raise BindingResolutionError(f"{where}: [models.{name}] {limit} is a positive integer")
+            locality = str(spec.get("locality", "external"))
+            if locality not in LOCALITIES:
+                raise BindingResolutionError(f"{where}: [models.{name}] locality is one of {', '.join(LOCALITIES)}")
+            auth_ref = str(spec.get("auth_ref", ""))
+            if auth_ref and not AUTH_REF.match(auth_ref):
+                raise BindingResolutionError(f"{where}: [models.{name}] auth_ref {auth_ref!r} is env:NAME, the only "
+                                             "kind yet; a key itself never goes here")
             models[name] = ModelCog(
                 name=name, endpoint=str(spec.get("endpoint", "")), model_identifier=str(spec.get("model", "")),
-                auth_ref=str(spec.get("auth_ref", "")), provider=provider,
-                context_window=spec.get("context_window"), max_output_tokens=spec.get("max_output_tokens"))
+                auth_ref=auth_ref, provider=provider,
+                context_window=spec.get("context_window"), max_output_tokens=spec.get("max_output_tokens"),
+                locality=locality)
         cogs = dict(document.get("cogs", {}))
         for cog, model in cogs.items():
             if not isinstance(model, str):
@@ -205,3 +182,300 @@ class ModelsBlock:
             return {key: value for key, value in given.items() if value}
 
         return deliver
+
+
+# --- the inventory, and the plug point in front of it --------------------------------------------
+
+AUTH_REF = re.compile(r"^env:[A-Za-z_][A-Za-z0-9_]*$")
+"""The only kind of credential reference yet: the name of a variable in the controller's environment."""
+MODEL_KEY_ENV = "COLLAB_MODEL_API_KEY"  # noqa: S105 - the variable's name, not a secret
+"""Where a worker finds the key its binding's ``auth_ref`` names: the one secret delivered, by environment."""
+BINDING_FILE = "binding.json"
+"""The binding as delivered to a worker: the file ``COLLAB_BINDING_FILE`` names."""
+BINDING_FILE_ENV = "COLLAB_BINDING_FILE"
+
+
+@dataclass(frozen=True, slots=True)
+class Satisfier:
+    """One entry of the inventory: something the hub offers that a Cog's ``requires`` may be satisfied by.
+
+    A model satisfier is a served model, described by its endpoint, model
+    id, transport, locality, ``auth_ref`` and limits; a harness satisfier is
+    a harness Cog installed on the hub, by its pinned reference. Neither ever
+    carries a credential's value.
+    """
+
+    id: str
+    kind: str
+    """``model`` or ``harness``."""
+    provides: tuple[str, ...]
+    locality: str = "external"
+    provider: str | None = None
+    endpoint: str | None = None
+    model: str | None = None
+    transport: str | None = None
+    auth_ref: str | None = None
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+    reference: str | None = None
+    digest: str | None = None
+    cog_id: str | None = None
+    install: str | None = None
+
+    def descriptor(self) -> dict[str, Any]:
+        """The satisfier as a Cog's ``resolve`` sees it, and as the binding record keeps it: no value absent."""
+        return {key: value for key, value in (
+            ("id", self.id), ("kind", self.kind), ("provides", list(self.provides)), ("locality", self.locality),
+            ("provider", self.provider), ("endpoint", self.endpoint), ("model", self.model),
+            ("transport", self.transport), ("auth_ref", self.auth_ref), ("context_window", self.context_window),
+            ("max_output_tokens", self.max_output_tokens), ("reference", self.reference), ("digest", self.digest),
+            ("cog_id", self.cog_id), ("install", self.install),
+        ) if value is not None}
+
+    @classmethod
+    def from_descriptor(cls, value: Mapping[str, Any]) -> Satisfier:
+        known = {f for f in cls.__dataclass_fields__}
+        fields = {key: value[key] for key in known if key in value}
+        fields["provides"] = tuple(fields.get("provides") or ())
+        return cls(**fields)
+
+
+def model_satisfier(model: ModelCog) -> Satisfier:
+    return Satisfier(id=f"model:{model.name}", kind="model", provides=("model", f"model-endpoint/{model.provider}"),
+                     locality=model.locality, provider=model.provider, endpoint=model.endpoint or None,
+                     model=model.model_identifier or None, transport=model.transport, auth_ref=model.auth_ref or None,
+                     context_window=model.context_window, max_output_tokens=model.max_output_tokens)
+
+
+def harness_satisfier(install_id: str, reference: str, digest: str, cog_id: str | None,
+                      card: Mapping[str, Any] | None = None) -> Satisfier:
+    provides = ["harness"]
+    for item in (card or {}).get("provides") or ():
+        if isinstance(item, str) and item not in provides:
+            provides.append(item)
+    locality = (card or {}).get("locality")
+    return Satisfier(id=f"harness:{install_id}", kind="harness", provides=tuple(provides),
+                     locality=locality if isinstance(locality, str) else "in-cluster", reference=reference,
+                     digest=digest, cog_id=cog_id, install=install_id)
+
+
+def is_harness(card: Mapping[str, Any] | None) -> bool:
+    """Whether a card describes a harness Cog: its kind says so, or it provides ``harness``."""
+    card = card or {}
+    provides = card.get("provides") or ()
+    return card.get("kind") == "harness" or (isinstance(provides, list) and "harness" in provides)
+
+
+def inventory(models: ModelsBlock | None, harnesses: Iterable[Satisfier] = ()) -> tuple[Satisfier, ...]:
+    """The satisfiers the hub offers: one per served model in the ``models:`` block, and each installed harness."""
+    offered = [model_satisfier(model) for model in (models.models.values() if models is not None else ())]
+    offered.extend(harnesses)
+    return tuple(offered)
+
+
+InventoryFilter = Callable[[Sequence[Satisfier], Mapping[str, Any]], Sequence[Satisfier]]
+"""What stands between the inventory and a Cog's ``resolve``: given the satisfiers and the install being bound
+(its reference and card), the satisfiers that Cog may see. The plug point for sensitivity (#10): a rating
+filter goes here, and nothing else in resolution changes."""
+
+
+def no_filter(satisfiers: Sequence[Satisfier], context: Mapping[str, Any]) -> Sequence[Satisfier]:
+    """The only filter built: every Cog sees the whole inventory."""
+    return satisfiers
+
+
+def inventory_digest(satisfiers: Sequence[Satisfier]) -> str:
+    canonical = json.dumps([s.descriptor() for s in satisfiers], sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
+# --- the binding record ----------------------------------------------------------------------------
+
+_SECRET_WORDS = frozenset({"apikey", "password", "passwd", "secret", "secrets", "token", "tokens", "authorization",
+                           "credential", "credentials"})
+MANIFEST_SECRET_TABLES = ("activation.env", "feature.*.activation.env", "tool.cog")
+"""Where a credential could sit in a ``pixi.toml``: the variables a package's activation sets, and the Cog's own
+profile. A dependency or a task is named freely (``tiktoken``, ``refresh-token``) and is never a secret's value."""
+
+
+def names_a_secret(name: str) -> bool:
+    """Whether a key names a credential: a whole word of it (split on ``_``, ``-``, ``.`` and case) is one of the
+    words a secret goes by, or ``api`` is followed by ``key``; ``tiktoken`` is not, ``api_key`` and ``apiKey`` are."""
+    words = [word for word in re.split(r"[^a-z0-9]+", re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()) if word]
+    return any(word in _SECRET_WORDS for word in words) or any(
+        first == "api" and second == "key" for first, second in zip(words, words[1:]))
+
+
+def _tables(document: Any, pattern: str) -> list[tuple[str, Any]]:
+    """The subdocuments at a dotted path, ``*`` standing for any key: ``(path, value)`` pairs."""
+    found: list[tuple[str, Any]] = [("", document)]
+    for segment in pattern.split("."):
+        found = [(f"{path}{key}.", item) for path, value in found if isinstance(value, Mapping)
+                 for key, item in value.items() if segment == "*" or key == segment]
+    return found
+
+
+def refuse_literal_secrets(document: Any, *, where: str, tables: Sequence[str] | None = None) -> None:
+    """Refuse a manifest or a binding that carries a credential's value rather than a reference to one.
+
+    A key that names a secret (``api_key``, ``password``, ``token``, ...)
+    with a non-empty string value is refused, and so is an ``auth_ref`` that
+    is not ``env:NAME``. ``*_sha256``, ``*_ref`` and ``*_digest`` keys are
+    references, not values. With ``tables``, only those dotted paths of the
+    document are read (``MANIFEST_SECRET_TABLES`` for a ``pixi.toml``);
+    the whole document otherwise (a binding, whose keys are the hub's own).
+    """
+    def walk(value: Any, path: str) -> None:
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                name = str(key)
+                if name == "auth_ref":
+                    if item not in (None, "") and not (isinstance(item, str) and AUTH_REF.match(item)):
+                        raise BindingResolutionError(f"{where}: {path}{name} is {item!r}; a credential is named "
+                                                     "by reference, env:NAME, never by its value")
+                elif (names_a_secret(name) and not name.endswith(("_ref", "_sha256", "_digest"))
+                      and isinstance(item, str) and item.strip()):
+                    raise BindingResolutionError(f"{where}: {path}{name} carries a literal secret; credentials "
+                                                 "travel by reference only")
+                walk(item, f"{path}{name}.")
+        elif isinstance(value, (list, tuple)):
+            for index, item in enumerate(value):
+                walk(item, f"{path}{index}.")
+
+    if tables is None:
+        walk(document, "")
+        return
+    for pattern in tables:
+        for path, table in _tables(document, pattern):
+            walk(table, path)
+
+
+@dataclass(frozen=True, slots=True)
+class BindingRecord:
+    """What resolution produced for one installed Cog: the satisfier it talks to, and the harness it runs on.
+
+    The record is what the Track and every envelope name by ``id``, and what
+    is delivered to each worker of the Cog. It carries references, never a
+    credential's value.
+    """
+
+    id: str
+    cog: str
+    """The pinned reference of the Cog bound."""
+    model: Satisfier | None = None
+    harness: Satisfier | None = None
+    resolved_by: str = "cog"
+    """``cog``: the Cog's own ``resolve`` selected; ``none``: the Cog requires nothing."""
+    inventory_digest: str | None = None
+    selections: Mapping[str, str] = field(default_factory=dict)
+    """What ``resolve`` answered: each required capability and the satisfier id it chose."""
+
+    @classmethod
+    def none(cls, cog: str) -> BindingRecord:
+        """The binding of a Cog that requires nothing: an id, and nothing to deliver."""
+        return cls(id=binding_id(cog, {}, None), cog=cog, resolved_by="none")
+
+    @classmethod
+    def of(cls, cog: str, selections: Mapping[str, str], offered: Sequence[Satisfier], *,
+           resolved_by: str = "cog") -> BindingRecord:
+        """The record of a Cog's selections over the inventory it was offered; a selection the inventory does not
+        hold is refused, as is more than one model or harness."""
+        by_id = {s.id: s for s in offered}
+        model = harness = None
+        for capability, chosen in selections.items():
+            satisfier = by_id.get(chosen) if isinstance(chosen, str) else None
+            if satisfier is None:
+                raise BindingResolutionError(f"resolve selected {chosen!r} for {capability!r}, which the inventory "
+                                             "it was offered does not hold")
+            if satisfier.kind == "model":
+                if model is not None and model.id != satisfier.id:
+                    raise BindingResolutionError("resolve selected two models; a binding names one")
+                model = satisfier
+            elif satisfier.kind == "harness":
+                if harness is not None and harness.id != satisfier.id:
+                    raise BindingResolutionError("resolve selected two harnesses; a binding names one")
+                harness = satisfier
+        digest = inventory_digest(offered)
+        return cls(id=binding_id(cog, selections, digest), cog=cog, model=model, harness=harness,
+                   resolved_by=resolved_by, inventory_digest=digest, selections=dict(selections))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id, "cog": self.cog, "resolved_by": self.resolved_by, "inventory_digest": self.inventory_digest,
+            "selections": dict(self.selections),
+            "model": self.model.descriptor() if self.model is not None else None,
+            "harness": self.harness.descriptor() if self.harness is not None else None,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> BindingRecord:
+        model, harness = value.get("model"), value.get("harness")
+        return cls(id=str(value["id"]), cog=str(value.get("cog") or ""),
+                   model=Satisfier.from_descriptor(model) if isinstance(model, Mapping) else None,
+                   harness=Satisfier.from_descriptor(harness) if isinstance(harness, Mapping) else None,
+                   resolved_by=str(value.get("resolved_by") or "cog"), inventory_digest=value.get("inventory_digest"),
+                   selections=dict(value.get("selections") or {}))
+
+    def file(self) -> dict[str, Any]:
+        """The binding as a worker reads it: the format the worker SDK's loader takes, the key by reference."""
+        document: dict[str, Any] = {"id": self.id, "cog": self.cog, "resolved_by": self.resolved_by}
+        if self.model is not None:
+            document.update({
+                "provider": self.model.provider or "openai-compatible", "endpoint": self.model.endpoint,
+                "model": self.model.model, "transport": self.model.transport, "locality": self.model.locality,
+                "context_window": self.model.context_window, "max_output_tokens": self.model.max_output_tokens,
+                "satisfier": self.model.id,
+            })
+            if self.model.auth_ref:
+                document["auth_ref"] = f"env:{MODEL_KEY_ENV}"
+        if self.harness is not None:
+            document["harness"] = {"satisfier": self.harness.id, "reference": self.harness.reference,
+                                   "digest": self.harness.digest, "cog_id": self.harness.cog_id}
+        return document
+
+    def delivery(self, environ: Mapping[str, str] | None = None) -> Delivered:
+        """What a worker bound by this record is given: the binding file, and the key its model names, by
+        environment. The key is read as the worker starts, from the controller's environment, and goes nowhere
+        else."""
+        environ = os.environ if environ is None else environ
+        env: dict[str, str] = {}
+        if self.model is not None and self.model.auth_ref:
+            name = self.model.auth_ref[4:]
+            if not environ.get(name):
+                raise BindingResolutionError(f"binding {self.id}: auth_ref {self.model.auth_ref!r} names a variable "
+                                             "that is not set")
+            env[MODEL_KEY_ENV] = environ[name]
+        return Delivered(env=env, files={BINDING_FILE: json.dumps(self.file(), sort_keys=True)})
+
+
+def binding_id(cog: str, selections: Mapping[str, str], inventory_digest: str | None) -> str:
+    canonical = json.dumps({"cog": cog, "selections": dict(selections), "inventory": inventory_digest},
+                           sort_keys=True, separators=(",", ":"))
+    return "bnd-" + hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+# --- what the executor delivers to a worker --------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Delivered:
+    """What the binding delivers to one worker: variables for its environment, and files to mount beside it.
+
+    An executor puts the files where the worker can read them and names the
+    binding file in ``COLLAB_BINDING_FILE``; the variables enter that
+    worker's environment only.
+    """
+
+    env: Mapping[str, str] = field(default_factory=dict)
+    files: Mapping[str, str] = field(default_factory=dict)
+
+
+def as_delivered(value: Any) -> Delivered:
+    """A delivery as an executor takes it: a ``Delivered``, or a mapping of variables alone."""
+    if isinstance(value, Delivered):
+        return value
+    if value is None:
+        return Delivered()
+    if isinstance(value, Mapping):
+        return Delivered(env=dict(value))
+    raise TypeError(f"a delivery is a Delivered or a mapping of variables, not {type(value).__name__}")

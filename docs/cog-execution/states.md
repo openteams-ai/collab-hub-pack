@@ -28,6 +28,7 @@ stateDiagram-v2
     BOUND --> INVOKABLE: check passed
     FETCHED --> FETCHED: no binding admitted, recorded
     BOUND --> BOUND: check failed, recorded
+    PUBLISHED --> UNINSTALLED: uninstall, before anything was fetched
     FETCHED --> UNINSTALLED: uninstall
     BOUND --> UNINSTALLED: uninstall
     INVOKABLE --> UNINSTALLED: uninstall
@@ -97,11 +98,11 @@ stateDiagram-v2
 
 | State | Of | Meaning | Reached through |
 |---|---|---|---|
-| `PUBLISHED` | the Cog | The package is in a registry the catalog indexes, addressable as `<host>/<repo>@<digest>`; nothing of it is on the hub yet. A development package read from a directory has no install states: it is materialized straight from its directory. | ADR-0001 D6; #7 |
-| `FETCHED` | the Cog | Install has pulled the package and provisioned its environment. Not invokable. A binding that cannot be admitted leaves it here, recorded. | glossary, *Install*; #106 |
-| `BOUND` | the Cog | Its requirements are resolved and the binding admitted. A failing `check` leaves it here, with the failing step recorded. | #106, #3 |
-| `INVOKABLE` | the Cog | `check` passed against the delivered binding and the catalog card is recorded; a run may name the digest. Installing starts no worker. | glossary, *Install*; ADR-0001 D5 |
-| `UNINSTALLED` | the Cog | The install and every runtime resource it created are removed, its warm pool drained. Reachable from every state in which the install holds something on the hub — `FETCHED`, `BOUND`, `INVOKABLE` — so an install stuck before `INVOKABLE` can be removed. A `PUBLISHED` Cog has nothing on the hub to remove. | #106, #4 |
+| `PUBLISHED` | the Cog | The package is in a registry the catalog indexes, addressable as `<host>/<repo>@<digest>`; nothing of it is on the hub yet. An install asked for (`POST /v1/cogs/installs`) starts here, until a run controller takes it. A development package read from a directory has no install states: it is materialized straight from its directory. | ADR-0001 D6; #7 |
+| `FETCHED` | the Cog | Install has read the artifact at its digest: its manifest and card verified, its lock named, its `serve` task found. Not invokable. A binding that cannot be admitted leaves it here, recorded. | glossary, *Install*; #105 |
+| `BOUND` | the Cog | Its requirements are resolved by its own `resolve` over the hub's inventory and the binding admitted. A failing `check` leaves it here, with the failing step recorded. | #105 |
+| `INVOKABLE` | the Cog | `check` passed against the delivered binding and the catalog card is recorded; a run may name the digest. Installing starts no worker that outlives it. | glossary, *Install*; ADR-0001 D5 |
+| `UNINSTALLED` | the Cog | The install and every runtime resource it created are removed, its warm pool drained. Reachable from every state the install can be asked to leave, `PUBLISHED` included: an install removed before a controller fetched anything ends here too, so the record of the ask ends honestly, and an install stuck before `INVOKABLE` can be removed. | #105, #4 |
 | `MATERIALIZED` | a worker | The executor has brought up the package's `serve` — a child process or a pod — and it is not answering yet. | glossary, *Materialize / worker* |
 | `READY` | a worker | `/healthz` answers; the worker can take an `/invoke`. | #1 |
 | `INTERACTING` | a worker | An `/invoke` is in flight. Cancellation and the duration deadline act here. | #1, #4 |
@@ -141,7 +142,7 @@ record (#106).
 | `refuse_binding(reason)` | `FETCHED` → `FETCHED` | `binding_refused` |
 | `check_passed()` | `BOUND` → `INVOKABLE` | `check_passed` |
 | `check_failed(step, reason)` | `BOUND` → `BOUND` | `check_failed` |
-| `uninstall()` | `FETCHED`, `BOUND`, `INVOKABLE` → `UNINSTALLED` | `uninstalled` |
+| `uninstall()` | `PUBLISHED`, `FETCHED`, `BOUND`, `INVOKABLE` → `UNINSTALLED` | `uninstalled` |
 
 `require_invokable()` refuses to materialize a worker of an install that is not
 `INVOKABLE` — the one move between machines.

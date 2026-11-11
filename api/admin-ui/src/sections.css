@@ -327,3 +327,14 @@ button.primary:disabled {
   background: none;
   border-color: var(--line);
 }
+
+/* Where an administrator's role comes from, in the Users table. */
+.tag {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  color: var(--ink);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}

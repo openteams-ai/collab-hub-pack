@@ -215,6 +215,23 @@ def test_claims_past_their_retention_are_pruned_once_settled_and_the_rest_kept(s
     assert store.get("r", "r:open:0") is None
 
 
+def test_a_prune_judges_at_most_the_limit_oldest_first(store):
+    for name in ("first", "second", "third"):
+        store.reserve("r", f"r:{name}:0", worker="w1")
+        store.commit("r", f"r:{name}:0", worker="w1", envelope=ENVELOPE)
+    asked = []
+
+    def noting(claim):
+        asked.append(claim.key)
+        return True
+
+    later = datetime.now(UTC) + timedelta(days=2)
+    assert store.prune(noting, now=later, limit=2) == 2
+    assert asked == ["r:first:0", "r:second:0"] and store.get("r", "r:third:0") is not None
+    assert store.prune(noting, now=later, limit=2) == 1 and store.get("r", "r:third:0") is None
+    assert store.prune(noting, now=later, limit=0) == 0
+
+
 def test_a_pruned_key_is_reserved_afresh(store):
     # After the retention, a settled key is a new key: what outlives an attempt's recorded outcome is history.
     store.reserve("r", KEY, worker="w1")

@@ -229,8 +229,9 @@ combination, but not restating the list is the better habit.)
   is no idempotency key is a 422 before anything is read; only then is the
   run's Track read, and only that run's. No map entry can open the routes
   ([the seam](cog-execution/op-cog-seam.md#the-keyed-claim)). Workers reach
-  them inside the cluster by the API's Service, so an installation whose
-  ingress lists its paths need not expose `/v1/claims`.
+  them inside the cluster by the API's Service; the chart's default ingress
+  routes `/` to the API, so they are reachable from outside as well, and an
+  installation whose ingress lists its paths need not include `/v1/claims`.
 - The API routes under `/v1` need no entry: the default covers them, and each
   also carries its own auth dependency, so a `public` entry does not make
   frames or tasks anonymous. The one exception is the Cog catalog: a `public`

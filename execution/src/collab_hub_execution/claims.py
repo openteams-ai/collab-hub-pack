@@ -153,10 +153,11 @@ class ClaimStore(Protocol):
         """A person settles an unknown outcome: the claim is ``recorded`` and names them. :class:`ClaimRefused`
         for a claim that is not ``outcome_unknown``."""
 
-    def prune(self, settled: Settled, *, now: datetime | None = None) -> int:
+    def prune(self, settled: Settled, *, now: datetime | None = None, limit: int | None = None) -> int:
         """Delete the claims that last changed longer ago than the store's retention and whose attempt
         ``settled`` says is settled on the Track; how many went. A claim ``settled`` keeps is read again next
-        time: a reservation whose attempt has no outcome yet is what a retry resumes, however old."""
+        time: a reservation whose attempt has no outcome yet is what a retry resumes, however old. ``limit``
+        bounds how many claims past the retention one pass judges, oldest first."""
 
 
 def _attempt(claim: Claim) -> StepAttempt:
@@ -253,10 +254,11 @@ class InMemoryClaimStore:
             self._claims[(run_id, key)] = claim
             return claim
 
-    def prune(self, settled: Settled, *, now: datetime | None = None) -> int:
+    def prune(self, settled: Settled, *, now: datetime | None = None, limit: int | None = None) -> int:
         cutoff = (now or _now()) - self.retention
         with self._lock:
-            old = [claim for claim in self._claims.values() if claim.updated_at < cutoff]
+            old = sorted((claim for claim in self._claims.values() if claim.updated_at < cutoff),
+                         key=lambda claim: claim.updated_at)[:limit]
         gone = [claim for claim in old if settled(claim)]
         with self._lock:
             for claim in gone:
@@ -378,13 +380,14 @@ class SqliteClaimStore:
             self._upsert(connection, claim)
             return claim
 
-    def prune(self, settled: Settled, *, now: datetime | None = None) -> int:
+    def prune(self, settled: Settled, *, now: datetime | None = None, limit: int | None = None) -> int:
         cutoff = ((now or _now()) - self.retention).isoformat()
         # The candidates are read, and judged, outside the write lock: `settled` reads the Track, which may
         # be this same file.
         with closing(sqlite3.connect(self.path, timeout=5)) as connection, connection:
-            rows = connection.execute(f"SELECT {_COLUMNS} FROM collab_claims WHERE updated_at < ?",
-                                      (cutoff,)).fetchall()
+            rows = connection.execute(
+                f"SELECT {_COLUMNS} FROM collab_claims WHERE updated_at < ? ORDER BY updated_at LIMIT ?",
+                (cutoff, -1 if limit is None else limit)).fetchall()
         gone = [claim for claim in map(_claim_row, rows) if settled(claim)]
         if not gone:
             return 0
@@ -487,11 +490,12 @@ class PostgresClaimStore:
             self._upsert(connection, claim)
             return claim
 
-    def prune(self, settled: Settled, *, now: datetime | None = None) -> int:
+    def prune(self, settled: Settled, *, now: datetime | None = None, limit: int | None = None) -> int:
         cutoff = (now or _now()) - self.retention
         with self.pool.connection() as connection:
-            rows = connection.execute(f"SELECT {_COLUMNS} FROM collab_claims WHERE updated_at < %s",
-                                      (cutoff,)).fetchall()
+            rows = connection.execute(
+                f"SELECT {_COLUMNS} FROM collab_claims WHERE updated_at < %s ORDER BY updated_at LIMIT %s",
+                (cutoff, limit)).fetchall()
         gone = [claim for claim in map(_claim_row, rows) if settled(claim)]
         if not gone:
             return 0

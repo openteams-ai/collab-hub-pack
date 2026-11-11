@@ -112,15 +112,17 @@ any step name fits:
 | `GET /v1/claims?key=` | What became of the worker's own key; 404 for one never reserved |
 
 **What is committed, and what is released.** The worker commits the envelope
-when the entry point was called: it answered, or it failed on its own (a
-`WorkerError` it raised, an exception). It commits nothing, and releases the
-key, when nothing acted: the task was refused before the entry point was
-called (no such entry point, a session already held, a harness that could
-not start: `invalid-input`, `model-unavailable`, `binding-invalid`), or the
-interaction was cancelled before it answered (the run was terminated, or the
-worker stopped, while it ran). A replay of a released key runs the step; a
-replay of a committed failure is answered with that failure, since the step
-acted, and the run's retry runs it as a new attempt. A key the hub answered
+when the entry point was called: it answered, it failed on its own (a
+`WorkerError` it raised, an exception), or it was cancelled while it ran (the
+run was terminated, or the worker stopped, mid-prompt: the agent may have run
+its tools already). It commits nothing, and releases the key, when nothing
+acted: the task was refused before the entry point was called (no such entry
+point, a session already held, a harness that could not start or was
+cancelled while starting: `invalid-input`, `model-unavailable`,
+`binding-invalid`, or the cancellation's `model-call-failed`). A replay of a
+released key runs the step; a replay of a committed failure is answered with
+that failure, since the step acted, and the run's retry runs it as a new
+attempt. A key the hub answered
 `committed` or `outcome_unknown` to is neither committed nor released by the
 worker that asked: it is not that worker's.
 
@@ -139,8 +141,10 @@ with it. Last, the key must be the one the worker's `worker_started` admits
 it to, its own step attempt's: another step's key, or another attempt's, is
 403 `claim_not_yours`, and a key of another run, or of no run, is 401 like an
 unknown token, so the answer never says whether such a run exists. The routes
-are for workers, which reach the API inside the cluster by its Service; an
-installation need not expose `/v1/claims` on its ingress.
+are for workers, which reach the API inside the cluster by its Service. The
+chart's default ingress routes `/` to the API, so they are reachable from
+outside too, refusing everything but a run token before any read; an
+installation that lists its ingress paths need not include `/v1/claims`.
 
 The hub is `COLLAB_HUB_URL` in the worker's environment; a worker given none
 claims nothing and acts on every invocation. A hub that cannot be reached for
@@ -151,7 +155,7 @@ window in which a lost worker's side effect is unaccounted for to the gap
 between reserve and commit, and makes it visible as `outcome-unknown`; it
 does not pretend to close it. Such a step is never retried by the run API: a
 platform operator settles what happened and records it (`POST
-/v1/runs/{id}/steps/{step}/reconcile`, `collab-hub run reconcile`; the
+/v1/runs/{id}/reconcile`, `collab-hub run reconcile`; the
 `outcome_reconciled` event on the Track, and the claim `recorded`), before the
 run is retried as a new attempt.
 

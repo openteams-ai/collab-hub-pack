@@ -30,10 +30,10 @@ D4). The API constructs no executor and never calls the controller.
   controller takes it, resuming the attempt in flight after an interruption and
   starting a new one after a failure. A step that ended ``outcome-unknown`` is
   not retried: the refusal names it.
-- ``POST /v1/runs/{id}/steps/{step}/reconcile`` -- a platform operator records
-  that they settled what a lost worker did on a step that ended
-  ``outcome-unknown``, on the Track and on the attempt's claim; the run is then
-  retried as a new attempt.
+- ``POST /v1/runs/{id}/reconcile`` -- a platform operator records that they
+  settled what a lost worker did on a step that ended ``outcome-unknown``, on
+  the Track and on the attempt's claim; the run is then retried as a new
+  attempt. The step is named in the body, so any step name fits.
 - ``POST /v1/claims/reserve``, ``POST /v1/claims/commit``,
   ``POST /v1/claims/release`` and ``GET /v1/claims?key=`` -- the keyed claim,
   for workers: a worker reserves its step attempt's idempotency key before it
@@ -94,7 +94,11 @@ claims_router = APIRouter(prefix="/claims", tags=["claims"])
 _log = logging.getLogger(__name__)
 
 CLAIM_PRUNE_INTERVAL = 3600.0
-"""Seconds between prunes of claims past their retention, done by the reserve route as it is used."""
+"""Seconds between prunes of claims past their retention, started by the reserve route as it is used."""
+
+CLAIM_PRUNE_BATCH = 100
+"""How many claims past their retention one prune judges against the Track, oldest first: a pass is bounded,
+and a reservation that stays unsettled is read again an hour later rather than on every pass."""
 
 RUN_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 
@@ -132,10 +136,11 @@ class RunService:
         self._pruned_at: float | None = None
         self._prune_lock = threading.Lock()
 
-    def prune_claims(self) -> None:
+    def prune_claims(self, *, wait: bool = False) -> None:
         """Let go of the claims past their retention whose attempt is settled on the Track, at most once per
-        ``CLAIM_PRUNE_INTERVAL``. A reservation whose attempt has no outcome yet stays, however old: it is
-        what a retry of the interrupted run resumes."""
+        ``CLAIM_PRUNE_INTERVAL`` and ``CLAIM_PRUNE_BATCH`` at a time, off the request path: the reserve that
+        starts a pass does not wait for it (``wait`` makes a caller wait, for a test). A reservation whose
+        attempt has no outcome yet stays, however old: it is what a retry of the interrupted run resumes."""
         if self.claims is None:
             return
         with self._prune_lock:
@@ -143,8 +148,14 @@ class RunService:
             if self._pruned_at is not None and now - self._pruned_at < CLAIM_PRUNE_INTERVAL:
                 return
             self._pruned_at = now
+        pass_ = threading.Thread(target=self._prune_pass, name="claims-prune", daemon=True)
+        pass_.start()
+        if wait:
+            pass_.join()
+
+    def _prune_pass(self) -> None:
         try:
-            pruned = self.claims.prune(self.claim_settled)
+            pruned = self.claims.prune(self.claim_settled, limit=CLAIM_PRUNE_BATCH)
         except Exception as exc:  # noqa: BLE001 - a prune that fails is tried again next interval
             _log.warning("the claims past their retention could not be pruned: %s", exc)
             return
@@ -960,18 +971,16 @@ def retry_run(run_id: RunId, auth: AuthDep, service: ServiceDep) -> RunStatus | 
 class ReconcileRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    step: str = Field(min_length=1, max_length=128)
+    """The step whose attempt ended ``outcome-unknown``; in the body, never the path, so any step name fits."""
     note: str | None = Field(default=None, max_length=1024)
     """What was established of the lost worker's side effect, and what was done about it; kept on the Track."""
 
 
-@router.post("/{run_id}/steps/{step}/reconcile", response_model=RunStatus)
+@router.post("/{run_id}/reconcile", response_model=RunStatus)
 @requires_platform_role(PLATFORM_ROLE_OPERATOR)
 def reconcile_step(
-    run_id: RunId,
-    step: Annotated[str, Path(min_length=1, max_length=128)],
-    body: ReconcileRequest,
-    auth: AuthDep,
-    service: ServiceDep,
+    run_id: RunId, body: ReconcileRequest, auth: AuthDep, service: ServiceDep
 ) -> RunStatus | JSONResponse:
     """Record that the caller settled what a lost worker did on a step that ended ``outcome-unknown``.
 
@@ -982,6 +991,7 @@ def reconcile_step(
     organization's run: who may establish what a lost worker did is whoever
     runs the hub, and the operator role is that.
     """
+    step = body.step
     try:
         view = intents.reconcile_outcome(
             service.track, run_id, step=step, actor=auth.user, note=body.note, claims=service.claims

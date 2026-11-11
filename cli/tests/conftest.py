@@ -303,11 +303,11 @@ class Stub:
                         "details": {"escalation": run.get("escalation")}}})
                 run["decision"] = {"escalation": body["escalation"], "outcome": body["outcome"], "actor": user}
                 return httpx.Response(202, json=run)
-            if action.startswith("steps/") and action.endswith("/reconcile"):
+            if action == "reconcile":
                 if not self.operator:
                     return httpx.Response(403, json={"error": {"code": "forbidden", "message": "Forbidden"}})
-                step = action.removeprefix("steps/").removesuffix("/reconcile")
                 body = json.loads(request.content)
+                step = body.pop("step")
                 if run.get("error") != "outcome-unknown":
                     return httpx.Response(409, json={"error": {
                         "code": "run_not_reconcilable", "message": f"Run {run_id} has nothing to reconcile on "

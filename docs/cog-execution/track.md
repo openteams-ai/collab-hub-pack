@@ -78,8 +78,8 @@ workloads' `name` and `namespace`, by which a later controller reaps a pod.
 settled what a lost worker did, after the step's attempt ended
 `outcome-unknown` under the keyed claim ([runs.md](runs.md#the-keyed-claim)):
 written with `append_if` only while the run has ended on that step's unknown
-outcome, through `POST /v1/runs/{id}/steps/{step}/reconcile`, which also moves
-the attempt's claim to `recorded`. It moves nothing on the run; a retry asked
+outcome, through `POST /v1/runs/{id}/reconcile`, which also moves the
+attempt's claim to `recorded`. It moves nothing on the run; a retry asked
 after it runs the step as a new attempt.
 
 `retry_asked` (`actor`) is a client's request that an ended run run again,

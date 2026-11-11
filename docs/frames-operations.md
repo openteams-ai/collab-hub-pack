@@ -399,7 +399,8 @@ shared `frames.postgres.url`, migrated by the same
   writes it. A claim is kept thirty days after it last changed, and then only
   until its attempt is settled on the Track (its `step_completed` or
   `step_failed`, or a run that ended where no retry reaches it); the API
-  deletes those as the claim routes are used (at most once an hour). A
+  deletes those as the claim routes are used (a pass of at most a hundred,
+  oldest first, at most once an hour, off the request path). A
   reservation whose attempt has no outcome yet is never deleted, however old:
   a retry of the interrupted run resumes that key, and must find it. A row
   left `outcome_unknown` is the record that a person reconciled nothing, and

@@ -295,9 +295,11 @@ async def test_a_reservation_whose_attempt_has_no_outcome_is_never_pruned(runs_c
     service.claims = store  # the API prunes with its own store; this one has no retention
     service._pruned_at = None
     monkeypatch.setattr(runs_router, "CLAIM_PRUNE_INTERVAL", 0.0)
-    # Any reserve prunes.
+    # Any reserve starts a pass, off its own path; the test waits for the one it starts.
     later = await _run(runs_client, track)
     assert (await _reserve(runs_client, f"{later}:s:0", _worker_of(track, later))).status_code == 201
+    service._pruned_at = None
+    service.prune_claims(wait=True)
     assert store.get(interrupted, f"{interrupted}:s:0").state == "reserved"
     assert store.get(done, f"{done}:s:0") is None and store.get(cancelled, f"{cancelled}:s:0") is None
     # ...and a prune by age alone is not something the store offers.
@@ -372,14 +374,15 @@ async def test_an_operator_reconciles_a_step_that_ended_outcome_unknown_and_the_
     refused = await operator_client.post(f"/v1/runs/{run_id}/retry")
     assert refused.status_code == 409 and refused.json()["error"]["code"] == "run_not_retryable"
     assert "'greet' ended outcome-unknown" in refused.json()["error"]["message"]
-    nothing = await operator_client.post(f"/v1/runs/{run_id}/steps/other/reconcile", json={})
+    nothing = await operator_client.post(f"/v1/runs/{run_id}/reconcile", json={"step": "other/step:1"})
     assert nothing.status_code == 409 and nothing.json()["error"]["code"] == "run_not_reconcilable"
-    assert nothing.json()["error"]["details"] == {"status": "FAILED", "step": "other"}
-    assert (await operator_client.post("/v1/runs/run-nobody/steps/greet/reconcile", json={})).status_code == 404
+    assert nothing.json()["error"]["details"] == {"status": "FAILED", "step": "other/step:1"}  # any name reaches it
+    assert (await operator_client.post("/v1/runs/run-nobody/reconcile", json={"step": "greet"})).status_code == 404
+    assert (await operator_client.post(f"/v1/runs/{run_id}/reconcile", json={})).status_code == 422
     # A person settles what the lost worker did; the Track and the claim both say so, and the run then
     # retries as a new attempt.
     reconciled = await operator_client.post(
-        f"/v1/runs/{run_id}/steps/greet/reconcile", json={"note": "sent once, confirmed"}
+        f"/v1/runs/{run_id}/reconcile", json={"step": "greet", "note": "sent once, confirmed"}
     )
     assert reconciled.status_code == 200, reconciled.text
     assert reconciled.json()["status"] == "FAILED" and reconciled.json()["ended"] is True
@@ -388,7 +391,7 @@ async def test_an_operator_reconciles_a_step_that_ended_outcome_unknown_and_the_
     assert recorded == {"step": "greet", "actor": "ops", "note": "sent once, confirmed"}
     claim = store.get(run_id, f"{run_id}:greet:0")
     assert claim.state == "recorded" and claim.actor == "ops"
-    once = await operator_client.post(f"/v1/runs/{run_id}/steps/greet/reconcile", json={})
+    once = await operator_client.post(f"/v1/runs/{run_id}/reconcile", json={"step": "greet"})
     assert once.status_code == 409
     assert (await operator_client.post(f"/v1/runs/{run_id}/retry")).status_code == 202
     settle(controller, until=lambda: track.runs(retry_asked=True) == ())
@@ -397,7 +400,7 @@ async def test_an_operator_reconciles_a_step_that_ended_outcome_unknown_and_the_
 
 async def test_reconciling_takes_the_operator_platform_role(runs_client):
     # The dev user holds no platform role: refused before the run is looked at.
-    refused = await runs_client.post("/v1/runs/run-nobody/steps/greet/reconcile", json={"note": "x"})
+    refused = await runs_client.post("/v1/runs/run-nobody/reconcile", json={"step": "greet", "note": "x"})
     assert refused.status_code == 403, refused.text
 
 

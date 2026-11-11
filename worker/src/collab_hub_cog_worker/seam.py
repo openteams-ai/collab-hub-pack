@@ -17,12 +17,12 @@ Every task carries an idempotency key, and the worker honours it through the
 keyed claim (``claims.py``): it reserves the key on the hub before an entry
 point acts and commits the envelope after, so an invocation replayed after a
 crash or a retry never acts twice. An envelope is committed when the entry
-point was called: it answered, or it failed on its own. When nothing acted,
-because the task was refused before the entry point was called (no such entry
-point, a session already held, a harness that could not start) or because the
-interaction was cancelled before it answered, the key is released instead, and
-a replay runs the step. A worker given no hub (``COLLAB_HUB_URL``) claims
-nothing.
+point was called: it answered, failed on its own, or was cancelled while it
+ran, since the agent may have acted before the cancellation reached it. When
+nothing acted, because the task was refused before the entry point was called
+(no such entry point, a session already held, a harness that could not start
+or was cancelled while starting), the key is released instead, and a replay
+runs the step. A worker given no hub (``COLLAB_HUB_URL``) claims nothing.
 """
 
 from __future__ import annotations
@@ -236,8 +236,9 @@ class Worker:
         committing fails the step ``outcome-unknown``, so nothing acts twice. A
         hub that cannot be reached for the reservation fails the step
         ``hub-unavailable`` before anything acts. The envelope is committed
-        after, when the entry point was called; when nothing acted, the key is
-        released instead, so a replay runs the step. A commit or a release the
+        after, when the entry point was called, a cancellation out of it
+        included; when nothing acted, the key is released instead, so a replay
+        runs the step. A commit or a release the
         hub does not take is logged, and the envelope answered all the same,
         since the controller records it.
         """
@@ -280,9 +281,10 @@ class Worker:
 
     def _invoke(self, entry_point: Any, input: Any, idempotency_key: Any, frames: Any,
                 signal: Any) -> tuple[int, dict[str, Any], bool]:
-        """The status and the envelope, and whether the step acted: the entry point was called and answered or
-        failed on its own. False when the task was refused before the entry point was called, or the
-        interaction was cancelled before it answered; the claim is released, not committed, then."""
+        """The status and the envelope, and whether the step acted: the entry point was called, and answered,
+        failed on its own or was cancelled while it ran. False when the task was refused before the entry point
+        was called, the harness being cancelled while it started included; the claim is released, not
+        committed, then."""
         clock = Stopwatch()
         harness: Harness | None = None
         acted = False
@@ -305,8 +307,10 @@ class Worker:
         except WorkerError as error:
             return status_for(error), self._envelope(entry_point, harness, clock, error=error), acted
         except Cancelled:
+            # Cancelled while the harness started: nothing acted. Cancelled out of the entry point, mid-prompt:
+            # the agent may have run its tools already, so the step acted, and the failure is committed.
             error = WorkerError("model-call-failed", "the interaction was cancelled before it answered")
-            return status_for(error), self._envelope(entry_point, harness, clock, error=error), False
+            return status_for(error), self._envelope(entry_point, harness, clock, error=error), acted
         except Exception as exc:  # noqa: BLE001 - the seam's contract: every /invoke is answered with an envelope
             error = self._unexpected(exc)
             return status_for(error), self._envelope(entry_point, harness, clock, error=error), acted

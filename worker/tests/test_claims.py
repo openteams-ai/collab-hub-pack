@@ -227,16 +227,32 @@ def test_a_task_refused_before_the_entry_point_was_called_releases_the_key(hub, 
     assert status == 200 and worker.sent == ["r:s:0"] and hub.claims["r:s:0"]["state"] == "committed"
 
 
-def test_an_interaction_cancelled_before_it_answered_releases_the_key(hub):
+def test_a_harness_cancelled_while_it_started_releases_the_key(hub):
+    # The worker was stopped before its harness was up: the entry point never ran, and nothing acted.
+    def cancelled_start(context):
+        raise Cancelled()
+
+    worker = _worker(hub.url, harness=cancelled_start)
+    status, envelope = worker.invoke("send", {"to": "a"}, idempotency_key="r:c:0")
+    assert status == 502 and "cancelled" in envelope["error"]["detail"] and worker.sent == []
+    assert hub.calls == [("reserve", "r:c:0"), ("release", "r:c:0")] and "r:c:0" not in hub.claims
+
+
+def test_an_entry_point_cancelled_while_it_ran_commits_since_it_may_have_acted(hub):
+    # The ACP adapter raises Cancelled mid-prompt, after the agent may have run its tools: the step acted, and
+    # the failure is committed, so the retry does not act a second time under this attempt.
     worker = _worker(hub.url)
 
     @worker.task("stopped")
     def stopped(task: Task, harness: Harness):
-        raise Cancelled()  # the run was terminated, or the worker stopped, while it ran
+        worker.sent.append(task.idempotency_key)  # the side effect happened...
+        raise Cancelled()  # ...and the run was terminated, or the worker stopped, before the answer
 
     status, envelope = worker.invoke("stopped", None, idempotency_key="r:c:0")
     assert status == 502 and "cancelled" in envelope["error"]["detail"]
-    assert hub.calls == [("reserve", "r:c:0"), ("release", "r:c:0")] and "r:c:0" not in hub.claims
+    assert hub.calls == [("reserve", "r:c:0"), ("commit", "r:c:0")]
+    assert hub.claims["r:c:0"]["state"] == "committed" and hub.claims["r:c:0"]["envelope"] == envelope
+    assert worker.invoke("stopped", None, idempotency_key="r:c:0")[1] == envelope and worker.sent == ["r:c:0"]
 
 
 def test_a_session_already_held_releases_the_key_while_a_session_that_opened_commits(hub):

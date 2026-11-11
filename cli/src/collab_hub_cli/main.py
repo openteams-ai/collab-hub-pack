@@ -861,8 +861,8 @@ def run_reconcile(
     """
 
     with Hub(_target()) as hub:
-        run = hub.request_json("POST", f"/v1/runs/{run_id}/steps/{step}/reconcile",
-                               json={"note": note} if note else {})
+        run = hub.request_json("POST", f"/v1/runs/{run_id}/reconcile",
+                               json={"step": step, **({"note": note} if note else {})})
     _err(f"{run_id}: step {step} reconciled; `run retry {run_id}` runs it again as a new attempt.")
     if as_json:
         _print_json(run)

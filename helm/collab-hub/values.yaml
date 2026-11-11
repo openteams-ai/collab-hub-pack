@@ -939,11 +939,12 @@ runs:
     #
     # A worker is the Cog's own published artifact, pulled by its pinned digest in an init container of the
     # hub's image, and run with the package's `serve` task in the environment pixi builds from its lock:
-    # nothing of a Cog is baked into the image. With `cacheClaim` naming a PersistentVolumeClaim (ReadWriteMany
-    # where workers may land on several nodes), every worker pod and the controller share the cache, keyed by
-    # the digest of each package's pixi.lock, so a second run on the same lock finds the package and its
-    # environment and solves nothing again, and an uninstall evicts them; empty, each pod has an emptyDir of
-    # its own, bounded by `cacheSizeLimit`, and builds its environment again.
+    # nothing of a Cog is baked into the image. With `cacheClaim` naming a PersistentVolumeClaim of the workers'
+    # namespace (ReadWriteMany where workers may land on several nodes), every worker pod shares the cache: each
+    # package under its artifact's digest, verified file for file before a pod trusts it and mounted read-only
+    # to the Cog, and one environment per pixi.lock digest, the only part a Cog may write, so a second run on
+    # the same lock solves nothing again; an uninstall evicts them through a pod of that namespace. Empty, each
+    # pod has an emptyDir of its own, bounded by `cacheSizeLimit`, and builds its environment again.
     #
     # The pull reaches the registry the install's reference names, the hub's own /v2 when the hub serves pulls
     # (cogs.serve.enabled), with a registry credential (user:secret, what POST /v1/cogs/registry-credentials

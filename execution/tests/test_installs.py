@@ -18,6 +18,7 @@ import pytest
 
 from collab_hub_execution.installs import (
     InMemoryInstallStore,
+    InstallConflict,
     InstallExists,
     InstallRow,
     PostgresInstallStore,
@@ -117,6 +118,45 @@ def test_each_move_of_the_machine_is_recorded_with_its_events_and_a_failing_chec
     assert [e.sequence for e in events] == sorted(e.sequence for e in events)
     with pytest.raises(ValueError, match="cannot be changed"):
         store.record(row.id, passed, org_id="x")
+
+
+def test_a_record_guarded_by_the_state_it_moves_from_is_dropped_when_another_controller_moved_the_install(store):
+    """Controller A is checking; B records the uninstall asked for meanwhile; A's `invokable` is never written over
+    it, and nothing of A's move, its events included, reaches the store."""
+    row = store.create(_row())
+    bound = row.machine().fetch().after.admit_binding(binding="bnd-1")
+    row = store.record(row.id, row.machine().fetch(), lock_digest="sha256:" + "1" * 64, expected_state="published")
+    row = store.record(row.id, bound, binding_id="bnd-1", expected_state="fetched")
+    removed = store.record(row.id, row.machine().uninstall(), expected_state="bound")  # B
+    assert removed.state == "uninstalled"
+    with pytest.raises(InstallConflict, match="not bound"):
+        store.record(row.id, bound.after.check_passed(), failure=None, failed_step=None, expected_state="bound")  # A
+    assert store.get(row.id).state == "uninstalled"
+    assert [e.event_type for e in store.events(row.id)] == ["install_fetched", "binding_admitted", "uninstalled"]
+
+
+def test_in_progress_lists_what_a_controller_claimed_and_did_not_finish_and_a_dead_controllers_is_reclaimed(store):
+    fresh = store.create(_row())
+    claimed = store.create(_row(reference="hub.example/cogs/b@sha256:" + "b" * 64))
+    failed = store.create(_row(reference="hub.example/cogs/c@sha256:" + "c" * 64))
+    done = store.create(_row(reference="hub.example/cogs/d@sha256:" + "d" * 64))
+    for asked in (claimed, failed, done):
+        assert store.claim(asked.id, "one")
+    store.record(failed.id, failed.machine().fetch(), expected_state="published")
+    store.record(failed.id, store.get(failed.id).machine().refuse_binding(reason="no model"), failure="bind: no model",
+                 failed_step="bind")
+    store.record(done.id, done.machine().fetch())
+    store.record(done.id, store.get(done.id).machine().admit_binding(binding="bnd-1"), binding_id="bnd-1")
+    store.record(done.id, store.get(done.id).machine().check_passed())
+    # Unclaimed, failed and finished installs are not in progress; a removal asked for takes a row out of it.
+    assert [r.id for r in store.in_progress()] == [claimed.id]
+    assert [r.id for r in store.pending()] == [fresh.id]
+    assert store.reclaim(claimed.id, "two", "three") is False  # not two's to take
+    assert store.reclaim(claimed.id, "one", "two") is True and store.get(claimed.id).controller == "two"
+    assert store.reclaim(fresh.id, "one", "two") is False  # nobody claimed it
+    assert store.reclaim(done.id, "one", "two") is False  # finished
+    store.request_uninstall(claimed.id, "alice")
+    assert store.in_progress() == ()
 
 
 def test_a_removal_is_asked_once_and_pending_lists_what_a_controller_acts_on(store):

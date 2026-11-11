@@ -92,11 +92,10 @@ spec:
             - name: COLLAB_CONTROLLER_WORKER_TMP_SIZE_LIMIT
               value: {{ $controller.worker.tmpSizeLimit | quote }}
             {{- if $controller.worker.cacheClaim }}
-            # The cache every worker pod mounts, and this controller too, so an uninstall evicts a package.
+            # The cache every worker pod mounts: a claim of the workers' namespace, which this pod is not in, so
+            # an uninstall evicts a package through a pod of that namespace (run-controller-rbac.yaml).
             - name: COLLAB_CONTROLLER_WORKER_CACHE_CLAIM
               value: {{ $controller.worker.cacheClaim | quote }}
-            - name: COLLAB_CONTROLLER_WORKER_CACHE_PATH
-              value: "/var/cache/collab-hub/artifacts"
             {{- end }}
             {{- if $controller.worker.registryCredential.existingSecret }}
             # The credential the pull presents to the registry's token endpoint: in this controller's environment,
@@ -133,10 +132,6 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            {{- if $controller.worker.cacheClaim }}
-            - name: worker-cache
-              mountPath: /var/cache/collab-hub
-            {{- end }}
             {{- if $controller.models }}
             - name: run-models
               mountPath: /etc/collab-hub/runs
@@ -153,11 +148,6 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: {{ $controller.tmpSizeLimit | quote }}
-        {{- if $controller.worker.cacheClaim }}
-        - name: worker-cache
-          persistentVolumeClaim:
-            claimName: {{ $controller.worker.cacheClaim | quote }}
-        {{- end }}
         {{- if $controller.models }}
         - name: run-models
           configMap:

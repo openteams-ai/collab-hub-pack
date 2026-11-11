@@ -53,6 +53,13 @@ def package(tmp_path, name="echo", lock="version: 6\n"):
     return directory
 
 
+def locate_or_none(reference, cache):
+    try:
+        return locate(reference, cache)
+    except PullError:
+        return None
+
+
 def client(registry, **settings):
     return RegistryClient(plain_http={registry.host}, **settings)
 
@@ -102,36 +109,71 @@ def test_a_package_is_published_and_pulled_back_byte_for_byte_into_the_cache(tmp
     said = []
     pulled = materialize(reference, cache, client(registry), log=said.append)
     assert not pulled.cached and pulled.serve == "python serve.py"
-    assert pulled.directory == cache / "packages" / artifacts._hex(pulled.lock_digest)
+    assert pulled.directory == cache / "packages" / artifacts._hex(reference.digest)  # the artifact's own
     for name in ("pixi.toml", "pixi.lock", "serve.py", "COG.md"):
         assert (pulled.directory / name).read_bytes() == (tmp_path / "echo" / name).read_bytes()
-    assert not (pulled.directory / ".pixi").exists()  # the environment is never published
+    # The environment is never published; what pixi builds goes to the lock's directory, through the link.
+    assert pulled.environment == cache / "envs" / artifacts._hex(pulled.lock_digest)
+    link = pulled.directory / ".pixi"
+    assert link.is_symlink() and link.resolve() == pulled.environment / "pixi"
     assert any(line.startswith("artifact pulling") for line in said)
     assert serve_command(pulled) == ["pixi", "run", "--locked", "--manifest-path", str(pulled.manifest), "serve"]
+    assert artifacts.serve_environment(pulled) == {"PIXI_HOME": str(pulled.environment / "home"),
+                                                   "PIXI_CACHE_DIR": str(pulled.environment / "cache")}
     # The lock's digest is the key: its layer's digest, which is the sha256 of the lock's bytes.
     import hashlib
     assert pulled.lock_digest == "sha256:" + hashlib.sha256(b"version: 6\n").hexdigest()
 
 
-def test_a_second_materialization_of_the_same_lock_pulls_nothing_and_finds_the_package(tmp_path, registry):
+def test_a_second_materialization_of_the_same_artifact_pulls_nothing_and_finds_the_package(tmp_path, registry):
     reference = publish(package(tmp_path), f"{registry.host}/cogs/echo:0.1.0", client(registry))
     cache = tmp_path / "cache"
     first = materialize(reference, cache, client(registry))
-    (first.directory / ".pixi").mkdir()  # what pixi builds beside the package on its first run
+    (first.directory / ".pixi" / "envs").mkdir()  # what pixi builds on the first run, through the link
     registry.blob_reads.clear()
     said = []
     again = materialize(reference, cache, client(registry), log=said.append)
     assert again.cached and again.directory == first.directory and registry.blob_reads == []
     assert any(line.startswith("artifact cached") for line in said)
-    assert (again.directory / ".pixi").is_dir()  # the environment built on the first run is still there
-    # Another artifact with the same lock (a new serve.py, say) shares the package's environment: same key.
+    assert (first.environment / "pixi" / "envs").is_dir()  # the environment built on the first run is still there
+    assert locate(reference, cache).cached and locate(reference, cache).environment == first.environment
+
+
+def test_another_artifact_with_the_same_lock_is_its_own_package_and_shares_the_environment(tmp_path, registry):
+    """A v0.2.0 that changes serve.py alone runs its own serve.py, and finds v0.1.0's environment: the package is
+    keyed by the artifact's digest, the environment by the lock's."""
+    reference = publish(package(tmp_path), f"{registry.host}/cogs/echo:0.1.0", client(registry))
+    cache = tmp_path / "cache"
+    first = materialize(reference, cache, client(registry))
+    (first.environment / "pixi" / "envs").mkdir()
     other = package(tmp_path / "v2", lock="version: 6\n")
     (other / "serve.py").write_text("print('changed')\n")
     second = publish(other, f"{registry.host}/cogs/echo:0.2.0", client(registry))
     assert second.digest != reference.digest
     shared = materialize(second, cache, client(registry))
-    assert shared.cached and shared.directory == first.directory
-    assert locate(second, cache).directory == first.directory and locate(reference, cache).cached
+    assert not shared.cached and shared.directory != first.directory
+    assert (shared.directory / "serve.py").read_text() == "print('changed')\n"
+    assert (first.directory / "serve.py").read_text() == "print('hi')\n"
+    assert shared.environment == first.environment
+    assert (shared.directory / ".pixi").resolve() == first.environment / "pixi"
+    assert locate(second, cache).directory == shared.directory and locate(reference, cache).directory == first.directory
+
+
+def test_a_cached_package_that_does_not_match_its_artifact_is_pulled_again(tmp_path, registry):
+    """A file altered in the cache (another Cog on a shared claim, say) is found at the next materialization: every
+    file is checked against its layer's digest before the package is trusted."""
+    reference = publish(package(tmp_path), f"{registry.host}/cogs/echo:1", client(registry))
+    cache = tmp_path / "cache"
+    first = materialize(reference, cache, client(registry))
+    (first.directory / "serve.py").write_text("print('tampered')\n")
+    registry.blob_reads.clear()
+    said = []
+    again = materialize(reference, cache, client(registry), log=said.append)
+    assert not again.cached and registry.blob_reads and any(line.startswith("artifact stale") for line in said)
+    assert (again.directory / "serve.py").read_text() == "print('hi')\n"
+    (again.directory / "COG.md").unlink()
+    assert not materialize(reference, cache, client(registry)).cached  # a missing file is no package either
+    assert (again.directory / "COG.md").is_file()
 
 
 def test_a_changed_lock_is_another_package(tmp_path, registry):
@@ -216,15 +258,17 @@ def test_a_private_registry_is_pulled_from_with_the_credential_through_the_token
         materialize(reference, tmp_path / "other", client(private_registry))
 
 
-def test_evicting_a_reference_removes_its_package_unless_another_shares_the_lock(tmp_path, registry):
+def test_evicting_a_reference_removes_its_package_and_its_locks_environment_unless_another_shares_the_lock(
+        tmp_path, registry):
     first = publish(package(tmp_path, "a"), f"{registry.host}/cogs/a:1", client(registry))
     cache = tmp_path / "cache"
     pulled = materialize(first, cache, client(registry))
-    assert evict(first, cache, keep_lock=True) is False and pulled.directory.is_dir()
+    assert evict(first, cache, keep_lock=True) is True and not pulled.directory.exists()
+    assert pulled.environment.is_dir()  # another install shares the lock: its environment stays
     with pytest.raises(PullError):
         locate(first, cache)
     materialize(first, cache, client(registry))
-    assert evict(first, cache) is True and not pulled.directory.exists()
+    assert evict(first, cache) is True and not pulled.directory.exists() and not pulled.environment.exists()
     assert evict(first, cache) is False
 
 
@@ -234,6 +278,8 @@ def test_the_command_line_materializes_and_pulls(tmp_path, registry, monkeypatch
     cache = tmp_path / "cache"
     assert artifacts.main(["materialize", str(reference), "--cache", str(cache)]) == 0
     assert capsys.readouterr().out.strip() == str(locate(reference, cache).directory)
+    assert artifacts.main(["evict", str(reference), "--cache", str(cache), "--keep-lock"]) == 0
+    assert not locate_or_none(reference, cache) and (cache / "envs").is_dir()
     assert artifacts.main(["pull", str(reference), "--into", str(tmp_path / "out")]) == 0
     assert (tmp_path / "out" / "serve.py").read_text() == "print('hi')\n"
     assert artifacts.main(["publish", str(tmp_path / "echo"), f"{registry.host}/cogs/echo:2"]) == 0

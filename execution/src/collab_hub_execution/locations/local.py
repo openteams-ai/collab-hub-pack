@@ -175,7 +175,7 @@ class LocalProcessCogExecutor:
         self.registry = registry
         """What a Cog named by a pinned reference is pulled through; ``None`` refuses every such Cog."""
         self.artifact_cache = Path(artifact_cache) if artifact_cache is not None else self.work_dir / "artifacts"
-        """Where pulled artifacts and the environments pixi builds for them live, keyed by the lock's digest."""
+        """Where pulled artifacts live, each package under its digest, and the environment pixi builds for each lock."""
         self.environment = environment
         self.pixi = pixi
         self.deliver = deliver
@@ -230,6 +230,10 @@ class LocalProcessCogExecutor:
                 path.chmod(0o600)
                 if name == "binding.json":
                     env[BINDING_FILE_ENV] = str(path)
+        if artifacts.is_reference(package.name):
+            # A package from its artifact builds its environment under its lock's directory in the cache, with a
+            # pixi home and cache of that lock's own.
+            env.update(artifacts.serve_environment(artifacts.locate(package.name, self.artifact_cache)))
         env.update({HOST_ENV: LOOPBACK, PORT_ENV: str(port), COG_ENV: package.name, RUN_ENV: run_id,
                     run_tokens.RUN_TOKEN_ENV: token})
         return env

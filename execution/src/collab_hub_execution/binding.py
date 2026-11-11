@@ -291,16 +291,39 @@ def inventory_digest(satisfiers: Sequence[Satisfier]) -> str:
 
 # --- the binding record ----------------------------------------------------------------------------
 
-_SECRET_KEYS = re.compile(r"(api[_-]?key|password|passwd|secret|token|authorization|credential)s?$", re.IGNORECASE)
+_SECRET_WORDS = frozenset({"apikey", "password", "passwd", "secret", "secrets", "token", "tokens", "authorization",
+                           "credential", "credentials"})
+MANIFEST_SECRET_TABLES = ("activation.env", "feature.*.activation.env", "tool.cog")
+"""Where a credential could sit in a ``pixi.toml``: the variables a package's activation sets, and the Cog's own
+profile. A dependency or a task is named freely (``tiktoken``, ``refresh-token``) and is never a secret's value."""
 
 
-def refuse_literal_secrets(document: Any, *, where: str) -> None:
+def names_a_secret(name: str) -> bool:
+    """Whether a key names a credential: a whole word of it (split on ``_``, ``-``, ``.`` and case) is one of the
+    words a secret goes by, or ``api`` is followed by ``key``; ``tiktoken`` is not, ``api_key`` and ``apiKey`` are."""
+    words = [word for word in re.split(r"[^a-z0-9]+", re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()) if word]
+    return any(word in _SECRET_WORDS for word in words) or any(
+        first == "api" and second == "key" for first, second in zip(words, words[1:]))
+
+
+def _tables(document: Any, pattern: str) -> list[tuple[str, Any]]:
+    """The subdocuments at a dotted path, ``*`` standing for any key: ``(path, value)`` pairs."""
+    found: list[tuple[str, Any]] = [("", document)]
+    for segment in pattern.split("."):
+        found = [(f"{path}{key}.", item) for path, value in found if isinstance(value, Mapping)
+                 for key, item in value.items() if segment == "*" or key == segment]
+    return found
+
+
+def refuse_literal_secrets(document: Any, *, where: str, tables: Sequence[str] | None = None) -> None:
     """Refuse a manifest or a binding that carries a credential's value rather than a reference to one.
 
     A key that names a secret (``api_key``, ``password``, ``token``, ...)
     with a non-empty string value is refused, and so is an ``auth_ref`` that
-    is not ``env:NAME``. ``*_sha256`` and ``*_ref`` keys are references, not
-    values.
+    is not ``env:NAME``. ``*_sha256``, ``*_ref`` and ``*_digest`` keys are
+    references, not values. With ``tables``, only those dotted paths of the
+    document are read (``MANIFEST_SECRET_TABLES`` for a ``pixi.toml``);
+    the whole document otherwise (a binding, whose keys are the hub's own).
     """
     def walk(value: Any, path: str) -> None:
         if isinstance(value, Mapping):
@@ -310,7 +333,7 @@ def refuse_literal_secrets(document: Any, *, where: str) -> None:
                     if item not in (None, "") and not (isinstance(item, str) and AUTH_REF.match(item)):
                         raise BindingResolutionError(f"{where}: {path}{name} is {item!r}; a credential is named "
                                                      "by reference, env:NAME, never by its value")
-                elif (_SECRET_KEYS.search(name) and not name.endswith(("_ref", "_sha256", "_digest"))
+                elif (names_a_secret(name) and not name.endswith(("_ref", "_sha256", "_digest"))
                       and isinstance(item, str) and item.strip()):
                     raise BindingResolutionError(f"{where}: {path}{name} carries a literal secret; credentials "
                                                  "travel by reference only")
@@ -319,7 +342,12 @@ def refuse_literal_secrets(document: Any, *, where: str) -> None:
             for index, item in enumerate(value):
                 walk(item, f"{path}{index}.")
 
-    walk(document, "")
+    if tables is None:
+        walk(document, "")
+        return
+    for pattern in tables:
+        for path, table in _tables(document, pattern):
+            walk(table, path)
 
 
 @dataclass(frozen=True, slots=True)

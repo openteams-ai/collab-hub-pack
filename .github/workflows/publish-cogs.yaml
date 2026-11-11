@@ -31,6 +31,9 @@ jobs:
       REPOSITORY_ROOT: ${{ github.repository }}/cogs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `pixi lock` resolves PyPI dependencies in this checkout: the workflow's token stays out of .git/config.
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
@@ -38,9 +41,9 @@ jobs:
           version-file: .github/uv.toml
 
       - name: Install pixi
-        uses: prefix-dev/setup-pixi@v0.9.3
+        uses: prefix-dev/setup-pixi@9936258fee697aff89b3fed6ca1f80a382ef694e # v0.11.3
         with:
-          pixi-version: v0.83.0
+          pixi-version: v0.84.1
           run-install: false
 
       - name: Publish each Cog under cogs/

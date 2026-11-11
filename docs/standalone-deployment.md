@@ -221,7 +221,9 @@ combination, but not restating the list is the better habit.)
   the organization that launched it, another organization's run being a 404. A
   request without credentials is a 401 there under the hardened map
   ([runs.md](cog-execution/runs.md#the-run-controller-and-the-run-api)).
-  `/v1/cogs/installs/**`, the installs, is the same: each route carries its
+  `/v1/cogs/installs/**`, the installs, is the same, and installing or
+  removing takes the organization's owner role, or the platform operator's,
+  where the hub resolves memberships: each route carries its
   own auth dependency and scopes installs to the caller's organization, so a
   `public` rule at `/v1/cogs` opens the catalog's discovery and never an
   install ([runs.md](cog-execution/runs.md#installing-a-cog-and-running-it-once)).
@@ -447,7 +449,7 @@ runs:
         valueFrom:
           secretKeyRef: {name: claude, key: api-key}
     worker:
-      cacheClaim: cog-cache                     # a ReadWriteMany claim you create; empty for an emptyDir per pod
+      cacheClaim: cog-cache                     # a ReadWriteMany claim you create in the workers' namespace; empty for an emptyDir per pod
       registryCredential:
         existingSecret: hub-registry-pull       # user:secret for the registry the install references name
         key: credential
@@ -501,16 +503,21 @@ runs:
   app.kubernetes.io/managed-by=collab-hub-executor`.
 - **Each worker is a pod of its own**: the hub's image, which ships pixi and
   the artifact puller and no Cog. An init container pulls the Cog's artifact
-  at its pinned digest, every blob verified, into the cache under the digest
-  of the package's `pixi.lock`, and the pod's container runs the package's
-  own `serve` task there in the environment pixi builds beside it, locked.
-  With `worker.cacheClaim` naming a claim (ReadWriteMany where workers land
-  on several nodes; the controller mounts it too, to evict a package at
-  uninstall), the next pod of any artifact with that lock finds the package
-  and its environment and solves nothing again (`workerStartSeconds` bounds
-  a first build; several minutes for Hermes); with it empty, each pod has an
-  `emptyDir` of its own (`worker.cacheSizeLimit`) and builds its environment
-  again. The pod carries no ServiceAccount token, and a NetworkPolicy per
+  at its pinned digest, every blob verified, into the cache under the
+  artifact's digest, with the environment directory of the package's
+  `pixi.lock` beside it, and the pod's container runs the package's own
+  `serve` task there in the environment pixi builds for that lock, locked.
+  The Cog's container mounts its package read-only and, writable, its lock's
+  environment directory alone. With `worker.cacheClaim` naming a claim of
+  the workers' namespace (ReadWriteMany where workers land on several
+  nodes), the next pod of any artifact with that lock finds the environment
+  and solves nothing again (`workerStartSeconds` bounds a first build;
+  several minutes for Hermes), a package found there is verified file for
+  file before a pod trusts it, and an uninstall evicts through a pod of that
+  namespace, which the controller's Role there admits (the controller's own
+  pod mounts nothing of the claim); with it empty, each pod has an `emptyDir`
+  of its own (`worker.cacheSizeLimit`) and builds its environment again. The
+  pod carries no ServiceAccount token, and a NetworkPolicy per
   worker admits only the controller's pods to its `/invoke`, enforced by a
   policy-enforcing CNI. The run token, the binding file and the key its
   binding names reach the pod through a Secret of the worker's own

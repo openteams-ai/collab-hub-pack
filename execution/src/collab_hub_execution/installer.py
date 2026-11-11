@@ -23,10 +23,16 @@ before resolution has chosen that model):
    ``materialize`` when the worker never came up, ``check`` when it answered
    no.
 
-A removal tears down what the install's workers left and records
+A removal tears down what the install's workers left, evicts the package
+from the artifact cache when no other install shares its lock, and records
 ``uninstalled``. Every move is a transition of the install machine
-(``states.install``), recorded with its events in the install store; the
-API reads the state there and never calls the executor.
+(``states.install``), recorded with its events in the install store, each
+record guarded by the state it moves from, so two controllers never write
+over each other's move; the API reads the state there and never calls the
+executor. An install a controller claimed and did not finish is resumed on
+that controller's next start, and taken over by another controller once
+its id is no longer held, from the state the store records: a binding on
+record is delivered again from the record.
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ from typing import Any
 
 from . import artifacts
 from .binding import (
+    MANIFEST_SECRET_TABLES,
     BindingRecord,
     BindingResolutionError,
     Delivered,
@@ -50,7 +57,7 @@ from .binding import (
     refuse_literal_secrets,
 )
 from .envelope import ResultEnvelope
-from .installs import InstallRow, InstallStore
+from .installs import InstallConflict, InstallRow, InstallStore
 from .locations.packages import DirectoryPackageSource, PackageNotFound, PackageRefused
 from .states import InstallState, InvalidTransition
 
@@ -96,6 +103,7 @@ class Installer:
         environ: Mapping[str, str] | None = None,
         inventory_filter: InventoryFilter = no_filter,
         cache: Path | str | None = None,
+        evict: Callable[[str, bool], bool] | None = None,
     ) -> None:
         self.store = store
         self.executor = executor
@@ -107,8 +115,15 @@ class Installer:
         self.environ = environ
         self.filter = inventory_filter
         self.cache = Path(cache) if cache is not None else None
-        """The artifact cache this controller can reach, where an uninstall evicts a package; ``None`` when it
-        cannot reach one (the workers' own volumes)."""
+        """The artifact cache this controller reaches itself (the ``local`` location's), where an uninstall evicts a
+        package; ``None`` when it reaches none."""
+        self.evict = evict
+        """How an uninstall evicts a package: given the reference and whether to keep its lock's environment (another
+        install shares it), whether a package was removed. The cache this controller reaches itself when it has one;
+        at ``remote``, the executor's, through a pod of the workers' namespace; ``None`` evicts nothing (each
+        worker's cache went with its pod)."""
+        if self.evict is None and self.cache is not None:
+            self.evict = lambda reference, keep_lock: artifacts.evict(reference, self.cache, keep_lock=keep_lock)
         self._deliveries: dict[str, Delivered] = {}
         self._lock = threading.Lock()
         self._threads: dict[str, threading.Thread] = {}
@@ -123,14 +138,26 @@ class Installer:
 
     # --- the controller's pass ----------------------------------------------------------------
 
-    def tick(self) -> None:
-        """One pass: take each removal asked for, and claim and start each install nobody has started."""
+    def tick(self, alive: Callable[[str], bool] | None = None) -> None:
+        """One pass: take each removal asked for, claim and start each install nobody has started, resume each this
+        controller claimed and did not finish, and take over those of a controller ``alive`` says no longer holds
+        its id (every other controller's, when ``alive`` is not given)."""
         for row in self.store.pending():
             if self._busy(row.id):
                 continue
             if row.uninstall_requested_by is not None:
                 self._spawn(row.id, self.uninstall, row.id)
             elif self.store.claim(row.id, self.controller):
+                self._spawn(row.id, self.install, row.id)
+        for row in self.store.in_progress():
+            if self._busy(row.id) or row.controller is None:
+                continue
+            if row.controller == self.controller:
+                _log.info("install %s: resuming from %s", row.id, row.state)
+                self._spawn(row.id, self.install, row.id)
+            elif (alive is None or not alive(row.controller)) \
+                    and self.store.reclaim(row.id, row.controller, self.controller):
+                _log.info("install %s: taken over from %s at %s", row.id, row.controller, row.state)
                 self._spawn(row.id, self.install, row.id)
 
     def _busy(self, install_id: str) -> bool:
@@ -152,17 +179,29 @@ class Installer:
         row = self.store.get(install_id)
         if row is None:
             return None
+        step = "fetch"
         try:
             row = self._fetch(row)
             if row is None:
                 return self.store.get(install_id)  # stayed published, with the failed fetch recorded
-            row = self._bind(row)
-            if row.machine().state is not InstallState.BOUND:
-                return row
+            if row.machine().state is InstallState.FETCHED:  # resumed at BOUND, the binding is on record
+                step = "bind"
+                row = self._bind(row)
+                if row.machine().state is not InstallState.BOUND:
+                    return row
+            step = CHECK
             return self._check(row)
-        except Exception:  # noqa: BLE001 - one install's trouble never stops the controller
-            _log.exception("installing %s (%s) failed", install_id, row.reference)
+        except InstallConflict as exc:
+            _log.warning("install %s: %s; another controller moved it, this move is dropped", install_id, exc)
             return self.store.get(install_id)
+        except Exception as exc:  # noqa: BLE001 - one install's trouble never stops the controller
+            _log.exception("installing %s (%s) failed at %s", install_id, row.reference, step)
+            # Recorded as the step's failure, so the install is not resumed into the same trouble on every pass.
+            try:
+                return self.store.record(row.id, _Stay(row.machine()), failure=f"{step}: {_bound(exc)}",
+                                         failed_step=step, expected_state=row.state)
+            except InstallConflict:
+                return self.store.get(install_id)
 
     def _fetch(self, row: InstallRow) -> InstallRow | None:
         install = row.machine()
@@ -174,17 +213,20 @@ class Installer:
             # Nothing of the Cog reached the hub: the install stays PUBLISHED, and says why, so a retry is a
             # new ask rather than a stuck row.
             _log.warning("fetching %s failed: %s", row.reference, exc)
-            self.store.record(row.id, _Stay(install), failure=f"fetch: {_bound(exc)}", failed_step="fetch")
+            self.store.record(row.id, _Stay(install), failure=f"fetch: {_bound(exc)}", failed_step="fetch",
+                              expected_state=row.state)
             return None
         _log.info("install %s: fetched %s (lock %s)", row.id, row.reference, lock_digest[:19] if lock_digest else "-")
-        return self.store.record(row.id, install.fetch(), lock_digest=lock_digest, failure=None, failed_step=None)
+        return self.store.record(row.id, install.fetch(), lock_digest=lock_digest, failure=None, failed_step=None,
+                                 expected_state=row.state)
 
     def _fetch_artifact(self, row: InstallRow) -> str | None:
         if artifacts.is_reference(row.reference):
             if self.registry is None:
                 raise artifacts.PullError("this controller reaches no registry: it was started without one")
             fetched = artifacts.fetch(row.reference, self.registry)
-            refuse_literal_secrets(_toml(fetched.files.get(artifacts.MANIFEST)), where=f"{row.reference} pixi.toml")
+            refuse_literal_secrets(_toml(fetched.files.get(artifacts.MANIFEST)), where=f"{row.reference} pixi.toml",
+                                   tables=MANIFEST_SECRET_TABLES)
             return fetched.lock_digest
         if self.packages is None:
             raise PackageRefused(f"{row.reference!r} is not a pinned reference, and this controller runs no "
@@ -205,12 +247,12 @@ class Installer:
         except BindingResolutionError as exc:
             _log.warning("binding %s refused: %s", row.reference, exc)
             return self.store.record(row.id, install.refuse_binding(reason=_bound(exc)),
-                                     failure=f"bind: {_bound(exc)}", failed_step="bind")
+                                     failure=f"bind: {_bound(exc)}", failed_step="bind", expected_state=row.state)
         with self._lock:
             self._deliveries[row.run_id] = delivered
         _log.info("install %s: bound %s as %s", row.id, row.reference, record.id)
         return self.store.record(row.id, install.admit_binding(binding=record.id), binding_id=record.id,
-                                 binding=record.to_dict(), failure=None, failed_step=None)
+                                 binding=record.to_dict(), failure=None, failed_step=None, expected_state=row.state)
 
     def _resolve(self, row: InstallRow, requires: list[dict[str, Any]],
                  offered: tuple[Satisfier, ...]) -> BindingRecord:
@@ -244,13 +286,25 @@ class Installer:
 
     def _check(self, row: InstallRow) -> InstallRow:
         install = row.machine()
+        if self.delivered(row.run_id) is None and row.binding:
+            # Resumed at BOUND, by this controller started again or by another: the binding is delivered from the
+            # record, the key it names found now; a key gone since the bind is the check's failure, at bind.
+            try:
+                delivered = BindingRecord.from_dict(row.binding).delivery(self.environ)
+            except BindingResolutionError as exc:
+                _log.warning("the binding of %s cannot be delivered again: %s", row.reference, exc)
+                return self.store.record(row.id, install.check_failed(step="bind", reason=_bound(exc)),
+                                         failure=f"bind: {_bound(exc)}", failed_step="bind", expected_state=row.state)
+            with self._lock:
+                self._deliveries[row.run_id] = delivered
         try:
             worker = self.executor.materialize(row.reference, row.run_id, CHECK)
         except Exception as exc:  # noqa: BLE001 - a worker that never came up fails the check at materialize
             reason = f"{type(exc).__name__}: {exc}"
             _log.warning("check of %s failed at materialize: %s", row.reference, reason)
             return self.store.record(row.id, install.check_failed(step="materialize", reason=_bound(reason)),
-                                     failure=f"materialize: {_bound(reason)}", failed_step="materialize")
+                                     failure=f"materialize: {_bound(reason)}", failed_step="materialize",
+                                     expected_state=row.state)
         try:
             if CHECK in _lifecycle_ops(dict(row.card or {})):
                 envelope = worker.interact(CHECK, {})
@@ -259,11 +313,12 @@ class Installer:
                     reason = f"{error.code}: {error.detail}" if error else "check answered no envelope"
                     _log.warning("check of %s failed: %s", row.reference, reason)
                     return self.store.record(row.id, install.check_failed(step=CHECK, reason=_bound(reason)),
-                                             failure=f"check: {_bound(reason)}", failed_step=CHECK)
+                                             failure=f"check: {_bound(reason)}", failed_step=CHECK,
+                                             expected_state=row.state)
         except Exception as exc:  # noqa: BLE001 - the worker's refusal is the check's failure
             reason = f"{type(exc).__name__}: {exc}"
             return self.store.record(row.id, install.check_failed(step=CHECK, reason=_bound(reason)),
-                                     failure=f"check: {_bound(reason)}", failed_step=CHECK)
+                                     failure=f"check: {_bound(reason)}", failed_step=CHECK, expected_state=row.state)
         finally:
             try:
                 self.executor.teardown(worker)
@@ -272,7 +327,8 @@ class Installer:
             with self._lock:
                 self._deliveries.pop(row.run_id, None)
         _log.info("install %s: %s is invokable", row.id, row.reference)
-        return self.store.record(row.id, install.check_passed(), failure=None, failed_step=None)
+        return self.store.record(row.id, install.check_passed(), failure=None, failed_step=None,
+                                 expected_state=row.state)
 
     # --- removing -----------------------------------------------------------------------------
 
@@ -287,17 +343,16 @@ class Installer:
                 sweep(run_id=row.run_id)
             except Exception:  # noqa: BLE001 - what could not be swept is logged, and the removal goes on
                 _log.exception("sweeping the workers of install %s failed", install_id)
-        if self.cache is not None and artifacts.is_reference(row.reference):
-            # The package and the environment pixi built beside it go when the last install of their lock does;
-            # another install of the same lock (the same reference, or another artifact with the same
-            # environment) keeps them.
+        if self.evict is not None and artifacts.is_reference(row.reference) and row.lock_digest:
+            # The package goes with its install; the environment of its lock goes when the last install of that
+            # lock does, since another install with the same lock (the same reference installed by another
+            # organization, or another artifact with the same environment) shares it.
             others = [r for r in self.store.list(include_uninstalled=False)
                       if r.id != row.id and r.lock_digest == row.lock_digest]
-            if not others:
-                try:
-                    artifacts.evict(row.reference, self.cache)
-                except Exception:  # noqa: BLE001
-                    _log.exception("evicting %s from the cache failed", row.reference)
+            try:
+                self.evict(row.reference, bool(others))
+            except Exception:  # noqa: BLE001
+                _log.exception("evicting %s from the cache failed", row.reference)
         with self._lock:
             self._deliveries.pop(row.run_id, None)
         try:
@@ -306,7 +361,11 @@ class Installer:
             _log.warning("install %s cannot be uninstalled from %s: %s", install_id, row.state, exc)
             return row
         _log.info("install %s: %s uninstalled", install_id, row.reference)
-        return self.store.record(install_id, transition)
+        try:
+            return self.store.record(install_id, transition, expected_state=row.state)
+        except InstallConflict as exc:
+            _log.warning("install %s: %s; recorded by another controller", install_id, exc)
+            return self.store.get(install_id)
 
 
 class _Stay:

@@ -29,6 +29,7 @@ from collab_hub_execution.controller import BindingDelivery, RunController
 from collab_hub_execution.installer import Installer, harnesses_installed
 from collab_hub_execution.installs import SqliteInstallStore
 from httpx import ASGITransport, AsyncClient
+from test_cog_serving import bearer
 from test_cogs_api import AUTH, HOST, SOURCE, T0, _jwt, fixture_card, row
 from test_runs_api import package
 
@@ -327,6 +328,50 @@ async def test_a_development_package_installs_from_the_directory_source(api, con
     asked = await client.post("/v1/cogs/installs", json={"package": "echo"})
     assert asked.status_code == 202 and asked.json()["reference"] == "echo" and asked.json()["kind"] == "package"
     assert asked.json()["digest"].startswith("sha256:")
+
+
+async def test_on_a_hub_that_resolves_memberships_owners_and_operators_install_and_a_member_is_refused(
+    config, monkeypatch, tmp_path
+):
+    """Installing runs the Cog's `resolve` and `check` with the hub's model key delivered, so it takes the
+    organization's owner role, or the platform operator's, where the hub has roles at all."""
+    from collab_hub_api.frames.identity import IDENTITY_CLAIM_ENV
+    from collab_hub_api.frames.org_source import ORG_SOURCE_ENV
+    from collab_hub_api.frames.orgs import ROLE_MEMBER, ROLE_OWNER
+
+    monkeypatch.setenv("FRAMES_UNSAFE_AUTH_ENABLED", "true")
+    monkeypatch.setenv("FRAMES_BEARER_ALLOW_UNSIGNED", "true")
+    monkeypatch.setenv(IDENTITY_CLAIM_ENV, "sub")
+    monkeypatch.setenv(ORG_SOURCE_ENV, "membership")
+    values = {
+        "storage": {"frames_path": str(tmp_path / "frames")},
+        "frames": {"mcp_session_manager_enabled": False, "orgs": {"backend": "memory"}},
+        "tasks": {"backend": "memory"},
+        "cogs": {"catalog": {"backend": "memory"}},
+        "runs": {"track_path": str(tmp_path / "track.sqlite")},
+    }
+    app = make_app(Config.parse(values))
+    reference = f"{HOST}/cogs/notes@sha256:{'0' * 64}"
+    async with app.router.lifespan_context(app):
+        orgs = app.state.org_store
+        orgs.set_membership("sub-owner", "org-1", role=ROLE_OWNER)
+        orgs.set_membership("sub-member", "org-1", role=ROLE_MEMBER)
+        orgs.set_platform_role("sub-operator")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            member, owner = bearer({"sub": "sub-member"}), bearer({"sub": "sub-owner"})
+            operator = bearer({"sub": "sub-operator"})
+            refused = await client.post("/v1/cogs/installs", json={"reference": reference}, headers=member)
+            assert refused.status_code == 403 and refused.json()["error"]["code"] == "install_forbidden"
+            assert (await client.delete("/v1/cogs/installs/inst-000000000000", headers=member)).status_code == 403
+            # Past the gate: the catalog holds nothing at that digest, which is the owner's and the operator's answer.
+            assert (
+                await client.post("/v1/cogs/installs", json={"reference": reference}, headers=owner)
+            ).status_code == 404
+            assert (
+                await client.get("/v1/cogs/installs", headers=member)
+            ).status_code == 200  # reading is every member's
+            operator_asked = await client.post("/v1/cogs/installs", json={"reference": reference}, headers=operator)
+            assert operator_asked.status_code != 403
 
 
 def test_the_install_routes_sit_under_the_cogs_prefix_and_before_the_catalogs_cog_id_route(config):

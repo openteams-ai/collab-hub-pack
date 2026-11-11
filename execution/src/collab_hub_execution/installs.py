@@ -31,6 +31,11 @@ INSTALL_RUN_PREFIX = "install:"
 """The run id an install's workers are materialized under: ``install:<install id>``."""
 
 
+class InstallConflict(RuntimeError):
+    """A record that expected the install in one state found it in another: another controller moved it (an
+    uninstall recorded while this one was checking, say), and this one's move is dropped, never written over it."""
+
+
 class InstallExists(ValueError):
     """The organization already holds a live install of this digest."""
 
@@ -113,8 +118,16 @@ class InstallStore(Protocol):
     def claim(self, install_id: str, controller: str) -> bool:
         """Take an install nobody has started on, naming the controller; ``False`` when another did."""
 
-    def record(self, install_id: str, transition: Transition[CogInstall], **changes: Any) -> InstallRow:
-        """Write a machine transition's records to the install's log, and its state and ``changes`` to the row."""
+    def record(self, install_id: str, transition: Transition[CogInstall], *, expected_state: str | None = None,
+               **changes: Any) -> InstallRow:
+        """Write a machine transition's records to the install's log, and its state and ``changes`` to the row.
+
+        With ``expected_state``, the state the transition moves from, the row is written only while it is still
+        in that state; ``InstallConflict`` otherwise, and nothing is written.
+        """
+
+    def reclaim(self, install_id: str, from_controller: str, controller: str) -> bool:
+        """Take an install in progress from a controller that no longer holds its id; ``False`` when it moved."""
 
     def request_uninstall(self, install_id: str, actor: str) -> InstallRow | None:
         """Record that ``actor`` asked for the install's removal; ``None`` for an install that is gone."""
@@ -123,6 +136,13 @@ class InstallStore(Protocol):
 
     def pending(self) -> tuple[InstallRow, ...]:
         """What a controller has to act on: installs nobody has started, and removals asked for."""
+
+    def in_progress(self) -> tuple[InstallRow, ...]:
+        """Installs a controller has claimed and not finished: short of invokable, with no step recorded as failed
+        and no removal asked. What a controller resumes under its own id, or takes from an id no longer held."""
+
+
+IN_PROGRESS_STATES = (InstallState.PUBLISHED.value, InstallState.FETCHED.value, InstallState.BOUND.value)
 
 
 def _check_changes(changes: Mapping[str, Any]) -> None:
@@ -171,10 +191,21 @@ class InMemoryInstallStore:
             self._rows[install_id] = replace(row, controller=controller, updated_at=datetime.now(UTC))
             return True
 
-    def record(self, install_id: str, transition: Transition[CogInstall], **changes: Any) -> InstallRow:
+    def reclaim(self, install_id: str, from_controller: str, controller: str) -> bool:
+        with self._lock:
+            row = self._rows.get(install_id)
+            if row is None or row.controller != from_controller or not _in_progress(row):
+                return False
+            self._rows[install_id] = replace(row, controller=controller, updated_at=datetime.now(UTC))
+            return True
+
+    def record(self, install_id: str, transition: Transition[CogInstall], *, expected_state: str | None = None,
+               **changes: Any) -> InstallRow:
         _check_changes(changes)
         with self._lock:
             row = self._rows[install_id]
+            if expected_state is not None and row.state != expected_state:
+                raise InstallConflict(f"install {install_id} is {row.state}, not {expected_state}")
             now = datetime.now(UTC)
             for record in transition.records:
                 self._events.append(InstallEvent(install_id, record.event_type, dict(record.payload), now,
@@ -199,11 +230,23 @@ class InMemoryInstallStore:
     def pending(self) -> tuple[InstallRow, ...]:
         return tuple(r for r in self._rows.values() if _pending(r))
 
+    def in_progress(self) -> tuple[InstallRow, ...]:
+        return tuple(r for r in self._rows.values() if _in_progress(r))
+
 
 def _pending(row: InstallRow) -> bool:
     asked = row.state == InstallState.PUBLISHED.value and row.controller is None
     removal = row.uninstall_requested_by is not None and row.live
     return asked or removal
+
+
+def _in_progress(row: InstallRow) -> bool:
+    return (row.controller is not None and row.state in IN_PROGRESS_STATES and row.failed_step is None
+            and row.uninstall_requested_by is None)
+
+
+_IN_PROGRESS_SQL = ("controller IS NOT NULL AND state IN ('published', 'fetched', 'bound') "
+                    "AND failed_step IS NULL AND uninstall_requested_by IS NULL")
 
 
 # --- SQLite ---------------------------------------------------------------------------------------
@@ -357,7 +400,16 @@ class SqliteInstallStore:
                 (controller, datetime.now(UTC).isoformat(), install_id)).rowcount
         return changed == 1
 
-    def record(self, install_id: str, transition: Transition[CogInstall], **changes: Any) -> InstallRow:
+    def reclaim(self, install_id: str, from_controller: str, controller: str) -> bool:
+        with self._connect() as connection:
+            changed = connection.execute(
+                f"UPDATE collab_cog_installs SET controller = ?, updated_at = ? "
+                f"WHERE id = ? AND controller = ? AND {_IN_PROGRESS_SQL}",
+                (controller, datetime.now(UTC).isoformat(), install_id, from_controller)).rowcount
+        return changed == 1
+
+    def record(self, install_id: str, transition: Transition[CogInstall], *, expected_state: str | None = None,
+               **changes: Any) -> InstallRow:
         _check_changes(changes)
         now = datetime.now(UTC)
         values = dict(changes)
@@ -365,15 +417,20 @@ class SqliteInstallStore:
             values["binding"] = _dump(dict(values["binding"]))
         values["state"] = transition.after.state.value
         values["updated_at"] = now.isoformat()
+        guard, params = ("", ()) if expected_state is None else (" AND state = ?", (expected_state,))
         with self._connect() as connection:
+            # The row first, under the guard, so a move another controller made is never written over.
+            assignments = ", ".join(f"{column} = ?" for column in values)
+            changed = connection.execute(f"UPDATE collab_cog_installs SET {assignments} WHERE id = ?{guard}",
+                                         (*values.values(), install_id, *params)).rowcount
+            if changed != 1:
+                connection.rollback()
+                raise InstallConflict(f"install {install_id} is not {expected_state}")
             for record in transition.records:
                 connection.execute(
                     "INSERT INTO collab_cog_install_events (install_id, event_type, payload, occurred_at) "
                     "VALUES (?, ?, ?, ?)", (install_id, record.event_type, _dump(dict(record.payload)),
                                             now.isoformat()))
-            assignments = ", ".join(f"{column} = ?" for column in values)
-            connection.execute(f"UPDATE collab_cog_installs SET {assignments} WHERE id = ?",
-                               (*values.values(), install_id))
             [row] = self._select(connection, "WHERE id = ?", (install_id,))
         return row
 
@@ -400,6 +457,10 @@ class SqliteInstallStore:
                 connection, "WHERE (state = 'published' AND controller IS NULL) "
                             "OR (uninstall_requested_by IS NOT NULL AND state <> 'uninstalled') ORDER BY created_at",
                 ()))
+
+    def in_progress(self) -> tuple[InstallRow, ...]:
+        with self._connect() as connection:
+            return tuple(self._select(connection, f"WHERE {_IN_PROGRESS_SQL} ORDER BY created_at", ()))
 
 
 # --- Postgres --------------------------------------------------------------------------------------
@@ -526,7 +587,16 @@ class PostgresInstallStore:
                 "WHERE id = %s AND controller IS NULL AND state = 'published'", (controller, install_id)).rowcount
         return changed == 1
 
-    def record(self, install_id: str, transition: Transition[CogInstall], **changes: Any) -> InstallRow:
+    def reclaim(self, install_id: str, from_controller: str, controller: str) -> bool:
+        with self.pool.connection() as connection:
+            changed = connection.execute(
+                f"UPDATE collab_cog_installs SET controller = %s, updated_at = now() "
+                f"WHERE id = %s AND controller = %s AND {_IN_PROGRESS_SQL}",
+                (controller, install_id, from_controller)).rowcount
+        return changed == 1
+
+    def record(self, install_id: str, transition: Transition[CogInstall], *, expected_state: str | None = None,
+               **changes: Any) -> InstallRow:
         _check_changes(changes)
         values = dict(changes)
         casts = {}
@@ -534,15 +604,21 @@ class PostgresInstallStore:
             values["binding"] = _dump(dict(values["binding"]))
             casts["binding"] = "::jsonb"
         values["state"] = transition.after.state.value
+        guard, params = ("", ()) if expected_state is None else (" AND state = %s", (expected_state,))
         with self.pool.connection() as connection:
+            # The row first, under the guard, so a move another controller made is never written over.
+            assignments = ", ".join(f"{column} = %s{casts.get(column, '')}" for column in values)
+            changed = connection.execute(
+                f"UPDATE collab_cog_installs SET {assignments}, updated_at = now() WHERE id = %s{guard}",
+                (*values.values(), install_id, *params)).rowcount
+            if changed != 1:
+                connection.rollback()
+                raise InstallConflict(f"install {install_id} is not {expected_state}")
             for record in transition.records:
                 connection.execute(
                     "INSERT INTO collab_cog_install_events (install_id, event_type, payload) "
                     "VALUES (%s, %s, %s::jsonb)",
                     (install_id, record.event_type, _dump(dict(record.payload))))
-            assignments = ", ".join(f"{column} = %s{casts.get(column, '')}" for column in values)
-            connection.execute(f"UPDATE collab_cog_installs SET {assignments}, updated_at = now() WHERE id = %s",
-                               (*values.values(), install_id))
             [row] = self._select(connection, "WHERE id = %s", (install_id,))
         return row
 
@@ -569,8 +645,13 @@ class PostgresInstallStore:
                             "OR (uninstall_requested_by IS NOT NULL AND state <> 'uninstalled') ORDER BY created_at",
                 ()))
 
+    def in_progress(self) -> tuple[InstallRow, ...]:
+        with self.pool.connection() as connection:
+            return tuple(self._select(connection, f"WHERE {_IN_PROGRESS_SQL} ORDER BY created_at", ()))
+
 
 __all__ = [
-    "INSTALL_RUN_PREFIX", "InMemoryInstallStore", "InstallEvent", "InstallExists", "InstallRow", "InstallStore",
+    "INSTALL_RUN_PREFIX", "InMemoryInstallStore", "InstallConflict", "InstallEvent", "InstallExists", "InstallRow",
+    "InstallStore",
     "PostgresInstallStore", "SqliteInstallStore", "new_install_id",
 ]

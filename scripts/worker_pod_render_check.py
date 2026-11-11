@@ -23,6 +23,7 @@ import yaml
 from collab_hub_execution.kubernetes import KubernetesCogExecutor, resource_name
 
 REFERENCE = "hub.example.com/cogs/notes@sha256:" + "a" * 64
+LOCK_DIGEST = "sha256:" + "b" * 64
 
 
 def main() -> int:
@@ -42,7 +43,7 @@ def main() -> int:
         registry_plain_http=(env.get("COLLAB_CONTROLLER_REGISTRY_PLAIN_HTTP") or "").split(","),
     )
     name = resource_name(REFERENCE, "run-1", "ask:0")
-    deployment, _ = executor._manifests(REFERENCE, "run-1", name, files={"binding.json": "{}"})
+    deployment, _ = executor._manifests(REFERENCE, "run-1", name, files={"binding.json": "{}"}, lock_digest=LOCK_DIGEST)
     pod = deployment["spec"]["template"]["spec"]
     [pull] = pod["initContainers"]
     assert pull["image"] == env["COLLAB_CONTROLLER_IMAGE"], pull["image"]
@@ -53,6 +54,17 @@ def main() -> int:
     assert worker["command"][:4] == ["python", "-m", "collab_hub_execution.artifacts", "serve"], worker["command"]
     assert worker["envFrom"] == [{"secretRef": {"name": name}}]
     assert not [c for c in worker["command"] if "/opt/collab-hub/cogs" in c], "the worker runs from the image"
+    # The Cog's container: its package read-only, the environment of its lock alone writable, nothing else of
+    # the cache; the pull container the whole cache, to land the package and make the environment directory.
+    cache_mounts = {m["mountPath"]: m for m in worker["volumeMounts"] if m["name"] == "cache"}
+    package = f"/var/cache/collab-hub/artifacts/packages/{'a' * 64}"
+    environment = f"/var/cache/collab-hub/artifacts/envs/{'b' * 64}"
+    assert set(cache_mounts) == {package, environment}, cache_mounts
+    assert cache_mounts[package]["readOnly"] is True
+    assert cache_mounts[package]["subPath"] == f"artifacts/packages/{'a' * 64}"
+    assert not cache_mounts[environment].get("readOnly")
+    assert cache_mounts[environment]["subPath"] == f"artifacts/envs/{'b' * 64}"
+    assert [m["mountPath"] for m in pull["volumeMounts"] if m["name"] == "cache"] == ["/var/cache/collab-hub"]
     volumes = {v["name"]: v for v in pod["volumes"]}
     if env.get("COLLAB_CONTROLLER_WORKER_CACHE_CLAIM"):
         assert volumes["cache"]["persistentVolumeClaim"]["claimName"] == env["COLLAB_CONTROLLER_WORKER_CACHE_CLAIM"]
@@ -64,7 +76,7 @@ def main() -> int:
     assert worker_env["COLLAB_BINDING_FILE"] == "/etc/collab-hub/binding/binding.json"
     plain = {e["name"]: e["value"] for e in pull["env"]}.get("COLLAB_REGISTRY_PLAIN_HTTP")
     assert plain == (env.get("COLLAB_CONTROLLER_REGISTRY_PLAIN_HTTP") or None), plain
-    print(f"worker {name}: pulls {REFERENCE} in {pull['name']}, serves it from the cache")
+    print(f"worker {name}: pulls {REFERENCE} in {pull['name']}, serves it from its read-only package")
     return 0
 
 

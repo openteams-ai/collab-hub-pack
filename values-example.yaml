@@ -68,8 +68,9 @@ runs:
         valueFrom:
           secretKeyRef: {name: model-key, key: api-key}
     worker:
-      # A ReadWriteMany claim you create: the cache every worker pod and the controller share, keyed by each
-      # package's pixi.lock digest, so a second run on the same lock finds the environment. Empty for an
+      # A ReadWriteMany claim you create in the workers' namespace: the cache every worker pod shares, each
+      # package under its artifact's digest and one environment per pixi.lock digest, so a second run on the
+      # same lock finds the environment; an uninstall evicts through a pod of that namespace. Empty for an
       # emptyDir per pod.
       cacheClaim: ""
       # user:secret for the registry the install references name: the hub's own /v2 when cogs.serve.enabled

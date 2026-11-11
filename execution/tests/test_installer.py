@@ -37,7 +37,12 @@ from collab_hub_execution import (
     inventory,
 )
 from collab_hub_execution.artifacts import RegistryClient, locate, materialize, publish
-from collab_hub_execution.binding import harness_satisfier, refuse_literal_secrets
+from collab_hub_execution.binding import (
+    MANIFEST_SECRET_TABLES,
+    harness_satisfier,
+    names_a_secret,
+    refuse_literal_secrets,
+)
 from collab_hub_execution.controller import BindingDelivery, RunController
 from collab_hub_execution.installer import Installer, harnesses_installed
 from collab_hub_execution.installs import InstallRow, new_install_id
@@ -117,10 +122,11 @@ def row(reference, card=CONTEXT_CARD, org="acme"):
                       requested_by="alice")
 
 
-def installer(store, executor, registry=None, packages_root=None, environ=ENVIRON, harness_of=None, **extra):
+def installer(store, executor, registry=None, packages_root=None, environ=ENVIRON, harness_of=None,
+              controller="one", **extra):
     client = RegistryClient(plain_http={registry.host}) if registry is not None else None
     return Installer(
-        store, executor, controller="one", registry=client, environ=environ,
+        store, executor, controller=controller, registry=client, environ=environ,
         packages=DirectoryPackageSource([packages_root]) if packages_root else None,
         inventory=lambda org: inventory(MODELS, harnesses_installed(store, org)), **extra)
 
@@ -272,12 +278,95 @@ def test_the_inventory_filter_stands_between_the_inventory_and_resolve(registry,
 
 def test_literal_secrets_are_refused_in_a_manifest_and_a_binding():
     refuse_literal_secrets({"auth_ref": "env:KEY", "run_token_sha256": "ab", "model": {"api_key": ""}}, where="ok")
-    for bad in ({"api_key": "sk-123"}, {"model": {"password": "x"}}, {"auth_ref": "sk-123"},
+    for bad in ({"api_key": "sk-123"}, {"model": {"password": "x"}}, {"auth_ref": "sk-123"}, {"apiKey": "sk-1"},
                 {"tool": {"cog": {"secrets": [{"token": "t"}]}}}):
         with pytest.raises(BindingResolutionError):
             refuse_literal_secrets(bad, where="test")
     with pytest.raises(BindingResolutionError, match="auth_ref"):
         ModelsBlock.parse({"models": {"m": {"endpoint": "http://x", "model": "x", "auth_ref": "sk-literal"}}})
+
+
+def test_the_secret_check_reads_whole_words_and_only_the_manifest_tables_a_secret_could_sit_in():
+    # A dependency or a task is named freely: `tiktoken` is no token, and a task called refresh-token is a task.
+    manifest = {"pypi-dependencies": {"tiktoken": ">=0.7"}, "tasks": {"refresh-token": "python refresh.py"},
+                "dependencies": {"python-dotenv": "*"}}
+    refuse_literal_secrets(manifest, where="pixi.toml", tables=MANIFEST_SECRET_TABLES)
+    assert not names_a_secret("tiktoken") and names_a_secret("refresh-token") and names_a_secret("apiKey")
+    # Where a value could be a credential, it is still refused: the activation's variables and the Cog's profile.
+    for bad in ({"activation": {"env": {"OPENAI_API_KEY": "sk-1"}}},
+                {"feature": {"gpu": {"activation": {"env": {"HF_TOKEN": "hf_1"}}}}},
+                {"tool": {"cog": {"password": "x"}}}):
+        with pytest.raises(BindingResolutionError):
+            refuse_literal_secrets(bad, where="pixi.toml", tables=MANIFEST_SECRET_TABLES)
+    # A binding is read whole: its keys are the hub's own.
+    with pytest.raises(BindingResolutionError):
+        refuse_literal_secrets({"tasks": {"token": "t"}}, where="binding")
+
+
+def test_an_install_a_controller_did_not_finish_is_resumed_on_its_next_start_from_the_recorded_state(
+        registry, tmp_path):
+    """The controller stops after bind: its next start, under the same id, finds the row bound with no delivery in
+    memory, delivers the binding again from the record, and checks."""
+    reference = published(registry, tmp_path)
+    store = InMemoryInstallStore()
+    asked = store.create(row(reference))
+    store.claim(asked.id, "one")
+    first = installer(store, InMemoryCogExecutor({str(reference): selecting()}), registry)
+    bound = first._bind(first._fetch(asked))
+    assert bound.state == "bound" and [r.id for r in store.in_progress()] == [asked.id]
+    seen = []
+    again = installer(store, InMemoryCogExecutor({str(reference): selecting(seen=seen)}), registry)
+    again.tick()
+    _settled(again)
+    done = store.get(asked.id)
+    assert done.invokable and [e for e, _ in seen] == ["check"]  # resumed at check: resolve is not asked again
+    assert again.delivered(done.run_id) is None  # the check's delivery is let go of after it
+    assert [e.event_type for e in store.events(asked.id)] == ["install_fetched", "binding_admitted", "check_passed"]
+
+
+def test_a_resumed_binding_whose_key_is_gone_fails_the_check_at_bind(registry, tmp_path):
+    reference = published(registry, tmp_path)
+    store = InMemoryInstallStore()
+    asked = store.create(row(reference))
+    store.claim(asked.id, "one")
+    first = installer(store, InMemoryCogExecutor({str(reference): selecting()}), registry)
+    first._bind(first._fetch(asked))
+    again = installer(store, InMemoryCogExecutor({str(reference): selecting()}), registry, environ={})
+    done = again.install(asked.id)
+    assert done.state == "bound" and done.failed_step == "bind" and "FAKE_KEY" in done.failure
+    assert store.in_progress() == ()  # a recorded failure is not resumed into again
+
+
+def test_an_install_of_a_controller_that_no_longer_holds_its_id_is_taken_over(registry, tmp_path):
+    reference = published(registry, tmp_path)
+    store = InMemoryInstallStore()
+    asked = store.create(row(reference))
+    store.claim(asked.id, "dead")
+    other = installer(store, InMemoryCogExecutor({str(reference): selecting()}), registry, controller="two")
+    other.tick(alive=lambda controller: controller != "dead")
+    _settled(other)
+    assert store.get(asked.id).controller == "two" and store.get(asked.id).invokable
+    # One whose controller still holds its id is left to it.
+    held = store.create(row(reference, org="other"))
+    store.claim(held.id, "one")
+    other.tick(alive=lambda controller: True)
+    _settled(other)
+    assert store.get(held.id).controller == "one" and store.get(held.id).state == "published"
+
+
+def test_an_unexpected_failure_is_recorded_at_its_step_so_the_install_is_not_resumed_into_it(registry, tmp_path):
+    reference = published(registry, tmp_path)
+    store = InMemoryInstallStore()
+    asked = store.create(row(reference))
+    store.claim(asked.id, "one")
+
+    class Broken(InMemoryCogExecutor):
+        def materialize(self, cog, run_id, instance=""):
+            raise RuntimeError("the cluster is unreachable")
+
+    done = installer(store, Broken({str(reference): selecting()}), registry).install(asked.id)
+    assert done.state == "fetched" and done.failed_step == "bind" and "unreachable" in done.failure
+    assert store.in_progress() == ()
 
 
 def test_a_run_of_an_installed_cog_is_delivered_its_binding_and_every_step_event_names_it(registry, tmp_path):
@@ -339,7 +428,7 @@ def test_a_run_of_an_installed_cog_is_delivered_its_binding_and_every_step_event
         delivery(str(reference), "r", "ask:0")
 
 
-def test_an_uninstall_sweeps_the_installs_workers_and_evicts_its_package_unless_another_shares_the_lock(
+def test_an_uninstall_sweeps_the_installs_workers_and_evicts_its_package_keeping_a_shared_locks_environment(
         registry, tmp_path):
     reference = published(registry, tmp_path)
     store = InMemoryInstallStore()
@@ -350,7 +439,8 @@ def test_an_uninstall_sweeps_the_installs_workers_and_evicts_its_package_unless_
             swept.append(run_id)
 
     cache = tmp_path / "cache"
-    package = materialize(reference, cache, RegistryClient(plain_http={registry.host})).directory
+    pulled = materialize(reference, cache, RegistryClient(plain_http={registry.host}))
+    package, environment = pulled.directory, pulled.environment
     executor = Sweeping({str(reference): selecting()})
     install = installer(store, executor, registry, cache=cache)
     first = store.create(row(reference))
@@ -364,12 +454,32 @@ def test_an_uninstall_sweeps_the_installs_workers_and_evicts_its_package_unless_
     gone = store.get(first.id)
     assert gone.state == "uninstalled" and swept == [f"install:{first.id}"]
     assert [e.event_type for e in store.events(first.id)][-1] == "uninstalled"
-    assert package.is_dir()  # the other install shares the lock: the package and its environment stay
-    store.request_uninstall(second.id, "bob")
-    install.uninstall(second.id)
-    assert not package.exists()  # the last install of that lock: the package goes with it
+    # The package goes with its install; the other install shares the lock, so the lock's environment stays.
+    assert not package.exists() and environment.is_dir()
     with pytest.raises(Exception, match="not been materialized"):
         locate(reference, cache)
+    materialize(reference, cache, RegistryClient(plain_http={registry.host}))  # the other install's next run
+    store.request_uninstall(second.id, "bob")
+    install.uninstall(second.id)
+    assert not package.exists() and not environment.exists()  # the last install of that lock: both go
+
+
+def test_an_uninstall_at_remote_evicts_through_the_executor(registry, tmp_path):
+    reference = published(registry, tmp_path)
+    store = InMemoryInstallStore()
+    evicted = []
+    executor = InMemoryCogExecutor({str(reference): selecting()})
+    install = installer(store, executor, registry, evict=lambda ref, keep: evicted.append((ref, keep)) or True)
+    first = store.create(row(reference))
+    second = store.create(row(reference, org="other"))
+    for asked in (first, second):
+        store.claim(asked.id, "one")
+        assert install.install(asked.id).invokable
+    store.request_uninstall(first.id, "alice")
+    install.uninstall(first.id)
+    store.request_uninstall(second.id, "bob")
+    install.uninstall(second.id)
+    assert evicted == [(str(reference), True), (str(reference), False)]
     assert store.pending() == ()
 
 

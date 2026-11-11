@@ -11,15 +11,15 @@ is what a ``remote`` worker's init container runs:
     python -m collab_hub_execution.artifacts serve <reference> --cache /var/cache/collab-hub
 
 ``materialize`` pulls the artifact into the cache, under a directory named by
-the digest of its ``pixi.lock``, and verifies every blob against its digest;
-``serve`` finds that directory and runs the package's ``serve`` task there
-with pixi, ``--locked``. The cache is keyed by the lock's digest because the
-lock names the environment: two artifacts with one lock share one
-environment, and a second run on the same lock finds the package and the
-environment pixi built beside it, and solves nothing again. Pixi keeps the
-environment under the package (``.pixi/``) or, with
-``detached-environments``, under a directory derived from the manifest's
-path, which the lock digest makes stable.
+the artifact's own digest (``packages/<digest>``), and verifies every blob
+against its digest; a package found there is verified file for file against
+the manifest before it is trusted, and pulled again otherwise. ``serve``
+finds that directory and runs the package's ``serve`` task there with pixi,
+``--locked``. The environment is the lock's: ``envs/<lock digest>``, which
+the package's ``.pixi`` links to, so two artifacts with one lock share one
+environment and a second run on the same lock solves nothing again, while
+no two artifacts ever share a package. ``evict`` removes a package, and the
+environment of its lock unless another install shares it.
 
 Authentication is the distribution token flow: a ``401`` with a ``Bearer``
 challenge is answered by asking the challenge's realm for a token, with a
@@ -43,6 +43,7 @@ import shutil
 import sys
 import tempfile
 import time
+import urllib.parse
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -194,6 +195,12 @@ class RegistryClient:
         realm = challenge.get("realm")
         if not realm:
             raise PullError(f"{host}'s bearer challenge names no realm")
+        realm_host = urllib.parse.urlsplit(realm).netloc
+        if not realm.startswith("https://") and realm_host not in self.plain_http:
+            # A challenge is the registry's to write: the credential goes to no realm that is not https, unless
+            # its host is one named as reached over plain HTTP (a cluster-local registry in development).
+            raise PullError(f"{host}'s bearer challenge names the realm {realm}, which is not https and whose "
+                            f"host is not in {PLAIN_HTTP_ENV}: the credential is not presented there")
         params = {key: value for key, value in (("service", challenge.get("service")),
                                                 ("scope", challenge.get("scope") or scope)) if value}
         headers: dict[str, str] = {}
@@ -447,29 +454,45 @@ def fetch(reference: ArtifactReference | str, client: RegistryClient) -> Fetched
 
 @dataclass(frozen=True, slots=True)
 class MaterializedPackage:
-    """A package in the cache: where it is, which artifact it came from, and whether it was there already."""
+    """A package in the cache: where it is, which artifact it came from, the directory of its lock's environment,
+    and whether it was there already."""
 
     reference: ArtifactReference
     directory: Path
     lock_digest: str
     serve: str
     cached: bool
+    environment: Path
 
     @property
     def manifest(self) -> Path:
         return self.directory / MANIFEST
 
 
+PIXI_DIRECTORY = ".pixi"
+ENVIRONMENT_PIXI = "pixi"
+"""Under a lock's environment directory: what the package's ``.pixi`` links to, where pixi builds the environment."""
+ENVIRONMENT_CACHE = "cache"
+"""Under a lock's environment directory: pixi's package cache (``PIXI_CACHE_DIR``), the lock's own."""
+ENVIRONMENT_HOME = "home"
+"""Under a lock's environment directory: pixi's home (``PIXI_HOME``), the lock's own, so no ``detached-environments``
+setting of the image's pixi home moves the environment away from the package's ``.pixi`` link."""
+
+
 def _hex(digest: str) -> str:
     return digest.partition(":")[2]
 
 
-def package_directory(cache: Path, lock_digest: str) -> Path:
-    return Path(cache) / "packages" / _hex(lock_digest)
+def package_directory(cache: Path, reference: ArtifactReference) -> Path:
+    """Where an artifact's files are: keyed by the artifact's own digest, so no two artifacts ever share a package,
+    whatever their locks."""
+    return Path(cache) / "packages" / _hex(reference.digest)
 
 
-def _reference_note(cache: Path, reference: ArtifactReference) -> Path:
-    return Path(cache) / "references" / _hex(reference.digest)
+def environment_directory(cache: Path, lock_digest: str) -> Path:
+    """Where the environment of a lock is: keyed by the lock's digest, shared by every artifact with that lock, since
+    the lock is what names the environment."""
+    return Path(cache) / "envs" / _hex(lock_digest)
 
 
 def _marker(directory: Path) -> dict[str, Any] | None:
@@ -480,13 +503,39 @@ def _marker(directory: Path) -> dict[str, Any] | None:
     return marker if isinstance(marker, dict) else None
 
 
+def _verified(directory: Path, layers: tuple[Layer, ...]) -> str | None:
+    """The ``serve`` task of the package in ``directory`` when it is the artifact these layers describe, every
+    file matching its layer's digest; ``None`` when anything is missing, altered, or a link."""
+    marker = _marker(directory)
+    if marker is None:
+        return None
+    for layer in layers:
+        path = directory / layer.title
+        try:
+            if path.is_symlink() or not path.is_file() or _sha256(path.read_bytes()) != layer.digest:
+                return None
+        except OSError:
+            return None
+    serve = marker.get("serve")
+    return serve if isinstance(serve, str) and serve else None
+
+
 def materialize(reference: ArtifactReference | str, cache: Path | str, client: RegistryClient,
                 *, log=None) -> MaterializedPackage:
-    """Pull the artifact into the cache, keyed by its lock's digest, unless a package of that lock is there.
+    """Pull the artifact into the cache under its own digest, unless its package is there and verifies.
 
-    The pull lands in a directory of its own and is moved into place in one
-    step, so a package is never seen half-pulled; of two pulls of one lock
-    racing, the second finds the first's package and keeps it.
+    The package directory is keyed by the artifact's digest, so two artifacts
+    never share files, whatever their locks: a new version of a Cog with the
+    same lock is its own package. What they share is the environment of
+    their lock, ``envs/<lock digest>``, which the package's ``.pixi`` links
+    to, so pixi builds an environment once per lock and the next
+    materialization of any artifact with that lock solves nothing. A package
+    found in the cache is verified against the manifest, every file against
+    its layer's digest, before it is trusted; one that does not verify is
+    pulled again. The pull lands in a directory of its own and is moved
+    into place in one step, so a package is never seen half-pulled; of two
+    pulls of one artifact racing, the second finds the first's package and
+    keeps it.
     """
     reference = reference if isinstance(reference, ArtifactReference) else ArtifactReference.parse(reference)
     cache = Path(cache)
@@ -494,19 +543,21 @@ def materialize(reference: ArtifactReference | str, cache: Path | str, client: R
     manifest = client.manifest(reference)
     layers = layers_of(manifest, reference)
     lock = lock_layer(layers, reference)
-    directory = package_directory(cache, lock.digest)
-    marker = _marker(directory)
-    if marker is not None and marker.get("lock_digest") == lock.digest:
-        serve = str(marker.get("serve") or "")
+    directory = package_directory(cache, reference)
+    environment = environment_directory(cache, lock.digest)
+    serve = _verified(directory, layers)
+    cached = serve is not None
+    if cached:
         say(f"artifact cached: {reference.short} is {directory} (lock {lock.digest[:19]})")
     else:
+        if directory.exists():
+            say(f"artifact stale: {directory} is not {reference.short} file for file; pulling again")
+            shutil.rmtree(directory, ignore_errors=True)
         say(f"artifact pulling: {reference.short} into {directory} (lock {lock.digest[:19]})")
         serve = _pull_into(reference, layers, directory, client, say)
-    note = _reference_note(cache, reference)
-    note.parent.mkdir(parents=True, exist_ok=True)
-    note.write_text(json.dumps({"reference": str(reference), "lock_digest": lock.digest, "serve": serve}))
+    _link_environment(directory, environment)
     return MaterializedPackage(reference=reference, directory=directory, lock_digest=lock.digest, serve=serve,
-                               cached=marker is not None and marker.get("lock_digest") == lock.digest)
+                               cached=cached, environment=environment)
 
 
 def _pull_into(reference: ArtifactReference, layers: tuple[Layer, ...], directory: Path, client: RegistryClient,
@@ -525,58 +576,76 @@ def _pull_into(reference: ArtifactReference, layers: tuple[Layer, ...], director
         lock = lock_layer(layers, reference)
         (staging / MARKER).write_text(json.dumps({
             "reference": str(reference), "lock_digest": lock.digest, "serve": serve,
-            "files": [layer.title for layer in layers], "pulled_at": time.time()}))
+            "files": [{"title": layer.title, "digest": layer.digest} for layer in layers], "pulled_at": time.time()}))
         try:
             os.rename(staging, directory)
         except OSError:
-            if _marker(directory) is None:
+            if _verified(directory, layers) is None:
                 raise
-            say("  another pull of this lock landed first; keeping it")
+            say("  another pull of this artifact landed first; keeping it")
         return serve
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+
+
+def _link_environment(directory: Path, environment: Path) -> None:
+    """``<package>/.pixi`` links to the lock's environment directory: pixi builds and finds the environment there,
+    once per lock, and the package stays as the artifact was pulled."""
+    for name in (ENVIRONMENT_PIXI, ENVIRONMENT_CACHE, ENVIRONMENT_HOME):
+        (environment / name).mkdir(parents=True, exist_ok=True)
+    link = directory / PIXI_DIRECTORY
+    target = environment / ENVIRONMENT_PIXI
+    if link.is_symlink():
+        if os.readlink(link) == str(target):
+            return
+        link.unlink()
+    elif link.is_dir():
+        shutil.rmtree(link, ignore_errors=True)
+    elif link.exists():
+        link.unlink()
+    link.symlink_to(target, target_is_directory=True)
 
 
 def locate(reference: ArtifactReference | str, cache: Path | str) -> MaterializedPackage:
     """The package ``materialize`` put in the cache for this reference; ``PullError`` when there is none."""
     reference = reference if isinstance(reference, ArtifactReference) else ArtifactReference.parse(reference)
     cache = Path(cache)
-    try:
-        note = json.loads(_reference_note(cache, reference).read_text())
-    except (OSError, ValueError):
-        raise PullError(f"{reference.short} has not been materialized into {cache}") from None
-    lock_digest = str(note.get("lock_digest") or "")
-    directory = package_directory(cache, lock_digest)
+    directory = package_directory(cache, reference)
     marker = _marker(directory)
-    if marker is None or marker.get("lock_digest") != lock_digest:
-        raise PullError(f"the package of {reference.short} is missing from {directory}")
+    if marker is None:
+        raise PullError(f"{reference.short} has not been materialized into {cache}")
+    lock_digest = str(marker.get("lock_digest") or "")
     return MaterializedPackage(reference=reference, directory=directory, lock_digest=lock_digest,
-                               serve=str(marker.get("serve") or ""), cached=True)
+                               serve=str(marker.get("serve") or ""), cached=True,
+                               environment=environment_directory(cache, lock_digest))
 
 
 def evict(reference: ArtifactReference | str, cache: Path | str, *, keep_lock: bool = False) -> bool:
-    """Forget a reference in the cache, and remove its package unless ``keep_lock`` (another install shares the
-    lock). Returns whether a package was removed."""
+    """Remove the artifact's package from the cache, and the environment of its lock unless ``keep_lock`` (another
+    install shares the lock). Returns whether a package was there to remove."""
     reference = reference if isinstance(reference, ArtifactReference) else ArtifactReference.parse(reference)
     cache = Path(cache)
-    note = _reference_note(cache, reference)
-    try:
-        lock_digest = str(json.loads(note.read_text()).get("lock_digest") or "")
-    except (OSError, ValueError):
+    directory = package_directory(cache, reference)
+    marker = _marker(directory)
+    if marker is None:
         return False
-    note.unlink(missing_ok=True)
-    if keep_lock or not lock_digest:
-        return False
-    directory = package_directory(cache, lock_digest)
-    if _marker(directory) is None:
-        return False
+    lock_digest = str(marker.get("lock_digest") or "")
     shutil.rmtree(directory, ignore_errors=True)
+    if not keep_lock and lock_digest:
+        shutil.rmtree(environment_directory(cache, lock_digest), ignore_errors=True)
     return True
 
 
 def serve_command(package: MaterializedPackage, pixi: str = "pixi") -> list[str]:
     """What runs the package's ``serve`` task in its own environment: pixi, locked to the lock the digest names."""
     return [pixi, "run", "--locked", "--manifest-path", str(package.manifest), SERVE_TASK]
+
+
+def serve_environment(package: MaterializedPackage) -> dict[str, str]:
+    """What ``serve_command`` runs with: pixi's home and its package cache under the lock's environment directory,
+    so the environment is built under the package's ``.pixi`` link and nothing of it lands outside that directory."""
+    return {"PIXI_HOME": str(package.environment / ENVIRONMENT_HOME),
+            "PIXI_CACHE_DIR": str(package.environment / ENVIRONMENT_CACHE)}
 
 
 # --- publishing, for development and tests -------------------------------------------------------
@@ -659,6 +728,11 @@ def main(argv: list[str] | None = None) -> int:
                              help=f"the artifact cache (or ${CACHE_ENV})")
         if name == "serve":
             command.add_argument("--pixi", default="pixi")
+    gone = commands.add_parser("evict", help="remove the artifact's package from the cache")
+    gone.add_argument("reference")
+    gone.add_argument("--cache", default=os.environ.get(CACHE_ENV), metavar="DIR")
+    gone.add_argument("--keep-lock", action="store_true",
+                      help="keep the environment of its lock: another install shares it")
     pull = commands.add_parser("pull", help="pull the artifact's files into a directory")
     pull.add_argument("reference")
     pull.add_argument("--into", required=True, metavar="DIR")
@@ -678,8 +752,15 @@ def main(argv: list[str] | None = None) -> int:
             package = locate(args.reference, args.cache)
             command = serve_command(package, args.pixi)
             _say(f"artifact serving: {package.reference.short} from {package.directory}: {' '.join(command)}")
+            os.environ.update(serve_environment(package))
             os.chdir(package.directory)
             os.execvp(command[0], command)  # noqa: S606 - pixi, with the package's own serve task
+            return 0
+        if args.command == "evict":
+            if not args.cache:
+                parser.error(f"--cache (or ${CACHE_ENV}) names the artifact cache")
+            removed = evict(args.reference, args.cache, keep_lock=args.keep_lock)
+            _say(f"artifact {'evicted' if removed else 'not in the cache'}: {args.reference}")
             return 0
         if args.command == "pull":
             reference = ArtifactReference.parse(args.reference)

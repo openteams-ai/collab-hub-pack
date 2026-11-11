@@ -55,16 +55,27 @@ reads the manifest through the registry's distribution API (the hub's own
 `/v2/` when the hub serves pulls, with a registry credential the controller
 hands the init container through a Secret of its own, which the Cog's
 container never sees), verifies it against the digest and every blob against
-its own, and lands the package in the cache under the digest of its
-`pixi.lock`; the pod's container then runs `artifacts serve <reference>`,
-which is `pixi run --locked ... serve` on that package, in the environment
-pixi builds beside it. The cache is keyed by the lock because the lock names
-the environment: the next pod of any artifact with that lock, on a cache that
-outlives pods (`runs.controller.worker.cacheClaim`, a claim every worker pod
-and the controller mount), finds the package and the environment and pulls
-and solves nothing again, which the init container's log says (`artifact
-cached:` rather than `artifact pulling:`); on an `emptyDir` of the pod's own
-each pod builds its environment. A step naming a package by name runs it
+its own, and lands the package in the cache under the artifact's own digest
+(`artifacts/packages/<digest>`), with the environment directory of its
+`pixi.lock` beside it (`artifacts/envs/<lock digest>`, which the package's
+`.pixi` links to); the pod's container then runs `artifacts serve
+<reference>`, which is `pixi run --locked ... serve` on that package, in the
+environment pixi builds there. No two artifacts share a package: a new
+version of a Cog with the same lock is its own package, and a package found
+in the cache is verified file for file against the manifest before a pod
+trusts it, and pulled again otherwise. What artifacts with one lock share is
+the environment, since the lock names it: the next pod of any artifact with
+that lock, on a cache that outlives pods (`runs.controller.worker.cacheClaim`,
+a claim of the workers' namespace every worker pod mounts), finds the
+environment and solves nothing again, which the init container's log says
+(`artifact cached:` rather than `artifact pulling:`); on an `emptyDir` of the
+pod's own each pod builds its environment. The Cog's container mounts its
+package read-only and, writable, the environment directory of its lock
+alone, as subPaths of the cache volume: on a shared claim a Cog alters no
+other Cog's package and no other lock's environment, and pixi's home and
+package cache are the lock's own (`PIXI_HOME`, `PIXI_CACHE_DIR`, set by
+`artifacts serve`). The init container, the hub's own code, mounts the whole
+cache. A step naming a package by name runs it
 from the image's packages under `/opt/collab-hub/cogs`, which the chart's
 `remote` location does not offer and the tests keep. It is given what a local worker
 is given, in its environment: `COLLAB_COG_HOST` (`0.0.0.0`) and
@@ -105,7 +116,7 @@ takes `--image`, `--namespace` (the workers' own), `--allow-ingress-from`
 `--insecure-skip-network-policy` for a trusted namespace,
 `--worker-resources`, `--worker-cache-size-limit` and
 `--worker-tmp-size-limit` for the pods, `--worker-cache-claim` for the shared
-cache and `--worker-cache-path` for where the controller reaches it itself,
+cache (`--worker-cache-path` is where a `local` controller reaches its own),
 and `--registry-credential-env`, `--registry-token-env` and
 `--registry-plain-http` for how a pull reaches the registry.
 
@@ -137,8 +148,9 @@ both files of the package itself: a package without its lock, or with a
 symbolic link in place of either, is refused, and pixi runs it `--locked`. It
 is identified on the Track by its name and the sha256 of its manifest and lock, so a development run is never mistaken for a
 published Cog. A pinned reference at `local` is pulled the way a `remote`
-worker pulls it, into `<work_dir>/artifacts` keyed by the lock's digest, and
-served from there; `worker_started` names the `artifact`. A controller started
+worker pulls it, into `<work_dir>/artifacts`, each package under its digest
+and the environment of each lock beside them, and served from there;
+`worker_started` names the `artifact`. A controller started
 with no registry to pull through refuses such a step.
 
 **The run token.** One per worker, minted when it is materialized. The
@@ -270,18 +282,19 @@ through the install machine of [states.md](states.md).
 
 | Route | What it does |
 |---|---|
-| `POST /v1/cogs/installs` | Ask for an install: `cog_id` (its newest present version, or with `digest`), or `reference`, a pinned `<host>/<repository>@<digest>` the catalog holds; at a development hub, `package`, a package of the directory source. Records the card and answers 202 with the install, `published`. One live install of a digest per organization: a second ask is a 409 naming the first |
+| `POST /v1/cogs/installs` | Ask for an install: `cog_id` (its newest present version, or with `digest`), or `reference`, a pinned `<host>/<repository>@<digest>` the catalog holds; at a development hub, `package`, a package of the directory source. Records the card and answers 202 with the install, `published`. One live install of a digest per organization: a second ask is a 409 naming the first. The organization's owners and platform operators ask, where the hub resolves memberships (a member is a 403, `install_forbidden`); on a hub whose organization comes from the token's claims alone, every member does |
 | `GET /v1/cogs/installs` | The organization's installs, newest first; `state` filters, and `include_uninstalled` shows removed ones |
 | `GET /v1/cogs/installs/{id}` | One install: its `state`, `invokable`, the `failed_step` (`fetch`, `bind`, `materialize` or `check`) and `failure` when a step failed, its `binding` record and `binding_id`, the `lock_digest` of its package, which controller took it, and every event its controller recorded |
-| `DELETE /v1/cogs/installs/{id}` | Ask for its removal: answers 202, and the controller sweeps every workload of the install, evicts its package from the cache when no other install shares its lock, and records it `uninstalled` |
+| `DELETE /v1/cogs/installs/{id}` | Ask for its removal, under the same role as an install: answers 202, and the controller sweeps every workload of the install, evicts its package from the cache (and the environment of its lock, when no other install shares it; at `remote` through a pod of the workers' namespace that mounts the claim), and records it `uninstalled` |
 
 What the controller does with an ask, in order, because a Cog's `check` may
 probe what its binding gives it:
 
 1. **fetch** (`PUBLISHED` to `FETCHED`): reads the artifact at its digest
    through the registry: the manifest verified against the digest, the lock
-   named (its digest is the cache's key), the `serve` task found, the
-   manifest refused if it carries a literal secret. A development install
+   named (its digest keys the environment the Cog shares with every
+   artifact of that lock), the `serve` task found, the manifest refused if
+   its activation or its profile carries a literal secret. A development install
    names a package of the directory source, which fetch resolves there. An
    artifact that cannot be read stays `published`, with `failure` saying why.
 2. **bind** (`FETCHED` to `BOUND`): offers the hub's inventory to the Cog's
@@ -296,6 +309,15 @@ probe what its binding gives it:
    that answers `ok: false` fails at `check`; either leaves the install
    `bound`, not invokable, with the step and the reason recorded, and the
    binding it ran against kept.
+
+Each move is recorded under the state it moves from: a controller whose
+install another controller moved meanwhile (a removal recorded while it was
+checking) has its move dropped, never written over the other's. An install a
+controller claimed and did not finish, because it stopped, is resumed on that
+controller's next start from the state recorded, a binding on record
+delivered again from the record; one whose controller no longer holds its id
+is taken over by a live controller the same way. A step recorded as failed is
+not resumed: a new ask is a new install.
 
 Only an `invokable` install is materialized by a run. `POST /v1/runs` takes
 the run-one-installed-Cog form, `{"cog": <reference, digest or install id>,
@@ -373,7 +395,7 @@ produced until it is removed and installed again.
 | `--id` | The controller's name, held while it runs, recorded on each run it picks up |
 | `--packages`, `--allow`, `--work-dir`, `--environment` | The `local` location's directory package source, and where workers write their output |
 | `--image`, `--namespace`, `--allow-ingress-from`, `--allow-ingress-from-namespace`, `--insecure-skip-network-policy`, `--worker-resources`, `--worker-cache-size-limit`, `--worker-tmp-size-limit`, `--worker-cache-claim` | The `remote` location: the image a worker pod runs, the workers' namespace, which pods may reach a worker and from which namespace, the pod's resources and volume limits, and the claim every worker pod mounts as its cache |
-| `--worker-cache-path` | Where this controller reaches the cache itself, so an uninstall evicts a package; under `--work-dir` at `local` |
+| `--worker-cache-path` | Where a `local` controller reaches its artifact cache, so an uninstall evicts a package; under `--work-dir`. At `remote` an uninstall evicts through a pod of the workers' namespace, the claim being of that namespace |
 | `--registry-credential-env`, `--registry-token-env`, `--registry-plain-http` | How a pull reaches the registry: the variable holding a registry credential (`user:secret`, presented to the registry's token endpoint; what `POST /v1/cogs/registry-credentials` exchanges a session for, or the backing registry's own), or one holding a bearer the registry takes as it is; and the hosts reached over plain HTTP |
 | `--backend`, `--location` | The two axes: `none` built; `local` and `remote` built |
 | `--models FILE` | The hub's `models:` block, below |

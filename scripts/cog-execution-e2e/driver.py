@@ -115,7 +115,10 @@ def main() -> int:
     assert api.get(f"/apis/apps/v1/namespaces/{namespace}/deployments").status_code == 403, \
         "the executor's identity reads Deployments of the hub's namespace"
     assert api.get(f"/apis/apps/v1/namespaces/{worker_namespace}/deployments").status_code == 200
+    evicted: list[bool] = []
     installer = Installer(installs, executor, controller="op-driver", registry=client,
+                          # An uninstall evicts through a pod of the workers' namespace that mounts the claim.
+                          evict=lambda reference, keep_lock: evicted.append(executor.evict(reference, keep_lock)),
                           inventory=lambda org: inventory(models, harnesses_installed(installs, org)))
     delivery.installer = installer
 
@@ -166,11 +169,15 @@ def main() -> int:
 
     print("== run it again: the init container finds the package of this lock in the cache", flush=True)
     worker_logs: dict[str, str] = {}
+    worker_mounts: dict[str, list[dict]] = {}
     materialize = executor.materialize
 
     def materialize_and_read(cog, run_id, instance=""):
         worker = materialize(cog, run_id, instance)
         worker_logs[run_id] = pod_log(api, worker_namespace, worker.name, PULL_CONTAINER)
+        deployment = api.get(f"/apis/apps/v1/namespaces/{worker_namespace}/deployments/{worker.name}").json()
+        [runner] = deployment["spec"]["template"]["spec"]["containers"]
+        worker_mounts[run_id] = [m for m in runner["volumeMounts"] if m["name"] == "cache"]
         return worker
 
     executor.materialize = materialize_and_read
@@ -179,6 +186,11 @@ def main() -> int:
     print(pull_log, flush=True)
     assert "artifact cached:" in pull_log, "the second run pulled the artifact again"
     assert "artifact pulling:" not in pull_log
+    # The Cog's container mounts its package read-only and the environment directory of its lock alone.
+    mounts = {m["subPath"]: m for m in worker_mounts["e2e-second"]}
+    package_mount = f"artifacts/packages/{reference.digest.partition(':')[2]}"
+    assert package_mount in mounts and mounts[package_mount]["readOnly"] is True, mounts
+    assert len(mounts) == 2 and any(path.startswith("artifacts/envs/") for path in mounts), mounts
 
     print("== a gated two-step Op on the installed Cog", flush=True)
     op = OpDefinition("e2e-run", (
@@ -210,10 +222,14 @@ def main() -> int:
     assert sum(e.payload["usage"]["tokens"] for e in track.replay("e2e-run")
                if e.event_type == "interaction_usage") == 30
 
-    print("== uninstall: every workload of the install is swept", flush=True)
+    print("== uninstall: every workload of the install is swept, and its package evicted from the claim", flush=True)
     installs.request_uninstall(install.id, "e2e")
     installer.uninstall(install.id)
     assert installs.get(install.id).state == "uninstalled"
+    assert evicted == [True], f"the eviction pod did not succeed: {evicted}"
+    pods = api.get(f"/api/v1/namespaces/{worker_namespace}/pods?labelSelector=app.kubernetes.io/managed-by%3D"
+                   "collab-hub-executor").json().get("items", [])
+    assert not [p for p in pods if p["metadata"]["name"].startswith("cog-evict-")], "an eviction pod was left"
     print("E2E OK: a published Cog installed by digest, run from its artifact in a namespace of the workers' own "
           "with its delivered binding, its environment found in the cache on the second run, a Gate sent a "
           "step back and approved it",

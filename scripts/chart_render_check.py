@@ -470,18 +470,23 @@ def case_run_controller_remote(r: Rendered) -> None:
                    "COLLAB_CONTROLLER_REGISTRY_PLAIN_HTTP"):
         assert absent not in controller.env, absent
     assert "worker-cache" not in controller.volumes
+    [role] = [role for role in r.roles.values() if role["metadata"]["name"].endswith("run-controller")]
+    assert not any("pods" in rule["resources"] for rule in role["rules"]), "no eviction pod without a claim"
 
 
 def case_run_controller_remote_artifacts(r: Rendered) -> None:
     # The cache claim and the registry credential reach the controller, which hands them to each worker pod:
-    # the claim as the cache every pod mounts (and the controller too, to evict a package), the credential to
-    # the init container that pulls the artifact, by the variable's name.
+    # the claim as the cache every pod mounts, the credential to the init container that pulls the artifact, by
+    # the variable's name. The claim is of the workers' namespace, so the controller's pod mounts nothing of
+    # it; its Role there lets it run the eviction pod an uninstall needs.
     controller = r.controller
     assert controller is not None, "no run-controller Deployment"
     assert controller.value("COLLAB_CONTROLLER_WORKER_CACHE_CLAIM") == "cog-cache"
-    assert controller.value("COLLAB_CONTROLLER_WORKER_CACHE_PATH") == "/var/cache/collab-hub/artifacts"
-    assert controller.volumes["worker-cache"]["persistentVolumeClaim"]["claimName"] == "cog-cache"
-    assert controller.mounts["worker-cache"]["mountPath"] == "/var/cache/collab-hub"
+    assert "COLLAB_CONTROLLER_WORKER_CACHE_PATH" not in controller.env
+    assert "worker-cache" not in controller.volumes and "worker-cache" not in controller.mounts
+    [role] = [role for role in r.roles.values() if role["metadata"]["name"].endswith("run-controller")]
+    pods = [rule for rule in role["rules"] if "pods" in rule["resources"]]
+    assert pods and sorted(pods[0]["verbs"]) == ["create", "delete", "get"], role["rules"]
     secret_ref(controller.env, "COLLAB_CONTROLLER_REGISTRY_CREDENTIAL", "hub-registry-pull", "credential")
     assert controller.value("COLLAB_CONTROLLER_REGISTRY_CREDENTIAL_ENV") == "COLLAB_CONTROLLER_REGISTRY_CREDENTIAL"
     assert controller.value("COLLAB_CONTROLLER_REGISTRY_PLAIN_HTTP") == "registry.cogs.svc:5000"

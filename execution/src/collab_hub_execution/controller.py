@@ -193,7 +193,7 @@ class RunController:
                 _log.exception("handling %s failed; the next pass tries again", row.run_id)
         if self.installer is not None:
             try:
-                self.installer.tick()
+                self.installer.tick(alive=self._owner_holds_id)
             except Exception:  # noqa: BLE001 - the installs are read again next pass
                 _log.exception("reading the installs failed")
 
@@ -816,7 +816,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}: each controller on a Track has its own --id", file=sys.stderr)
         return 1
 
-    cache_path = args.worker_cache_path
+    # The artifact cache this controller reaches itself: the local location's, under its work directory. At
+    # remote the cache is the workers' (a claim of their namespace, or each pod's own), which an uninstall
+    # evicts from through the executor.
+    cache_path = args.worker_cache_path if args.location == "local" else None
     if args.location == "local":
         cache_path = cache_path or str(Path(args.work_dir) / "artifacts")
         location_settings: dict[str, Any] = {
@@ -829,7 +832,7 @@ def main(argv: list[str] | None = None) -> int:
             "allow_ingress_from_namespace": args.allow_ingress_from_namespace or None,
             "insecure_skip_network_policy": bool(args.insecure_skip_network_policy),
             "cache_claim": args.worker_cache_claim or None, "registry_credential": registry_credential,
-            "registry_plain_http": plain_http}
+            "registry_token": registry_token, "registry_plain_http": plain_http, "registry": registry}
         if args.worker_resources:
             try:
                 location_settings["resources"] = json.loads(args.worker_resources)
@@ -849,6 +852,7 @@ def main(argv: list[str] | None = None) -> int:
     packages = runner.executor.source if args.location == "local" else None
     installer = Installer(
         installs, runner.executor, controller=args.id, registry=registry, packages=packages, cache=cache_path,
+        evict=getattr(runner.executor, "evict", None) if args.location == "remote" else None,
         inventory=lambda org_id: inventory(models, harnesses_installed(installs, org_id)))
     delivery.installer = installer
     controller = RunController(runner, poll_interval=args.poll_interval, track_spec=args.track, installer=installer)

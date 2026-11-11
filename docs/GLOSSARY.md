@@ -252,7 +252,8 @@ lets go of it or dies. For development and the desktop. (ADR-0002 D12.)
 **Materialize / worker.** To materialize a Cog is to bring up a running
 instance of its `serve` entry point where the hub can reach it — on
 Kubernetes, a pod behind a Service whose init container pulls the Cog's own
-artifact at its pinned digest into a cache keyed by its lock's digest. That
+artifact at its pinned digest into a cache, under the artifact's digest, with
+the environment of its lock beside it. That
 running instance is a **worker**. Materialization happens behind the
 executor; teardown reclaims it. The first invocation of an installed Cog
 materializes a worker. (ADR-0001 D5; cog-execution README.)

@@ -166,6 +166,23 @@ def _not_found(install_id: str) -> JSONResponse:
     return error_response(status.HTTP_404_NOT_FOUND, "install_not_found", f"No install {install_id}")
 
 
+INSTALL_ROLES = ("owner", "operator")
+"""Who installs and uninstalls: the organization's owners, and platform operators. An install runs the Cog's
+`resolve` and `check` with the hub's model key delivered, which is more than a member's read of the catalog. On
+a hub that resolves no memberships (the organization comes from the token's claims alone) there is no role to
+ask for, and every member of the organization installs."""
+
+
+def _may_install(auth: AuthContext) -> JSONResponse | None:
+    if auth.platform_role == "operator" or auth.org_role is None or auth.org_role in INSTALL_ROLES:
+        return None
+    return error_response(
+        status.HTTP_403_FORBIDDEN,
+        "install_forbidden",
+        f"Installing a Cog takes the organization's {' or '.join(INSTALL_ROLES)} role; the caller is a {auth.org_role}",
+    )
+
+
 def _location_key(row: CogArtifact) -> tuple:
     pushed = row.pushed_at.timestamp() if row.pushed_at else 0.0
     return (row.removed_at is not None, row.pushed_at is None, -pushed, row.source_id, row.repository)
@@ -221,7 +238,11 @@ def install_cog(
     body: InstallRequest, auth: AuthDep, service: ServiceDep, catalog: CatalogDep, registry_host: RegistryHostDep
 ) -> InstallStatus | JSONResponse:
     """Ask for a Cog to be installed on this hub: pinned by digest from the catalog, fetched, bound by its own
-    `resolve` and checked by a run controller. Answers at once, `published`; `GET` shows what it reaches."""
+    `resolve` and checked by a run controller. Answers at once, `published`; `GET` shows what it reaches. The
+    organization's owners and platform operators install, where the hub resolves memberships."""
+    forbidden = _may_install(auth)
+    if forbidden is not None:
+        return forbidden
     if service.installs is None:
         return error_response(
             status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -332,6 +353,9 @@ def get_install(install_id: InstallId, auth: AuthDep, service: ServiceDep) -> In
 def uninstall_cog(install_id: InstallId, auth: AuthDep, service: ServiceDep) -> InstallStatus | JSONResponse:
     """Ask for the install's removal: the controller removes every runtime resource it created and records it
     `uninstalled`. Answers 202 with the install as it stands."""
+    forbidden = _may_install(auth)
+    if forbidden is not None:
+        return forbidden
     row = _visible(service, install_id, auth)
     if row is None:
         return _not_found(install_id)

@@ -1261,7 +1261,8 @@ The controller fetches the artifact at its digest, binds it through the Cog's
 own `resolve` over the inventory `make models` generates (the fake model, by
 default: the `fake-model` service of the `fakes` profile at level 2, or `make
 fake-model` as a process), checks it on a worker pulled into
-`.local/runs/artifacts/` keyed by the digest of its lock, and records each
+`.local/runs/artifacts/` (each package under its digest, the environment of
+each lock beside them), and records each
 move; `cog installs` and `cog show-install` show them. The run then names the
 installed Cog by its reference, and its worker is given the binding file and
 the key by reference. `make cog-publish COG=hermes` publishes the Hermes Cog

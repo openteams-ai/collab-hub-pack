@@ -101,8 +101,16 @@ if [ "$(checksum)" != "$(checksum --set-string runs.controller.models='[models.o
 else
   fail "run controller: a new models block changes the pod template" "the checksum did not change"
 fi
-check "run controller remote: a Deployment of its own with the only workload Role, the API with none" \
-  run-controller-remote -f "$TESTDATA/run-controller-remote.yaml"
+# Workers in a namespace of their own (issue #253): the Role there, nothing in the release namespace.
+check "run controller remote: a Deployment of its own with the only workload Role, in the workers' namespace, the API with none" \
+  run-controller-remote -f "$TESTDATA/run-controller-remote.yaml" --namespace hub
+check "run controller remote: a workers' namespace that exists is used, not made" \
+  run-controller-remote-existing-namespace -f "$TESTDATA/run-controller-remote.yaml" --namespace hub \
+  --set runs.controller.workerNamespace.name=cog-workers --set runs.controller.workerNamespace.create=false
+refused "run controller remote: the release namespace as the workers' is refused" "namespace of their own" \
+  -f "$TESTDATA/run-controller-remote.yaml" --namespace hub --set runs.controller.workerNamespace.name=hub
+refused "run controller remote: a workers' namespace that is no DNS label is refused" "workerNamespace" \
+  -f "$TESTDATA/run-controller-remote.yaml" --set runs.controller.workerNamespace.name=Cog_Workers
 refused "run controller: refused without the hub's database" "needs frames.postgres" --set runs.controller.enabled=true
 # Frames on S3, so the chart's own storage rules allow more than one API pod and it is this rule that refuses.
 SHARED_FRAMES='--set frames.storage.backend=s3 --set frames.s3.bucket=frames --set frames.activeState.backend=postgres'

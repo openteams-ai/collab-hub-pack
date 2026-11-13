@@ -1,0 +1,142 @@
+{
+  "pages": {
+    "ready": {
+      "heading": "Accept your invitation",
+      "paragraphs": [
+        "You are signed in and your invitation is ready. Check the account shown at the bottom of this page first — in this beta a login joins one organization and that does not change afterwards, so accept with the account you mean to use."
+      ]
+    },
+    "reauthentication_required": {
+      "heading": "Confirm your sign-in to continue",
+      "paragraphs": [
+        "You are signed in, but it was long enough ago that we need to re-check your email address with your identity provider before accepting an invitation on it. Nothing is wrong with your account, and your invitation has not been used.",
+        "Continue below. If you are still signed in with your identity provider this takes a moment and asks you nothing."
+      ]
+    },
+    "working": {
+      "heading": "Accepting your invitation",
+      "paragraphs": ["One moment — we are redeeming your invitation."]
+    },
+    "signin": {
+      "heading": "Create your account to accept your invitation",
+      "paragraphs": [
+        "Your invitation is ready. Create your account with the exact email address the invitation was sent to — or sign in with it, if you already have an account here.",
+        "Your invitation is held in this browser tab while you do that, so finish in this tab. If you have to open an email-verification link, come back here afterwards, or simply open your invitation link again."
+      ]
+    },
+    "no_token": {
+      "heading": "Open your invitation link",
+      "paragraphs": [
+        "This page needs the invitation link that was sent to you. The one-time code lives in the part of the link after the '#', and your browser never sends that part to us — so a bookmark of this page, or the address typed without it, will not work.",
+        "Open the original link again in this browser. If you no longer have it, ask whoever invited you to send a new invitation."
+      ]
+    },
+    "accepted": {
+      "heading": "You are in",
+      "paragraphs": [
+        "Your invitation has been accepted and your account now belongs to an organization on this deployment.",
+        "Open the Collab desktop app and sign in with this same account to get started. You do not need this page again."
+      ]
+    },
+    "invitation_not_found": {
+      "heading": "We do not recognize this invitation",
+      "paragraphs": [
+        "The code in your link does not match any invitation. The most common cause is a link that was cut short — check that you copied all of it, including everything after the '#'.",
+        "If it still does not work, ask whoever invited you to send a new invitation."
+      ]
+    },
+    "invitation_expired": {
+      "heading": "This invitation has expired",
+      "paragraphs": [
+        "Invitations are valid for a limited time and this one has passed it. Nothing has changed about your account.",
+        "Ask whoever invited you to send a new invitation."
+      ]
+    },
+    "invitation_revoked": {
+      "heading": "This invitation was withdrawn",
+      "paragraphs": [
+        "Whoever issued this invitation has since withdrawn it, so it can no longer be accepted. Nothing has changed about your account.",
+        "If you think that is a mistake, contact the person who invited you."
+      ]
+    },
+    "invitation_already_used": {
+      "heading": "This invitation has already been used",
+      "paragraphs": [
+        "Each invitation can be accepted once, and this one has been.",
+        "If you accepted it yourself, you already have access — open the Collab desktop app and sign in. If you did not, tell whoever invited you: someone else may have used your link, and they can check who."
+      ]
+    },
+    "invitation_email_mismatch": {
+      "heading": "This invitation was sent to a different address",
+      "paragraphs": [
+        "You are signed in with one email address and this invitation was issued to another. An invitation can only be accepted by the address it names.",
+        "Sign out below, sign in with the address the invitation was sent to, and this page will finish accepting it. Your invitation has not been used."
+      ]
+    },
+    "email_not_verified": {
+      "heading": "Confirm your email address first",
+      "paragraphs": [
+        "We can only accept an invitation for an email address your identity provider has confirmed. Either this account's address is not confirmed yet, or the sign-in did not carry an address at all.",
+        "If a confirmation email was sent to you, follow its link and come back to this tab — or open your invitation link again. If you were never asked to confirm an address, ask whoever invited you for help. Your invitation has not been used."
+      ]
+    },
+    "already_in_organization": {
+      "heading": "This login already belongs to an organization",
+      "paragraphs": [
+        "In this beta each login belongs to exactly one organization, and that does not change once it is set. This login already belongs to one, so it cannot also accept this invitation.",
+        "Joining the organization this invitation is for needs a separate login with its own email address, and the invitation has to be issued to that address. Ask whoever invited you to reissue it there.",
+        "Nothing has changed: your invitation has not been used, and what this login can already see is unaffected."
+      ]
+    },
+    "organization_missing": {
+      "heading": "The organization for this invitation is gone",
+      "paragraphs": [
+        "This invitation names an organization that no longer exists, so there is nothing to join. Nothing has changed about your account.",
+        "Ask whoever invited you to send a new invitation."
+      ]
+    },
+    "organization_creation_refused": {
+      "heading": "This invitation cannot be accepted here",
+      "paragraphs": [
+        "This invitation would create a new organization, and this deployment hosts a single organization, so it cannot be accepted. Nothing has changed about your account, and your invitation has not been used.",
+        "Ask whoever invited you to send a new invitation into the existing organization."
+      ]
+    },
+    "invitations_unavailable": {
+      "heading": "Invitations are temporarily unavailable",
+      "paragraphs": [
+        "We could not process invitations just now. This is a problem on our side, not with your invitation or your account.",
+        "Your invitation has not been used. Reload this page in a few minutes, and tell whoever invited you if it keeps happening."
+      ]
+    },
+    "error": {
+      "heading": "Something went wrong",
+      "paragraphs": [
+        "We could not finish accepting your invitation. Your invitation has not been used.",
+        "Reload this page to try again, and tell whoever invited you if it keeps happening."
+      ]
+    }
+  },
+  "relaxed": {
+    "signin": {
+      "paragraphs": {
+        "1": "Your invitation is held in this browser tab while you do that, so finish in this tab. If you lose it, simply open your invitation link again."
+      }
+    },
+    "email_not_verified": {
+      "heading": "We could not read an email address for this account",
+      "paragraphs": {
+        "0": "An invitation can only be accepted for the address it names, so we have to be able to read an address from the account you signed in with — and this sign-in did not carry one.",
+        "1": "That usually means the account has no email address set. Ask whoever invited you for help. Your invitation has not been used."
+      }
+    }
+  },
+  "settled": [
+    "accepted",
+    "invitation_not_found",
+    "invitation_expired",
+    "invitation_revoked",
+    "invitation_already_used",
+    "organization_missing"
+  ]
+}

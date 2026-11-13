@@ -1499,6 +1499,7 @@ def test_accept_threads_the_setting_to_both_decisions_without_a_database(monkeyp
         "accepted_org_id": None,
         "revoked_at": None,
         "revoked_by": None,
+        "role": None,
         "server_now": now,
     }
 
@@ -1656,6 +1657,14 @@ def test_the_granted_role_follows_from_whether_an_org_is_named():
     assert _invitation(org_id=ORG).granted_role == ROLE_MEMBER
 
 
+def test_a_role_stored_on_the_invitation_is_the_one_granted():
+    """An operator seating the first owner of an organization they created up front."""
+
+    assert _invitation(org_id=ORG, role=ROLE_OWNER).granted_role == ROLE_OWNER
+    assert _invitation(org_id=ORG, role=ROLE_MEMBER).granted_role == ROLE_MEMBER
+    assert _invitation(org_id=ORG, role=None).granted_role == ROLE_MEMBER
+
+
 # ===========================================================================
 # Schema: migrations are appended, and pinned to the Python vocabularies
 # ===========================================================================
@@ -1672,8 +1681,8 @@ def test_migrations_are_appended_and_shipped_versions_are_untouched():
     """
 
     versions = [version for version, _ in COLLAB_SCHEMA_MIGRATIONS]
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-    assert LATEST_COLLAB_SCHEMA_VERSION == 16
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+    assert LATEST_COLLAB_SCHEMA_VERSION == 17
 
     version_two = dict(COLLAB_SCHEMA_MIGRATIONS)[2]
     # v2 has shipped, so its statements are frozen text. If this ever fails,
@@ -2691,6 +2700,103 @@ def test_live_accepting_an_org_scoped_invitation_creates_nothing_but_a_membershi
     assert redeem["actor"] == INVITEE
     assert redeem["org_id"] == ORG
     assert redeem["target_id"] == issued.invitation.id
+
+
+@live_postgres
+def test_live_an_org_scoped_invitation_can_carry_the_owner_role(service, live_db):
+    """The operator chose the organization and the role; acceptance grants exactly that."""
+
+    issued = service.create(OPERATOR_CTX, email=INVITED_EMAIL, org_id=OTHER_ORG, role=ROLE_OWNER)
+    assert issued.invitation.role == ROLE_OWNER
+    assert service.get(issued.invitation.id).role == ROLE_OWNER
+
+    outcome = _accept(service, secret=issued.raw_secret.reveal())
+
+    assert outcome == invitations_module.InvitationAcceptance(
+        invitation_id=issued.invitation.id, org_id=OTHER_ORG, role=ROLE_OWNER, org_created=False
+    )
+    (member,) = _rows(live_db, "SELECT org_id, role FROM collab_org_members WHERE user_id = %s", (INVITEE,))
+    assert (member["org_id"], member["role"]) == (OTHER_ORG, ROLE_OWNER)
+    sent = [row for row in _audit_rows(live_db) if row["action"] == "invitation.send"][-1]
+    assert sent["detail"]["role"] == ROLE_OWNER
+
+
+@live_postgres
+@pytest.mark.parametrize(
+    ("org_id", "role"),
+    [(None, ROLE_OWNER), (None, ROLE_MEMBER), (OTHER_ORG, "admin"), (OTHER_ORG, "")],
+    ids=["owner-of-new-org", "member-of-new-org", "unknown-role", "blank-role"],
+)
+def test_live_a_role_is_refused_unless_it_names_one_the_organization_can_hold(service, live_db, org_id, role):
+    """A role needs an existing organization, and must be one of the membership roles."""
+
+    for issue in (service.create, service.create_unless_live):
+        with pytest.raises(ValueError):
+            issue(OPERATOR_CTX, email=INVITED_EMAIL, org_id=org_id, role=role)
+    assert _rows(live_db, "SELECT id FROM collab_invitations") == []
+    assert _audit_rows(live_db) == []
+
+
+@live_postgres
+def test_live_an_operator_creates_a_named_organization_up_front(service, live_db):
+    """The organization exists, named, before anyone is invited into it."""
+
+    created = service.create_organization(OPERATOR_CTX, name="  Acme   Labs ")
+
+    assert created.name == "Acme Labs"
+    (row,) = _rows(live_db, "SELECT name, created_by FROM collab_orgs WHERE id = %s", (created.id,))
+    assert (row["name"], row["created_by"]) == ("Acme Labs", OPERATOR)
+    assert service.organization_name(created.id) == "Acme Labs"
+    assert _rows(live_db, "SELECT user_id FROM collab_org_members WHERE org_id = %s", (created.id,)) == []
+
+    (event,) = _audit_rows(live_db)
+    assert (event["action"], event["actor"], event["target_type"]) == ("org.create", OPERATOR, "org")
+    assert (event["target_id"], event["target_label"], event["org_id"]) == (created.id, "Acme Labs", created.id)
+    assert event["detail"]["org_created"] is True
+    assert "invitation_id" not in event["detail"]
+
+
+@live_postgres
+def test_live_a_placeholder_or_blank_name_creates_no_organization(service, live_db):
+    orgs_before = _rows(live_db, "SELECT id FROM collab_orgs")
+    for name in ("", "   ", NEUTRAL_ORG_NAME, "unnamed ORGANIZATION"):
+        with pytest.raises(ValueError):
+            service.create_organization(OPERATOR_CTX, name=name)
+    assert _rows(live_db, "SELECT id FROM collab_orgs") == orgs_before
+    assert _audit_rows(live_db) == []
+
+
+@live_postgres
+def test_live_organizations_are_listed_by_name_with_how_many_people_each_has(service, live_db):
+    """What an operator picks from when inviting into an existing organization."""
+
+    created = service.create_organization(OPERATOR_CTX, name="Acme Labs")
+    with live_db.connection() as conn:
+        conn.execute(
+            "INSERT INTO collab_org_members (user_id, org_id, role, status) VALUES (%s, %s, %s, %s)",
+            ("gone-0000-4444-8444-abcdefabcdef", ORG, ROLE_MEMBER, "removed"),
+        )
+
+    page = service.list_organizations(limit=10)
+
+    assert [(org.id, org.name, org.members) for org in page.organizations] == [
+        (created.id, "Acme Labs", 0),
+        (ORG, NEUTRAL_ORG_NAME, 2),
+        (OTHER_ORG, NEUTRAL_ORG_NAME, 0),
+    ]
+    assert page.has_more is False
+    assert page.organizations[0].created_at is not None
+
+    first_two = service.list_organizations(limit=2)
+    assert [org.id for org in first_two.organizations] == [created.id, ORG]
+    assert first_two.has_more is True
+    assert [org.id for org in service.list_organizations(limit=2, offset=2).organizations] == [OTHER_ORG]
+
+    assert service.organization_names([ORG, created.id, "no-such-org"]) == {
+        ORG: NEUTRAL_ORG_NAME,
+        created.id: "Acme Labs",
+    }
+    assert service.organization_names([]) == {}
 
 
 @live_postgres

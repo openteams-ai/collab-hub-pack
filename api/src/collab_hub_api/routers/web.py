@@ -38,9 +38,10 @@ from ..web.authz import (
     require_csrf,
     require_web_session,
     signin_redirect_target,
+    viewer_roles,
 )
 from ..web.data_statement import data_statement_page
-from ..web.forms import FormRefused
+from ..web.forms import FormRefused, csrf_ok, form_field, form_fields
 from ..web.pages import (
     SECURITY_HEADERS,
     STYLE_PATH,
@@ -50,7 +51,9 @@ from ..web.pages import (
     escape,
     forbidden_page,
     page_response,
+    preferred_theme,
     render_page,
+    set_theme_cookie,
     sign_in_failed_page,
     signed_out_page,
 )
@@ -67,22 +70,21 @@ from ..web.session import (
     set_transient_cookie,
 )
 from ..web.surface import (
-    ADMIN_INVITATIONS_PATH,
     CALLBACK_PATH,
     DATA_STATEMENT_PATH,
     LANDING_PATH,
-    ORG_INVITATIONS_PATH,
     PRIVACY_PATH,
-    PUBLIC_WEB_PATHS,
     SIGNED_OUT_PATH,
     SIGNIN_PATH,
     SIGNOUT_PATH,
     TERMS_PATH,
+    THEME_PATH,
     WEB_LOGO_PATH,
     WebSurface,
     account_page_url,
     answers_json,
     clamped_session_lifetime,
+    is_public_web_path,
 )
 from ..web.terms_of_service import terms_of_service_page
 
@@ -283,9 +285,11 @@ def _refuse_unless_safely_public(route: object) -> None:
     * an **actual** :class:`~fastapi.routing.APIRoute` — an ``isinstance``,
       not a duck-typed ``.path``, because a fabricated object satisfied the
       structural version of this check in #88's review;
-    * a path already in :data:`~..web.surface.PUBLIC_WEB_PATHS`, so choosing
-      this argument buys placement and never anonymity — anonymity still costs
-      the reviewed line in the allowlist;
+    * a path already in :data:`~..web.surface.PUBLIC_WEB_PATHS` (or a file
+      directly inside one of its public asset directories, see
+      :func:`~..web.surface.is_public_web_path`), so choosing this argument
+      buys placement and never anonymity: anonymity still costs the reviewed
+      line in the allowlist;
     * a method set within :data:`SAFE_PUBLIC_METHODS`, so an anonymous path
       cannot also carry a handler that changes something.
     """
@@ -297,7 +301,7 @@ def _refuse_unless_safely_public(route: object) -> None:
             " WebSocketRoute is outside the session model, and anything else cannot be"
             " checked at all."
         )
-    if route.path not in PUBLIC_WEB_PATHS:
+    if not is_public_web_path(route.path):
         raise RuntimeError(
             f"{route.path!r} was passed to make_router as a public page route but is not in"
             " web.surface.PUBLIC_WEB_PATHS. Anonymous access to this surface is granted"
@@ -546,45 +550,77 @@ def make_router(
 
     @router.get(LANDING_PATH)
     async def overview(request: Request, session: WebSession = Depends(require_web_session)) -> Response:
-        """The signed-in overview: proves the session and hosts the sign-out form.
+        """The signed-in overview: proves the session and says what this surface is for.
 
-        The operator invitation page (#91) is linked unconditionally rather
-        than only for operators. Resolving the platform role here would make
-        the *overview* fail on a deployment with no role source — the one page
-        that must keep working so an operator can at least see they are signed
-        in — and a non-operator following the link gets the surface's 403 page,
-        which is a real answer and says what to do about it. The owner
-        invitation page (#142) is linked the same way for the same reasons:
-        resolving membership here would add a store read to the page that must
-        never fail, and the link's worst case is the same honest 403.
+        The roles are read through :func:`viewer_roles`, which offers nothing
+        and logs when a source cannot answer, so this page still renders while
+        an operator works out what is wrong; every page it leads to keeps its
+        own gate.
         """
 
-        identity = session.name or session.email or session.user
-        rows = f"<dt>Signed in as</dt><dd>{escape(identity)}</dd>"
-        if session.email and session.email != identity:
-            rows += f"<dt>Email</dt><dd>{escape(session.email)}</dd>"
-        root = escape(_root_path(request))
-        body = (
-            "<h1>Collab operations</h1>"
-            "<p>This is the operations surface for this Collab deployment.</p>"
-            f'<p><a href="{root}{ADMIN_INVITATIONS_PATH}">Invitations</a>'
-            " — invite someone to this deployment, and revoke an invitation."
-            " Platform operators only.</p>"
-            f'<p><a href="{root}{ORG_INVITATIONS_PATH}">Your organization\'s'
-            " invitations</a> — invite someone into your organization, and"
-            " revoke an invitation. Organization owners only.</p>"
-            f"<dl>{rows}</dl>"
-        )
+        # A name of only spaces counts as no name.
+        name = (session.name or "").strip()
+        identity = name or session.email or session.user
+        roles = viewer_roles(request, session)
+        # The header already carries the address, so the page greets the
+        # person by their first name and says what this surface is for them.
+        # Its links live in the navigation and nowhere else.
+        first_name = name.split()[0] if name else identity
+        organization = roles.organization or "your organization"
+        if roles.owner:
+            purpose = (
+                f"This is where you look after {escape(organization)}: invite people into it, and see who has joined."
+            )
+            if roles.operator:
+                purpose += " The admin panel covers the hub itself."
+        elif roles.operator:
+            purpose = (
+                "This is where you look after this Collab deployment. The admin panel"
+                " manages its models, people and connectors, and invitations into"
+                " every organization."
+            )
+        else:
+            purpose = (
+                "There is nothing to manage from here. Open the Collab desktop app"
+                " and sign in with this same account to get started."
+            )
+            if roles.organization:
+                purpose = f"You are a member of {escape(roles.organization)}. {purpose}"
+        body = f"<h1>Hi, {escape(first_name)}.</h1><p>{purpose}</p>"
         return page_response(
             render_page(
                 title="Collab operations",
                 body=body,
                 root_path=_root_path(request),
                 identity_label=identity,
+                identity_email=session.email,
                 csrf_token=session.csrf,
+                current_path=LANDING_PATH,
+                roles=roles,
+                theme=preferred_theme(request),
                 account_url=account_page_url(request),
             )
         )
+
+    @router.post(THEME_PATH)
+    async def choose_theme(request: Request, session: WebSession = Depends(require_web_session)) -> Response:
+        """Record light or dark for this browser and go back where it was.
+
+        Parses its own form (the choice and the page to return to) and checks
+        the CSRF token over those fields, like the invitation pages do, so the
+        body is read once under the surface's cap. A word the stylesheet does
+        not know is dropped and the redirect still happens: a bad switch is not
+        worth an error page.
+        """
+
+        fields = await form_fields(request)
+        if not csrf_ok(request, fields, session, page=THEME_PATH):
+            raise WebForbidden(f"missing or invalid CSRF token for user {session.user!r}")
+        theme = form_field(fields, "theme", max_length=8)
+        response = _redirect(f"{_root_path(request)}{sanitize_next_path(fields.get('next'))}")
+        if theme in ("light", "dark"):
+            set_theme_cookie(response, theme)
+        return response
 
     @router.post(SIGNOUT_PATH)
     async def signout(request: Request, _session: WebSession = Depends(require_csrf)) -> Response:

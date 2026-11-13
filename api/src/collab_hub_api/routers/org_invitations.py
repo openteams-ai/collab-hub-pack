@@ -105,7 +105,7 @@ from ..web.admin import (
     MAX_EMAIL_LENGTH,
     MAX_INVITATION_ID_LENGTH,
 )
-from ..web.authz import require_org_owner
+from ..web.authz import require_org_owner, viewer_roles
 from ..web.forms import (
     MAX_FORM_BYTES,
     FormRefused,
@@ -133,7 +133,7 @@ from ..web.org_invitations import (
     request_refused_page,
 )
 from ..web.owner import owner_context
-from ..web.pages import forbidden_page, page_response
+from ..web.pages import forbidden_page, page_response, preferred_theme
 from ..web.request_limits import connection_close_headers
 from ..web.session import WebSession
 from ..web.surface import (
@@ -313,6 +313,7 @@ def make_router() -> APIRouter:
             if status_code == status.HTTP_200_OK:
                 status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
+        roles = viewer_roles(request, session)
         return page_response(
             invitations_page(
                 root_path=_root_path(request),
@@ -324,6 +325,8 @@ def make_router() -> APIRouter:
                 has_more=page.has_more if page is not None else False,
                 now=now,
                 notice=notice,
+                roles=roles,
+                theme=preferred_theme(request),
                 account_url=account_page_url(request),
             ),
             status_code=status_code,

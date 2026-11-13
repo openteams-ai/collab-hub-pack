@@ -53,6 +53,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from ..frames.invitations import (
     MAX_ORGANIZATION_NAME_LENGTH,
@@ -73,6 +74,9 @@ from .surface import (
     ORG_INVITATIONS_PATH,
     ORG_INVITATIONS_REVOKE_PATH,
 )
+
+if TYPE_CHECKING:
+    from .authz import ViewerRoles
 
 __all__ = [
     "ORG_INVITATIONS_NAME_PATH",
@@ -99,7 +103,7 @@ __all__ = [
     "request_refused_page",
 ]
 
-PAGE_TITLE = "Your organization's invitations"
+PAGE_TITLE = "Invitations"
 
 # The form field names and their bounds are the operator page's
 # (:mod:`.admin`): one invitation form, one spelling of its fields. The one
@@ -317,6 +321,8 @@ def invitations_page(
     now: datetime,
     has_more: bool = False,
     notice: Notice | None = None,
+    roles: ViewerRoles | None = None,
+    theme: str | None = None,
     account_url: str | None = None,
 ) -> str:
     """Render the owner invitation page for this request.
@@ -375,6 +381,10 @@ def invitations_page(
         body=body,
         root_path=root_path,
         identity_label=identity,
+        identity_email=session.email,
         csrf_token=session.csrf,
+        current_path=ORG_INVITATIONS_PATH,
+        roles=roles,
+        theme=theme,
         account_url=account_url,
     )

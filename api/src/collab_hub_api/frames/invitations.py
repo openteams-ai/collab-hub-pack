@@ -435,6 +435,8 @@ class Invitation:
     accepted_org_id: str | None = None
     revoked_at: datetime | None = None
     revoked_by: str | None = None
+    role: str | None = None
+    """The role the issuer chose, or ``None`` for the derived default."""
 
     @property
     def creates_organization(self) -> bool:
@@ -442,8 +444,15 @@ class Invitation:
 
     @property
     def granted_role(self) -> str:
-        """The role acceptance grants: owner of a new org, else member."""
+        """The role acceptance grants.
 
+        The issuer's choice when there is one; otherwise owner of the new
+        organization an org-creating invitation mints, member of an existing
+        one. See :func:`validate_invitation_role` for what may be chosen.
+        """
+
+        if self.role is not None:
+            return self.role
         return ROLE_OWNER if self.creates_organization else ROLE_MEMBER
 
 
@@ -515,6 +524,31 @@ class LiveInvitationExists:
     """
 
     existing: Invitation
+
+
+@dataclass(frozen=True)
+class CreatedOrganization:
+    """An organization an operator created up front: named, and empty."""
+
+    id: str
+    name: str
+
+
+@dataclass(frozen=True)
+class OrganizationSummary:
+    """One organization as the operator's picker shows it."""
+
+    id: str
+    name: str | None
+    created_at: datetime
+    members: int
+    """Active memberships; removed people are not counted."""
+
+
+@dataclass(frozen=True)
+class OrganizationPage:
+    organizations: list[OrganizationSummary]
+    has_more: bool
 
 
 @dataclass(frozen=True)
@@ -784,6 +818,26 @@ ordinary spaces — is a name's business.
 """
 
 
+def validate_invitation_role(role: str | None, *, org_id: str | None) -> str | None:
+    """The role an issuer may attach to an invitation, or ``None`` for the default.
+
+    A chosen role only makes sense on an org-scoped invitation: an org-creating
+    one always seats its accepter as the new organization's owner, so a role
+    there would either restate that or contradict it. The vocabulary is the
+    membership table's own (``owner``, ``member``).
+
+    Raises :class:`ValueError`; the surfaces word that themselves.
+    """
+
+    if role is None:
+        return None
+    if role not in (ROLE_OWNER, ROLE_MEMBER):
+        raise ValueError("role must be 'owner' or 'member'")
+    if org_id is None:
+        raise ValueError("a role needs an organization to apply to")
+    return role
+
+
 def verified_claim_email(email: object, email_verified: object, *, require_verified: bool = True) -> str:
     """The caller's usable email, or raise :class:`EmailNotVerifiedError`.
 
@@ -987,6 +1041,15 @@ class UnavailableInvitationService:
     def name_organization(self, *args, **kwargs) -> str:
         raise self._unavailable()
 
+    def create_organization(self, *args, **kwargs) -> CreatedOrganization:
+        raise self._unavailable()
+
+    def list_organizations(self, *args, **kwargs) -> OrganizationPage:
+        raise self._unavailable()
+
+    def organization_names(self, *args, **kwargs) -> dict[str, str | None]:
+        raise self._unavailable()
+
     def record_service_access_grant(self, *args, **kwargs) -> None:
         raise self._unavailable()
 
@@ -1012,9 +1075,25 @@ total, so consecutive pages neither overlap nor skip."""
 
 _COLUMNS = (
     "id, org_id, email, status, created_at, created_by, expires_at, "
-    "accepted_at, accepted_by, accepted_org_id, revoked_at, revoked_by"
+    "accepted_at, accepted_by, accepted_org_id, revoked_at, revoked_by, role"
 )
 """Named once so a SELECT and a RETURNING can never drift apart."""
+
+
+def _send_detail(org_id: str | None, role: str | None) -> dict:
+    """The redacted summary an ``invitation.send`` row carries.
+
+    No secret, no hash: a person reads this out of psql, and a token hash in
+    an audit row is a redemption oracle for anyone with log access.
+    ``ttl_hours`` since #131: a sub-day TTL truncated to ``.days`` would record
+    0. ``role`` only when the issuer chose one, so rows written before roles
+    could be chosen and rows written without a choice read the same.
+    """
+
+    detail: dict = {"creates_organization": org_id is None, "ttl_hours": INVITATION_TTL // timedelta(hours=1)}
+    if role is not None:
+        detail["role"] = role
+    return detail
 
 
 class PostgresInvitationService:
@@ -1137,6 +1216,94 @@ class PostgresInvitationService:
             event.conn.execute("UPDATE collab_orgs SET name = %s WHERE id = %s", (new_name, org_id))
         return new_name
 
+    def create_organization(self, ctx: AuthContext, *, name: str) -> CreatedOrganization:
+        """Create a named organization with nobody in it, recorded as ``org.create``.
+
+        The other way an organization comes to exist. Acceptance of an
+        org-creating invitation mints one with the accepter as owner and the
+        placeholder for a name; this mints one the operator named, before
+        anyone is invited into it, so the invitations that follow can name
+        the organization and seat its first owner (``role`` on
+        :meth:`create`).
+
+        Same audit row as the acceptance path, ``org.create`` with the
+        organization as target and scope, and the operator as actor; the name
+        is the ``target_label``. ``detail`` carries no ``invitation_id``,
+        which is what tells the two apart in the log.
+
+        The single-organization guard applies: a deployment that declares one
+        organization refuses a second however it would be made. *name* goes
+        through :func:`validate_organization_name`, so the placeholder and the
+        visually blank are refused before anything is written.
+        """
+
+        _refuse_org_creation_under_single_org(None)
+        new_name = validate_organization_name(name)
+        return _retrying(lambda: self._create_organization_once(ctx, name=new_name))
+
+    def list_organizations(self, *, limit: int, offset: int = 0) -> OrganizationPage:
+        """One page of every organization, by name, with its active headcount.
+
+        Alphabetical on the name (case-insensitively) and then on the id, so
+        the order is total and consecutive pages neither overlap nor skip, as
+        for invitations. Organizations still carrying the placeholder name
+        sort together under it. One row beyond the page answers "is there
+        more?" without a separate count.
+        """
+
+        if limit < 1 or offset < 0:
+            raise ValueError("limit must be positive and offset must not be negative")
+        with self._db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT o.id, o.name, o.created_at,
+                       count(m.user_id) FILTER (WHERE m.status = 'active') AS members
+                FROM collab_orgs o
+                LEFT JOIN collab_org_members m ON m.org_id = o.id
+                GROUP BY o.id, o.name, o.created_at
+                ORDER BY lower(coalesce(o.name, '')), o.id
+                LIMIT %s OFFSET %s
+                """,
+                (limit + 1, offset),
+            ).fetchall()
+        return OrganizationPage(
+            organizations=[
+                OrganizationSummary(
+                    id=row["id"], name=row["name"], created_at=row["created_at"], members=row["members"]
+                )
+                for row in rows[:limit]
+            ],
+            has_more=len(rows) > limit,
+        )
+
+    def organization_names(self, org_ids: Sequence[str]) -> dict[str, str | None]:
+        """The stored name of each organization named, by id; unknown ids are absent."""
+
+        ids = list(dict.fromkeys(org_ids))
+        if not ids:
+            return {}
+        with self._db.connection() as conn:
+            rows = conn.execute("SELECT id, name FROM collab_orgs WHERE id = ANY(%s)", (ids,)).fetchall()
+        return {row["id"]: row["name"] for row in rows}
+
+    def _create_organization_once(self, ctx: AuthContext, *, name: str) -> CreatedOrganization:
+        org_id = uuid4().hex
+        with audited(
+            self._db,
+            ctx,
+            AUDIT_ACTION_ORG_CREATE,
+            target_type="org",
+            target_id=org_id,
+            target_label=name,
+            org_id=org_id,
+            detail={"org_created": True, "named_at_creation": True},
+        ) as event:
+            event.conn.execute(
+                "INSERT INTO collab_orgs (id, name, created_by) VALUES (%s, %s, %s)",
+                (org_id, name, ctx.user),
+            )
+        return CreatedOrganization(id=org_id, name=name)
+
     def get(self, invitation_id: str) -> Invitation | None:
         with self._db.connection() as conn:
             row = conn.execute(
@@ -1190,7 +1357,7 @@ class PostgresInvitationService:
 
     # --- Issue --------------------------------------------------------------
 
-    def create(self, ctx: AuthContext, *, email: str, org_id: str | None) -> IssuedInvitation:
+    def create(self, ctx: AuthContext, *, email: str, org_id: str | None, role: str | None = None) -> IssuedInvitation:
         """Issue one invitation, recorded as ``invitation.send``.
 
         The caller has **already been authorized** by one of the two wrappers
@@ -1198,14 +1365,18 @@ class PostgresInvitationService:
         one, which is exactly why the operator-issued and owner-issued rows
         come out identical apart from ``actor``/``actor_label``.
 
+        ``role`` is the issuer's choice for an org-scoped invitation (see
+        :func:`validate_invitation_role`); ``None`` leaves the derived default.
+
         Returns the raw secret to the caller instead of sending it: delivery
         is unrecoverable and must happen after this transaction commits.
         """
 
         _refuse_org_creation_under_single_org(org_id)
-        return _retrying(lambda: self._create_once(ctx, email=email, org_id=org_id))
+        role = validate_invitation_role(role, org_id=org_id)
+        return _retrying(lambda: self._create_once(ctx, email=email, org_id=org_id, role=role))
 
-    def _create_once(self, ctx: AuthContext, *, email: str, org_id: str | None) -> IssuedInvitation:
+    def _create_once(self, ctx: AuthContext, *, email: str, org_id: str | None, role: str | None) -> IssuedInvitation:
         invited = validate_invited_email(email)
         invitation_id = uuid4().hex
         # One name, one redacted repr: see MintedSecret. A retry mints again,
@@ -1227,7 +1398,7 @@ class PostgresInvitationService:
             # reader consumes the old `ttl_days` key — rows written before the
             # rename keep it, which is correct, because detail describes the
             # issuance as it happened.
-            detail={"creates_organization": org_id is None, "ttl_hours": INVITATION_TTL // timedelta(hours=1)},
+            detail=_send_detail(org_id, role),
         ) as event:
             try:
                 row = event.conn.execute(
@@ -1238,11 +1409,12 @@ class PostgresInvitationService:
                     -- taking `expires_at` from the same value is what makes
                     -- `expires_at - created_at` exactly the TTL rather than the
                     -- TTL plus however long the insert took.
-                    INSERT INTO collab_invitations (id, org_id, email, token_hash, created_by, expires_at)
-                    VALUES (%s, %s, %s, %s, %s, now() + %s)
+                    INSERT INTO collab_invitations
+                        (id, org_id, email, token_hash, created_by, expires_at, role)
+                    VALUES (%s, %s, %s, %s, %s, now() + %s, %s)
                     RETURNING {_COLUMNS}
                     """,
-                    (invitation_id, org_id, invited, minted.token_hash, ctx.user, INVITATION_TTL),
+                    (invitation_id, org_id, invited, minted.token_hash, ctx.user, INVITATION_TTL, role),
                 ).fetchone()
             except Exception as exc:
                 if _is_foreign_key_violation(exc):
@@ -1255,7 +1427,7 @@ class PostgresInvitationService:
         return IssuedInvitation(invitation=invitation, raw_secret=minted.raw)
 
     def create_unless_live(
-        self, ctx: AuthContext, *, email: str, org_id: str | None
+        self, ctx: AuthContext, *, email: str, org_id: str | None, role: str | None = None
     ) -> IssuedInvitation | LiveInvitationExists:
         """Issue one invitation **unless** this address already holds a live one.
 
@@ -1282,10 +1454,11 @@ class PostgresInvitationService:
         """
 
         _refuse_org_creation_under_single_org(org_id)
-        return _retrying(lambda: self._create_unless_live_once(ctx, email=email, org_id=org_id))
+        role = validate_invitation_role(role, org_id=org_id)
+        return _retrying(lambda: self._create_unless_live_once(ctx, email=email, org_id=org_id, role=role))
 
     def _create_unless_live_once(
-        self, ctx: AuthContext, *, email: str, org_id: str | None
+        self, ctx: AuthContext, *, email: str, org_id: str | None, role: str | None
     ) -> IssuedInvitation | LiveInvitationExists:
         invited = validate_invited_email(email)
         invitation_id = uuid4().hex
@@ -1299,7 +1472,7 @@ class PostgresInvitationService:
                 target_id=invitation_id,
                 target_label=invited,
                 org_id=org_id,
-                detail={"creates_organization": org_id is None, "ttl_hours": INVITATION_TTL // timedelta(hours=1)},
+                detail=_send_detail(org_id, role),
             ) as event:
                 # First statement in the transaction, before anything reads the
                 # table: a concurrent issuance for the same address blocks here
@@ -1331,11 +1504,11 @@ class PostgresInvitationService:
                     row = event.conn.execute(
                         f"""
                         INSERT INTO collab_invitations
-                            (id, org_id, email, token_hash, created_by, expires_at)
-                        VALUES (%s, %s, %s, %s, %s, now() + %s)
+                            (id, org_id, email, token_hash, created_by, expires_at, role)
+                        VALUES (%s, %s, %s, %s, %s, now() + %s, %s)
                         RETURNING {_COLUMNS}
                         """,
-                        (invitation_id, org_id, invited, minted.token_hash, ctx.user, INVITATION_TTL),
+                        (invitation_id, org_id, invited, minted.token_hash, ctx.user, INVITATION_TTL, role),
                     ).fetchone()
                 except Exception as exc:
                     if _is_foreign_key_violation(exc):
@@ -2039,4 +2212,5 @@ def _invitation(row) -> Invitation:
         accepted_org_id=row["accepted_org_id"],
         revoked_at=row["revoked_at"],
         revoked_by=row["revoked_by"],
+        role=row["role"],
     )

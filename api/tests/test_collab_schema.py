@@ -459,7 +459,7 @@ def test_migration_creates_the_cog_publishing_schema():
         "org_id text",
     ):
         assert name not in earlier, name
-    assert LATEST_COLLAB_SCHEMA_VERSION == 16
+    assert LATEST_COLLAB_SCHEMA_VERSION == 17
 
 
 def test_migration_creates_the_source_activity_table():
@@ -526,6 +526,7 @@ PINNED_CHECKSUMS = {
     14: "c3ceed5775cd624aabf1b9b9ac90aa23f8909cf93777f90836c7a263f72a2494",
     15: "94c87d3dc97dfc138ea1ee78bdb067ba114163995f4ef27d44398a930690d84d",
     16: "b2140ce96b42c4e7e9daabbac44b8ee6828d3ce9b39cccd37ca7f818747ca33f",
+    17: "15564c060339f3896f7e10a77fc063ff59e2817316fd4e7b54d2fdbb96d74068",
 }
 
 

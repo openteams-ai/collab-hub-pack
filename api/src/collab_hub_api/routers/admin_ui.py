@@ -13,10 +13,11 @@ path before routing, and a mounted sub-app's routing is opaque to the checks
 that verify the surface is covered. Two routes cost four lines and keep the
 surface's own verification meaningful.
 
-Which also means the asset path is validated here rather than by somebody
-else's implementation. ``filename`` is matched against a strict pattern and the
-resolved path is required to be inside the asset directory, so a traversal
-attempt is a 404 rather than a file read.
+Which also means the asset path is validated by this codebase rather than by
+somebody else's implementation: :class:`~..web.bundle.BuiltBundle` matches
+``filename`` against a strict pattern and requires the resolved path to be
+inside the asset directory, so a traversal attempt is a 404 rather than a file
+read.
 
 The trailing slash is load-bearing
 ----------------------------------
@@ -46,27 +47,17 @@ find its own index.
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from ..web.authz import require_operator
+from ..web.bundle import BuiltBundle
 
-__all__ = ["ASSET_NAME", "make_router"]
-
-ASSET_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
-"""What an asset file may be called.
-
-Vite emits hashed names from this alphabet. No slashes and no dots-only names,
-so ``..`` and every path with a separator in it fail the match before anything
-touches the filesystem.
-"""
+__all__ = ["make_router"]
 
 
-def make_router(dist: Path) -> APIRouter:
-    """Serve the panel from *dist*, behind the operator gate.
+def make_router(bundle: BuiltBundle) -> APIRouter:
+    """Serve the panel from *bundle*, behind the operator gate.
 
     The router carries ``require_operator``, so a signed-in non-operator gets
     the surface's 403 page rather than the shell. The shell holds no data and
@@ -75,12 +66,10 @@ def make_router(dist: Path) -> APIRouter:
     """
 
     router = APIRouter(include_in_schema=False, dependencies=[Depends(require_operator)])
-    index = dist / "index.html"
-    assets = dist / "assets"
 
     @router.get("/admin/")
     def panel_shell() -> HTMLResponse:
-        return HTMLResponse(index.read_text(encoding="utf-8"))
+        return bundle.document()
 
     @router.get("/admin")
     def panel_shell_redirect(request: Request) -> RedirectResponse:
@@ -100,16 +89,6 @@ def make_router(dist: Path) -> APIRouter:
 
     @router.get("/admin/assets/{filename}")
     def panel_asset(filename: str) -> FileResponse:
-        if not ASSET_NAME.match(filename) or filename in (".", ".."):
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-        target = (assets / filename).resolve()
-        # The pattern already excludes separators, so this cannot currently
-        # fail. It is kept because the pattern is the thing most likely to be
-        # loosened by someone adding a file type, and a containment check that
-        # only exists while the pattern is strict is a check that disappears
-        # exactly when it starts to matter.
-        if not target.is_file() or assets.resolve() not in target.parents:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-        return FileResponse(target)
+        return bundle.asset(filename)
 
     return router

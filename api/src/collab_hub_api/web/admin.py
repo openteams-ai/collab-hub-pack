@@ -44,6 +44,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from ..frames.invitations import (
     STATUS_ACCEPTED,
@@ -56,6 +57,9 @@ from ..frames.invitations import (
 from .forms import refused_form_page
 from .pages import escape, render_page
 from .surface import ADMIN_INVITATIONS_PATH, ADMIN_INVITATIONS_REVOKE_PATH
+
+if TYPE_CHECKING:
+    from .authz import ViewerRoles
 
 __all__ = [
     "ADMIN_INVITATIONS_PATH",
@@ -289,6 +293,8 @@ def invitations_page(
     now: datetime,
     has_more: bool = False,
     notice: Notice | None = None,
+    roles: ViewerRoles | None = None,
+    theme: str | None = None,
     account_url: str | None = None,
 ) -> str:
     """Render the operator invitation page for this request.
@@ -315,6 +321,10 @@ def invitations_page(
         body=body,
         root_path=root_path,
         identity_label=identity,
+        identity_email=session.email,
         csrf_token=session.csrf,
+        current_path=ADMIN_INVITATIONS_PATH,
+        roles=roles,
+        theme=theme,
         account_url=account_url,
     )

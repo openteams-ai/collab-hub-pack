@@ -72,7 +72,9 @@ beside each package that needs it ([`api/admin-ui/`](api/admin-ui/) and
 Dependabot bumps action and image versions, not these.
 
 The admin panel is a Vite and React app in [`api/admin-ui/`](api/admin-ui/)
-with its own Vitest suite:
+with its own Vitest suite. The same project builds the registration pages (the
+invitation-acceptance page) from `api/admin-ui/registration/` as a separate
+bundle:
 
 ```sh
 cd api/admin-ui

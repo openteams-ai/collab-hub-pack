@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Accept your invitation</title>
+  </head>
+  <body>
+    <!-- Shown until the page's script runs, and kept if it never does: while a
+         new version rolls out, the script can briefly fail to load. -->
+    <div id="root">
+      <p class="loading">
+        Loading your invitation. If this message stays, open the link in your invitation email
+        again.
+      </p>
+    </div>
+    <noscript>
+      <h1>JavaScript is required on this page</h1>
+      <p>
+        Your invitation code travels in the part of the link after the '#', which browsers never
+        send to a server. That is what keeps it out of web-server logs. Reading it therefore has to
+        happen in your browser, so this page needs JavaScript enabled.
+      </p>
+    </noscript>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

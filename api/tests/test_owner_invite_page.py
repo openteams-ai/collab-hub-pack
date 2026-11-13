@@ -252,7 +252,7 @@ class FakeInvitationService:
         self.plain_create_calls.append({"email": email, "org_id": org_id})
         raise AssertionError("the owner page must call create_unless_live, not create")
 
-    def create_unless_live(self, ctx, *, email, org_id):
+    def create_unless_live(self, ctx, *, email, org_id, role=None):
         self._guard()
         self.issue_calls.append({"actor": ctx.user, "email": email, "org_id": org_id})
         if self.issue_result is not None:
@@ -376,6 +376,19 @@ def csrf_from(document: str) -> str:
     match = re.search(r'name="csrf_token" value="([^"]+)"', document)
     assert match, "every form on this surface carries the CSRF token"
     return match.group(1)
+
+
+def page_fields(document: str) -> list[str]:
+    """The ``name`` of every input in the page's own content.
+
+    Scoped to ``<main>``: the signed-in frame around it carries forms of its
+    own (the theme switch, sign-out), and these tests are about what *this
+    page* asks for.
+    """
+
+    main = re.search(r"<main[^>]*>(.*?)</main>", document, re.S)
+    assert main, "the page has no main content"
+    return re.findall(r'<input[^>]*name="([^"]+)"', main.group(1))
 
 
 async def issue(client: AsyncClient, *, email: str = INVITEE, csrf: str | None = None):
@@ -578,7 +591,7 @@ async def test_the_page_offers_no_way_to_name_an_organization(tmp_path, idp):
         await signed_in(client, idp)
         page = await client.get(ORG_INVITATIONS_PATH)
         assert page.status_code == 200
-        fields = re.findall(r'<input[^>]*name="([^"]+)"', page.text)
+        fields = page_fields(page.text)
         assert set(fields) == {"csrf_token", EMAIL_FIELD}
         smuggled = await client.post(
             ORG_INVITATIONS_PATH,
@@ -903,7 +916,7 @@ async def test_an_unnamed_organization_gets_the_naming_form_not_the_issue_form(t
         await signed_in(client, idp)
         page = await client.get(ORG_INVITATIONS_PATH)
     assert page.status_code == 200
-    fields = re.findall(r'<input[^>]*name="([^"]+)"', page.text)
+    fields = page_fields(page.text)
     assert set(fields) == {"csrf_token", ORGANIZATION_NAME_FIELD}
     assert ORG_INVITATIONS_NAME_PATH in page.text
     assert "Invite someone to join" not in page.text
@@ -934,7 +947,7 @@ async def test_naming_records_the_owner_and_the_callers_organization(tmp_path, i
     assert service.name_calls == [{"actor": OWNER_SUB, "org_id": ORG_ID, "name": CHOSEN_NAME}]
     assert notice_text(NOTICE_NAMED, CHOSEN_NAME) in response.text
     # The page rendered after naming is #142's: the issue form, and the name.
-    fields = re.findall(r'<input[^>]*name="([^"]+)"', response.text)
+    fields = page_fields(response.text)
     assert set(fields) == {"csrf_token", EMAIL_FIELD}
     assert f"Invite someone to join {CHOSEN_NAME}" in response.text
 

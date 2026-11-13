@@ -21,7 +21,7 @@ export function usePages() {
 export function Pager({ pages, next }: { pages: ReturnType<typeof usePages>; next: number | null }) {
   if (!pages.hasNewer && next === null) return null;
   return (
-    <p>
+    <p className="pager">
       {pages.hasNewer && (
         <button type="button" className="link" onClick={pages.newer}>
           Newer

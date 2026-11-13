@@ -1,20 +1,19 @@
 import { LogOut, Moon, Sun } from "lucide-react";
 import { useState } from "react";
 
-import logo from "./assets/collab-logo.png";
+import { LogoMark } from "./Logo";
 import { initials } from "./avatar";
 import type { AdminSession } from "./session";
 import { signOut } from "./signout";
 import type { Theme } from "./theme";
 
 /**
- * The product header: the wordmark, what this surface is, and who you are.
+ * The product header: the mark and name, that this is the hub's admin, which
+ * hub it is, and who you are.
  *
- * The logo is the product's own primary horizontal wordmark, bundled rather
- * than linked, so the panel's Content-Security-Policy keeps naming no external
- * origin. It is a navy wordmark and the only variant that ships, so the
- * stylesheet inverts it to white on dark surfaces -- the same treatment the
- * desktop client applies, rather than a second asset to keep in step.
+ * The hub is named by the host the panel was opened at, the one thing the
+ * browser already knows for certain, so an operator with several deployments
+ * open can tell the tabs apart without the server saying anything new.
  */
 export function Header({
   session,
@@ -37,33 +36,30 @@ export function Header({
 
   return (
     <header className="header">
-      <div className="header-brand">
-        <img className="wordmark" src={logo} alt="OpenTeams Collab" />
-        <span className="header-surface">Admin</span>
+      <div className="lockup">
+        <LogoMark />
+        <span className="lockup-name">Collab</span>
       </div>
+      <span className="badge-brand">Hub admin</span>
+      <span className="chip">{window.location.hostname}</span>
+      <span className="header-spacer" />
+      <button type="button" className="icon-button" onClick={onToggleTheme} title={nextLabel} aria-label={nextLabel}>
+        {theme === "dark" ? (
+          <Sun size={16} strokeWidth={1.75} aria-hidden="true" />
+        ) : (
+          <Moon size={16} strokeWidth={1.75} aria-hidden="true" />
+        )}
+      </button>
       <div className="header-identity">
         <span className="avatar" aria-hidden="true">
           {initials(session)}
         </span>
-        {signOutFailed && <span className="bad">Sign-out did not go through. Try again.</span>}
         <span className="who">{session.email || session.user}</span>
-        <button
-          type="button"
-          className="icon-button"
-          onClick={onToggleTheme}
-          title={nextLabel}
-          aria-label={nextLabel}
-        >
-          {theme === "dark" ? (
-            <Sun size={16} strokeWidth={1.75} aria-hidden="true" />
-          ) : (
-            <Moon size={16} strokeWidth={1.75} aria-hidden="true" />
-          )}
-        </button>
-        <button type="button" className="icon-button" onClick={leave} title="Sign out" aria-label="Sign out">
-          <LogOut size={16} strokeWidth={1.75} aria-hidden="true" />
-        </button>
       </div>
+      {signOutFailed && <span className="bad">Sign-out did not go through. Try again.</span>}
+      <button type="button" className="icon-button" onClick={leave} title="Sign out" aria-label="Sign out">
+        <LogOut size={16} strokeWidth={1.75} aria-hidden="true" />
+      </button>
     </header>
   );
 }

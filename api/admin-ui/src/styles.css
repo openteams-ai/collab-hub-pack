@@ -1,97 +1,14 @@
 /* Fonts are bundled, not fetched from a font CDN. The panel's CSP names no
    external origin, and a hub that runs without internet egress still renders
    the typeface it was designed in. */
-@import "@fontsource/ibm-plex-sans/400.css";
-@import "@fontsource/ibm-plex-sans/500.css";
-@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
 @import "@fontsource/ibm-plex-mono/400.css";
 @import "@fontsource/ibm-plex-mono/500.css";
 /* Every @import must precede any rule, or CSS silently drops it. */
+@import "./tokens.css";
 @import "./sections.css";
-
-/* Colours come from the server-rendered pages this panel sits beside
-   (`web/pages.py` STYLESHEET and `routers/usage.py` PAGE_STYLE), so the
-   surfaces of one product do not disagree about what blue means.
-
-   Each colour is written once, as a `-l`/`-d` pair, and the three blocks below
-   only re-point the aliases. That is deliberately more verbose than
-   `light-dark()`, which this file used until it was found not to work: Vite's
-   CSS minifier downlevels `light-dark()` into a pair of custom properties that
-   it flips from `color-scheme` declarations *in the stylesheet*, so a
-   `color-scheme` set at runtime on the root element never reached them and the
-   toggle changed nothing but the logo. Explicit attribute selectors do not
-   depend on what a minifier decides to do.
-
-   Nothing in this interface is capitalised for emphasis. */
-:root {
-  --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
-
-  --ink-l: #1a1a2e;        --ink-d: #e8e8f0;
-  --ink-soft-l: #666;      --ink-soft-d: #9a9aa8;
-  --accent-l: #3452d9;     --accent-d: #96a9ff;
-  --line-l: #ddd;          --line-d: #3a3a48;
-  --warn-l: #8a2f2f;       --warn-d: #ff9b9b;
-  --page-l: #fff;          --page-d: #111116;
-  --on-accent-l: #fff;     --on-accent-d: #14161c;
-
-  --ink: var(--ink-l);
-  --ink-soft: var(--ink-soft-l);
-  --accent: var(--accent-l);
-  --line: var(--line-l);
-  --warn: var(--warn-l);
-  --page: var(--page-l);
-  --on-accent: var(--on-accent-l);
-
-  /* Until someone picks: follow the operating system, like the pages beside
-     this one. The attribute selectors below take over once they do. */
-  color-scheme: light dark;
-}
-
-/* The system says dark and nobody has overridden it. */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --ink: var(--ink-d);
-    --ink-soft: var(--ink-soft-d);
-    --accent: var(--accent-d);
-    --line: var(--line-d);
-    --warn: var(--warn-d);
-    --page: var(--page-d);
-    --on-accent: var(--on-accent-d);
-  }
-
-  :root:not([data-theme="light"]) .wordmark { filter: brightness(0) invert(1); }
-}
-
-/* An explicit choice, which outranks the system in both directions. */
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --ink: var(--ink-d);
-  --ink-soft: var(--ink-soft-d);
-  --accent: var(--accent-d);
-  --line: var(--line-d);
-  --warn: var(--warn-d);
-  --page: var(--page-d);
-  --on-accent: var(--on-accent-d);
-}
-
-:root[data-theme="light"] {
-  color-scheme: light;
-  --ink: var(--ink-l);
-  --ink-soft: var(--ink-soft-l);
-  --accent: var(--accent-l);
-  --line: var(--line-l);
-  --warn: var(--warn-l);
-  --page: var(--page-l);
-  --on-accent: var(--on-accent-l);
-}
-
-/* The only wordmark that ships is navy, which disappears on a dark surface.
-   Flattening it to black and inverting gives a white mark of the same shape,
-   which is what the desktop client does rather than shipping a second file
-   that would then have to be kept in step. */
-:root[data-theme="dark"] .wordmark { filter: brightness(0) invert(1); }
-:root[data-theme="light"] .wordmark { filter: none; }
 
 * { box-sizing: border-box; }
 
@@ -100,50 +17,75 @@ body {
   background: var(--page);
   color: var(--ink);
   font-family: var(--font-sans);
-  font-size: 15px;
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 20px;
 }
 
 code, .mono { font-family: var(--font-mono); }
 
+button, input, select { font: inherit; color: inherit; }
+
 .app { min-height: 100vh; display: flex; flex-direction: column; }
 
-/* The product header. Its bottom rule is the only thing separating it from the
-   content, which is enough: the wordmark already anchors the top-left, and a
-   filled bar would fight the page's own surface in both themes. */
+/* The product header: the mark and name, what this surface is, and which hub
+   it is, then the person on the right. */
 .header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 1.5rem;
-  padding: 1rem 1.75rem;
-  border-bottom: 1px solid var(--line);
+  gap: 16px;
+  height: 56px;
+  padding: 0 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line-soft);
 }
 
-.header-brand { display: flex; align-items: center; gap: 0.85rem; min-width: 0; }
+.lockup { display: flex; align-items: center; gap: 10px; }
+.lockup svg { display: block; flex: none; }
+.lockup-name { font-size: 17px; line-height: 24px; font-weight: 600; color: var(--ink); }
 
-.wordmark { height: 2.25rem; width: auto; display: block; }
-
-/* Which surface of the product this is, set apart from the wordmark by a rule
-   rather than by shouting. */
-.header-surface {
-  font-size: 0.9rem;
-  color: var(--ink-soft);
-  padding-left: 0.85rem;
-  border-left: 1px solid var(--line);
-}
-
-.header-identity {
-  display: flex;
+/* A static label: which surface of the product this is. */
+.badge-brand {
+  display: inline-flex;
   align-items: center;
-  gap: 0.75rem;
-  font-size: 0.9rem;
-  min-width: 0;
+  height: 24px;
+  padding: 2px 6px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-xs);
+  background: var(--raised);
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
-/* The address is a name, not a data readout, so it is set in the same face as
-   everything else people read. Monospace here made it look like a record id. */
-.header-identity .who { color: var(--ink); overflow-wrap: anywhere; }
+/* Which hub this is, read from the address it was opened at, so an operator
+   with several deployments open can tell the tabs apart. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+  color: var(--body);
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.header-spacer { flex: 1; }
+
+.header-identity { display: flex; align-items: center; gap: 8px; min-width: 0; }
+
+.header-identity .who {
+  color: var(--body);
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
 
 /* Drawn from initials rather than fetched. The panel's CSP allows images only
    from this origin, so a picture from the identity provider or a gravatar
@@ -153,14 +95,14 @@ code, .mono { font-family: var(--font-mono); }
   flex: none;
   display: grid;
   place-items: center;
-  width: 2rem;
-  height: 2rem;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--accent-tint);
   color: var(--accent);
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
   user-select: none;
 }
 
@@ -170,62 +112,152 @@ code, .mono { font-family: var(--font-mono); }
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 2rem;
-  height: 2rem;
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  padding: 6px;
+  border: 0;
+  border-radius: var(--radius-md);
   background: none;
-  color: var(--ink-soft);
+  color: var(--icon);
   cursor: pointer;
 }
 
-.icon-button:hover { color: var(--ink); border-color: var(--ink-soft); }
+.icon-button:hover { color: var(--ink); background: var(--muted); }
 
-.shell { display: grid; grid-template-columns: 15rem 1fr; flex: 1; }
+.shell { display: grid; grid-template-columns: 240px 1fr; flex: 1; }
 
 .nav {
-  border-right: 1px solid var(--line);
-  padding: 1.5rem 1rem;
   display: flex;
   flex-direction: column;
-  gap: 1.75rem;
+  gap: 2px;
+  padding: 16px 12px;
+  background: var(--subtle);
+  border-right: 1px solid var(--line-soft);
 }
 
-.nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.125rem; }
+.nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 
-.nav a {
+/* A group's name: small and quiet, in sentence case. */
+.nav-group {
+  padding: 16px 8px 6px;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 600;
+  color: var(--faint);
+}
+
+.nav > div:first-child .nav-group { padding-top: 4px; }
+
+.navlink {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  padding: 0.4rem 0.6rem;
-  border-radius: 6px;
-  color: var(--ink);
-  text-decoration: none;
-  font-size: 0.9rem;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--body);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
 }
 
-.nav a:hover { background: color-mix(in srgb, var(--ink) 7%, transparent); }
+.navlink svg { flex: none; color: var(--icon); }
+.navlink:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+
+/* The current section sits on its own raised card, and its icon takes the
+   brand colour; the label stays ink so the row reads as selected, not as a
+   link. */
+.navlink.current {
+  background: var(--raised);
+  border-color: var(--line-soft);
+  box-shadow: 0 1px 1px rgb(0 0 0 / 4%);
+  color: var(--ink);
+}
+
+.navlink.current svg { color: var(--accent); }
 
 /* Pushed to the bottom of the column: which build this is matters when
    something is wrong, and never before then. */
 .nav footer {
   margin-top: auto;
-  padding: 0.4rem 0.6rem;
-  font-size: 0.8rem;
-  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--faint);
 }
 
-.main { padding: 2.5rem 2.5rem 4rem; max-width: 64rem; }
-.main h2 { font-size: 1.35rem; font-weight: 600; margin: 0 0 0.75rem; }
-.main p { color: var(--ink-soft); max-width: 44rem; margin: 0 0 1rem; }
+.main { padding: 40px 24px 64px; }
+.page { max-width: 920px; margin: 0 auto; display: flex; flex-direction: column; gap: 24px; }
 
-.notice {
-  border-left: 3px solid var(--accent);
-  padding: 0.25rem 0 0.25rem 0.85rem;
-  max-width: 40rem;
-  margin: 4rem auto;
+/* A page's title and what it is for, with the page's own control (a range,
+   say) on the right. */
+.page-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
+.page-header-text { max-width: 640px; display: flex; flex-direction: column; gap: 6px; }
+.page-header-text h2 { margin: 0; font-size: 22px; line-height: 30px; font-weight: 600; color: var(--ink); }
+.page-header-text p { margin: 0; color: var(--ink-soft); }
+
+.main p { margin: 0; }
+
+/* A short standing note: neutral, because it informs rather than warns. */
+.banner {
+  padding: 10px 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  background: var(--subtle);
+  color: var(--body);
 }
 
-.notice.bad { border-left-color: var(--warn); }
-.notice h2 { margin-top: 0; }
+/* The panel-wide notices: loading, signed out, not an administrator. */
+.notice-page {
+  display: grid;
+  grid-template-columns: 580px 1fr;
+  min-height: 100vh;
+}
+
+.notice-art { display: grid; place-items: center; background: var(--page); }
+
+/* Two rings round the mark, drawn with borders and solid fills only. */
+.notice-ring {
+  display: grid;
+  place-items: center;
+  width: 222px;
+  height: 222px;
+  border-radius: 50%;
+  background: var(--accent-wash);
+  border: 1px solid var(--accent-tint);
+}
+
+.notice-ring > div {
+  display: grid;
+  place-items: center;
+  width: 156px;
+  height: 156px;
+  border-radius: 50%;
+  background: var(--accent-tint);
+  border: 1px solid var(--accent-line);
+}
+
+.notice-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 12px;
+  padding: 0 80px;
+  background: var(--subtle);
+}
+
+.notice-body h2 { margin: 0; font-size: 22px; line-height: 30px; font-weight: 600; }
+.notice-body p { margin: 0; font-size: 15px; line-height: 22px; color: var(--ink-soft); max-width: 32rem; }
+.notice-body .bad { color: var(--warn); }
+.notice-body .primary { align-self: flex-start; margin-top: 4px; text-decoration: none; }
+
+@media (max-width: 900px) {
+  .notice-page { grid-template-columns: 1fr; }
+  .notice-art { display: none; }
+  .notice-body { padding: 48px 24px; }
+}
+
+@media (max-width: 760px) {
+  .shell { grid-template-columns: 1fr; }
+  .nav { border-right: 0; border-bottom: 1px solid var(--line-soft); }
+  .chip { display: none; }
+}

@@ -88,6 +88,7 @@ from .routers import (
 )
 from .routers import runs as runs_router
 from .web.authz import platform_role_source_name, verify_web_route_protection
+from .web.bundle import BuiltBundle
 from .web.guard import WebSessionGuardMiddleware
 from .web.pages import WebSecurityHeadersMiddleware
 from .web.surface import (
@@ -823,6 +824,7 @@ def make_app(config: BaseConfig) -> FastAPI:
         invite_public, invite_gated = invite.make_routers(
             memberships_enabled=org_source_resolves_membership(),
             require_verified_email=config.frames.invitations.require_verified_email,
+            bundle=_built_registration_ui(config),
         )
         # The operator invitation page (issue #91). Mounted only where
         # invitations can mean anything, for the same reason #89's API router
@@ -853,9 +855,9 @@ def make_app(config: BaseConfig) -> FastAPI:
             # The built panel, when this deployment ships one. Checked here
             # rather than inside the router so that a deployment without a
             # build mounts nothing at all.
-            admin_ui_dist = _built_admin_ui(config)
-            if admin_ui_dist is not None:
-                page_routers.append(admin_ui.make_router(admin_ui_dist))
+            admin_panel = _built_admin_ui(config)
+            if admin_panel is not None:
+                page_routers.append(admin_ui.make_router(admin_panel))
             # The owner invitation page (issue #142), same mounting rule and
             # for the same reason: on a claims-sourced deployment the org-role
             # axis is structurally None, so every owner would be refused, and
@@ -979,8 +981,17 @@ def make_app(config: BaseConfig) -> FastAPI:
     return app
 
 
-def _built_admin_ui(config) -> Path | None:
-    """The panel's built directory, or ``None`` if this build has no panel.
+REGISTRATION_BUNDLE_DIRECTORY = "registration"
+"""Where the registration pages' build lands inside ``web.admin_ui_dist``.
+
+The same name ``admin-ui/vite.registration.config.ts`` builds into. One setting
+locates both bundles because one project builds both, and the image copies its
+``dist`` whole.
+"""
+
+
+def _built_admin_ui(config) -> BuiltBundle | None:
+    """The panel's built bundle, or ``None`` if this build has no panel.
 
     A configured path whose ``index.html`` is missing counts as no panel. That
     is the failure a broken Docker stage produces, and answering it with the
@@ -988,11 +999,39 @@ def _built_admin_ui(config) -> Path | None:
     take down sign-in and the invitation pages over a front-end build.
     """
 
+    return _built_bundle(config, "", missing="admin_ui_dist_missing_index")
+
+
+def _built_registration_ui(config) -> BuiltBundle | None:
+    """The registration pages' built bundle, or ``None`` if there is none.
+
+    ``None`` does not unmount the invitation page: its routes stay, and the
+    page says the deployment cannot show it. See :mod:`.routers.invite`.
+
+    Unlike the panel's, a missing registration build is logged at **error**
+    level, configured or not: every invitation link then answers 503, and an
+    image built without the bundle otherwise starts looking healthy.
+    """
+
+    bundle = _built_bundle(config, REGISTRATION_BUNDLE_DIRECTORY, missing=None)
+    if bundle is None:
+        configured = config.web.admin_ui_dist
+        logger.error(
+            "registration_ui_missing",
+            extra={
+                "path": str(Path(configured) / REGISTRATION_BUNDLE_DIRECTORY) if configured else None,
+                "consequence": "every invitation link answers 503 until the bundle is built",
+            },
+        )
+    return bundle
+
+
+def _built_bundle(config, directory: str, *, missing: str | None) -> BuiltBundle | None:
     configured = config.web.admin_ui_dist
     if not configured:
         return None
-    dist = Path(configured)
-    if not (dist / "index.html").is_file():
-        logger.warning("admin_ui_dist_missing_index", extra={"path": str(dist)})
-        return None
-    return dist
+    root = Path(configured) / directory
+    bundle = BuiltBundle.at(root)
+    if bundle is None and missing is not None:
+        logger.warning(missing, extra={"path": str(root)})
+    return bundle

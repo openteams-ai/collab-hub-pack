@@ -39,7 +39,11 @@ async function reason(response: Response): Promise<string> {
   try {
     const body = (await response.json()) as { outcome?: unknown; error?: unknown };
     if (typeof body.outcome === "string") return body.outcome;
-    return typeof body.error === "string" ? body.error : "unknown";
+    if (typeof body.error === "string") return body.error;
+    // The hub's standard error body, `{"error": {"code": ..., "message": ...}}`,
+    // which is what a refusal raised below an endpoint answers with.
+    const code = (body.error as { code?: unknown } | null | undefined)?.code;
+    return typeof code === "string" ? code : "unknown";
   } catch {
     return "unknown";
   }

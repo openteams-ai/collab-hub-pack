@@ -75,6 +75,19 @@ describe("postJson", () => {
   it("treats a success with no body as ok with nothing to read", async () => {
     expect(await postJson("x", {}, "csrf", answering(204))).toEqual({ state: "ok", data: null });
   });
+
+  it("reads the reason out of the hub's standard error body", async () => {
+    // What a single-organization hub answers when asked to issue an invitation
+    // that would create a second organization.
+    const refusal = answering(409, {
+      error: { code: "organization_creation_refused", message: "This deployment declares a single organization." },
+    });
+
+    expect(await postJson("api/invitations", {}, "csrf", refusal)).toEqual({
+      state: "refused",
+      reason: "organization_creation_refused",
+    });
+  });
 });
 
 describe("an expired session", () => {

@@ -1,0 +1,118 @@
+/* Fonts are bundled, not fetched from a font CDN: this page's
+   Content-Security-Policy names no external origin, and a hub with no internet
+   egress still renders the typeface it was designed in. */
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+/* The same colours and typefaces as the admin panel, from the one file both
+   import. Every @import must precede any rule, or CSS silently drops it. */
+@import "../src/tokens.css";
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+/* One readable column with the same margin on every side, the bottom
+   included, so nothing reads as cut off on a short page or a narrow phone. */
+.page {
+  max-width: 38rem;
+  margin: 0 auto;
+  padding: 4rem 1.5rem;
+}
+
+.wordmark { height: 2.25rem; width: auto; display: block; margin-bottom: 3rem; }
+
+h1 { font-size: 1.5rem; font-weight: 600; line-height: 1.3; margin: 0 0 1.25rem; }
+
+p { margin: 0 0 1rem; }
+
+a { color: var(--accent); text-underline-offset: 0.15em; }
+
+.quiet { color: var(--ink-soft); }
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem 1.5rem;
+  margin-top: 2rem;
+}
+
+/* The one action a state is asking for. A link and a button share the look,
+   because "create your account" navigates and "accept" posts. */
+.button {
+  display: inline-block;
+  font: inherit;
+  font-weight: 500;
+  line-height: 1.5;
+  background: var(--accent);
+  color: var(--on-accent);
+  border: 0;
+  border-radius: 6px;
+  padding: 0.65rem 1.25rem;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+/* Explicit colours rather than `opacity`, which would also fade the label. */
+.button:disabled {
+  background: color-mix(in srgb, var(--ink) 12%, transparent);
+  color: var(--ink-soft);
+  cursor: default;
+}
+
+.button:focus-visible, a:focus-visible, button.link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* What is stored, shown in full beside the control that commits to it. */
+.statement {
+  margin-top: 2rem;
+  padding: 1.25rem 1.5rem 0.25rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink-soft);
+  font-size: 0.925rem;
+}
+
+.identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 1rem;
+  margin-top: 3.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+}
+
+.identity strong { color: var(--ink); font-weight: 500; overflow-wrap: anywhere; }
+
+button.link {
+  font: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+button.link:disabled { color: var(--ink-soft); cursor: default; text-decoration: none; }
+
+.bad { color: var(--warn); }
+
+noscript { display: block; max-width: 38rem; margin: 0 auto; padding: 4rem 1.5rem; }
+
+/* The static line index.html shows until the script runs, in the page's column. */
+.loading { max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }

@@ -25,6 +25,7 @@ one, and only matters once you reach level 3.
 |---|---|---|
 | [uv](https://docs.astral.sh/uv/) | every level | `uv --version` |
 | Docker with Compose v2 | levels 2–4 (**not** level 1) | `docker compose version` |
+| [Node](https://nodejs.org/) 24 | the admin panel and the invitation page (`make api-full`, `make api-membership`, `make ui`) | `node --version` |
 | [kind](https://kind.sigs.k8s.io/), `helm`, `kubectl` | level 4 only | `kind version` |
 | [kubeconform](https://github.com/yannh/kubeconform) | `make lint` only | `kubeconform -v` |
 | [pixi](https://pixi.sh) | `make controller` (unless `ENVIRONMENT=host`) and `make op LOCATION=local` only | `pixi --version` |
@@ -956,6 +957,12 @@ open http://localhost:8000/web/signin
 You are redirected to Keycloak for the authorization-code flow with the
 confidential `collab-web` client, and the app issues its own session cookie
 after verifying the ID token. Sign in as `dev` / `dev`.
+
+Two parts of this surface are React bundles built from `api/admin-ui`: the
+admin panel at `/admin/` and the invitation page at `/invite/accept`.
+`make api-full` and `make api-membership` build both first (`make ui`, which
+needs Node). Without Node the API still starts, serves no admin panel, and the
+invitation page answers with a notice that its build is missing.
 
 This works on a non-default `API_PORT` too. The realm lists both
 `http://localhost:8000/web/oidc/callback` and a bare `http://localhost:*`,

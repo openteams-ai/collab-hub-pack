@@ -20,6 +20,7 @@ from __future__ import annotations
 import functools
 import logging
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 from urllib.parse import urlencode
 
 from fastapi import Depends, Request
@@ -245,7 +246,7 @@ def route_offence(route: object, prefixes: Sequence[str]) -> str | None:
     says so.
     """
 
-    from .surface import ALLOWED_WEB_MOUNTS, CSRF_ENFORCED_IN_ROUTE, PUBLIC_WEB_PATHS
+    from .surface import ALLOWED_WEB_MOUNTS, CSRF_ENFORCED_IN_ROUTE, is_public_web_path
 
     path = getattr(route, "path", None)
     if not isinstance(path, str) or not on_web_surface(path, prefixes):
@@ -262,8 +263,14 @@ def route_offence(route: object, prefixes: Sequence[str]) -> str | None:
         return f"{path} is a WebSocket route, which this surface does not serve"
     if not isinstance(route, APIRoute):
         return f"{path} is a {type(route).__name__}, which this surface does not serve"
-    if path in PUBLIC_WEB_PATHS:
-        return None
+    if is_public_web_path(path):
+        # Anonymous for reading only. A public path that answers anything else
+        # would be an anonymous write no allowlist line was reviewed for, so
+        # it is named here like any other route without a session.
+        writes = set(route.methods or ()) - {"GET", "HEAD"}
+        if not writes:
+            return None
+        return f"{path} is public for reading, and answers {', '.join(sorted(writes))} with no web session"
     if not route_enforces_session(route):
         return f"{path} requires no web session and is not in PUBLIC_WEB_PATHS"
     unsafe = route_unsafe_methods(route)
@@ -604,6 +611,64 @@ def _org_store(request: Request) -> OrgStore:
     if store is None:
         raise OrgsUnavailableError("Organization storage is not available on this app")
     return store
+
+
+@dataclass(frozen=True, slots=True)
+class ViewerRoles:
+    """What the signed-in person may open on this surface, and whose organization it is."""
+
+    operator: bool = False
+    owner: bool = False
+    organization: str | None = None
+    """The display name of the person's organization, once it has one."""
+
+
+def viewer_roles(request: Request, session: WebSession) -> ViewerRoles:
+    """The two roles the frame's navigation is drawn from, read live.
+
+    This decides what is *offered*, never what is *allowed*: every page keeps
+    its own gate, so a wrong answer here costs a missing or a dead link and
+    nothing more. That is why a source that cannot answer is treated as "no
+    role" and logged, where the gates treat it as unavailable and refuse. The
+    landing page is the one page that must keep working while an operator
+    works out what is wrong, and this runs on it.
+    """
+
+    operator = False
+    owner = False
+    organization = None
+    try:
+        operator = resolve_platform_role(request, session.user) == PLATFORM_ROLE_OPERATOR
+    except Exception:  # noqa: BLE001 - offer nothing rather than fail the page
+        logger.warning("web_viewer_platform_role_unavailable", extra={"user": session.user})
+    try:
+        membership = _org_store(request).get_membership(session.user)
+        if membership is not None and membership.is_active:
+            owner = membership.role == ROLE_OWNER
+            organization = _organization_name(request, membership.org_id)
+    except Exception:  # noqa: BLE001 - same reasoning
+        logger.warning("web_viewer_membership_unavailable", extra={"user": session.user})
+    return ViewerRoles(operator=operator, owner=owner, organization=organization)
+
+
+def _organization_name(request: Request, org_id: str) -> str | None:
+    """The organization's display name for the frame, or ``None`` while it has none.
+
+    Read from the invitation service, which words a missing name as the
+    placeholder; the frame shows nothing in that case rather than the
+    placeholder, so the header never calls an organization "Unnamed". A
+    service that cannot answer is logged and treated the same way, for the
+    reason given on :func:`viewer_roles`.
+    """
+
+    from ..frames.invitations import is_placeholder_organization_name
+
+    try:
+        name = request.app.state.invitation_service.organization_name(org_id)
+    except Exception:  # noqa: BLE001 - the frame can do without the name
+        logger.warning("web_viewer_organization_name_unavailable", extra={"org_id": org_id})
+        return None
+    return None if is_placeholder_organization_name(name) else name
 
 
 def require_org_owner(request: Request, session: WebSession = Depends(require_web_session)) -> WebSession:

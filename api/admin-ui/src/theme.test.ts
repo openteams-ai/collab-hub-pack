@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { THEME_KEY, nextTheme, readTheme, storeTheme } from "./theme";
+import { THEME_COOKIE, THEME_KEY, nextTheme, readTheme, storeTheme, themeFromCookie } from "./theme";
 
 function storage(initial: Record<string, string> = {}) {
   const data = { ...initial };
@@ -74,5 +74,22 @@ describe("nextTheme", () => {
   it("flips", () => {
     expect(nextTheme("light")).toBe("dark");
     expect(nextTheme("dark")).toBe("light");
+  });
+});
+
+describe("the theme shared with the hub's own pages", () => {
+  it("prefers the choice the hub's pages recorded in the cookie", () => {
+    expect(readTheme(() => storage({ [THEME_KEY]: "light" }), false, `${THEME_COOKIE}=dark; other=1`)).toBe("dark");
+  });
+
+  it("ignores a cookie naming a theme that does not exist", () => {
+    expect(themeFromCookie(`${THEME_COOKIE}=purple`)).toBeNull();
+    expect(readTheme(() => storage({ [THEME_KEY]: "light" }), true, `${THEME_COOKIE}=purple`)).toBe("light");
+  });
+
+  it("writes the choice to the cookie as well, for every path of the origin", () => {
+    const written: string[] = [];
+    storeTheme(() => storage(), "dark", (cookie) => written.push(cookie));
+    expect(written).toEqual([`${THEME_COOKIE}=dark; Path=/; Max-Age=31536000; SameSite=Lax; Secure`]);
   });
 });

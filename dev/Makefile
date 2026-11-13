@@ -19,6 +19,7 @@ SHELL := /bin/bash
 ROOT        := $(abspath $(CURDIR)/..)
 API_DIR     := $(ROOT)/api
 CLI_DIR     := $(ROOT)/cli
+ADMIN_UI_DIR := $(API_DIR)/admin-ui
 CLI         := $(CLI_DIR)/.venv/bin/collab-hub
 LOCAL       := $(CURDIR)/.local
 COMPOSE     := docker compose -f $(CURDIR)/compose.yaml
@@ -180,8 +181,11 @@ S3_ENV := \
   AWS_ACCESS_KEY_ID=devaccesskey \
   AWS_SECRET_ACCESS_KEY=devsecretkey
 
-# The server-rendered /web and /admin pages.
+# The /web, /admin and /invite pages. ADMIN_UI_DIST is where `make ui` builds
+# the admin panel and the registration pages; without a build there the API
+# still starts, mounts no panel, and says so on the invitation page.
 WEB_ENV := \
+  COLLAB_HUB_API__WEB__ADMIN_UI_DIST=$(ADMIN_UI_DIR)/dist \
   COLLAB_HUB_API__WEB__CLIENT_ID=collab-web \
   COLLAB_HUB_API__WEB__CLIENT_SECRET=collab-web-dev-secret \
   COLLAB_HUB_API__WEB__ISSUER_URL=$(KC_URL)/realms/$(REALM) \
@@ -222,7 +226,7 @@ KC_CONNECTOR_ENV := \
   COLLAB_HUB_API__CONNECTORS__SHAREPOINT__BROKER_TOKEN_URL=$(KC_URL)/realms/$(REALM)/broker/microsoft/token
 
 .DEFAULT_GOAL := help
-.PHONY: help api api-watch api-pg api-oidc api-fakes api-full api-membership \
+.PHONY: help api api-watch api-pg api-oidc api-fakes api-full api-membership ui \
         api-desktop api-desktop-fakes hosts-check hub-proxy hub-proxy-down desktop-check \
         postgres services keycloak fakes up down destroy logs ps \
         keycloak-admin realm-import broker-role idp-google idp-github idp-microsoft idp-list \
@@ -374,12 +378,31 @@ api-fakes: postgres keycloak fakes | $(LOCAL)/frames ## API + Keycloak + fake Go
 	cd $(API_DIR) && env $(BASE_ENV) $(OIDC_ENV) $(PG_ENV) $(FAKE_CONNECTOR_ENV) \
 		uv run python -m collab_hub_api
 
-api-full: services keycloak | $(LOCAL)/frames ## Everything: OIDC + Postgres + S3 + web surface + Keycloak-brokered connectors
+api-full: services keycloak ui | $(LOCAL)/frames ## Everything: OIDC + Postgres + S3 + web surface + Keycloak-brokered connectors
 	cd $(API_DIR) && env $(BASE_ENV) $(OIDC_ENV) $(PG_ENV) $(S3_ENV) $(WEB_ENV) $(KC_CONNECTOR_ENV) \
 		uv run python -m collab_hub_api
 
-api-membership: postgres keycloak | $(LOCAL)/frames ## API in multi-tenant mode: organization comes from collab_org_members
+api-membership: postgres keycloak ui | $(LOCAL)/frames ## API in multi-tenant mode: organization comes from collab_org_members
 	cd $(API_DIR) && env $(BASE_ENV) $(MEMBERSHIP_ENV) $(PG_ENV) $(WEB_ENV) uv run python -m collab_hub_api
+
+# `npm ci` installs exactly what the lockfile pins and `--ignore-scripts` runs
+# no package lifecycle hook, the same way the image and CI build it. It runs
+# only when the lockfile is newer than the installed tree (npm records the
+# install in node_modules/.package-lock.json), so starting the API again needs
+# no network. Where Node is missing, or the install or build fails (offline,
+# say), this says so and carries on, so the two targets above still start:
+# the API then serves whatever was built last, or no panel, and logs
+# `registration_ui_missing` if the invitation page has no build.
+ui: ## Build the admin panel and registration pages (needs Node; skipped without it)
+	@if ! command -v npm >/dev/null 2>&1; then \
+		echo "npm not found: skipping the web UI build. /admin and /invite/accept need it."; \
+	else \
+		cd $(ADMIN_UI_DIR) && \
+		if [ ! node_modules/.package-lock.json -nt package-lock.json ]; then \
+			npm ci --ignore-scripts --no-audit --no-fund || { echo "npm ci failed: starting with the last web UI build, if any."; exit 0; }; \
+		fi && \
+		{ npm run build || echo "The web UI build failed: starting with the last build, if any."; }; \
+	fi
 
 # ---------------------------------------------------------------------------
 ## Apollo Desktop — connect the Collab client to this hub

@@ -7,7 +7,9 @@ FROM node:26.13.0-bookworm-slim AS node
 # cogs/hermes/pixi.toml requires (requires-pixi).
 FROM ghcr.io/prefix-dev/pixi:0.84.1-bookworm-slim AS pixi
 
-# The admin panel is a built bundle, so it is built here rather than committed.
+# The admin panel and the registration pages are built bundles, so they are
+# built here rather than committed. One build produces both: the panel in
+# `dist/`, the registration pages in `dist/registration/`.
 # `npm ci --ignore-scripts` installs exactly what package-lock.json pins and
 # runs no package lifecycle script: the panel's dependency set needs none, and
 # a build stage that executes arbitrary install hooks is the step a compromised
@@ -74,9 +76,10 @@ WORKDIR /var/collab-hub-api
 COPY --from=builder --chown=nonroot:nonroot /var/collab-hub-api/.venv /var/collab-hub-api/.venv
 ENV PATH="/var/collab-hub-api/.venv/bin:${PATH}"
 
-# The built panel, and the setting that makes the app serve it. An image
-# without this directory mounts no panel routes at all, which is what a
-# deployment that predates the panel already does.
+# The built panel and registration pages, and the setting that makes the app
+# serve them. An image without this directory mounts no panel routes at all,
+# which is what a deployment that predates the panel already does, and answers
+# the invitation page with a notice that its build is missing.
 COPY --from=admin-ui --chown=nonroot:nonroot /var/admin-ui/dist /var/collab-hub-api/admin-ui-dist
 ENV COLLAB_HUB_API__WEB__ADMIN_UI_DIST=/var/collab-hub-api/admin-ui-dist
 

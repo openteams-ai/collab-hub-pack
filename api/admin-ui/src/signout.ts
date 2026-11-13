@@ -17,6 +17,20 @@ export const SIGNOUT_URL = "../web/signout";
 // the same allowlist as the sign-in redirect.
 export const SIGNED_OUT_URL = "../web/signed-out?next=%2Fadmin%2F";
 
+/** End the session, and say whether the server confirmed it. */
+export async function endSession(csrfToken: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+  try {
+    const response = await fetchImpl(SIGNOUT_URL, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "X-CSRF-Token": csrfToken },
+    });
+    return response.ok || (response.status >= 300 && response.status < 400);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Where to go once signed out, or `null` if the server did not confirm it.
  *
@@ -25,14 +39,5 @@ export const SIGNED_OUT_URL = "../web/signed-out?next=%2Fadmin%2F";
  * may still be live, and the person would leave believing otherwise.
  */
 export async function signOut(csrfToken: string, fetchImpl: typeof fetch = fetch): Promise<string | null> {
-  try {
-    const response = await fetchImpl(SIGNOUT_URL, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "X-CSRF-Token": csrfToken },
-    });
-    return response.ok || (response.status >= 300 && response.status < 400) ? SIGNED_OUT_URL : null;
-  } catch {
-    return null;
-  }
+  return (await endSession(csrfToken, fetchImpl)) ? SIGNED_OUT_URL : null;
 }

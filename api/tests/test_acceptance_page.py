@@ -5,10 +5,8 @@ What these prove, and what they deliberately do not.
 **Proven here (the half the application owns, per the issue's ⚠️):** the
 one-time secret never appears in a request line, a query string, a path, a
 ``Referer``, a rendered document, or any log record this application emits —
-across success and every terminal state; the acceptance page is the only path
-on the browser surface whose CSP permits script, and it permits exactly one
-SHA-256 digest which is re-derived from the served bytes; the page is
-reachable without a session while its redemption endpoint is not; and the
+across success and every terminal state; the page is reachable without a
+session while its redemption endpoint is not; and the
 server half of the registration round trip works — an anonymous visit, a real
 OIDC sign-in against the live stub IdP, and a redemption on the way back.
 
@@ -35,35 +33,33 @@ configured to log request bodies does not capture the token. It would. That
 is an internal issue, verified against the running
 deployment.
 
-**Not executed here:** the page's JavaScript. There is no browser in this
-suite, so the script is asserted as a *contract* — it is a compile-time
-constant, so its text can be checked for the properties that matter (it
-strips the fragment, it POSTs a JSON body, it never builds a URL from the
-token, it names no state the page does not render) and its digest can be
-checked against the CSP. Browser execution belongs to a manual pass against
-the live deployment.
+**Not here: the page itself.** It is the registration app, a React bundle
+built by ``admin-ui``, and how it reads the fragment, where it keeps the code,
+what it posts and what it says in each state are executed by that project's
+own suite (``admin-ui/registration/*.test.ts``). What this suite holds is the
+contract between the two: every outcome word the endpoint can answer has a page
+in the app's ``states.json``. Serving the bundle is ``test_registration_ui.py``.
 """
 
 from __future__ import annotations
 
 import contextlib
-import html
 import json
 import logging
 import os
-import re
 import socket
 import threading
 import time
-from base64 import b64encode
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from registration_bundle import built_dist  # noqa: E402
 
 # The live stub IdP, the https client, and the sign-in helpers are #88's, and
 # reusing them is the point: this page has to work on the surface as built,
@@ -104,23 +100,20 @@ from collab_hub_api.routers.invitations import redact_validation_details
 from collab_hub_api.routers.invite import MAX_REDEEM_BODY_BYTES
 from collab_hub_api.routers.web import make_router
 from collab_hub_api.web.acceptance import (
-    ACCEPT_BUTTON_ATTRIBUTE,
     ACCEPT_PAGE_PATH,
     ACCEPT_REDEEM_PATH,
-    ACCEPTANCE_CONTENT_SECURITY_POLICY,
-    ACCEPTANCE_SCRIPT,
-    ACCEPTANCE_SCRIPT_HASH,
     OUTCOME_ACCEPTED,
     OUTCOME_ERROR,
     OUTCOME_NOT_FOUND,
     OUTCOME_REAUTHENTICATION_REQUIRED,
     OUTCOME_UNAVAILABLE,
-    PAGE_STATES,
-    SETTLED_OUTCOMES,
-    acceptance_page,
 )
-from collab_hub_api.web.data_statement import DATA_STATEMENT_TEXT
-from collab_hub_api.web.pages import CONTENT_SECURITY_POLICY, headers_for_path
+from collab_hub_api.web.bundle import BuiltBundle
+from collab_hub_api.web.pages import (
+    CONTENT_SECURITY_POLICY,
+    REGISTRATION_APP_HEADERS,
+    headers_for_path,
+)
 from collab_hub_api.web.session import (
     CLOCK_SKEW_SECONDS,
     SESSION_COOKIE,
@@ -131,7 +124,7 @@ from collab_hub_api.web.session import (
     WebSession,
     verified_claims_are_current,
 )
-from collab_hub_api.web.surface import PUBLIC_WEB_PATHS, build_web_surface
+from collab_hub_api.web.surface import ACCEPT_SESSION_PATH, PUBLIC_WEB_PATHS, build_web_surface
 
 SENTINEL_TOKEN = "S3cr3tTokenValueThatMustNeverBePrinted"
 """A token that satisfies the accept model's alphabet and length.
@@ -227,7 +220,11 @@ refuses without it."""
 def build_app(
     tmp_path, idp, *, raises: Exception | None = None, web: dict | None = None
 ) -> tuple[object, FakeInvitationService]:
-    app = make_web_app(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL, **(web or {})})
+    app = make_web_app(
+        tmp_path,
+        idp,
+        web={"public_base_url": PUBLIC_BASE_URL, "admin_ui_dist": str(built_dist(tmp_path)), **(web or {})},
+    )
     service = FakeInvitationService(raises=raises)
     # The lifespan is what normally installs this; these tests drive the ASGI
     # app directly, so the state is installed here instead.
@@ -235,20 +232,21 @@ def build_app(
     return app, service
 
 
-def csrf_from(document: str) -> str:
-    match = re.search(r'id="accept"[^>]*data-csrf="([^"]+)"', document)
-    assert match, "the signed-in page must hand its script a CSRF token"
-    return match.group(1)
+PAGE_COPY = json.loads((Path(__file__).parents[1] / "admin-ui" / "registration" / "states.json").read_text())
+"""The registration app's own table of states: the copy for each, and which
+outcomes end the invitation. Read from the app's source, so the two halves are
+checked against each other and not against a second list kept in step."""
+
+PAGE_STATES = set(PAGE_COPY["pages"])
+SETTLED_OUTCOMES = set(PAGE_COPY["settled"])
 
 
-def page_script(document: str) -> str:
-    match = re.search(r"<script>(.*?)</script>", document, re.S)
-    assert match, "the acceptance page must carry exactly one inline script"
-    return match.group(1)
+async def csrf_token(client: AsyncClient) -> str:
+    """The CSRF token the app is handed for this browser's session."""
 
-
-def rendered_states(document: str) -> set[str]:
-    return set(re.findall(r'<section data-state="([^"]+)"', document))
+    token = (await client.get(ACCEPT_SESSION_PATH)).json()["csrf_token"]
+    assert token, "the signed-in app must be handed a CSRF token"
+    return token
 
 
 async def signed_in(client: AsyncClient, idp: _StubIdp, *, verified: bool = True, email: str = INVITEE_EMAIL):
@@ -259,14 +257,13 @@ async def signed_in(client: AsyncClient, idp: _StubIdp, *, verified: bool = True
 
 
 async def redeem(client: AsyncClient, *, token: str = SENTINEL_TOKEN, csrf: str | None = None):
-    page = await client.get(ACCEPT_PAGE_PATH)
     headers = {"Content-Type": "application/json"}
-    headers["X-CSRF-Token"] = csrf if csrf is not None else csrf_from(page.text)
+    headers["X-CSRF-Token"] = csrf if csrf is not None else await csrf_token(client)
     return await client.post(ACCEPT_REDEEM_PATH, content=json.dumps({"token": token}), headers=headers)
 
 
 # ===========================================================================
-# The CSP relaxation: scoped to one path, pinned to one digest
+# The CSP relaxation: scoped to the app's own paths
 # ===========================================================================
 
 
@@ -280,57 +277,13 @@ async def test_the_acceptance_page_is_the_only_path_that_may_run_script(tmp_path
             await client.get("/web/signed-out"),
             await client.get("/web/app.css"),
             await client.get("/invite/something-else"),
+            await client.get(ACCEPT_SESSION_PATH),
             await client.post(ACCEPT_REDEEM_PATH),
         ]
     assert "script-src" in page.headers["content-security-policy"]
     for response in others:
         assert "script" not in response.headers["content-security-policy"], response.url
         assert response.headers["content-security-policy"] == CONTENT_SECURITY_POLICY
-
-
-async def test_the_pinned_hash_is_the_digest_of_the_script_actually_served(tmp_path, idp):
-    """The property that makes a hash-pinned CSP worth anything.
-
-    Re-derived from the response body rather than compared to the constant:
-    an edit to the script that forgot to update a hand-written digest would
-    pass a constant-to-constant comparison and fail here, which is the whole
-    reason the digest is computed from the source at import.
-    """
-
-    app, _ = build_app(tmp_path, idp)
-    async with web_client(app) as client:
-        page = await client.get(ACCEPT_PAGE_PATH)
-
-    served = page_script(page.text)
-    digest = "sha256-" + b64encode(sha256(served.encode()).digest()).decode()
-    assert digest == ACCEPTANCE_SCRIPT_HASH
-    assert f"script-src '{digest}'" in page.headers["content-security-policy"]
-    assert served == ACCEPTANCE_SCRIPT
-
-
-@pytest.mark.parametrize("weakener", ["'unsafe-inline'", "'unsafe-eval'", "'self'", "*", "https:"])
-def test_the_scripted_policy_grants_nothing_beyond_the_one_digest(weakener):
-    # 'self' is on the list on purpose: it is the tempting middle ground, and
-    # it would permit any same-origin response the browser will parse as
-    # script — including one an injection could arrange.
-    script_src = re.search(r"script-src ([^;]+);", ACCEPTANCE_CONTENT_SECURITY_POLICY).group(1)
-    assert weakener not in script_src
-    assert script_src.strip() == f"'{ACCEPTANCE_SCRIPT_HASH}'"
-
-
-def test_the_scripted_policy_is_the_default_policy_plus_two_directives():
-    """Stated as a diff, so a future widening has to be a visible edit here."""
-
-    def directives(policy: str) -> dict[str, str]:
-        parts = [part.strip() for part in policy.split(";") if part.strip()]
-        return {part.split(" ", 1)[0]: part.split(" ", 1)[1] for part in parts}
-
-    default = directives(CONTENT_SECURITY_POLICY)
-    scripted = directives(ACCEPTANCE_CONTENT_SECURITY_POLICY)
-    assert set(scripted) - set(default) == {"script-src", "connect-src"}
-    assert scripted["connect-src"] == "'self'"
-    for name, value in default.items():
-        assert scripted[name] == value, f"{name} was weakened for the acceptance page"
 
 
 async def test_the_acceptance_page_keeps_every_other_security_header(tmp_path, idp):
@@ -346,16 +299,16 @@ async def test_the_acceptance_page_keeps_every_other_security_header(tmp_path, i
     assert "default-src 'none'" in csp
     assert "frame-ancestors 'none'" in csp
     assert "base-uri 'none'" in csp
-    assert "form-action 'self'" in csp
+    assert "form-action 'none'" in csp
 
 
 async def test_a_failing_acceptance_page_answers_with_the_no_script_policy(tmp_path, idp, monkeypatch):
     """The worst-case response must not be the one that hands out a budget."""
 
-    def explode(**_kwargs):
+    def explode(_bundle):
         raise RuntimeError("page render failed")
 
-    monkeypatch.setattr(invite_router, "acceptance_page", explode)
+    monkeypatch.setattr(BuiltBundle, "document", explode)
     app, _ = build_app(tmp_path, idp)
     async with web_client(app) as client:
         response = await client.get(ACCEPT_PAGE_PATH)
@@ -365,9 +318,17 @@ async def test_a_failing_acceptance_page_answers_with_the_no_script_policy(tmp_p
     assert "page render failed" not in response.text
 
 
-def test_the_policy_exception_is_keyed_on_one_path_and_no_other():
-    assert headers_for_path(ACCEPT_PAGE_PATH)["Content-Security-Policy"] == (ACCEPTANCE_CONTENT_SECURITY_POLICY)
-    for path in ("/web", "/web/signin", ACCEPT_REDEEM_PATH, "/invite/accept/", "/admin/invitations"):
+def test_the_policy_exception_is_keyed_on_the_apps_own_paths_and_no_other():
+    assert headers_for_path(ACCEPT_PAGE_PATH) == REGISTRATION_APP_HEADERS
+    assert headers_for_path("/invite/assets/index-abc123.js") == REGISTRATION_APP_HEADERS
+    for path in (
+        "/web",
+        "/web/signin",
+        ACCEPT_REDEEM_PATH,
+        ACCEPT_SESSION_PATH,
+        "/invite/accept/",
+        "/admin/invitations",
+    ):
         assert headers_for_path(path)["Content-Security-Policy"] == CONTENT_SECURITY_POLICY
 
 
@@ -382,59 +343,47 @@ def test_the_page_is_public_and_its_redemption_endpoint_is_not():
 
 
 async def test_an_invitee_with_no_account_sees_the_page(tmp_path, idp):
+    """The document is a build output: the same bytes whoever asks.
+
+    Nothing about the person is in it, which is half of what makes it safe to
+    serve anonymously. What differs per browser is the session answer.
+    """
+
     app, _ = build_app(tmp_path, idp)
     async with web_client(app) as client:
-        page = await client.get(ACCEPT_PAGE_PATH)
-    assert page.status_code == 200
-    container = re.search(r"<div (id=\"accept\"[^>]*)>", page.text).group(1)
-    assert 'data-signed-in="false"' in container
+        anonymous = await client.get(ACCEPT_PAGE_PATH)
+        answer = (await client.get(ACCEPT_SESSION_PATH)).json()
+        await signed_in(client, idp)
+        returning = await client.get(ACCEPT_PAGE_PATH)
+    assert anonymous.status_code == 200
+    assert anonymous.text == returning.text
     # No CSRF token for a browser with no session — there is nothing to bind
-    # it to, and the script will send them to sign in rather than POST.
-    assert "data-csrf" not in container
-    assert 'class="identity"' not in page.text  # no signed-in footer, no sign-out form
-    assert f"/web/signin?next={ACCEPT_PAGE_PATH.replace('/', '%2F')}" in page.text
-    # The data statement (#146) ships in the ready-state section — hidden
-    # markup on this anonymous render, revealed after sign-in, and always the
-    # same constant the canonical page serves.
-    assert html.escape(DATA_STATEMENT_TEXT) in page.text
-    assert 'href="/web/data-statement"' in page.text
-    # Registration first, sign-in second (#144): the invitee has no account
-    # yet, so the create path is the primary link and carries register=1;
-    # the plain sign-in link stays for returning accounts.
-    encoded_next = ACCEPT_PAGE_PATH.replace("/", "%2F")
-    assert f"/web/signin?next={encoded_next}&amp;register=1" in page.text
-    assert "Create your account" in page.text
-    assert "Already have an account? Sign in" in page.text
+    # it to, and the app will send them to sign in rather than POST.
+    assert answer["signed_in"] is False
+    assert answer["csrf_token"] is None
 
 
 ACCOUNT_URL = "https://billing.example.com/account"
-ACCOUNT_LINK = f'<a href="{ACCOUNT_URL}">Account</a>'
 
 
-async def test_the_signed_in_page_carries_the_account_link_when_set(tmp_path, idp):
-    # The footer is rendered by pages.render_page, but this route is what
-    # hands it the value (#275): a dropped `account_url=` here fails here.
+async def test_the_signed_in_app_is_handed_the_account_link_when_set(tmp_path, idp):
+    # The app draws the link beside Sign out; this route is what hands it the
+    # value (#275): a dropped `account_url` here fails here.
     app, _ = build_app(tmp_path, idp, web={"account_page_url": ACCOUNT_URL})
     async with web_client(app) as client:
         await signed_in(client, idp)
-        page = await client.get(ACCEPT_PAGE_PATH)
-    assert page.status_code == 200
-    assert page.text.count(ACCOUNT_LINK) == 1
-    # Beside the sign-out button in the footer; the page body also says
-    # "Sign out" in its own copy, so compare against the button.
-    assert page.text.index(">Account</a>") < page.text.index('class="link">Sign out</button>')
+        answer = (await client.get(ACCEPT_SESSION_PATH)).json()
+    assert answer["account_url"] == ACCOUNT_URL
 
 
-async def test_the_anonymous_page_never_carries_the_account_link(tmp_path, idp):
-    # This is the one public page that renders the signed-in footer, so it is
+async def test_the_anonymous_app_is_never_handed_the_account_link(tmp_path, idp):
+    # This is the one public page that shows the signed-in footer, so it is
     # the page where "set, but signed out" can actually go wrong.
     app, _ = build_app(tmp_path, idp, web={"account_page_url": ACCOUNT_URL})
     async with web_client(app) as client:
-        page = await client.get(ACCEPT_PAGE_PATH)
-    assert page.status_code == 200
-    assert 'class="identity"' not in page.text
-    assert ACCOUNT_URL not in page.text
-    assert ">Account</a>" not in page.text
+        answer = (await client.get(ACCEPT_SESSION_PATH)).json()
+    assert answer["account_url"] is None
+    assert ACCOUNT_URL not in json.dumps(answer)
 
 
 async def test_an_anonymous_redemption_is_refused_by_the_guard(tmp_path, idp):
@@ -491,41 +440,6 @@ def test_a_public_page_router_not_on_the_allowlist_is_refused(tmp_path, idp):
 # ===========================================================================
 # The token: never in a URL, a document, or a log
 # ===========================================================================
-
-
-def test_the_page_markup_carries_no_token_and_builds_no_url_from_one():
-    """The rendered document, checked against a real secret in a real session.
-
-    The server never has the token on this request, so the strong form of the
-    claim is about the *shape* of the page: nothing it renders is derived
-    from a token, no URL it constructs carries one, and its only input field
-    is the layout's CSRF token.
-    """
-
-    now = int(datetime.now(tz=timezone.utc).timestamp())
-    session = WebSession(
-        user="subject-alice",
-        name="Alice",
-        email=INVITEE_EMAIL,
-        csrf="csrf-value",
-        issued_at=now,
-        expires_at=now + 600,
-        email_verified=True,
-    )
-    document = acceptance_page(root_path="/nexus", session=session)
-    # The document minus the script: the script's own contract is asserted
-    # separately, and its text mentions attribute names this check reads for.
-    markup = re.sub(r"<script>.*?</script>", "", document, flags=re.S)
-
-    for url in re.findall(r'(?:href|action|src)="([^"]*)"', markup):
-        assert "token" not in url.lower()
-        assert "#" not in url
-    inputs = re.findall(r"<input[^>]*>", markup)
-    assert inputs == ['<input type="hidden" name="csrf_token" value="csrf-value">']
-    # Root path honoured everywhere a URL is built, so a proxied deployment
-    # does not send the invitee to a 404 instead of sign-in.
-    assert 'data-redeem="/nexus/invite/accept/redeem"' in markup
-    assert 'href="/nexus/web/signin?' in markup
 
 
 async def test_the_secret_never_appears_in_a_request_line_or_a_referer(tmp_path, idp):
@@ -630,11 +544,10 @@ async def test_an_unusable_body_answers_one_uniform_outcome(tmp_path, idp, body)
     app, service = build_app(tmp_path, idp)
     async with web_client(app) as client:
         await signed_in(client, idp)
-        page = await client.get(ACCEPT_PAGE_PATH)
         response = await client.post(
             ACCEPT_REDEEM_PATH,
             content=body,
-            headers={"Content-Type": "application/json", "X-CSRF-Token": csrf_from(page.text)},
+            headers={"Content-Type": "application/json", "X-CSRF-Token": await csrf_token(client)},
         )
     assert response.status_code == 404
     assert response.json() == {"outcome": OUTCOME_NOT_FOUND}
@@ -645,11 +558,10 @@ async def test_an_oversized_body_is_refused_before_it_is_parsed(tmp_path, idp):
     app, service = build_app(tmp_path, idp)
     async with web_client(app) as client:
         await signed_in(client, idp)
-        page = await client.get(ACCEPT_PAGE_PATH)
         response = await client.post(
             ACCEPT_REDEEM_PATH,
             content=json.dumps({"token": "a" * 40_000}),
-            headers={"Content-Type": "application/json", "X-CSRF-Token": csrf_from(page.text)},
+            headers={"Content-Type": "application/json", "X-CSRF-Token": await csrf_token(client)},
         )
     assert response.status_code == 413
     assert response.json() == {"outcome": OUTCOME_ERROR}
@@ -677,11 +589,10 @@ async def test_a_chunked_body_cannot_slip_past_the_limit(tmp_path, idp):
     app, service = build_app(tmp_path, idp)
     async with web_client(app) as client:
         await signed_in(client, idp)
-        page = await client.get(ACCEPT_PAGE_PATH)
         response = await client.post(
             ACCEPT_REDEEM_PATH,
             content=stream(),
-            headers={"Content-Type": "application/json", "X-CSRF-Token": csrf_from(page.text)},
+            headers={"Content-Type": "application/json", "X-CSRF-Token": await csrf_token(client)},
         )
     assert "content-length" not in {k.lower() for k in response.request.headers}
     assert response.request.headers.get("transfer-encoding") == "chunked"
@@ -699,13 +610,12 @@ async def test_a_content_length_that_understates_the_body_does_not_help(tmp_path
     oversized = json.dumps({"token": "a" * 40_000}).encode()
     async with web_client(app) as client:
         await signed_in(client, idp)
-        page = await client.get(ACCEPT_PAGE_PATH)
         response = await client.post(
             ACCEPT_REDEEM_PATH,
             content=oversized,
             headers={
                 "Content-Type": "application/json",
-                "X-CSRF-Token": csrf_from(page.text),
+                "X-CSRF-Token": await csrf_token(client),
                 # Understated by three orders of magnitude.
                 "Content-Length": "12",
             },
@@ -721,13 +631,12 @@ async def test_a_body_at_the_cap_still_works(tmp_path, idp):
     app, service = build_app(tmp_path, idp)
     async with web_client(app) as client:
         await signed_in(client, idp)
-        page = await client.get(ACCEPT_PAGE_PATH)
         body = json.dumps({"token": SENTINEL_TOKEN, "padding": "p" * 1000}).encode()
         assert len(body) < MAX_REDEEM_BODY_BYTES
         response = await client.post(
             ACCEPT_REDEEM_PATH,
             content=body,
-            headers={"Content-Type": "application/json", "X-CSRF-Token": csrf_from(page.text)},
+            headers={"Content-Type": "application/json", "X-CSRF-Token": await csrf_token(client)},
         )
     assert response.status_code == 200
     assert len(service.calls) == 1
@@ -750,8 +659,7 @@ async def test_only_a_json_body_is_accepted_at_all(tmp_path, idp, content_type):
     app, service = build_app(tmp_path, idp)
     async with web_client(app) as client:
         await signed_in(client, idp)
-        page = await client.get(ACCEPT_PAGE_PATH)
-        headers = {"X-CSRF-Token": csrf_from(page.text)}
+        headers = {"X-CSRF-Token": await csrf_token(client)}
         if content_type:
             headers["Content-Type"] = content_type
         response = await client.post(ACCEPT_REDEEM_PATH, content=b"token=x", headers=headers)
@@ -771,10 +679,9 @@ async def test_a_form_encoded_body_is_refused_before_the_csrf_check_reads_it(tmp
     app, service = build_app(tmp_path, idp)
     async with web_client(app) as client:
         await signed_in(client, idp)
-        page = await client.get(ACCEPT_PAGE_PATH)
         response = await client.post(
             ACCEPT_REDEEM_PATH,
-            data={"csrf_token": csrf_from(page.text), "token": SENTINEL_TOKEN},
+            data={"csrf_token": await csrf_token(client), "token": SENTINEL_TOKEN},
         )
     assert response.status_code == 415
     assert response.json() == {"outcome": OUTCOME_ERROR}
@@ -792,8 +699,7 @@ async def test_every_refusal_issued_before_the_body_is_read_closes_the_connectio
     """
 
     async def refusals(client):
-        page = await client.get(ACCEPT_PAGE_PATH)
-        csrf = csrf_from(page.text)
+        csrf = await csrf_token(client)
         json_headers = {"Content-Type": "application/json", "X-CSRF-Token": csrf}
         body = json.dumps({"token": SENTINEL_TOKEN})
         return {
@@ -883,13 +789,20 @@ def test_every_terminal_state_the_service_can_raise_has_a_page_outcome():
 
 
 def test_every_outcome_word_has_copy_on_the_page():
-    document = acceptance_page(root_path="")
-    states = rendered_states(document)
-    assert states == set(PAGE_STATES)
+    """Every word the endpoint can answer is a state the app has copy for."""
+
     for _exception, outcome, _status in invite_router.TERMINAL_OUTCOMES:
-        assert outcome in states
-    assert OUTCOME_ACCEPTED in states
-    assert OUTCOME_ERROR in states
+        assert outcome in PAGE_STATES
+    for outcome in (
+        OUTCOME_ACCEPTED,
+        OUTCOME_ERROR,
+        OUTCOME_UNAVAILABLE,
+        OUTCOME_REAUTHENTICATION_REQUIRED,
+    ):
+        assert outcome in PAGE_STATES
+    for state, copy in PAGE_COPY["pages"].items():
+        assert copy["heading"], state
+        assert copy["paragraphs"], state
 
 
 @pytest.mark.parametrize(
@@ -968,10 +881,12 @@ async def test_the_flow_survives_the_sign_in_round_trip(tmp_path, idp):
     app, service = build_app(tmp_path, idp)
     async with web_client(app) as client:
         anonymous = await client.get(ACCEPT_PAGE_PATH)
-        assert 'data-signed-in="false"' in anonymous.text
+        assert anonymous.status_code == 200
+        assert (await client.get(ACCEPT_SESSION_PATH)).json()["signed_in"] is False
 
-        # Follow the page's own sign-in link, target and all.
-        href = re.search(r'href="(/web/signin\?[^"]+)"', anonymous.text).group(1)
+        # The app's own create-account link (`CREATE_ACCOUNT_URL` in its
+        # `links.ts`), as a browser resolves it from the page's address.
+        href = "/web/signin?next=%2Finvite%2Faccept&register=1"
         start = await client.get(href)
         assert start.status_code == 303
         params = {key: value[0] for key, value in parse_qs(urlsplit(start.headers["location"]).query).items()}
@@ -983,7 +898,8 @@ async def test_the_flow_survives_the_sign_in_round_trip(tmp_path, idp):
         assert callback.headers["location"] == ACCEPT_PAGE_PATH
 
         landed = await client.get(ACCEPT_PAGE_PATH)
-        assert 'data-signed-in="true"' in landed.text
+        assert landed.status_code == 200
+        assert (await client.get(ACCEPT_SESSION_PATH)).json()["signed_in"] is True
         response = await redeem(client)
 
     assert response.status_code == 200
@@ -1062,48 +978,6 @@ def test_the_session_round_trips_the_flag_and_refuses_a_string():
 
 
 # ===========================================================================
-# The script, as a contract
-# ===========================================================================
-
-
-def test_the_script_reads_the_fragment_and_immediately_strips_it():
-    assert "location.hash" in ACCEPTANCE_SCRIPT
-    assert "history.replaceState" in ACCEPTANCE_SCRIPT
-    # The strip happens inside the same function that reads the fragment, so
-    # there is no path that banks the token and leaves the URL alone.
-    reader = ACCEPTANCE_SCRIPT.split("function takeFragment()", 1)[1].split("\n  }", 1)[0]
-    assert "replaceState" in reader
-
-
-def test_the_script_sends_the_token_only_as_a_json_post_body():
-    assert 'method: "POST"' in ACCEPTANCE_SCRIPT
-    assert "JSON.stringify({ token: token })" in ACCEPTANCE_SCRIPT
-    # The token is never concatenated into anything — no URL, no markup, no
-    # query string, no element value.
-    for forbidden in (
-        "+ token",
-        "token +",
-        "?token",
-        "#token=",
-        "innerHTML",
-        "outerHTML",
-        "document.write",
-        "document.cookie",
-        "setAttribute",
-        "eval(",
-        "localStorage",
-    ):
-        assert forbidden not in ACCEPTANCE_SCRIPT, forbidden
-
-
-def test_the_script_names_no_state_the_page_does_not_render():
-    named = set(re.findall(r'(?:present|show)\("([^"]+)"\)', ACCEPTANCE_SCRIPT))
-    assert named
-    assert named <= set(PAGE_STATES)
-    assert rendered_states(acceptance_page(root_path="")) == set(PAGE_STATES)
-
-
-# ===========================================================================
 # The verified address must be current, not merely once-asserted
 # ===========================================================================
 
@@ -1150,16 +1024,15 @@ async def test_a_stale_verified_address_cannot_redeem(tmp_path, idp):
     async with web_client(app) as client:
         await signed_in(client, idp)
         _age_session(client, VERIFIED_CLAIM_MAX_AGE_SECONDS + 60)
-        page = await client.get(ACCEPT_PAGE_PATH)
+        answer = (await client.get(ACCEPT_SESSION_PATH)).json()
         response = await redeem(client)
 
     assert response.status_code == 401
     assert response.json() == {"outcome": OUTCOME_REAUTHENTICATION_REQUIRED}
     assert service.calls == [], "no redemption may run on a stale assertion"
-    # And the page said so before the click, to save a refusal.
-    container = re.search(r"<div (id=\"accept\"[^>]*)>", page.text).group(1)
-    assert 'data-signed-in="true"' in container
-    assert 'data-claims-current="false"' in container
+    # And the app was told so before the click, to save a refusal.
+    assert answer["signed_in"] is True
+    assert answer["claims_current"] is False
 
 
 async def test_the_endpoint_refuses_even_when_the_page_said_otherwise(tmp_path, idp):
@@ -1172,9 +1045,9 @@ async def test_the_endpoint_refuses_even_when_the_page_said_otherwise(tmp_path, 
     app, service = build_app(tmp_path, idp)
     async with web_client(app) as client:
         await signed_in(client, idp)
-        fresh_page = await client.get(ACCEPT_PAGE_PATH)
-        assert 'data-claims-current="true"' in fresh_page.text
-        csrf = csrf_from(fresh_page.text)
+        fresh = (await client.get(ACCEPT_SESSION_PATH)).json()
+        assert fresh["claims_current"] is True
+        csrf = fresh["csrf_token"]
         # Time passes between reading the page and clicking Accept.
         _age_session(client, VERIFIED_CLAIM_MAX_AGE_SECONDS + 1)
         response = await client.post(
@@ -1211,15 +1084,9 @@ async def test_re_authentication_re_reads_the_claims_from_the_idp(tmp_path, idp)
     async with web_client(app) as client:
         await signed_in(client, idp, verified=True)
         _age_session(client, VERIFIED_CLAIM_MAX_AGE_SECONDS + 60)
-        stale = await client.get(ACCEPT_PAGE_PATH)
-
-        # The page's own renew link, followed exactly as a person would.
-        section = re.search(r'<section data-state="reauthentication_required".*?</section>', stale.text, re.S).group(0)
-        # Unescaped the way a browser does: the attribute is HTML-escaped, so
-        # the raw text carries `&amp;` and an HTTP client would send it
-        # literally. Following the escaped form is not what a person does.
-        href = html.unescape(re.search(r'href="([^"]+)"', section).group(1))
-        assert "renew=1" in href
+        # The app's own renew link (`RENEW_SIGN_IN_URL` in its `links.ts`), as
+        # a browser resolves it from the page's address.
+        href = "/web/signin?next=%2Finvite%2Faccept&renew=1"
 
         idp.claims_override = {"email": INVITEE_EMAIL, "email_verified": False}
         start = await client.get(href)
@@ -1230,8 +1097,8 @@ async def test_re_authentication_re_reads_the_claims_from_the_idp(tmp_path, idp)
         assert callback.status_code == 303
         assert callback.headers["location"] == ACCEPT_PAGE_PATH
 
-        renewed = await client.get(ACCEPT_PAGE_PATH)
-        assert 'data-claims-current="true"' in renewed.text
+        renewed = (await client.get(ACCEPT_SESSION_PATH)).json()
+        assert renewed["claims_current"] is True
         response = await redeem(client)
 
     # Redemption now runs — on the withdrawn verification, which the service
@@ -1310,7 +1177,6 @@ def test_a_future_dated_session_is_not_fresh_forever():
 def test_reauthentication_keeps_the_token_and_has_copy():
     assert OUTCOME_REAUTHENTICATION_REQUIRED not in SETTLED_OUTCOMES
     assert OUTCOME_REAUTHENTICATION_REQUIRED in PAGE_STATES
-    assert OUTCOME_REAUTHENTICATION_REQUIRED in rendered_states(acceptance_page(root_path=""))
 
 
 # ===========================================================================
@@ -1372,9 +1238,19 @@ def test_the_acceptance_page_itself_passes_the_seam(tmp_path, idp):
     # The check has to admit the one router that legitimately uses it, or it
     # is only proving that nothing can be public.
     surface = build_web_surface(Config.parse(web_values(tmp_path, idp)))
-    public, gated = invite_router.make_routers(memberships_enabled=True, require_verified_email=True)
+    public, gated = invite_router.make_routers(
+        memberships_enabled=True,
+        require_verified_email=True,
+        bundle=BuiltBundle.at(built_dist(tmp_path) / "registration"),
+    )
     make_router(surface, page_routers=[gated], public_page_routers=[public])
-    assert [route.methods for route in public.routes] == [{"GET"}]
+    # The page, its session answer, and its bundle files: every one a GET.
+    assert sorted(route.path for route in public.routes) == [
+        "/invite/accept",
+        "/invite/accept/session",
+        "/invite/assets/{filename}",
+    ]
+    assert all(route.methods == {"GET"} for route in public.routes)
 
 
 def test_the_settled_list_is_exactly_the_states_that_kill_the_invitation():
@@ -1386,43 +1262,13 @@ def test_the_settled_list_is_exactly_the_states_that_kill_the_invitation():
         "invitation_email_mismatch",
         "email_not_verified",
         "already_in_organization",
+        "organization_creation_refused",
         "invitations_unavailable",
+        OUTCOME_REAUTHENTICATION_REQUIRED,
         OUTCOME_ERROR,
     ):
         assert recoverable not in SETTLED_OUTCOMES
-    assert set(SETTLED_OUTCOMES) <= set(PAGE_STATES)
-    for name in SETTLED_OUTCOMES:
-        assert f'"{name}"' in ACCEPTANCE_SCRIPT
-
-
-def test_the_script_is_small_enough_to_audit():
-    # Not a style rule: the CSP exception is justified by the script being
-    # readable in one sitting, and that justification should fail loudly if
-    # the script grows into an application.
-    assert len(ACCEPTANCE_SCRIPT.splitlines()) < 120
-
-
-def test_redemption_waits_for_a_deliberate_click():
-    """Joining an organization is permanent here, so it needs a gesture.
-
-    Without this, anyone able to issue an invitation to a known address could
-    bind that address's login to their organization by getting the person to
-    open a URL — no click, no notice, and the CSRF token is no help because
-    the page reads it from its own DOM.
-    """
-
-    document = acceptance_page(root_path="")
-    ready = re.search(r'<section data-state="ready".*?</section>', document, re.S).group(0)
-    assert f'<button type="button" {ACCEPT_BUTTON_ATTRIBUTE}>' in ready
-    # The fetch is reachable only from the click handler, never from the
-    # top-level flow: the last thing the script does on load is `present`.
-    assert "button.addEventListener" in ACCEPTANCE_SCRIPT
-    handler = ACCEPTANCE_SCRIPT.split("button.addEventListener", 1)[1]
-    assert "submit();" in handler
-    assert ACCEPTANCE_SCRIPT.count("submit();") == 1
-    assert "fetch(" not in ACCEPTANCE_SCRIPT.split("function submit()", 1)[0]
-    # And the button is not in a form, so no markup path can submit the page.
-    assert "<form" not in ready
+    assert SETTLED_OUTCOMES <= PAGE_STATES
 
 
 # ===========================================================================
@@ -1666,7 +1512,7 @@ def _sign_in_over_http(client: _LoopbackBrowser, idp: _StubIdp) -> str:
     idp.claims_override = {"email": INVITEE_EMAIL, "email_verified": True}
     callback = client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
     assert callback.status_code == 303, callback.text
-    return csrf_from(client.get(ACCEPT_PAGE_PATH).text)
+    return client.get(ACCEPT_SESSION_PATH).json()["csrf_token"]
 
 
 def test_an_oversize_request_does_not_hold_the_connection(tmp_path, idp):
@@ -1985,165 +1831,26 @@ async def test_live_an_expired_invitation_renders_its_own_state(live_app, idp, l
     assert datetime.now(tz=timezone.utc) - issued.invitation.created_at < timedelta(minutes=5)
 
 
-def test_the_not_verified_copy_does_not_promise_mail_a_relaxed_deployment_never_sends() -> None:
-    """Review finding: this change made the invitation email's copy
-    configuration-aware and left the page's alone.
-
-    On a deployment with `requireVerifiedEmail: false`, `email_not_verified` is
-    reached only when the token carries no usable address -- not because an
-    address is unverified. The strict copy tells the reader to "follow the
-    verification link that was sent to your mailbox", and no such mail exists
-    there, so the page would send people looking for something that was never
-    sent. On the surface they are actually looking at.
-    """
-
-    strict = acceptance_page(require_verified_email=True)
-    relaxed = acceptance_page(require_verified_email=False)
-
-    # The strict copy now covers both conditions this state can mean -- an
-    # unconfirmed address, and a sign-in that carried none -- because the second
-    # is reachable on a strict deployment too when a client's scopes omit
-    # `email`, and "follow the verification link" is no remedy for it.
-    assert "follow its link" in strict
-    assert "confirmation email" in strict
-    assert "confirmation email" not in relaxed
-    assert "could not read an email address" in relaxed
-
-    # The sign-in state too. Its mention is hedged ("if you have to open an
-    # email-verification link") so it was never false, only noise about a step
-    # that does not happen -- on the page somebody reads while confused.
-    assert "email-verification link" in strict
-    assert "email-verification link" not in relaxed
-
-
-def test_no_state_mentions_verification_on_a_relaxed_deployment() -> None:
-    """The sweep, rather than a list of the two states someone remembered.
-
-    A future state whose copy mentions verification would be caught here even
-    if nobody thought to add it to `RELAXED_PARAGRAPHS` -- which is the failure
-    mode of an override table.
-    """
-
-    relaxed = acceptance_page(require_verified_email=False)
-    assert "verification" not in relaxed.lower()
-    assert "verify" not in relaxed.lower()
-
-
-def test_both_modes_render_exactly_the_same_states() -> None:
-    """Copy varies; the wire contract does not.
-
-    If a mode ever added or dropped a state, the client script and the service's
-    outcome mapping would disagree with the page -- so this pins that the
-    override table is a copy table and nothing more.
-    """
-
-    # `rendered_states` already exists in this file and anchors on `<section`;
-    # the local copy this replaced would have counted a `data-state` on any
-    # other element the page grows later, reporting a state no section renders.
-    assert rendered_states(acceptance_page(require_verified_email=True)) == rendered_states(
-        acceptance_page(require_verified_email=False)
-    )
-    assert rendered_states(acceptance_page(require_verified_email=True)) == set(PAGE_STATES)
-
-
-def test_every_override_names_a_state_that_exists() -> None:
-    """A key naming no state renders nothing and nothing notices.
-
-    `overrides.get(name, ...)` is driven by iteration over `_SECTIONS`, so a
-    typo'd or stale key is silently inert -- the override table's own failure
-    mode. Neither of the tests above closes it: one compares state names, which
-    are identical either way, and the other only catches today's keys because
-    both of their strict texts happen to mention verification.
-    """
-
-    from collab_hub_api.web.acceptance import RELAXED_HEADINGS, RELAXED_PARAGRAPHS
-
-    for table in (RELAXED_PARAGRAPHS, RELAXED_HEADINGS):
-        assert set(table) <= set(PAGE_STATES), sorted(set(table) - set(PAGE_STATES))
-
-
-@pytest.mark.parametrize(
-    ("table", "entry", "message"),
-    [
-        ("RELAXED_PARAGRAPHS", {"no_such_state": {0: "x"}}, "states that do not exist"),
-        ("RELAXED_HEADINGS", {"no_such_state": "x"}, "states that do not exist"),
-        ("RELAXED_PARAGRAPHS", {"email_not_verified": {99: "x"}}, "out of range"),
-    ],
-)
-def test_the_import_time_validator_refuses_a_bad_table(monkeypatch, table, entry, message) -> None:
-    """The validator's raise branches, which nothing exercised.
-
-    `test_every_override_names_a_state_that_exists` re-asserts the same set
-    relation from outside rather than constructing a bad table, so the branches
-    that make the assertion enforceable were the file's uncovered lines --
-    93% patch coverage against a 90 floor, so CI had nothing to say either.
-    """
-
-    from collab_hub_api.web import acceptance
-
-    monkeypatch.setattr(acceptance, table, entry)
-    with pytest.raises(ValueError, match=message):
-        acceptance._validate_overrides()
-
-
-def test_copy_that_does_not_vary_is_stored_once() -> None:
-    """The override table must not duplicate text it does not change.
-
-    The first version overrode whole sections, so the sign-in heading and its
-    first paragraph were byte-identical copies -- and rewording the shared text
-    would have left relaxed deployments on the old wording forever. Indexing by
-    paragraph keeps one copy; this asserts no entry has quietly gone back to
-    restating something unchanged.
-    """
-
-    from collab_hub_api.web.acceptance import (
-        _SECTIONS,
-        RELAXED_HEADINGS,
-        RELAXED_PARAGRAPHS,
-    )
-
-    strict_paragraphs = {name: paragraphs for name, _, paragraphs in _SECTIONS}
-    strict_headings = {name: heading for name, heading, _ in _SECTIONS}
-
-    for state, overrides in RELAXED_PARAGRAPHS.items():
-        for index, text in overrides.items():
-            assert text != strict_paragraphs[state][index], f"{state}[{index}] overrides with the same text it replaces"
-    # Headings too: a byte-identical entry would pass every other test and
-    # freeze relaxed deployments on wording a later edit moved past.
-    for state, heading in RELAXED_HEADINGS.items():
-        assert heading != strict_headings[state], f"{state} overrides its heading with the same text"
-
-
 @pytest.mark.asyncio
-async def test_the_app_renders_the_page_copy_the_configuration_asks_for(tmp_path, idp) -> None:
-    """The third instance of the wiring seam, which had no test.
+async def test_the_app_is_told_whether_the_deployment_requires_a_verified_address(tmp_path, idp) -> None:
+    """The wiring seam for the page's copy, exercised end to end.
 
-    Builders for the invitation service and the email delivery each got one,
-    because a builder that ignored the setting left the suite green. The page
-    path is the same shape and was missed: changing `core.py`'s
-    `require_verified_email=` to a literal `True` passes all ~1440 tests, while
-    every relaxed deployment's page tells invitees to follow a verification
-    link for mail it never sends -- the defect `RELAXED_PARAGRAPHS` exists to fix.
-
-    So this goes through `make_app` and fetches the page over HTTP, which is
-    the only way the value's whole path is exercised: config -> make_routers ->
-    acceptance_page.
+    Where a verified address is not required, the app must not tell invitees to
+    follow a verification link for mail the deployment never sends. Which copy
+    it shows is its own business (and its own suite's); what it shows it *on* is
+    this value, and a builder that ignored the setting would leave every other
+    test green. So this goes through `make_app` and asks over HTTP, which is the
+    only way the value's whole path is exercised: config -> make_routers ->
+    the session answer.
     """
 
-    from collab_hub_api.web.acceptance import ACCEPT_PAGE_PATH
-
-    for flag, expect_verification_copy in ((True, True), (False, False)):
-        # No Postgres URL. The page route mounts on `config.web.enabled` alone,
-        # never on invitation-service availability, so the URL bought nothing --
-        # and it was not free: `make_app`'s schema-version check dialled it,
-        # taking the test from 0.17s to 10.2s in repeated connection failures,
-        # with one run ending in a `PythonFinalizationError` from the pool's
-        # `__del__`. The comment that used to sit here claimed nothing connects.
+    for flag in (True, False):
+        # No Postgres URL: the route mounts on `config.web.enabled` alone, and
+        # a URL here would have `make_app`'s schema-version check dial it.
         values = web_values(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL})
         values["frames"]["invitations"] = {"require_verified_email": flag}
         app = make_app(Config.parse(values))
         async with web_client(app) as client:
-            response = await client.get(ACCEPT_PAGE_PATH)
+            response = await client.get(ACCEPT_SESSION_PATH)
         assert response.status_code == 200
-        mentions = "verification" in response.text.lower()
-        assert mentions is expect_verification_copy, f"require_verified_email={flag} rendered the wrong copy"
+        assert response.json()["require_verified_email"] is flag

@@ -52,7 +52,7 @@ from ..frames.observability import REQUEST_COUNT, UNMATCHED_PATH_LABEL, access_l
 from .authz import on_web_surface, signin_redirect_target
 from .pages import SECURITY_HEADERS, authorization_unavailable_page, page_response
 from .session import SESSION_COOKIE
-from .surface import PUBLIC_WEB_PATHS, WEB_SURFACE_PREFIXES, answers_json
+from .surface import PUBLIC_WEB_PATHS, WEB_SURFACE_PREFIXES, answers_json, is_public_web_path
 
 logger = logging.getLogger("frames_server.web")
 
@@ -123,7 +123,7 @@ def _is_public(path: str) -> bool:
     is the shape of a loop and should not be in the code at all.
     """
 
-    if path in PUBLIC_WEB_PATHS:
+    if is_public_web_path(path):
         return True
     return len(path) > 1 and path.endswith("/") and path[:-1] in PUBLIC_WEB_PATHS
 

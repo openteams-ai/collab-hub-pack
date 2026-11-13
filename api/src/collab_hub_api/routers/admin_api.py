@@ -46,10 +46,14 @@ from ..frames.connector_status import connector_statuses
 from ..frames.group_membership import GroupMembershipError
 from ..frames.invitation_email import DELIVERY_PROVIDER_ACCEPTED, DELIVERY_UNKNOWN
 from ..frames.invitations import (
+    MAX_ORGANIZATION_NAME_LENGTH,
     InvitationService,
     InvitationsUnavailableError,
     LiveInvitationExists,
+    OrganizationCreationRefusedError,
+    OrgNotFoundError,
     effective_status,
+    validate_invitation_role,
 )
 from ..frames.model_catalog import ModelCatalogError
 from ..frames.platform_role_admin import PlatformRoleChangeRefused
@@ -59,12 +63,13 @@ from ..web.authz import require_csrf, require_operator, resolve_platform_role
 from ..web.operator import operator_context
 from ..web.session import WebSession
 from ..web.surface import ADMIN_API_PREFIX
-from .admin import issue_invitation, revoke_invitation
+from .admin import create_organization, issue_invitation, revoke_invitation
 
 logger = logging.getLogger("frames_server.web")
 
 DEFAULT_PAGE_SIZE = 50
 INVITATION_LISTING_LIMIT = 100
+ORGANIZATION_LISTING_LIMIT = 100
 
 
 def _active_role_rows(request: Request, user_ids: list[str]) -> dict[str, dict]:
@@ -99,13 +104,28 @@ def _running_version() -> str:
 
 
 class InvitationRequest(BaseModel):
-    """One address to invite.
+    """One address to invite, and where to.
 
     Bounded here as well as by the form on the server-rendered page: this
     endpoint is reachable without that page, so its own limits have to hold.
+
+    ``org_id`` names the organization to invite into, one that exists or one
+    the operator just created (``POST /admin/api/organizations``). The panel
+    never issues an invitation without one: that is the product rule, so a
+    body without it is refused with its own outcome rather than a validation
+    error. ``role`` is the role to grant there (``owner`` or ``member``,
+    default member).
     """
 
     email: str = Field(min_length=3, max_length=320)
+    org_id: str | None = Field(default=None, min_length=1, max_length=64)
+    role: str | None = Field(default=None, max_length=16)
+
+
+class OrganizationRequest(BaseModel):
+    """One organization to create up front, by name."""
+
+    name: str = Field(min_length=1, max_length=MAX_ORGANIZATION_NAME_LENGTH)
 
 
 class ConnectorSwitch(BaseModel):
@@ -177,12 +197,15 @@ def make_router() -> APIRouter:
     def admin_invitations(
         service: Annotated[InvitationService, Depends(get_invitation_service)],
         offset: Annotated[int, Query(ge=0)] = 0,
+        org_id: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
     ):
         """One page of every invitation on this deployment, newest first.
 
         The same listing the server-rendered page shows, read through the same
         service call, so the panel and that page cannot disagree about what
-        exists. Issuing and revoking are the two endpoints below.
+        exists. With ``org_id`` it is one organization's invitations only, the
+        listing the owner page reads, paged the same way. Issuing and revoking
+        are the two endpoints below.
 
         ``next_offset`` is where the following page starts, or ``None`` on the
         last page. It is an offset because that is what the service pages by:
@@ -194,8 +217,12 @@ def make_router() -> APIRouter:
         """
 
         try:
-            page = service.list_all(limit=INVITATION_LISTING_LIMIT, offset=offset)
+            if org_id is None:
+                page = service.list_all(limit=INVITATION_LISTING_LIMIT, offset=offset)
+            else:
+                page = service.list_for_org(org_id, limit=INVITATION_LISTING_LIMIT, offset=offset)
             now = service.server_now()
+            names = service.organization_names([row.org_id for row in page.invitations if row.org_id])
         except InvitationsUnavailableError:
             return JSONResponse({"error": "invitations_unavailable"}, status_code=503)
 
@@ -207,6 +234,9 @@ def make_router() -> APIRouter:
                     "status": effective_status(row, now),
                     "created_at": row.created_at.isoformat() if row.created_at else None,
                     "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+                    "org_id": row.org_id,
+                    "organization": names.get(row.org_id) if row.org_id else None,
+                    "role": row.granted_role,
                 }
                 for row in page.invitations
             ],
@@ -223,12 +253,13 @@ def make_router() -> APIRouter:
         delivery: Annotated[object, Depends(get_invitation_email_delivery)],
         _csrf: Annotated[object, Depends(require_csrf)],
     ):
-        """Invite one address, and send them the link.
+        """Invite one address into an organization, and send them the link.
 
         The same in-process call the server-rendered page makes, so the two
         cannot drift: one live invitation per address, enforced inside the
-        audited transaction under an advisory lock, and the organization
-        created on acceptance with the accepter as its owner.
+        audited transaction under an advisory lock. Unlike that page, the
+        panel always names the organization, and may seat its first owner
+        with ``role``.
 
         **The secret never appears in the response.** It is read once, handed
         to the mail adapter, and dropped -- exactly as on the page. A token
@@ -244,9 +275,18 @@ def make_router() -> APIRouter:
         address = body.email.strip()
         if "@" not in address or address.startswith("@") or address.endswith("@"):
             return JSONResponse({"outcome": "invalid_email"}, status_code=400)
+        if body.org_id is None:
+            return JSONResponse({"outcome": "organization_required"}, status_code=400)
+        try:
+            role = validate_invitation_role(body.role, org_id=body.org_id)
+        except ValueError:
+            return JSONResponse({"outcome": "invalid_role"}, status_code=400)
 
         try:
-            outcome = issue_invitation(actor, service, email=address)
+            organization_name = service.organization_name(body.org_id)
+            outcome = issue_invitation(actor, service, email=address, org_id=body.org_id, role=role)
+        except OrgNotFoundError:
+            return JSONResponse({"outcome": "organization_not_found"}, status_code=404)
         except InvitationsUnavailableError:
             return JSONResponse({"outcome": "unavailable"}, status_code=503)
 
@@ -261,7 +301,7 @@ def make_router() -> APIRouter:
             invitation_id=invitation.id,
             recipient=invitation.email,
             invitation_secret=outcome.raw_secret.reveal(),
-            organization_name=None,
+            organization_name=organization_name,
             expires_at=invitation.expires_at,
         )
         if delivered.status == DELIVERY_PROVIDER_ACCEPTED:
@@ -275,7 +315,15 @@ def make_router() -> APIRouter:
             "admin_api_invitation_issued",
             extra={"invitation_id": invitation.id, "delivery_status": delivered.status},
         )
-        return JSONResponse({"outcome": result, "email": invitation.email}, status_code=201)
+        return JSONResponse(
+            {
+                "outcome": result,
+                "email": invitation.email,
+                "org_id": invitation.org_id,
+                "role": invitation.granted_role,
+            },
+            status_code=201,
+        )
 
     @router.post("/invitations/{invitation_id}/revoke")
     def admin_revoke_invitation(
@@ -291,6 +339,68 @@ def make_router() -> APIRouter:
         except InvitationsUnavailableError:
             return JSONResponse({"outcome": "unavailable"}, status_code=503)
         return {"outcome": "revoked"}
+
+    @router.get("/organizations")
+    def admin_organizations(
+        service: Annotated[InvitationService, Depends(get_invitation_service)],
+        _actor: Annotated[object, Depends(operator_context)],
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ):
+        """One page of every organization, by name, with its active headcount.
+
+        What the invitation form offers when an operator invites into an
+        existing organization. ``name`` is ``null`` while an organization still
+        carries the placeholder, so the panel can say so in its own words.
+        """
+
+        try:
+            page = service.list_organizations(limit=ORGANIZATION_LISTING_LIMIT, offset=offset)
+        except InvitationsUnavailableError:
+            return JSONResponse({"error": "invitations_unavailable"}, status_code=503)
+
+        return {
+            "organizations": [
+                {
+                    "id": org.id,
+                    "name": org.name,
+                    "members": org.members,
+                    "created_at": org.created_at.isoformat() if org.created_at else None,
+                }
+                for org in page.organizations
+            ],
+            "has_more": page.has_more,
+            "next_offset": offset + len(page.organizations) if page.has_more else None,
+        }
+
+    @router.post("/organizations", status_code=201)
+    def admin_create_organization(
+        body: OrganizationRequest,
+        actor: Annotated[object, Depends(operator_context)],
+        service: Annotated[InvitationService, Depends(get_invitation_service)],
+        _csrf: Annotated[object, Depends(require_csrf)],
+    ):
+        """Create a named, empty organization, recorded as ``org.create``.
+
+        The first step of inviting people into an organization that does not
+        exist yet. A name the hub will not store (blank, the placeholder, or
+        otherwise refused by the organization-name rule) creates nothing; so
+        does a deployment that declares a single organization.
+        """
+
+        try:
+            created = create_organization(actor, service, name=body.name)
+        except ValueError:
+            return JSONResponse({"outcome": "invalid_name"}, status_code=400)
+        except OrganizationCreationRefusedError:
+            return JSONResponse({"outcome": "organization_creation_refused"}, status_code=409)
+        except InvitationsUnavailableError:
+            return JSONResponse({"outcome": "unavailable"}, status_code=503)
+
+        logger.info("admin_api_organization_created", extra={"org_id": created.id})
+        return JSONResponse(
+            {"outcome": "created", "organization": {"id": created.id, "name": created.name}},
+            status_code=201,
+        )
 
     @router.get("/models")
     def admin_models(request: Request):
@@ -513,6 +623,7 @@ def make_router() -> APIRouter:
     @router.get("/usage")
     def admin_usage(
         usage_store: Annotated[UsageStore, Depends(get_usage_store)],
+        service: Annotated[InvitationService, Depends(get_invitation_service)],
         since: Annotated[AwareDatetime | None, Query()] = None,
         until: Annotated[AwareDatetime | None, Query()] = None,
     ):
@@ -531,13 +642,20 @@ def make_router() -> APIRouter:
             summary = usage_store.hub_summary(since=since, until=until)
         except UsageUnavailableError:
             return JSONResponse({"error": "usage_unavailable"}, status_code=503)
+        # Names are a label on figures that stand on their own, so a hub that
+        # cannot read them still answers, and the panel shows the id instead.
+        try:
+            names = service.organization_names([org.org_id for org in summary.organizations])
+        except InvitationsUnavailableError:
+            names = {}
 
         return {
             "users_total": summary.users_total,
             "events_total": summary.events_total,
             "events": [{"event": event, "count": count} for event, count in summary.events],
             "organizations": [
-                {"org_id": org.org_id, "users": org.users, "events": org.events} for org in summary.organizations
+                {"org_id": org.org_id, "name": names.get(org.org_id), "users": org.users, "events": org.events}
+                for org in summary.organizations
             ],
         }
 

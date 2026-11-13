@@ -459,6 +459,12 @@ class StubInvitations:
 
         return datetime.now(tz=timezone.utc)
 
+    def organization_names(self, org_ids):
+        return {}
+
+    def organization_name(self, org_id):
+        return "Acme Labs"
+
 
 @pytest.mark.asyncio
 async def test_invitations_are_listed_for_the_panel(tmp_path, idp: _StubIdp):
@@ -476,6 +482,44 @@ async def test_invitations_are_listed_for_the_panel(tmp_path, idp: _StubIdp):
     assert [row["status"] for row in rows] == ["pending"]
     # The one-time secret never leaves the service on a listing.
     assert "secret" not in response.text and "token" not in response.text
+
+
+class NamedOrganizations(StubInvitations):
+    def organization_names(self, org_ids):
+        return {org_id: name for org_id, name in {"org-a": "Acme Labs"}.items() if org_id in org_ids}
+
+
+@pytest.mark.asyncio
+async def test_hub_usage_names_each_organization_it_can(tmp_path, idp: _StubIdp):
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        grant_operator(app, idp.sub)
+        app.state.invitation_service = NamedOrganizations()
+        app.state.usage_store.record_event("org-a", "default", "u-1", "chat")
+        app.state.usage_store.record_event("org-b", "default", "u-2", "chat")
+        await sign_in(client, idp, next_path="/web")
+        response = await client.get("/admin/api/usage")
+
+    assert response.status_code == 200
+    names = {org["org_id"]: org["name"] for org in response.json()["organizations"]}
+    assert names == {"org-a": "Acme Labs", "org-b": None}
+
+
+@pytest.mark.asyncio
+async def test_hub_usage_still_answers_when_names_cannot_be_read(tmp_path, idp: _StubIdp):
+    """A memory deployment has no organization store; the figures still matter."""
+
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        grant_operator(app, idp.sub)
+        app.state.usage_store.record_event("org-a", "default", "u-1", "chat")
+        await sign_in(client, idp, next_path="/web")
+        response = await client.get("/admin/api/usage")
+
+    assert response.status_code == 200
+    assert [org["name"] for org in response.json()["organizations"]] == [None]
 
 
 class ManyInvitations(StubInvitations):
@@ -571,7 +615,7 @@ class IssuingInvitations(StubInvitations):
         super().__init__()
         self.live_exists = live_exists
 
-    def create_unless_live(self, auth, *, email, org_id):
+    def create_unless_live(self, auth, *, email, org_id, role=None):
         from datetime import datetime, timedelta, timezone
 
         from collab_hub_api.frames.credentials import InvitationSecret
@@ -619,10 +663,10 @@ class RecordingDelivery:
         return DeliveryOutcome(status=self.status, error_code=None)
 
 
-async def issue(client, email, csrf):
+async def issue(client, email, csrf, org_id="org-1"):
     return await client.post(
         "/admin/api/invitations",
-        json={"email": email},
+        json={"email": email, "org_id": org_id},
         headers={"X-CSRF-Token": csrf},
     )
 
@@ -660,7 +704,7 @@ async def test_issuing_without_a_csrf_token_is_refused(tmp_path, idp: _StubIdp):
         app.state.invitation_service = service
         app.state.invitation_email_delivery = RecordingDelivery()
         await sign_in(client, idp, next_path="/web")
-        response = await client.post("/admin/api/invitations", json={"email": "bob@example.com"})
+        response = await client.post("/admin/api/invitations", json={"email": "bob@example.com", "org_id": "org-1"})
 
     assert response.status_code == 403
     assert service.created == []
@@ -1098,6 +1142,9 @@ async def test_invitations_report_an_unavailable_service(tmp_path, idp: _StubIdp
         def create_unless_live(self, *a, **k):
             raise InvitationsUnavailableError("no database")
 
+        def organization_name(self, org_id):
+            raise InvitationsUnavailableError("no database")
+
         def server_now(self):
             raise InvitationsUnavailableError("no database")
 
@@ -1112,3 +1159,264 @@ async def test_invitations_report_an_unavailable_service(tmp_path, idp: _StubIdp
 
     assert listing.status_code == 503
     assert issued.status_code == 503 and issued.json()["outcome"] == "unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Organizations: created up front, listed for the picker, invited into
+# ---------------------------------------------------------------------------
+
+
+class OrganizationsStub(IssuingInvitations):
+    """The organization half of the service seam: create, list, name."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.organizations: dict[str, str | None] = {"org-1": "Acme Labs", "org-2": None}
+        self.issued: list[tuple[str, str | None, str | None]] = []
+
+    def create_organization(self, auth, *, name):
+        from collab_hub_api.frames.invitations import CreatedOrganization, validate_organization_name
+
+        clean = validate_organization_name(name)
+        org_id = f"org-{len(self.organizations) + 1}"
+        self.organizations[org_id] = clean
+        return CreatedOrganization(id=org_id, name=clean)
+
+    def list_organizations(self, *, limit, offset=0):
+        from datetime import datetime, timezone
+
+        from collab_hub_api.frames.invitations import OrganizationPage, OrganizationSummary
+
+        rows = [
+            OrganizationSummary(id=org_id, name=name, created_at=datetime.now(tz=timezone.utc), members=n)
+            for n, (org_id, name) in enumerate(sorted(self.organizations.items()))
+        ]
+        return OrganizationPage(organizations=rows[offset : offset + limit], has_more=offset + limit < len(rows))
+
+    def organization_names(self, org_ids):
+        return {org_id: self.organizations[org_id] for org_id in org_ids if org_id in self.organizations}
+
+    def organization_name(self, org_id):
+        return self.organizations.get(org_id) or "Unnamed organization"
+
+    def create_unless_live(self, auth, *, email, org_id, role=None):
+        from datetime import datetime, timedelta, timezone
+
+        from collab_hub_api.frames.credentials import InvitationSecret
+        from collab_hub_api.frames.invitations import (
+            Invitation,
+            IssuedInvitation,
+            OrgNotFoundError,
+            validate_invitation_role,
+        )
+
+        validate_invitation_role(role, org_id=org_id)
+        if org_id is not None and org_id not in self.organizations:
+            raise OrgNotFoundError("Organization not found")
+        now = datetime.now(tz=timezone.utc)
+        row = Invitation(
+            id=f"inv-{len(self.issued) + 10}",
+            email=email,
+            org_id=org_id,
+            role=role,
+            status="pending",
+            created_at=now,
+            expires_at=now + timedelta(days=3),
+            created_by="u-1",
+        )
+        self.created.append(email)
+        self.issued.append((email, org_id, role))
+        return IssuedInvitation(invitation=row, raw_secret=InvitationSecret("s3cret-not-real"))
+
+    def list_all(self, *, limit, offset):
+        from datetime import datetime, timedelta, timezone
+
+        from collab_hub_api.frames.invitations import Invitation, InvitationPage
+
+        now = datetime.now(tz=timezone.utc)
+
+        def row(n, org_id, role):
+            return Invitation(
+                id=f"inv-{n}",
+                email=f"user{n}@example.com",
+                org_id=org_id,
+                role=role,
+                status="pending",
+                created_at=now,
+                expires_at=now + timedelta(days=3),
+                created_by="u-1",
+            )
+
+        return InvitationPage(
+            invitations=[row(1, None, None), row(2, "org-1", "owner"), row(3, "org-1", None), row(4, "org-2", None)],
+            has_more=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_panel_creates_an_organization_and_lists_it(tmp_path, idp: _StubIdp):
+    """An operator names the organization first, then invites people into it."""
+
+    app = build_app(tmp_path, idp)
+    service = OrganizationsStub()
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await operator_client(app, idp, client)
+        app.state.invitation_service = service
+        before = await client.get("/admin/api/organizations")
+        created = await client.post(
+            "/admin/api/organizations", json={"name": "  Globex  "}, headers={"X-CSRF-Token": csrf}
+        )
+        after = await client.get("/admin/api/organizations")
+        unprotected = await client.post("/admin/api/organizations", json={"name": "Initech"})
+
+    assert [org["name"] for org in before.json()["organizations"]] == ["Acme Labs", None]
+    assert [org["members"] for org in before.json()["organizations"]] == [0, 1]
+    assert created.status_code == 201
+    assert created.json() == {"outcome": "created", "organization": {"id": "org-3", "name": "Globex"}}
+    assert [org["name"] for org in after.json()["organizations"]] == ["Acme Labs", None, "Globex"]
+    assert after.json()["has_more"] is False and after.json()["next_offset"] is None
+    assert unprotected.status_code == 403
+    assert "Initech" not in service.organizations.values()
+
+
+@pytest.mark.asyncio
+async def test_a_name_the_hub_will_not_store_creates_nothing(tmp_path, idp: _StubIdp):
+    app = build_app(tmp_path, idp)
+    service = OrganizationsStub()
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await operator_client(app, idp, client)
+        app.state.invitation_service = service
+        blank = await client.post("/admin/api/organizations", json={"name": "   "}, headers={"X-CSRF-Token": csrf})
+        placeholder = await client.post(
+            "/admin/api/organizations", json={"name": "Unnamed organization"}, headers={"X-CSRF-Token": csrf}
+        )
+
+    assert (blank.status_code, blank.json()["outcome"]) == (400, "invalid_name")
+    assert (placeholder.status_code, placeholder.json()["outcome"]) == (400, "invalid_name")
+    assert len(service.organizations) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_panel_invites_into_an_existing_organization_with_a_chosen_role(tmp_path, idp: _StubIdp):
+    """The organization and the role travel with the request; the email still goes out."""
+
+    app = build_app(tmp_path, idp)
+    service = OrganizationsStub()
+    delivery = RecordingDelivery()
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await operator_client(app, idp, client)
+        app.state.invitation_service = service
+        app.state.invitation_email_delivery = delivery
+        owner = await client.post(
+            "/admin/api/invitations",
+            json={"email": "alice@example.com", "org_id": "org-1", "role": "owner"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        member = await client.post(
+            "/admin/api/invitations",
+            json={"email": "bob@example.com", "org_id": "org-1"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        nowhere = await client.post(
+            "/admin/api/invitations", json={"email": "carol@example.com"}, headers={"X-CSRF-Token": csrf}
+        )
+
+    assert owner.status_code == 201
+    assert owner.json() == {"outcome": "sent", "email": "alice@example.com", "org_id": "org-1", "role": "owner"}
+    assert member.json()["role"] == "member" and member.json()["org_id"] == "org-1"
+    # Every invitation from the panel names its organization; there is no
+    # "create one when they accept" from here.
+    assert (nowhere.status_code, nowhere.json()["outcome"]) == (400, "organization_required")
+    assert service.issued == [
+        ("alice@example.com", "org-1", "owner"),
+        ("bob@example.com", "org-1", None),
+    ]
+    assert delivery.sent == ["alice@example.com", "bob@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_organization_or_role_issues_nothing(tmp_path, idp: _StubIdp):
+    app = build_app(tmp_path, idp)
+    service = OrganizationsStub()
+    delivery = RecordingDelivery()
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await operator_client(app, idp, client)
+        app.state.invitation_service = service
+        app.state.invitation_email_delivery = delivery
+        missing = await client.post(
+            "/admin/api/invitations",
+            json={"email": "alice@example.com", "org_id": "org-404"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        bad_role = await client.post(
+            "/admin/api/invitations",
+            json={"email": "alice@example.com", "org_id": "org-1", "role": "admin"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        role_without_org = await client.post(
+            "/admin/api/invitations",
+            json={"email": "alice@example.com", "role": "owner"},
+            headers={"X-CSRF-Token": csrf},
+        )
+
+    assert (missing.status_code, missing.json()["outcome"]) == (404, "organization_not_found")
+    assert (bad_role.status_code, bad_role.json()["outcome"]) == (400, "invalid_role")
+    assert (role_without_org.status_code, role_without_org.json()["outcome"]) == (400, "organization_required")
+    assert service.issued == [] and delivery.sent == []
+
+
+@pytest.mark.asyncio
+async def test_the_listing_names_each_invitation_organization_and_role(tmp_path, idp: _StubIdp):
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        await operator_client(app, idp, client)
+        app.state.invitation_service = OrganizationsStub()
+        rows = (await client.get("/admin/api/invitations")).json()["invitations"]
+
+    assert [(row["org_id"], row["organization"], row["role"]) for row in rows] == [
+        (None, None, "owner"),
+        ("org-1", "Acme Labs", "owner"),
+        ("org-1", "Acme Labs", "member"),
+        ("org-2", None, "member"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_listing_can_be_narrowed_to_one_organization(tmp_path, idp: _StubIdp):
+    """The same page-by-page listing, over one organization's invitations only."""
+
+    class ScopedListing(OrganizationsStub):
+        def __init__(self):
+            super().__init__()
+            self.scoped_to: list[str] = []
+
+        def list_for_org(self, org_id, *, limit, offset=0):
+            from collab_hub_api.frames.invitations import InvitationPage
+
+            self.scoped_to.append(org_id)
+            everything = self.list_all(limit=limit, offset=offset).invitations
+            return InvitationPage(invitations=[row for row in everything if row.org_id == org_id], has_more=False)
+
+    app = build_app(tmp_path, idp)
+    service = ScopedListing()
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        await operator_client(app, idp, client)
+        app.state.invitation_service = service
+        everything = (await client.get("/admin/api/invitations")).json()["invitations"]
+        acme = (await client.get("/admin/api/invitations?org_id=org-1")).json()["invitations"]
+        nothing = (await client.get("/admin/api/invitations?org_id=org-2&offset=0")).json()
+
+    assert len(everything) == 4
+    assert [(row["email"], row["organization"], row["role"]) for row in acme] == [
+        ("user2@example.com", "Acme Labs", "owner"),
+        ("user3@example.com", "Acme Labs", "member"),
+    ]
+    assert [row["email"] for row in nothing["invitations"]] == ["user4@example.com"]
+    assert nothing["next_offset"] is None
+    assert service.scoped_to == ["org-1", "org-2"]

@@ -126,14 +126,16 @@ from ..web.acceptance import (
     OUTCOME_REAUTHENTICATION_REQUIRED,
     OUTCOME_REVOKED,
     OUTCOME_UNAVAILABLE,
-    acceptance_page,
+    bundle_missing_page,
 )
 from ..web.authz import WebForbidden, get_web_session, require_csrf, require_web_session
+from ..web.bundle import BuiltBundle
+from ..web.data_statement import DATA_STATEMENT_TEXT
 from ..web.forms import media_type
 from ..web.pages import page_response
 from ..web.request_limits import bounded_body, connection_close_headers, declares_oversize
 from ..web.session import WebSession, verified_claims_are_current
-from ..web.surface import account_page_url
+from ..web.surface import ACCEPT_SESSION_PATH, REGISTRATION_ASSETS_PREFIX, account_page_url
 from .invitations import InvitationAcceptRequest, redeem
 
 logger = logging.getLogger("frames_server.web")
@@ -314,7 +316,9 @@ def _sends_json(request: Request) -> bool:
     return media_type(request) == JSON_CONTENT_TYPE
 
 
-def make_routers(*, memberships_enabled: bool, require_verified_email: bool) -> tuple[APIRouter, APIRouter]:
+def make_routers(
+    *, memberships_enabled: bool, require_verified_email: bool, bundle: BuiltBundle | None
+) -> tuple[APIRouter, APIRouter]:
     """Build the acceptance page's ``(public_router, session_gated_router)``.
 
     ``memberships_enabled`` is ``org_source_resolves_membership()``, resolved once
@@ -331,34 +335,82 @@ def make_routers(*, memberships_enabled: bool, require_verified_email: bool) -> 
 
     @public_router.get(ACCEPT_PAGE_PATH)
     async def accept_page(request: Request) -> Response:
-        """Serve the acceptance page to anyone, signed in or not.
+        """Serve the registration app's document to anyone, signed in or not.
 
-        ``get_web_session`` rather than ``require_web_session``: an invitee
-        arriving for the first time has no session, and bouncing them to
-        Keycloak before telling them what they are being asked to sign in for
-        is how an invitation link looks like a phishing attempt. The page
-        renders the sign-in prompt itself, after its script has banked the
-        fragment.
+        No session is required: an invitee arriving for the first time has
+        none, and bouncing them to Keycloak before telling them what they are
+        being asked to sign in for is how an invitation link looks like a
+        phishing attempt. The app shows the sign-in prompt itself, after it
+        has banked the fragment.
+
+        The document is a build output, the same bytes for everyone. What
+        differs per browser is read by the app from
+        :data:`~..web.surface.ACCEPT_SESSION_PATH`.
         """
 
-        root_path = (request.scope.get("root_path") or "").rstrip("/")
+        if bundle is None:
+            root_path = (request.scope.get("root_path") or "").rstrip("/")
+            return page_response(
+                bundle_missing_page(root_path=root_path),
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return bundle.document()
+
+    @public_router.get(ACCEPT_SESSION_PATH)
+    async def accept_session(request: Request) -> JSONResponse:
+        """What the app needs to know about this browser before it shows a state.
+
+        The server knows three things the app cannot work out: whether this
+        browser holds a web session, whether that session's verified-address
+        claims are recent enough to redeem on, and the CSRF token a redemption
+        must carry. Everything else -- is there an invitation code, what did
+        redemption answer -- is decided in the browser.
+
+        ``claims_current`` is a **hint**, not a control: it saves someone a
+        click that was going to be refused. The redemption endpoint re-checks
+        it, and that check is the one that decides, because the window can
+        lapse between this answer and the click.
+
+        The CSRF token, not the invitation secret: it is bound to this
+        session and useless without the HttpOnly session cookie.
+
+        ``get_web_session`` rather than ``require_web_session``: an invitee
+        arriving for the first time has no session, and has to be told so in an
+        answer the app can read.
+        """
+
         session = get_web_session(request)
-        return page_response(
-            acceptance_page(
-                root_path=root_path,
-                session=session,
-                claims_current=session is not None and verified_claims_are_current(session),
-                # The page's copy for `email_not_verified` describes a
-                # verification email, which a deployment that does not require
-                # verification never sends. Same value the acceptance check and
-                # the invitation email read, fixed for the process's life. The
-                # sections it selects are still built per request, for the
-                # reason `acceptance.py` records at the join.
-                require_verified_email=require_verified_email,
-                account_url=account_page_url(request),
-            ),
-            path=ACCEPT_PAGE_PATH,
+        signed_in = session is not None
+        return JSONResponse(
+            {
+                "signed_in": signed_in,
+                "claims_current": signed_in and verified_claims_are_current(session),
+                "csrf_token": session.csrf if signed_in else None,
+                "identity": (session.name or session.email or session.user) if signed_in else None,
+                # The copy for `email_not_verified` describes a verification
+                # email, which a deployment that does not require verification
+                # never sends. Same value the acceptance check and the
+                # invitation email read, fixed for the process's life.
+                "require_verified_email": require_verified_email,
+                # Shown in full beside the control that performs the one
+                # irreversible act (#146), and sent from the same constant the
+                # canonical page serves, so what the invitee agreed next to and
+                # what the statement page says can never be two different texts.
+                "data_statement": DATA_STATEMENT_TEXT,
+                # The deployment's external account page (#275), drawn beside
+                # Sign out, so only a signed-in browser is handed it.
+                "account_url": (account_page_url(request) or None) if signed_in else None,
+            },
+            headers={"Cache-Control": "no-store"},
         )
+
+    if bundle is not None:
+
+        @public_router.get(REGISTRATION_ASSETS_PREFIX + "{filename}")
+        def registration_asset(filename: str) -> Response:
+            """One of the registration app's bundle files, to anyone."""
+
+            return bundle.asset(filename)
 
     @gated_router.post(ACCEPT_REDEEM_PATH)
     async def redeem_invitation(

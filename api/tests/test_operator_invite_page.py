@@ -222,7 +222,7 @@ class FakeInvitationService:
         self.plain_create_calls.append({"email": email, "org_id": org_id})
         raise AssertionError("the operator page must call create_unless_live, not create")
 
-    def create_unless_live(self, ctx, *, email, org_id):
+    def create_unless_live(self, ctx, *, email, org_id, role=None):
         self._guard()
         self.issue_calls.append({"actor": ctx.user, "email": email, "org_id": org_id})
         if self.issue_result is not None:
@@ -318,6 +318,19 @@ def csrf_from(document: str) -> str:
     match = re.search(r'name="csrf_token" value="([^"]+)"', document)
     assert match, "every form on this surface carries the CSRF token"
     return match.group(1)
+
+
+def page_fields(document: str) -> list[str]:
+    """The ``name`` of every input in the page's own content.
+
+    Scoped to ``<main>``: the signed-in frame around it carries forms of its
+    own (the theme switch, sign-out), and these tests are about what *this
+    page* asks for.
+    """
+
+    main = re.search(r"<main[^>]*>(.*?)</main>", document, re.S)
+    assert main, "the page has no main content"
+    return re.findall(r'<input[^>]*name="([^"]+)"', main.group(1))
 
 
 async def issue(client: AsyncClient, *, email: str = INVITEE, csrf: str | None = None):
@@ -570,7 +583,7 @@ async def test_the_page_offers_no_way_to_name_an_organization(tmp_path, idp):
     async with web_client(app) as client:
         await signed_in(client, idp)
         page = await client.get(ADMIN_INVITATIONS_PATH)
-    fields = re.findall(r'<input[^>]*name="([^"]+)"', page.text)
+    fields = page_fields(page.text)
     assert set(fields) <= {"csrf_token", EMAIL_FIELD, INVITATION_ID_FIELD}
     assert "org_id" not in page.text
 
@@ -1241,12 +1254,21 @@ async def test_a_hostile_address_cannot_inject_markup(tmp_path, idp):
     assert "&lt;script&gt;" in page.text
 
 
-async def test_the_overview_links_to_the_page(tmp_path, idp):
-    app, _, _ = build_app(tmp_path, idp)
+async def test_the_overview_offers_the_admin_panel_and_not_this_page(tmp_path, idp):
+    """An operator invites from the admin panel, which names the organization.
+
+    This server-rendered page only issues org-creating invitations, so the
+    frame no longer offers it; it stays reachable by address.
+    """
+
+    app, _service, _delivery = build_app(tmp_path, idp)
     async with web_client(app) as client:
         await signed_in(client, idp)
         overview = await client.get("/web")
-    assert f'href="{ADMIN_INVITATIONS_PATH}"' in overview.text
+        page = await client.get(ADMIN_INVITATIONS_PATH)
+    assert 'href="/admin/"' in overview.text
+    assert 'href="/admin/invitations"' not in overview.text
+    assert page.status_code == 200
 
 
 # ===========================================================================

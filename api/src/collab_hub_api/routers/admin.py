@@ -105,6 +105,7 @@ from ..frames.invitation_email import (
     InvitationEmailDelivery,
 )
 from ..frames.invitations import (
+    CreatedOrganization,
     Invitation,
     InvitationAlreadyUsedError,
     InvitationNotFoundError,
@@ -133,7 +134,7 @@ from ..web.admin import (
     invitations_page,
     request_refused_page,
 )
-from ..web.authz import require_operator
+from ..web.authz import require_operator, viewer_roles
 from ..web.forms import (
     FORM_CONTENT_TYPE,
     MAX_FORM_BYTES,
@@ -145,7 +146,7 @@ from ..web.forms import (
     form_fields,
 )
 from ..web.operator import operator_context
-from ..web.pages import forbidden_page, page_response
+from ..web.pages import forbidden_page, page_response, preferred_theme
 from ..web.request_limits import connection_close_headers
 from ..web.session import WebSession
 from ..web.surface import (
@@ -182,16 +183,22 @@ the operator API pages properly for anyone who needs more.
 
 @requires_platform_role(PLATFORM_ROLE_OPERATOR)
 def issue_invitation(
-    auth: AuthContext, service: InvitationService, *, email: str
+    auth: AuthContext,
+    service: InvitationService,
+    *,
+    email: str,
+    org_id: str | None = None,
+    role: str | None = None,
 ) -> IssuedInvitation | LiveInvitationExists:
-    """Issue one org-creating invitation, recorded as ``invitation.send``.
+    """Issue one invitation as an operator, recorded as ``invitation.send``.
 
-    ``org_id=None`` is not a parameter and never will be on this surface.
-    Every invitation issued from the operator page creates its organization on
-    acceptance, with the accepter as owner (Gate B, revised 2026-08-04); a page
-    that could name an existing organization would be the cross-org capability
-    Gate E scoped out, and pre-creating one here would leave an orphan behind
-    every invitation that is revoked, expires, or is never accepted.
+    With no ``org_id`` the invitation creates its organization on acceptance,
+    with the accepter as owner (Gate B, revised 2026-08-04): the bootstrap
+    invitation, and the only kind the server-rendered operator page issues.
+    With an ``org_id`` it invites into that existing organization, as a
+    member unless ``role`` says owner; this is how an operator seats the
+    first owner of an organization they created up front
+    (:func:`create_organization`). The admin panel offers both.
 
     ``create_unless_live`` rather than ``create``: issuing twice for one
     address must not mint a second live token, which matters more now that a
@@ -199,14 +206,28 @@ def issue_invitation(
     audited transaction under an advisory lock, so even a double-submitted form
     produces one invitation and one event row — see the invitation service.
 
-    **Scoped to this page**, and stated that way wherever it is stated. #89's
-    ``/v1`` operator and owner routes still call ``create``, which mints
-    unconditionally, so an address can hold two live invitations if one came
-    from the API. Unifying the two would change the semantics of a merged,
-    shipped endpoint the desktop is built against; #93 owns re-send policy.
+    **Scoped to the operator surfaces**, and stated that way wherever it is
+    stated. #89's ``/v1`` operator and owner routes still call ``create``,
+    which mints unconditionally, so an address can hold two live invitations
+    if one came from the API. Unifying the two would change the semantics of a
+    merged, shipped endpoint the desktop is built against; #93 owns re-send
+    policy.
     """
 
-    return service.create_unless_live(auth, email=email, org_id=None)
+    return service.create_unless_live(auth, email=email, org_id=org_id, role=role)
+
+
+@requires_platform_role(PLATFORM_ROLE_OPERATOR)
+def create_organization(auth: AuthContext, service: InvitationService, *, name: str) -> CreatedOrganization:
+    """Create a named, empty organization as an operator, recorded as ``org.create``.
+
+    The organization exists before anyone is invited into it, so the
+    invitations that follow can name it and seat its first owner. The name
+    goes through the organization-name rule inside the service, and a
+    deployment that declares a single organization refuses.
+    """
+
+    return service.create_organization(auth, name=name)
 
 
 @requires_platform_role(PLATFORM_ROLE_OPERATOR)
@@ -314,6 +335,7 @@ def make_router() -> APIRouter:
             if status_code == status.HTTP_200_OK:
                 status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
+        roles = viewer_roles(request, session)
         return page_response(
             invitations_page(
                 root_path=_root_path(request),
@@ -322,6 +344,8 @@ def make_router() -> APIRouter:
                 has_more=page.has_more if page is not None else False,
                 now=now,
                 notice=notice,
+                roles=roles,
+                theme=preferred_theme(request),
                 account_url=account_page_url(request),
             ),
             status_code=status_code,

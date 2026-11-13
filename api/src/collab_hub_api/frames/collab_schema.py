@@ -1021,6 +1021,22 @@ COLLAB_SCHEMA_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             """,
         ),
     ),
+    (
+        17,
+        (
+            # The role an invitation grants, when its issuer chose one. Until
+            # now the role was derived: owner of the organization an
+            # org-creating invitation mints, member of an existing one. An
+            # operator who creates an organization up front and invites into
+            # it needs to seat its first owner, so an org-scoped invitation can
+            # now carry the role. NULL keeps the derived rule, so every row
+            # written before this version reads exactly as it did.
+            """
+            ALTER TABLE collab_invitations
+            ADD COLUMN IF NOT EXISTS role text CHECK (role IN ('owner', 'member'))
+            """,
+        ),
+    ),
 )
 
 

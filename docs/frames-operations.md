@@ -1065,11 +1065,15 @@ One row per action, and the action names the *consequential* thing:
   idempotent no-op and writes **no** row: a revoke that changed nothing is not
   an action.
 - `invitation.redeem` — accepted into an **existing** organization.
-- `org.create` — accepted an org-creating invitation, with the **accepter** as
-  actor. This is the one asymmetry worth knowing: such an acceptance produces
-  an `org.create` row and *not* an `invitation.redeem` row, because creating
-  the organization is the consequential act. The invitation is still named, in
-  `detail.invitation_id`. To follow one invitation end to end, query on that:
+- `org.create` — an organization came to exist. Two ways: an org-creating
+  invitation was accepted, with the **accepter** as actor, or an operator
+  created a named organization up front from the admin panel, with the
+  operator as actor. This is the one asymmetry worth knowing: such an
+  acceptance produces an `org.create` row and *not* an `invitation.redeem`
+  row, because creating the organization is the consequential act. The
+  invitation is still named, in `detail.invitation_id`; an organization
+  created up front has no invitation to name, and its detail says
+  `named_at_creation`. To follow one invitation end to end, query on that:
 
 ```sql
 SELECT at, actor, action, org_id, detail
@@ -1166,6 +1170,40 @@ organization from a read taken *before* its transaction, and re-checks only
 `status` inside it — so a moved `org_id` could commit a join while the audit
 log recorded the creation of an organization that never existed. If you need
 an invitation to point somewhere else, revoke it and issue a new one.
+
+#### Owner invitations during a rollout or rollback
+
+Migration version 17 adds `collab_invitations.role`, which lets the admin
+panel invite someone into an existing organization as `owner`. A release
+before it ignores that column: it accepts any invitation into an existing
+organization as `member`. So an owner invitation accepted by an older pod
+creates a `member` membership, and accepting the same link again later does
+not fix it, because the invitation is already consumed.
+
+This can happen in two windows, and the operator running the deployment owns
+both:
+
+- **Rolling out.** While pods from the previous release are still serving,
+  any of them can take the acceptance. Issue owner invitations only after the
+  rollout has finished and no older pod is left.
+- **Rolling back** past the release that added migration 17. Before the
+  downgrade, revoke every pending owner invitation (`status = 'pending' AND
+  role = 'owner'`) and reissue them once the newer release is back.
+
+To find people already affected, read-only:
+
+```sql
+SELECT i.id, i.email, i.accepted_org_id, i.accepted_by
+FROM collab_invitations i
+JOIN collab_org_members m
+  ON m.user_id = i.accepted_by AND m.org_id = i.accepted_org_id
+WHERE i.role = 'owner' AND i.status = 'accepted' AND m.role = 'member';
+```
+
+Each row is someone who should be an owner. No screen or endpoint changes an
+existing member's role yet, so the repair is a hand-run `UPDATE` of their
+`collab_org_members.role` to `owner`, with an `operator.manual` event in the
+same transaction (see [Recording manual `psql` work](#recording-manual-psql-work-operatormanual)).
 
 #### Invitation state, read directly
 

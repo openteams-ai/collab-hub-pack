@@ -637,13 +637,20 @@ What a person sees at the hub's address. Signed out: Sign in and Sign up
 (`/web/signin?register=1`), both returning to the page. Signed in: the
 person's name, Sign out, and one click to each of the web client
 (`https://collab.<domain>/`), Frames (`https://collab.<domain>/frames`), the desktop
-download and docs (when configured) and the account page
-(`web.account_page_url`, or the realm's own account console when unset).
+download and docs (when configured) and the hub's own account page
+(`/web/account`). That page and Billing (`/web/account/billing`) share a
+dashboard with a sidebar; Billing links to `web.account_page_url` when it is
+set and is otherwise empty.
 
 Every link comes from configuration, never the request: the domain from
-`web.hub_domain` or the issuer, the rest from the settings above. The page
-runs no script and has its own stylesheet; its colours are the Collab UI
-kit's, light and dark.
+`web.hub_domain` or the issuer, the rest from the settings above. The pages
+load two scripts from this origin and nothing inline (`script-src 'self'`):
+`/web/theme.js` on the home, account and billing pages, for the theme switch, the menus and the
+dashboard sidebar, and `/web/home.js` on the home page only, for the demo
+Collab window, whose replies are made up on the page and sent nowhere. The
+pages have their own stylesheet, with fonts referenced relative to it so a
+`server.root_path` prefix applies; its colours are the Collab UI kit's,
+light and dark.
 
 The chart's `home.rootHost` serves these pages on the hub's root host
 (`home.hubDomain`): one HTTPRoute answers `/` with a redirect to `/web/home` on

@@ -5,4 +5,5 @@ MIT licence. Files renamed by provider: anthropic (claude-color), openai, gemini
 (gemini-color), meta (meta-color), mistral (mistral-color), deepseek
 (deepseek-color), qwen (qwen-color), xai (grok), moonshot (kimi-color),
 cohere (cohere-color), nvidia (nvidia-color), zai (zai), minimax (minimax-color).
+The MIT notice for these files is in LICENSE-lobehub.txt.
 The logos are trademarks of their owners and are shown to name their models.

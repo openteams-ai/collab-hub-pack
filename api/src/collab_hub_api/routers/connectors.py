@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import re
@@ -19,6 +20,8 @@ from collab_hub_api.connectors.drive_client import DriveUpstreamError, GoogleDri
 from collab_hub_api.connectors.github_client import (
     GitHubApiRequestError,
     GitHubClient,
+    GitHubProjectRead,
+    GitHubProjectReadError,
     GitHubSearchError,
     GitHubUpstreamError,
 )
@@ -873,12 +876,21 @@ async def read_github_project(
     if number < 1:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "A positive GitHub project number is required")
     client = await _github_client(request, config)
+    # Counts are requested by default even on continuation pages. Callers
+    # retaining the board-wide breakdown can explicitly opt out.
     try:
         # Counts run concurrently with the enumeration and never raise; only the
         # board read's own failure surfaces here to be mapped.
-        project, items, counts = await client.read_project_with_counts(
-            owner=body.owner, number=number, max_items=body.max_items
+        read = await client.read_project_with_counts(
+            owner=body.owner,
+            number=number,
+            max_items=body.max_items,
+            query=body.query,
+            after=body.after,
+            include_counts=body.include_counts,
         )
+    except GitHubProjectReadError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     except GitHubUpstreamError as exc:
         logger.info(
             "github_project_read_upstream_error",
@@ -887,16 +899,54 @@ async def read_github_project(
         _raise_github_upstream(exc, not_found_detail=_GITHUB_NOT_FOUND_DETAIL)
     except httpx.HTTPError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "GitHub project read failed") from exc
-    # project.items_count is the board's full size; flag when we returned fewer
-    # so the caller doesn't reason over a partial board as if it were complete.
-    total = project.items_count
+    # total_count stays the board size (same scalar as project.items_count and
+    # counts.total); matched_count is what the query selected, so a filter that
+    # matched nothing on a non-empty board reads as matched_count=0 < total_count
+    # rather than as an empty board. truncated means more matching items remain
+    # after this response (next_cursor is set). The API stays data-only except
+    # for the one shape evals showed the tool description cannot carry on its
+    # own: a filter that matched nothing on a non-empty board gets a `note`.
+    query = body.query.strip()
     return GitHubProjectReadResponse(
-        project=project,
-        items=items,
-        total_count=total,
-        truncated=total > len(items),
-        counts=counts,
+        project=read.project,
+        items=read.items,
+        query=query,
+        total_count=read.project.items_count,
+        matched_count=read.matched,
+        truncated=read.truncated,
+        next_cursor=read.cursor,
+        counts=read.counts,
+        note=_github_empty_filter_note(query=query, read=read),
     )
+
+
+# A `status:` term in a board filter, plain or negated (`-status:Done`), but not
+# a custom field whose name merely ends in "status" (`sub-status:x`) or the
+# valueless `no:status`.
+_GITHUB_STATUS_TERM_RE = re.compile(r"(?:^|\s)-?status:", re.IGNORECASE)
+
+
+def _github_empty_filter_note(*, query: str, read: GitHubProjectRead) -> str | None:
+    """Explain a filter that selected nothing on a non-empty board so the caller
+    tells a mistyped filter from an empty board and does not read
+    counts.by_status as what the filter matched. When the filter has a
+    `status:` term, also name the real Status columns (already sanitized by
+    the client) to retry with; other filters (`assignee:nobody`) get no column
+    list, since a column name would not fix them. None on every other read:
+    unfiltered, a filter that matched something, or an empty board."""
+    if not query or read.matched or not read.project.items_count:
+        return None
+    note = (
+        f"The filter matched 0 of the board's {read.project.items_count} items; "
+        "counts.by_status is board-wide, not what the filter matched."
+    )
+    columns = [c.name for c in read.counts.by_status] if read.counts else []
+    if columns and _GITHUB_STATUS_TERM_RE.search(query):
+        names = ", ".join(json.dumps(name, ensure_ascii=False) for name in columns)
+        note += (
+            f" status: values must match a column name, ignoring case but including any emoji. Columns here: {names}."
+        )
+    return note
 
 
 @router.get("/notion/status", response_model=NotionStatus)

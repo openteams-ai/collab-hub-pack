@@ -6,13 +6,14 @@ import html
 import os
 import re
 import sys
+from urllib.parse import urljoin
 
 import pytest
 from pydantic import ValidationError
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from test_web_surface import _StubIdp, make_web_app, sign_in, web_client  # noqa: E402
+from test_web_surface import _StubIdp, make_web_app, probe, sign_in, web_client  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -155,7 +156,21 @@ async def test_the_page_brings_its_own_fonts_from_this_origin(tmp_path, idp):
         assert font.status_code == 200, path
         assert font.headers["content-type"] == "font/woff2", path
         assert font.content[:4] == b"wOF2", path
-        assert f"url({path})" in css.text
+        assert f"url({path.removeprefix('/web/')})" in css.text
+
+
+async def test_under_a_root_path_the_fonts_and_the_door_mark_stay_under_it(tmp_path, idp):
+    app = make_web_app(tmp_path, idp)
+    page = await probe(app, "/hub/web/home", root_path="/hub")
+    stylesheet = await probe(app, "/hub/web/home.css", root_path="/hub")
+    urls = re.findall(r"url\(([^)]+)\)", stylesheet.text)
+    fonts = [urljoin("https://web.test/hub/web/home.css", url) for url in urls]
+    assert fonts, "the stylesheet names no font"
+    for font in fonts:
+        assert font.startswith("https://web.test/hub/web/fonts/"), font
+    for src in re.findall(r'<img class="icon mark-img" src="([^"]+)"', page.text):
+        assert src == "/hub/web/collab-mark.svg"
+    assert 'class="icon mark-img"' in page.text
 
 
 SHOT_VIEWS = ("frames", "hub", "hub-usage")
@@ -366,3 +381,21 @@ async def test_the_header_offers_the_download_whether_or_not_signed_in(tmp_path,
 
     assert link(DOWNLOAD_URL) in header_nav(anonymous.text)
     assert link(DOWNLOAD_URL) in header_nav(signed_in.text)
+
+
+@pytest.mark.parametrize(
+    ("package", "notice", "holder"),
+    [
+        ("collab_hub_api.web.models", "LICENSE-lobehub.txt", "Copyright (c) 2023 LobeHub"),
+        ("collab_hub_api.web.connectors", "LICENSE-thesvg.txt", "Copyright (c) 2025 thesvg.org"),
+    ],
+)
+def test_the_mit_licensed_logos_ship_with_their_notice(package, notice, holder):
+    """MIT asks for the copyright and permission notice to travel with the
+    copies, so it is package data beside the logos it covers."""
+
+    from importlib.resources import files
+
+    text = (files(package) / notice).read_text()
+    assert holder in text
+    assert "Permission is hereby granted, free of charge" in text

@@ -269,7 +269,8 @@ set before the page draws."""
 HOME_SCRIPT_PATH = f"{WEB_PATH_PREFIX}/home.js"
 """The home page's one script: the demo Collab window (model picker, mock chat).
 Served from this origin; the page's CSP allows ``script-src 'self'`` and
-nothing inline. No other page of the surface runs it or any script."""
+nothing inline. No other page runs it; the home, account and
+billing pages all run :data:`HOME_THEME_SCRIPT_PATH`."""
 
 HOME_ASSETS = {
     **{path: (f"fonts/{name}", "font/woff2") for path, name in zip(HOME_FONT_PATHS, HOME_FONT_FILES, strict=True)},

@@ -3,18 +3,23 @@
 What a person sees at the hub's address: the product's front door. Signed
 out, it offers sign-in and sign-up, both of which come back here; signed in,
 it names the person and puts the web client, the desktop download, Frames,
-the docs and the account page one click away.
+the docs and the hub's account page one click away. The account page and
+Billing share a dashboard (:func:`account_page`, :func:`billing_page`).
 
 Every link comes from configuration, never the request: the web client and
 Frames from the hub's domain (:func:`hub_domain`), the rest from ``web.*``
-settings checked at startup. Like the rest of the surface the page runs no
-script: its look is one stylesheet (:data:`HOME_STYLESHEET`), the Collab mark
-(:data:`COLLAB_MARK_SVG`) and the fonts in ``web/fonts``, all served from this
-origin. Motion is CSS that plays once, on load.
+settings checked at startup. Its look is one stylesheet
+(:data:`HOME_STYLESHEET`), the Collab mark (:data:`COLLAB_MARK_SVG`) and the
+fonts in ``web/fonts``, all served from this origin. Two scripts, also from
+this origin: ``theme.js`` on these pages (theme, menus, the dashboard sidebar)
+and ``home.js`` on this page (the demo Collab window). Nothing is inline.
+Motion is CSS that plays once, on load.
 
 Colour is blue and black only, in solid fills: no gradients. Surface colours
-follow the system theme, light and dark. Connector logos are Simple
-Icons 16.35.0 (CC0), inlined.
+follow the system theme, light and dark. Model and connector logos are
+served from ``web/models`` and ``web/connectors``; the ``SOURCE.txt`` and
+``LICENSE-*.txt`` files there say where each came from and under what
+licence.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from .surface import (
     ACCOUNT_PATH,
     BILLING_PATH,
     DATA_STATEMENT_PATH,
+    HOME_FONT_FILES,
     HOME_FONT_PATHS,
     HOME_MARK_PATH,
     HOME_PATH,
@@ -147,14 +153,16 @@ def _connectors(root: str) -> str:
 # Door rows whose glyph is a brand mark: the Collab mark in its own blues
 # (via the served file, so it matches the logo), and the Apple logo.
 _DOOR_GLYPHS = {
-    "collab": lambda: f'<img class="icon mark-img" src="{HOME_MARK_PATH}" alt="" width="22" height="22">',
-    "apple": lambda: _apple("icon"),
+    "collab": lambda root: f'<img class="icon mark-img" src="{root}{HOME_MARK_PATH}" alt="" width="22" height="22">',
+    "apple": lambda root: _apple("icon"),
 }
 
 
-def _door(icon: str, title: str, description: str, url: str) -> str:
+def _door(root: str, icon: str, title: str, description: str, url: str) -> str:
+    """One door row; *root* is the escaped root path, for the served mark."""
+
     return (
-        f'<a class="door" href="{html.escape(url)}">{_DOOR_GLYPHS.get(icon, lambda: _icon(icon))()}'
+        f'<a class="door" href="{html.escape(url)}">{_DOOR_GLYPHS.get(icon, lambda root: _icon(icon))(root)}'
         f'<span class="door-text"><strong>{html.escape(title)}</strong><span>{html.escape(description)}</span></span>'
         f"{_icon('arrow', 'icon-sm door-arrow')}</a>"
     )
@@ -719,12 +727,12 @@ def home_page(*, surface: WebSurface, session: WebSession | None, root_path: str
     root, domain, web_client, download = chrome.root, chrome.domain, chrome.web_client, chrome.download
     docs = surface.docs_url
 
-    doors = [_door("collab", "Open Collab in your browser", "Nothing to install.", web_client)]
+    doors = [_door(root, "collab", "Open Collab in your browser", "Nothing to install.", web_client)]
     if download:
-        doors.append(_door("apple", "Download Collab for macOS", "Local agents and capabilities.", download))
-    doors.append(_door("frames", "Manage your Frames", "Your team's shared context.", chrome.frames))
+        doors.append(_door(root, "apple", "Download Collab for macOS", "Local agents and capabilities.", download))
+    doors.append(_door(root, "frames", "Manage your Frames", "Your team's shared context.", chrome.frames))
     if docs:
-        doors.append(_door("docs", "Read the docs", "Set up, connect tools, go further.", docs))
+        doors.append(_door(root, "docs", "Read the docs", "Set up, connect tools, go further.", docs))
 
     if session is None:
         sign_in, sign_up = html.escape(chrome.sign_in), html.escape(chrome.sign_up)
@@ -899,9 +907,10 @@ COLLAB_MARK_SVG = (
 
 _FONT_FACES = "\n".join(
     f"@font-face {{ font-family: '{family}'; font-style: normal; font-weight: {weight};"
-    f" font-display: swap; src: url({path}) format('woff2'); }}"
-    for path, family, weight in zip(
-        HOME_FONT_PATHS,
+    f" font-display: swap; src: url(fonts/{name}) format('woff2'); }}"
+    # Relative to the stylesheet (``/web/home.css``), so a root path applies.
+    for name, family, weight in zip(
+        HOME_FONT_FILES,
         ("IBM Plex Sans",) * 4 + ("Cascadia Code", "IBM Plex Mono"),
         (400, 500, 600, 700, 400, 400),
         strict=True,
@@ -1567,7 +1576,7 @@ h3 { margin: 0 0 6px; font-size: 17px; font-weight: 600; }
   .hot { display: none; }
   .tabs { width: 100%; }
   .tab { flex: 1; padding: 10px 6px; text-align: center; }
-  .wide { display: none; }
+  .tab .wide { display: none; }
   .send-btn { width: 40px; height: 40px; }
   .model-btn, .new-btn { min-height: 36px; }
   .foot-in { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 36px 24px; padding: 48px 16px 32px; }

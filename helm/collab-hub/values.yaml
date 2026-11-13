@@ -859,6 +859,43 @@ web:
   # at startup. Becomes COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL on the API only.
   accountPageUrl: ""
 
+# The Collab Hub home page (/web/home): where its links point, and whether
+# the hub's root host answers with it. See docs/web-surface.md.
+home:
+  # -- The domain the home page (/web/home) builds its links from: the web
+  # client and its Frames page at collab.<domain>. Empty takes the
+  # issuer's host without its leading "keycloak.", as the desktop does. A bare
+  # host name. Becomes COLLAB_HUB_API__WEB__HUB_DOMAIN on the API only.
+  hubDomain: ""
+  # -- Where the home page's desktop download link points: the Collab macOS
+  # installer, the same file for every hub. Empty renders no link. Same rules
+  # as accountPageUrl.
+  desktopDownloadUrl: "https://openteams-collab.s3.us-west-2.amazonaws.com/collab-desktop-macos.dmg"
+  # -- Where the home page's docs link points. Empty renders no link. Same
+  # rules as accountPageUrl.
+  docsUrl: ""
+  rootHost:
+    # -- Serve the hub's pages on its root host (home.hubDomain): "/" opens
+    # the home page on that host, and /web, /invite and /admin go to the API.
+    # The exact "/" and these prefixes outrank another app's "/" prefix on
+    # the same host, so they take over from it without it being removed;
+    # nothing else is routed there. Point COLLAB_HUB_API__WEB__PUBLIC_BASE_URL
+    # at this host so sign-in returns here, and register
+    # https://<home.hubDomain>/web/oidc/callback with the Keycloak client.
+    enabled: false
+    # -- Namespace the route is created in. Empty is the release namespace.
+    # Set it when another app owns a listener for the root host that only
+    # admits routes from its own namespace: the Nebari operator gives
+    # nebari-landing such a listener, open to nebari-system only.
+    namespace: ""
+    # -- Gateways the route attaches to. The default is the Nebari gateway;
+    # no sectionName, so it attaches to every listener that admits it. Name
+    # the root host's own listener (sectionName) where one exists, since a
+    # listener for the exact host takes that host's traffic from the others.
+    parentRefs:
+      - name: nebari-gateway
+        namespace: envoy-gateway-system
+
 # Feature flags for work in progress that is on main but not yet exposed. Every
 # flag is off until it is listed here and set to true; each entry becomes
 # COLLAB_HUB_API__FEATURES__<NAME>. See docs/feature-flags.md.

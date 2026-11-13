@@ -1348,15 +1348,13 @@ async def test_metadata_reads_run_under_their_own_deadline(hub: Hub):
 # -- startup ------------------------------------------------------------------------
 
 
-def test_the_registry_is_the_hub_api_origin_not_a_host_of_its_own(tmp_path):
-    """Where the deployment states its external origin twice, the two must agree."""
+def test_the_browser_pages_may_live_on_another_host_than_the_registry(tmp_path):
+    """The web pages can be served on the hub's root host while /v2/ stays on
+    the API's own host: web.public_base_url names where the pages live, which
+    says nothing about the registry's origin."""
 
     values = settings(tmp_path)
     values["web"] = {"public_base_url": "https://elsewhere.example"}
-    with pytest.raises(RuntimeError, match="name different hosts"):
-        make_app(Config.parse(values))
-    # The same origin, spelled with its default port and a trailing slash, agrees.
-    values["web"] = {"public_base_url": f"{HUB_URL}:443/"}
     app = make_app(Config.parse(values))
     assert app is not None
 

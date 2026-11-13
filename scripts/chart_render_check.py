@@ -32,6 +32,13 @@ INDEX_VARS = (
     "COLLAB_HUB_API__COGS__INDEX__RUN_ON_STARTUP",
     "COLLAB_HUB_API__COGS__INDEX__REMOVED_SOURCE_RETENTION_HOURS",
 )
+# The browser pages' settings render on the API only; the indexer serves no pages.
+WEB_PAGE_VARS = (
+    "COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL",
+    "COLLAB_HUB_API__WEB__HUB_DOMAIN",
+    "COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL",
+    "COLLAB_HUB_API__WEB__DOCS_URL",
+)
 
 
 class Workload:
@@ -112,7 +119,7 @@ class Rendered:
         assert indexer.pod["serviceAccountName"] == api.pod["serviceAccountName"]
         assert indexer.pod.get("securityContext") == api.pod.get("securityContext")
         assert indexer.container.get("securityContext") == api.container.get("securityContext")
-        api_env = {name: entry for name, entry in api.env.items() if name not in INDEX_VARS}
+        api_env = {name: entry for name, entry in api.env.items() if name not in INDEX_VARS + WEB_PAGE_VARS}
         indexer_env = {name: entry for name, entry in indexer.env.items() if name not in INDEX_VARS}
         assert indexer_env == api_env, "the indexer's environment differs from the API's beyond the index switch"
         # Nothing routes to it: its component label is its own, and no
@@ -294,6 +301,87 @@ def case_account_link_with_indexer(r: Rendered) -> None:
     assert r.value(name) == "https://billing.example.com/account", r.value(name)
     assert r.indexer is not None
     assert name not in r.indexer.env, sorted(r.indexer.env)
+
+
+def case_home_page(r: Rendered) -> None:
+    # The home page's links: the domain and the two named links reach the API
+    # replicas as the settings the API reads.
+    assert r.value("COLLAB_HUB_API__WEB__HUB_DOMAIN") == "example.org"
+    assert r.value("COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL") == "https://downloads.example.com/collab"
+    assert r.value("COLLAB_HUB_API__WEB__DOCS_URL") == "https://docs.example.com/collab"
+
+
+GATEWAY_REF = {"group": "gateway.networking.k8s.io", "kind": "Gateway"}
+WEB_PREFIXES = ("/web", "/invite", "/admin")
+
+
+def root_host_rules(backend: dict) -> list:
+    """The root host's rules: "/" opens the home page on the same host, and
+    the browser pages' prefixes go to the API. Nothing else is routed there,
+    so /v1 and /mcp stay on the API's own host."""
+
+    return [
+        {
+            "matches": [{"path": {"type": "Exact", "value": "/"}}],
+            "filters": [
+                {
+                    "type": "RequestRedirect",
+                    "requestRedirect": {
+                        "path": {"type": "ReplaceFullPath", "replaceFullPath": "/web/home"},
+                        "statusCode": 302,
+                    },
+                }
+            ],
+        },
+        {
+            "matches": [{"path": {"type": "PathPrefix", "value": prefix}} for prefix in WEB_PREFIXES],
+            "backendRefs": [backend],
+        },
+    ]
+
+
+def case_root_host(r: Rendered) -> None:
+    # The hub's pages on the root host, from a route in the release namespace:
+    # the API Service is reached directly and no ReferenceGrant is needed.
+    routes = [d for d in r.docs if d.get("kind") == "HTTPRoute"]
+    assert len(routes) == 1, routes
+    route = routes[0]
+    assert route["metadata"]["namespace"] == "nebari-nexus", route["metadata"]
+    spec = route["spec"]
+    assert spec["hostnames"] == ["example.org"], spec["hostnames"]
+    # group and kind are written out: the API server fills them in anyway, and
+    # leaving them to it makes ArgoCD report the route as drifted forever.
+    assert spec["parentRefs"] == [
+        {**GATEWAY_REF, "name": "nebari-gateway", "namespace": "envoy-gateway-system"}
+    ], spec["parentRefs"]
+    api = {"group": "", "kind": "Service", "name": "t-collab-hub-api", "port": 80, "weight": 1}
+    assert spec["rules"] == root_host_rules(api), spec["rules"]
+    assert kind(r, "ReferenceGrant") is None
+
+
+def case_root_host_listener(r: Rendered) -> None:
+    # On a cluster where another app owns a listener for the root host (the
+    # Nebari operator gives nebari-landing one, open to its namespace only),
+    # the route is created in that namespace, attaches to that listener, and
+    # reaches the API across namespaces through a ReferenceGrant beside it.
+    route = kind(r, "HTTPRoute")
+    assert route["metadata"]["namespace"] == "nebari-system", route["metadata"]
+    assert route["spec"]["parentRefs"] == [
+        {**GATEWAY_REF, "name": "nebari-gateway", "namespace": "envoy-gateway-system", "sectionName": "tls-landing"}
+    ], route["spec"]["parentRefs"]
+    api = {"group": "", "kind": "Service", "name": "t-collab-hub-api", "namespace": "nebari-nexus", "port": 80, "weight": 1}
+    assert route["spec"]["rules"] == root_host_rules(api), route["spec"]["rules"]
+    grant = kind(r, "ReferenceGrant")
+    assert grant is not None, "a cross-namespace backend needs a ReferenceGrant"
+    assert grant["metadata"]["namespace"] == "nebari-nexus", grant["metadata"]
+    assert grant["spec"] == {
+        "from": [{"group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "namespace": "nebari-system"}],
+        "to": [{"group": "", "kind": "Service", "name": "t-collab-hub-api"}],
+    }, grant["spec"]
+
+
+def case_no_root_host(r: Rendered) -> None:
+    assert kind(r, "HTTPRoute") is None
 
 
 def case_serve_with_indexer(r: Rendered) -> None:
@@ -498,6 +586,10 @@ def case_run_controller_remote_existing_namespace(r: Rendered) -> None:
 
 
 CASES = {
+    "home-page": case_home_page,
+    "root-host": case_root_host,
+    "root-host-listener": case_root_host_listener,
+    "no-root-host": case_no_root_host,
     "sharepoint": case_sharepoint,
     "serve-off": case_serve_off,
     "serve-with-indexer": case_serve_with_indexer,

@@ -26,6 +26,9 @@ from .sharepoint_text import (
 # Microsoft Search pages by ``from``/``size`` offsets (no cursor). Graph refuses
 # deep offsets anyway; this cap keeps a page token from walking forever.
 _MAX_SEARCH_OFFSET = 10_000
+# One complete Graph response bounds chronological sorting without sorting only
+# a relevance page or issuing an unbounded crawl. Larger queries must narrow.
+_MAX_MODIFIED_RESULTS = 500
 # Read bound on extraction work, independent of the byte cap: a 25 MB PDF can
 # still be thousands of near-empty pages.
 _MAX_PDF_PAGES = 200
@@ -165,7 +168,7 @@ class SharePointClient:
             self._request(
                 "POST",
                 "/search/query",
-                json=_search_body("*", offset=0, size=1, sort="relevance"),
+                json=_search_body("*", offset=0, size=1),
                 operation="access check",
             ),
         )
@@ -182,36 +185,72 @@ class SharePointClient:
         sort: str,
         page_token: str,
     ) -> tuple[list[SharePointSearchHit], str, int]:
-        """One Microsoft Search page over driveItems, filtered to the window.
+        """Search driveItems, filter the window, then page in the requested order.
 
         The date window is sent to Graph as a KQL ``LastModifiedTime`` clause
         AND re-checked here per hit (in the caller's zone), so a query string
         that tries to widen the clause, or Graph's day-granular filter, cannot
         leak a file from outside the window. Paging is by offset: the echoed
-        token wraps the next ``from`` plus a fingerprint of this search.
+        token wraps the next offset plus a fingerprint of this search.
+
+        Graph's explicit sort can omit recently indexed matches. Modified order
+        therefore uses one complete, bounded relevance response, sorted before
+        pagination. Refuse incomplete sets rather than invent global ordering.
         """
-        fingerprint = _fingerprint(query, lower, upper, sort, limit)
+        modified = sort == "modified"
+        # Previous modified tokens indexed a different provider ordering. Bind
+        # the replacement ordering and caller's date zone before accepting one.
+        ordering = f"modified:complete-v1:{time_zone}" if modified else sort
+        fingerprint = _fingerprint(query, lower, upper, ordering, limit)
         offset = _decode_page_token(page_token, fingerprint)
         zone = _time_zone(time_zone)
         payload = await self._request(
             "POST",
             "/search/query",
-            json=_search_body(_kql(query, lower, upper), offset=offset, size=limit, sort=sort),
+            json=_search_body(
+                _kql(query, lower, upper),
+                offset=0 if modified else offset,
+                size=_MAX_MODIFIED_RESULTS if modified else limit,
+            ),
             operation="search",
         )
         container = _hits_container(payload)
         raw_hits = container.get("hits")
         if not isinstance(raw_hits, list):
             raw_hits = []
+        total = _non_negative_int(container.get("total"))
+        if modified and (container.get("moreResultsAvailable") or total > len(raw_hits)):
+            raise SharePointSearchError(
+                f"Modified sorting requires a complete result set of at most {_MAX_MODIFIED_RESULTS} matches; "
+                "narrow the query or date window. No partial chronological page was returned."
+            )
         hits: list[SharePointSearchHit] = []
         for raw in raw_hits:
             hit = self._search_hit(raw, lower=lower, upper=upper, zone=zone)
             if hit is not None:
                 hits.append(hit)
+        if modified:
+            hits.sort(
+                key=lambda hit: (
+                    hit.last_modified or datetime.min.replace(tzinfo=timezone.utc),
+                    hit.drive_id,
+                    hit.id,
+                ),
+                reverse=True,
+            )
+            # Graph can repeat a driveItem in a larger relevance response.
+            # Keep its newest metadata, while preserving distinct same-name files.
+            unique: dict[tuple[str, str], SharePointSearchHit] = {}
+            for hit in hits:
+                unique.setdefault((hit.drive_id, hit.id), hit)
+            hits = list(unique.values())
+            next_offset = offset + limit
+            next_token = _encode_page_token(next_offset, fingerprint) if next_offset < len(hits) else ""
+            return hits[offset:next_offset], next_token, len(hits)
         next_offset = offset + len(raw_hits)
         more = bool(container.get("moreResultsAvailable")) and raw_hits and next_offset <= _MAX_SEARCH_OFFSET
         next_token = _encode_page_token(next_offset, fingerprint) if more else ""
-        return hits, next_token, _non_negative_int(container.get("total"))
+        return hits, next_token, total
 
     async def read_item(self, *, drive_id: str, item_id: str, max_chars: int) -> SharePointReadResponse:
         resource = await self._request(
@@ -449,15 +488,13 @@ def sharepoint_time_bounds(
     return lower, until_date
 
 
-def _search_body(query_string: str, *, offset: int, size: int, sort: str) -> dict:
+def _search_body(query_string: str, *, offset: int, size: int) -> dict:
     request: dict = {
         "entityTypes": ["driveItem"],
         "query": {"queryString": query_string},
         "from": offset,
         "size": size,
     }
-    if sort == "modified":
-        request["sortProperties"] = [{"name": "lastModifiedDateTime", "isDescending": True}]
     return {"requests": [request]}
 
 

@@ -28,7 +28,7 @@ from .sharepoint_text import (
 _MAX_SEARCH_OFFSET = 10_000
 # One complete Graph response bounds chronological sorting without sorting only
 # a relevance page or issuing an unbounded crawl. Larger queries must narrow.
-_MAX_MODIFIED_RESULTS = 1000
+_MAX_MODIFIED_RESULTS = 500
 # Read bound on extraction work, independent of the byte cap: a 25 MB PDF can
 # still be thousands of near-empty pages.
 _MAX_PDF_PAGES = 200

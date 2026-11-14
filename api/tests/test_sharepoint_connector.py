@@ -461,7 +461,7 @@ async def test_sharepoint_search_sort_modified_and_date_window(tmp_path, monkeyp
     assert sent["query"]["queryString"] == "LastModifiedTime>=2026-10-01 AND LastModifiedTime<=2026-10-07"
     assert "sortProperties" not in sent
     assert sent["from"] == 0
-    assert sent["size"] == 1000
+    assert sent["size"] == 500
     # Hits Graph returned from outside the window (too old, too new) and a hit
     # with no modified time are all dropped Hub-side as well.
     assert [hit["name"] for hit in response.json()["hits"]] == ["Recent.docx"]
@@ -527,7 +527,7 @@ async def test_sharepoint_modified_sort_keeps_new_matches_and_pages_global_order
         assert "sortProperties" not in request
 
 
-@pytest.mark.parametrize("more,total", [(True, 1), (False, 1001)])
+@pytest.mark.parametrize("more,total", [(True, 1), (False, 501)])
 async def test_sharepoint_modified_sort_refuses_incomplete_result_set(tmp_path, monkeypatch, more, total):
     def handler(request: httpx.Request) -> Response:
         if request.url.path.endswith("/search/query"):
@@ -580,12 +580,12 @@ async def test_sharepoint_modified_sort_ties_and_missing_dates_are_stable_across
     assert second.json()["next_page_token"] == ""
 
 
-async def test_sharepoint_modified_sort_accepts_complete_thousand_match_boundary(tmp_path, monkeypatch):
-    hits = [_hit(_resource(f"{i:04}", "Plan.txt")) for i in range(1000)]
+async def test_sharepoint_modified_sort_accepts_complete_five_hundred_match_boundary(tmp_path, monkeypatch):
+    hits = [_hit(_resource(f"{i:04}", "Plan.txt")) for i in range(500)]
 
     def handler(request: httpx.Request) -> Response:
         if request.url.path.endswith("/search/query"):
-            return Response(200, json=_search_response(hits, total=1000))
+            return Response(200, json=_search_response(hits, total=500))
         return _ok_handler(request)
 
     _install_mock_client(monkeypatch, handler)
@@ -597,8 +597,8 @@ async def test_sharepoint_modified_sort_accepts_complete_thousand_match_boundary
             json={"query": "plan", "sort": "modified", "limit": 2},
         )
     assert response.status_code == 200
-    assert response.json()["total"] == 1000
-    assert [hit["id"] for hit in response.json()["hits"]] == ["0999", "0998"]
+    assert response.json()["total"] == 500
+    assert [hit["id"] for hit in response.json()["hits"]] == ["0499", "0498"]
     assert response.json()["next_page_token"]
 
 

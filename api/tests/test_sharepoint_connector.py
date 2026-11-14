@@ -554,6 +554,7 @@ async def test_sharepoint_modified_sort_ties_and_missing_dates_are_stable_across
     hits = [
         _hit(_resource("01A", "A.txt", modified="2026-11-13T14:00:00Z")),
         _hit(_resource("02B", "B.txt", modified="2026-11-13T14:00:00Z")),
+        _hit(_resource("01A", "A.txt", modified="2026-11-13T14:00:00Z")),
         _hit(_resource("03UNDATED", "Undated.txt", modified="")),
     ]
 
@@ -569,6 +570,7 @@ async def test_sharepoint_modified_sort_ties_and_missing_dates_are_stable_across
     async with _client(app) as client:
         first = await client.post("/v1/connectors/sharepoint/search", headers=_auth_header(), json=body)
         assert first.status_code == 200
+        assert first.json()["total"] == 3
         assert [hit["id"] for hit in first.json()["hits"]] == ["02B", "01A"]
         second = await client.post(
             "/v1/connectors/sharepoint/search",

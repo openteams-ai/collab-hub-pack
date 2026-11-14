@@ -238,6 +238,12 @@ class SharePointClient:
                 ),
                 reverse=True,
             )
+            # Graph can repeat a driveItem in a larger relevance response.
+            # Keep its newest metadata, while preserving distinct same-name files.
+            unique: dict[tuple[str, str], SharePointSearchHit] = {}
+            for hit in hits:
+                unique.setdefault((hit.drive_id, hit.id), hit)
+            hits = list(unique.values())
             next_offset = offset + limit
             next_token = _encode_page_token(next_offset, fingerprint) if next_offset < len(hits) else ""
             return hits[offset:next_offset], next_token, len(hits)

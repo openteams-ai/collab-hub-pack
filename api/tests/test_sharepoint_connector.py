@@ -459,10 +459,147 @@ async def test_sharepoint_search_sort_modified_and_date_window(tmp_path, monkeyp
     assert response.status_code == 200
     sent = captured["body"]["requests"][0]
     assert sent["query"]["queryString"] == "LastModifiedTime>=2026-10-01 AND LastModifiedTime<=2026-10-07"
-    assert sent["sortProperties"] == [{"name": "lastModifiedDateTime", "isDescending": True}]
+    assert "sortProperties" not in sent
+    assert sent["from"] == 0
+    assert sent["size"] == 1000
     # Hits Graph returned from outside the window (too old, too new) and a hit
     # with no modified time are all dropped Hub-side as well.
     assert [hit["name"] for hit in response.json()["hits"]] == ["Recent.docx"]
+
+
+@pytest.mark.parametrize("sorted_response_empty", [False, True])
+async def test_sharepoint_modified_sort_keeps_new_matches_and_pages_global_order(
+    tmp_path, monkeypatch, sorted_response_empty
+):
+    requests: list[dict] = []
+    old = _hit(_resource("01OLD", "Old.txt", modified="2026-11-06T14:00:00Z"))
+    new = _hit(_resource("02NEW", "New.txt", modified="2026-11-13T14:00:00Z"))
+
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith("/search/query"):
+            sent = json.loads(request.content)["requests"][0]
+            requests.append(sent)
+            # Observed Graph failure: adding sortProperties drops new matches,
+            # including a false empty result when only new files match.
+            if "sortProperties" in sent:
+                hits = [] if sorted_response_empty else [old]
+            else:
+                hits = [old, new]  # relevance order differs from chronology
+            return Response(200, json=_search_response(hits, total=len(hits)))
+        return _ok_handler(request)
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    body = {
+        "query": "routing",
+        "since_date": "2026-11-06",
+        "until_date": "2026-11-13",
+        "time_zone": "America/Puerto_Rico",
+        "sort": "modified",
+        "limit": 1,
+    }
+    async with _client(app) as client:
+        first = await client.post("/v1/connectors/sharepoint/search", headers=_auth_header(), json=body)
+        assert first.status_code == 200
+        assert [hit["id"] for hit in first.json()["hits"]] == ["02NEW"]
+        assert first.json()["total"] == 2
+        token = first.json()["next_page_token"]
+        assert token
+        second = await client.post(
+            "/v1/connectors/sharepoint/search", headers=_auth_header(), json={**body, "page_token": token}
+        )
+        assert second.status_code == 200
+        assert [hit["id"] for hit in second.json()["hits"]] == ["01OLD"]
+        assert second.json()["total"] == 2
+        assert second.json()["next_page_token"] == ""
+        changed_zone = await client.post(
+            "/v1/connectors/sharepoint/search",
+            headers=_auth_header(),
+            json={**body, "page_token": token, "time_zone": "Pacific/Auckland"},
+        )
+        assert changed_zone.status_code == 422
+    assert len(requests) == 2  # incompatible tokens fail before Graph access
+    for request in requests:
+        assert request["query"]["queryString"] == (
+            "(routing) AND LastModifiedTime>=2026-11-06 AND LastModifiedTime<=2026-11-13"
+        )
+        assert request["from"] == 0
+        assert "sortProperties" not in request
+
+
+@pytest.mark.parametrize("more,total", [(True, 1), (False, 1001)])
+async def test_sharepoint_modified_sort_refuses_incomplete_result_set(tmp_path, monkeypatch, more, total):
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith("/search/query"):
+            return Response(
+                200,
+                json=_search_response([_hit(_resource(ITEM_ID, "Plan.txt"))], total=total, more=more),
+            )
+        return _ok_handler(request)
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/sharepoint/search",
+            headers=_auth_header(),
+            json={"query": "plan", "sort": "modified"},
+        )
+    assert response.status_code == 422
+    assert "narrow the query or date window" in response.json()["detail"]
+    assert "hits" not in response.json()
+
+
+async def test_sharepoint_modified_sort_ties_and_missing_dates_are_stable_across_pages(tmp_path, monkeypatch):
+    hits = [
+        _hit(_resource("01A", "A.txt", modified="2026-11-13T14:00:00Z")),
+        _hit(_resource("02B", "B.txt", modified="2026-11-13T14:00:00Z")),
+        _hit(_resource("03UNDATED", "Undated.txt", modified="")),
+    ]
+
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith("/search/query"):
+            hits.reverse()  # Graph's relevance order can change between requests.
+            return Response(200, json=_search_response(hits))
+        return _ok_handler(request)
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    body = {"query": "plan", "sort": "modified", "limit": 2}
+    async with _client(app) as client:
+        first = await client.post("/v1/connectors/sharepoint/search", headers=_auth_header(), json=body)
+        assert first.status_code == 200
+        assert [hit["id"] for hit in first.json()["hits"]] == ["02B", "01A"]
+        second = await client.post(
+            "/v1/connectors/sharepoint/search",
+            headers=_auth_header(),
+            json={**body, "page_token": first.json()["next_page_token"]},
+        )
+    assert second.status_code == 200
+    assert [hit["id"] for hit in second.json()["hits"]] == ["03UNDATED"]
+    assert second.json()["next_page_token"] == ""
+
+
+async def test_sharepoint_modified_sort_accepts_complete_thousand_match_boundary(tmp_path, monkeypatch):
+    hits = [_hit(_resource(f"{i:04}", "Plan.txt")) for i in range(1000)]
+
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith("/search/query"):
+            return Response(200, json=_search_response(hits, total=1000))
+        return _ok_handler(request)
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/connectors/sharepoint/search",
+            headers=_auth_header(),
+            json={"query": "plan", "sort": "modified", "limit": 2},
+        )
+    assert response.status_code == 200
+    assert response.json()["total"] == 1000
+    assert [hit["id"] for hit in response.json()["hits"]] == ["0999", "0998"]
+    assert response.json()["next_page_token"]
 
 
 async def test_sharepoint_search_days_back_uses_callers_zone(tmp_path, monkeypatch):

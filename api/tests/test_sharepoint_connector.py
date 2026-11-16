@@ -157,6 +157,15 @@ def _ok_handler(request: httpx.Request) -> Response:
     return _graph_error(404, "Item not found")
 
 
+def _connector_log_events(caplog) -> list[str]:
+    """Event names of the SharePoint lines the connector loggers emitted, in order."""
+    return [
+        record.getMessage().split(" ", 1)[0]
+        for record in caplog.records
+        if record.name == "frames_server.connectors" and record.getMessage().startswith("sharepoint_")
+    ]
+
+
 def _minimal_pdf(text: str) -> bytes:
     """A hand-built one-page PDF with ``text`` in Helvetica, enough for PDFium."""
     escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
@@ -398,8 +407,10 @@ async def test_sharepoint_access_transport_diagnostics(
     ],
 )
 async def test_sharepoint_transport_diagnostics_preserve_operation_gateway_error(
-    tmp_path, monkeypatch, endpoint, payload, operation
+    tmp_path, monkeypatch, caplog, endpoint, payload, operation
 ):
+    caplog.set_level("INFO", logger="frames_server.connectors")
+
     def handler(request: httpx.Request) -> Response:
         raise httpx.ConnectError("PRIVATE-TRANSPORT-DETAIL", request=request)
 
@@ -410,6 +421,79 @@ async def test_sharepoint_transport_diagnostics_preserve_operation_gateway_error
     assert response.status_code == 502
     assert response.json()["detail"] == f"SharePoint {operation} failed: transport error (ConnectError)"
     assert "PRIVATE-TRANSPORT-DETAIL" not in response.text
+    # One operator line per failure: the router's upstream line is not repeated.
+    assert _connector_log_events(caplog) == ["sharepoint_graph_transport_error"]
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload", "event"),
+    [
+        ("/v1/connectors/sharepoint/search", {"query": "project"}, "sharepoint_search_upstream_error"),
+        (
+            f"/v1/connectors/sharepoint/drives/{DRIVE_ID}/items/{ITEM_ID}/read",
+            {},
+            "sharepoint_item_read_upstream_error",
+        ),
+    ],
+)
+async def test_sharepoint_http_error_responses_keep_the_router_upstream_log(
+    tmp_path, monkeypatch, caplog, endpoint, payload, event
+):
+    caplog.set_level("INFO", logger="frames_server.connectors")
+    _install_mock_client(monkeypatch, lambda request: _graph_error(500, "boom"))
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(endpoint, headers=_auth_header(), json=payload)
+    assert response.status_code == 502
+    assert _connector_log_events(caplog) == [event]
+
+
+@pytest.mark.parametrize(
+    ("name", "mime", "operation"),
+    [
+        ("readme.txt", "text/plain", "download"),
+        ("report.pdf", "application/pdf", "download"),
+        ("plan.docx", DOCX_MIME, "convert"),
+    ],
+)
+@pytest.mark.parametrize("failed_host", ["graph.test", "contoso.sharepoint.test"])
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError])
+async def test_sharepoint_download_transport_diagnostics(
+    tmp_path, monkeypatch, caplog, name, mime, operation, failed_host, error_type
+):
+    caplog.set_level("INFO", logger="frames_server.connectors")
+    # The download host is reached through a pre-authenticated URL, so the raw
+    # exception text is the likeliest place for one to leak from.
+    private_url = f"{DOWNLOAD_HOST}/download/raw?tempauth={STATIC_TOKEN}"
+    private_message = f"PRIVATE-TRANSPORT-DETAIL {private_url}"
+    ok_handler, _seen = _read_handler(_resource(ITEM_ID, name, mime=mime))
+
+    def handler(request: httpx.Request) -> Response:
+        is_content = request.url.path.endswith("/content") or request.url.host == "contoso.sharepoint.test"
+        if is_content and request.url.host == failed_host:
+            raise error_type(private_message, request=request)
+        return ok_handler(request)
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(_read_path(), headers=_auth_header(), json={})
+        # A failed document download must not hold the extraction permit.
+        again = await client.post(_read_path(), headers=_auth_header(), json={})
+    assert response.status_code == again.status_code == 502
+    assert response.json()["detail"] == f"SharePoint {operation} failed: transport error ({error_type.__name__})"
+
+    assert _connector_log_events(caplog) == ["sharepoint_graph_transport_error"] * 2
+    records = [
+        record for record in caplog.records if record.getMessage().startswith("sharepoint_graph_transport_error ")
+    ]
+    # Check the production formatter: extra attributes alone may be dropped.
+    rendered_log = JsonFormatter().format(records[0])
+    assert f"operation={operation} " in rendered_log
+    assert error_type.__name__ in rendered_log
+    for private_value in (private_message, private_url, STATIC_TOKEN, "tempauth"):
+        assert private_value not in response.text
+        assert private_value not in rendered_log
 
 
 async def test_sharepoint_static_token_wins_over_broker(tmp_path, monkeypatch):

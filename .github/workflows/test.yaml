@@ -17,6 +17,9 @@ on:
     paths:
       - "api/**"
       - ".github/workflows/test.yaml"
+      # The admin-ui job's audit check.
+      - "scripts/check_npm_audit.py"
+      - "scripts/tests/test_check_npm_audit.py"
   pull_request: {}   # runs on every PR so it can be a required status check
   merge_group: {}    # and on each merge-queue group; a required check that never reports there blocks the queue
 
@@ -168,9 +171,18 @@ jobs:
         working-directory: api/admin-ui
         run: npm ci --ignore-scripts --no-audit --no-fund
 
+      # The audit check's own refusals, on synthetic reports, so a regression
+      # in it can't wave an advisory through the audit below.
+      - name: Test the audit check
+        run: python3 -m unittest discover --start-directory scripts/tests --pattern test_check_npm_audit.py --verbose
+
+      # `npm audit` at --audit-level=low, except for the advisories
+      # api/admin-ui/audit-allowlist.json accepts: npm cannot ignore one, and an
+      # advisory with no patched release would otherwise block CI until
+      # upstream ships one. It also fails on an entry past its expiry, and on
+      # one no longer reported, so no exception outlives its reason.
       - name: Audit
-        working-directory: api/admin-ui
-        run: npm audit --audit-level=low
+        run: python3 scripts/check_npm_audit.py api/admin-ui
 
       - name: Typecheck
         working-directory: api/admin-ui

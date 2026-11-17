@@ -91,11 +91,103 @@ connectors:
     apiBaseUrl: https://api.notion.com
     notionVersion: "2022-06-28"
     requestTimeoutSeconds: 10
+    userinfoProxy:                # the gateway route the `notion` IdP needs (Envoy Gateway only)
+      enabled: false
+      host: ""                    # this hub's Keycloak host, e.g. keycloak.example.com
+      namespace: ""               # empty = release namespace
+      parentRefs:
+        - name: nebari-gateway
+          namespace: envoy-gateway-system
+          sectionName: https
 ```
 
-These map to `COLLAB_HUB_API__CONNECTORS__NOTION__*` env vars in the API
-deployment. `brokerTokenUrl` is the only value that must be set for the connector
-to work; left empty, the connector reports `not_connected` and stays fail-closed.
+The connector values map to `COLLAB_HUB_API__CONNECTORS__NOTION__*` env vars in
+the API deployment. `brokerTokenUrl` is the only value that must be set for the
+connector to work; left empty, the connector reports `not_connected` and stays
+fail-closed.
+
+`userinfoProxy` renders the gateway route described under the token path
+(`templates/notion-userinfo-proxy.yaml`), so a hub no longer copies it by hand.
+It sends the same `notionVersion` the connector pins. The render fails when
+`host` is empty, or when the cluster has no Envoy Gateway `Backend` CRD; the
+`Backend` kind also needs `extensionApis.enableBackend: true` in the Envoy
+Gateway config, which a render cannot check. The render also fails without the
+`EnvoyExtensionPolicy` CRD or any `BackendTLSPolicy` (v1 or v1alpha3); an offline
+`helm template` needs `--api-versions` for each.
+
+The route needs a gateway listener that admits both of its hostnames: the
+Keycloak host, and `api.notion.com` (Envoy re-matches the route after the Lua
+host rewrite). A listener with no `hostname`, like the Nebari gateway's `https`,
+admits both. A listener restricted to a hostname or wildcard silently drops
+`api.notion.com`, and a dedicated listener for the Keycloak host takes that
+host's traffic from the generic one; in either case point `parentRefs` at a
+listener that admits both, or links fail at the userinfo step. The render cannot
+see listener hostnames, so this one is on the operator.
+
+A hub that already carries a hand-written copy of this route (for example from
+its cluster repository) must remove it when it turns `userinfoProxy` on: two
+routes claiming the same host and `/notion-userinfo` path conflict.
+
+## Turning Notion on for a hub
+
+The chart does not hold Keycloak admin access, so the identity provider is the
+one step an operator runs by hand. In order:
+
+1. **Create the Notion integration** (see above): public, installation scope
+   **Any workspace** (it cannot be changed later), **Read content** only,
+   redirect URI `https://<keycloak-host>/realms/<realm>/broker/notion/endpoint`.
+   Each hub needs its own integration, or its redirect URI added to one the same
+   operator owns: the client secret must never leave the operator that holds it.
+2. **Turn on the proxy**: `connectors.notion.userinfoProxy.enabled: true` and
+   `host: <keycloak-host>`. Deploy.
+3. **Create the `notion` identity provider** in the hub's realm, with Keycloak
+   26.3.0 or later (the generic `oauth2` broker is stock from then):
+
+   ```sh
+   # NOTION_CLIENT_ID / NOTION_CLIENT_SECRET come from the integration's
+   # Configuration tab; never paste them into a ticket or chat. The JSON is
+   # piped straight in, so the secret is never written to disk. Values are
+   # interpolated unescaped: a secret containing " or \ needs escaping first.
+   kcadm.sh create identity-provider/instances -r <realm> -f - <<EOF
+   {
+     "alias": "notion",
+     "providerId": "oauth2",
+     "enabled": true,
+     "trustEmail": false,
+     "storeToken": true,
+     "linkOnly": true,
+     "hideOnLogin": true,
+     "config": {
+       "clientId": "$NOTION_CLIENT_ID",
+       "clientSecret": "$NOTION_CLIENT_SECRET",
+       "authorizationUrl": "https://api.notion.com/v1/oauth/authorize?owner=user",
+       "tokenUrl": "https://api.notion.com/v1/oauth/token",
+       "userInfoUrl": "https://<keycloak-host>/notion-userinfo",
+       "clientAuthMethod": "client_secret_basic",
+       "userIDClaim": "id",
+       "userNameClaim": "id",
+       "fullNameClaim": "name",
+       "defaultScope": "",
+       "syncMode": "IMPORT",
+       "showInAccountConsole": "ALWAYS"
+     }
+   }
+   EOF
+   ```
+
+   `linkOnly` is what keeps Notion from becoming a way to sign in or create an
+   account; keep it, and `storeToken`, true. `clientAuthMethod` must stay
+   `client_secret_basic` (Notion's token endpoint accepts only HTTP Basic).
+   Hubs that manage the realm from a setup job put the same JSON there instead,
+   gated on a Secret: see openteams-ai/collab.openteams.app
+   `clusters/collab-hub/manifests/keycloak/realm-setup-job.yaml`.
+4. **Check the provider exists**:
+   `curl -s https://<keycloak-host>/realms/<realm>/broker/notion/endpoint` must no
+   longer answer `Identity Provider [notion] not found.`
+5. **Offer the connector**: set `connectors.notion.brokerTokenUrl` to the broker
+   token endpoint and deploy. This is the switch that lists Notion in
+   `GET /v1/connectors`, so it goes last; set earlier, users see Notion as
+   "reconnect required". Normal users need the broker `read-token` role.
 
 ## Endpoints
 
@@ -133,8 +225,8 @@ the desktop chat renderer.
 - [ ] Configure the Keycloak `notion` generic-OAuth IdP with `Store Tokens` on,
       `Link-only` on, and `Hide on Login Page` on; grant normal users the broker
       `read-token` role.
-- [ ] Ensure the gateway `userinfo` proxy route for `notion` is in place (see the
-      token-path section) so links can complete.
+- [ ] Turn on `connectors.notion.userinfoProxy` (or provide an equivalent
+      gateway route) so links can complete.
 - [ ] Set `connectors.notion.brokerTokenUrl` to the broker token endpoint.
 - [ ] Set `notionVersion` and `apiBaseUrl` (defaults are correct for prod).
 

@@ -5,6 +5,7 @@ import base64
 import hashlib
 import html
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -22,6 +23,8 @@ from .sharepoint_text import (
     extract_pdf_text_async,
     extraction_permit,
 )
+
+logger = logging.getLogger("frames_server.connectors")
 
 # Microsoft Search pages by ``from``/``size`` offsets (no cursor). Graph refuses
 # deep offsets anyway; this cap keeps a page token from walking forever.
@@ -161,12 +164,12 @@ class SharePointClient:
         # often (Hub Management, task runs, the Hermes plugin's 4 s probe), and
         # Graph round trips dominate its latency.
         me, _search = await asyncio.gather(
-            self._request("GET", "/me", operation="access check"),
+            self._request("GET", "/me", operation="profile access check"),
             self._request(
                 "POST",
                 "/search/query",
                 json=_search_body("*", offset=0, size=1, sort="relevance"),
-                operation="access check",
+                operation="search access check",
             ),
         )
         return SharePointAccessCheck(account=_account_label(me))
@@ -351,14 +354,20 @@ class SharePointClient:
         headers = {"Authorization": f"Bearer {self.access_token}", "Accept": "application/json"}
         if json is not None:
             headers["Content-Type"] = "application/json"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.request(
-                method,
-                self.api_base_url + path,
-                headers=headers,
-                json=json,
-                params=params,
-            )
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.request(
+                    method,
+                    self.api_base_url + path,
+                    headers=headers,
+                    json=json,
+                    params=params,
+                )
+        except httpx.HTTPError as exc:
+            # Raw transport messages can contain provider URLs or credentials.
+            error_type = type(exc).__name__
+            logger.info("sharepoint_graph_transport_error operation=%s error_type=%s", operation, error_type)
+            raise SharePointUpstreamError(operation=operation, message=f"transport error ({error_type})") from exc
         _raise_for_graph_status(response, operation=operation)
         try:
             payload = response.json()

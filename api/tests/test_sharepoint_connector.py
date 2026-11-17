@@ -27,6 +27,7 @@ from collab_hub_api.connectors.models import (
 from collab_hub_api.connectors.sharepoint_client import _kql, _site_from_web_url, _strip_search_markup
 from collab_hub_api.connectors.sharepoint_text import PdfExtractionError, extract_pdf_text, extract_pdf_text_async
 from collab_hub_api.core import make_app
+from collab_hub_api.frames.observability import JsonFormatter
 
 STATIC_TOKEN = "eyJ-static-graph-token-alice"
 DRIVE_ID = "b!abc123-XYZ_456"
@@ -344,6 +345,71 @@ async def test_sharepoint_status_unavailable_on_server_error(tmp_path, monkeypat
     body = response.json()
     assert body["connected"] is False
     assert body["state"] == "unavailable"
+
+
+@pytest.mark.parametrize("endpoint", ["/v1/connectors/sharepoint/status", "/v1/connectors"])
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError])
+@pytest.mark.parametrize(
+    ("failed_path", "operation"),
+    [("/me", "profile access check"), ("/search/query", "search access check")],
+)
+async def test_sharepoint_access_transport_diagnostics(
+    tmp_path, monkeypatch, caplog, endpoint, error_type, failed_path, operation
+):
+    caplog.set_level("INFO", logger="frames_server.connectors")
+    private_url = f"https://private-provider.test/tenant?token={STATIC_TOKEN}"
+    private_message = f"PRIVATE-TRANSPORT-DETAIL {private_url}"
+
+    def handler(request: httpx.Request) -> Response:
+        if request.url.path.endswith(failed_path):
+            raise error_type(private_message, request=request)
+        return _ok_handler(request)
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.get(endpoint, headers=_auth_header())
+    assert response.status_code == 200
+    body = response.json()
+    if endpoint == "/v1/connectors":
+        body = next(connector for connector in body if connector["id"] == "sharepoint")
+    assert body["connected"] is False
+    assert body["state"] == "unavailable"
+    assert body["detail"] == f"SharePoint {operation} failed: transport error ({error_type.__name__})"
+
+    records = [
+        record for record in caplog.records if record.getMessage().startswith("sharepoint_graph_transport_error ")
+    ]
+    assert len(records) == 1
+    # Check the production formatter: extra attributes alone may be dropped.
+    rendered_log = JsonFormatter().format(records[0])
+    assert operation in rendered_log
+    assert error_type.__name__ in rendered_log
+    for private_value in (private_message, private_url, STATIC_TOKEN):
+        assert private_value not in response.text
+        assert private_value not in rendered_log
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload", "operation"),
+    [
+        ("/v1/connectors/sharepoint/search", {"query": "project"}, "search"),
+        (f"/v1/connectors/sharepoint/drives/{DRIVE_ID}/items/{ITEM_ID}/read", {}, "item metadata"),
+    ],
+)
+async def test_sharepoint_transport_diagnostics_preserve_operation_gateway_error(
+    tmp_path, monkeypatch, endpoint, payload, operation
+):
+    def handler(request: httpx.Request) -> Response:
+        raise httpx.ConnectError("PRIVATE-TRANSPORT-DETAIL", request=request)
+
+    _install_mock_client(monkeypatch, handler)
+    app = make_app(_config(tmp_path))
+    async with _client(app) as client:
+        response = await client.post(endpoint, headers=_auth_header(), json=payload)
+    assert response.status_code == 502
+    assert response.json()["detail"] == f"SharePoint {operation} failed: transport error (ConnectError)"
+    assert "PRIVATE-TRANSPORT-DETAIL" not in response.text
 
 
 async def test_sharepoint_static_token_wins_over_broker(tmp_path, monkeypatch):

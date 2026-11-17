@@ -814,10 +814,10 @@ and every chat starts informed. It all runs on your organization's own hub.</p>
     return _document(title="Collab Hub", chrome=chrome, main=main, scripts=(HOME_SCRIPT_PATH,), footer=True)
 
 
-def _dashboard(*, surface: WebSurface, session: WebSession, root_path: str, current: str, title: str, body: str) -> str:
-    """The account dashboard: a sidebar of sections beside the one shown."""
+def _dashboard(*, surface: WebSurface, session: WebSession, root_path: str, title: str, body: str) -> str:
+    """The account dashboard: the Account page, with a sidebar beside it."""
 
-    chrome = _chrome(surface, session, root_path, current)
+    chrome = _chrome(surface, session, root_path, ACCOUNT_PATH)
 
     def entry(href: str, label: str, icon: str, attrs: str = "") -> str:
         # The name doubles as a tooltip, for when the sidebar is folded to icons.
@@ -826,8 +826,7 @@ def _dashboard(*, surface: WebSurface, session: WebSession, root_path: str, curr
             f"{icon}<span>{label}</span></a></li>"
         )
 
-    current_attr = ' aria-current="page"' if current == ACCOUNT_PATH else ""
-    sections = entry(root_path + ACCOUNT_PATH, "Account", _icon("account", "icon-sm"), current_attr)
+    sections = entry(root_path + ACCOUNT_PATH, "Account", _icon("account", "icon-sm"), ' aria-current="page"')
     # Billing is the external account page (``web.account_page_url``), served on
     # its own host; a hub without one shows no Billing entry at all.
     if surface.account_page_url:
@@ -863,9 +862,7 @@ def account_page(*, surface: WebSurface, session: WebSession, root_path: str = "
 <a class="btn primary" href="{html.escape(f"https://collab.{domain}/")}">{_mark()}Open Collab</a>
 {_signout_form(html.escape(root_path), session, "btn outline")}
 </div>"""
-    return _dashboard(
-        surface=surface, session=session, root_path=root_path, current=ACCOUNT_PATH, title="Your account", body=body
-    )
+    return _dashboard(surface=surface, session=session, root_path=root_path, title="Your account", body=body)
 
 
 # The Collab mark's four quadrants: shape and colour. The served mark draws

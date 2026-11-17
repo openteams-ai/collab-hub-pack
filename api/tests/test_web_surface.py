@@ -3704,7 +3704,7 @@ def test_the_surface_stylesheet_shouts_at_nobody():
 # --- The optional account link (#275) ---------------------------------------
 
 ACCOUNT_URL = "https://billing.example.com/account?plan=1"
-ACCOUNT_LINK = f'<a href="{html.escape(ACCOUNT_URL)}">Account</a>'
+ACCOUNT_LINK = f'<a href="{html.escape(ACCOUNT_URL)}">Billing</a>'
 
 
 async def test_no_account_link_renders_unless_the_deployment_sets_one(tmp_path, idp):
@@ -3717,7 +3717,7 @@ async def test_no_account_link_renders_unless_the_deployment_sets_one(tmp_path, 
         overview = await client.get("/web")
     assert overview.status_code == 200
     assert "Sign out" in overview.text
-    assert "Account" not in overview.text
+    assert "Billing" not in overview.text
 
 
 async def test_the_account_link_renders_from_configuration_when_set(tmp_path, idp):
@@ -3728,8 +3728,8 @@ async def test_the_account_link_renders_from_configuration_when_set(tmp_path, id
         overview = await client.get("/web")
     assert overview.status_code == 200
     assert ACCOUNT_LINK in overview.text
-    assert overview.text.count("Account") == 1
-    assert overview.text.index("Account") < overview.text.index("Sign out")
+    assert overview.text.count("Billing") == 1
+    assert overview.text.index("Billing") < overview.text.index("Sign out")
     # A same-tab link like every other on the surface: no window-opening
     # attributes, and the page-level no-referrer meta covers the Referer.
     assert "target=" not in overview.text
@@ -3748,14 +3748,14 @@ def test_render_page_writes_the_link_only_in_the_signed_in_footer():
     signed_in = render_page(
         title="t", body="", identity_label="Alice", csrf_token="tok", account_url='https://x.example/a?b=1&c="2"'
     )
-    assert '<a href="https://x.example/a?b=1&amp;c=&quot;2&quot;">Account</a> · ' in signed_in
-    assert signed_in.index("Account") < signed_in.index("Sign out")
+    assert '<a href="https://x.example/a?b=1&amp;c=&quot;2&quot;">Billing</a> · ' in signed_in
+    assert signed_in.index("Billing") < signed_in.index("Sign out")
     for anonymous in (
         render_page(title="t", body="", account_url="https://x.example/a"),
         render_page(title="t", body="", identity_label="Alice", csrf_token="tok"),
         render_page(title="t", body="", identity_label="Alice", csrf_token="tok", account_url=""),
     ):
-        assert "Account" not in anonymous
+        assert "Billing" not in anonymous
 
 
 def test_account_page_url_is_empty_without_a_surface_or_a_value():

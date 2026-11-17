@@ -354,7 +354,7 @@ class WebConfig(BaseModel):
     """
 
     account_page_url: str = ""
-    """Where the signed-in navigation's "Account" link points, if anywhere.
+    """Where the signed-in navigation's "Billing" link points, if anywhere.
 
     Empty (the default) renders no link: a Hub install shows nothing and
     needs no billing configuration. The page itself -- plan, usage,

@@ -603,16 +603,17 @@ def make_router(
         )
 
     @router.get(BILLING_PATH)
-    async def billing(_session: WebSession = Depends(require_web_session)) -> Response:
+    async def billing(request: Request, _session: WebSession = Depends(require_web_session)) -> Response:
         """Billing lives on the external account page; this path only forwards there.
 
         The dashboard sidebar links to ``web.account_page_url`` directly. This
         keeps the hub's old Billing address working, and a hub without an
         account page has no Billing at all."""
 
-        if not surface.account_page_url:
+        target = account_page_url(request)
+        if not target:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
-        return _redirect(surface.account_page_url)
+        return _redirect(target)
 
     @router.post(SIGNOUT_PATH)
     async def signout(request: Request, _session: WebSession = Depends(require_csrf)) -> Response:

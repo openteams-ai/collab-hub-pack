@@ -70,7 +70,7 @@ than dead-ending a signed-in operator.
 | `COLLAB_HUB_API__WEB__PUBLIC_BASE_URL` | External origin the surface builds its absolute URLs from, the OIDC redirect URI among them. **Required** when the surface is enabled on a membership-resolving deployment — startup refuses without it, because those origins must never be derived from a forgeable request `Host` (see below). Also what makes the redirect URI correct behind a proxy whose forwarded headers are not trusted. Same https/loopback rule as the issuer. |
 | `COLLAB_HUB_API__WEB__ADMIN_UI_DIST` | Directory holding the built admin panel. The image sets it to `/var/collab-hub-api/admin-ui-dist`. Empty, or a directory with no `index.html`, mounts no panel routes (the second case logs `admin_ui_dist_missing_index`). The panel and its `/admin/api/*` endpoints mount only on a membership-resolving deployment (`orgSource` `membership` or `single`). |
 | `COLLAB_HUB_API__WEB__ADMIN_GROUP` | Identity-provider group whose members hold the operator role, reconciled at each sign-in from the ID token's `groups` claim. Matches with or without a leading slash. Empty (default) turns sync off. Needs a groups mapper on the client so the ID token carries the claim; see [frames-operations.md](frames-operations.md#where-operator-rows-come-from-source-and-sign-in-sync). |
-| `COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL` | Optional. An external account page (plan, usage, invoices) the signed-in navigation links to as "Account". Empty (default) renders no link. Same https/loopback rule as the issuer, plus a real host, a valid port, no credentials and no control characters, checked at startup. Chart value `web.accountPageUrl`. See [the account link](#the-account-link-an-optional-extension-point). |
+| `COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL` | Optional. An external account page (plan, usage, invoices) the signed-in navigation links to as "Billing". Empty (default) renders no link. Same https/loopback rule as the issuer, plus a real host, a valid port, no credentials and no control characters, checked at startup. Chart value `web.accountPageUrl`. See [the account link](#the-account-link-an-optional-extension-point). |
 | `COLLAB_HUB_API__WEB__HUB_DOMAIN` | Optional. The domain [the home page](#the-home-page-webhome) builds its links from (the web client and its Frames page at `collab.<domain>`, the API docs at `frames.<domain>`). Empty (default) takes the issuer's host without its leading `keycloak.`. A bare host name, checked at startup. Chart value `home.hubDomain`. |
 | `COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL` | Optional. The home page's desktop download link. Empty renders none. Same rules as `ACCOUNT_PAGE_URL`. Chart value `home.desktopDownloadUrl`. |
 | `COLLAB_HUB_API__WEB__DOCS_URL` | Optional. The home page's docs link. Empty renders none. Same rules as `ACCOUNT_PAGE_URL`. Chart value `home.docsUrl`. |
@@ -592,7 +592,7 @@ A deployment can show its users a link to an external account page — plan,
 usage, invoices — from the signed-in navigation, **only when it turns the
 link on** (issue [#275]). Set `web.account_page_url`
 (`COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL`, chart value `web.accountPageUrl`) and
-every page that renders the signed-in footer carries `Account` beside
+every page that renders the signed-in footer carries `Billing` beside
 `Sign out`. Leave it unset, which is the default, and nothing renders: a
 normal Hub install needs no billing configuration and shows no trace of one.
 
@@ -607,12 +607,12 @@ still kept:
   `web.surface.account_page_url(request)`, which looks up the `WebSurface` the
   app was built with — the same posture as `public_base_url` above. Nothing
   in the request can steer where the link points.
-- **One rule, three places.** The link is written in two places: the
-  signed-in footer (`pages.render_page`, beside the sign-out form, as
-  `Account`) and the account dashboard's sidebar (`home._dashboard`, as
-  `Billing`); `/web/account/billing` only forwards to it. All three follow
-  the same rule: a signed-in page, and the value is set. Unset, none of them
-  shows anything.
+- **One rule wherever the link appears.** It is written in two places,
+  both labelled `Billing`: the signed-in footer (`pages.render_page`, beside
+  the sign-out form) and the account dashboard's sidebar
+  (`home._dashboard`). `/web/account/billing` writes no link; it only
+  forwards to the page. All of them follow the same rule: a signed-in page,
+  and the value is set. Unset, none of them shows anything.
 - **Checked at startup, to the surface's usual bar.** `WebConfig` runs the
   value through `web.oidc.invalid_link_url_reason`, which follows the same rules
   as the realm-URL check: absolute `https://` (plain `http://` only on

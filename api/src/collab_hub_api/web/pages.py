@@ -310,11 +310,11 @@ def render_page(
     this surface follows.
 
     ``account_url`` is the deployment's external account page
-    (``web.account_page_url``, issue #275). It is rendered only in that
-    signed-in footer and only when set; routes read it from configuration
-    through :func:`~.surface.account_page_url`, never from the request. This
-    is the one place the link exists, so a page cannot grow a second copy
-    with a different rule.
+    (``web.account_page_url``, issue #275), linked as "Billing". It is
+    rendered only in that signed-in footer and only when set; routes read it
+    from configuration through :func:`~.surface.account_page_url`, never from
+    the request. The account dashboard's sidebar (``home._dashboard``) links
+    to the same page under the same rule: signed in, and the value set.
     """
 
     footer = ""
@@ -323,7 +323,7 @@ def render_page(
         if account_url:
             # Same-tab navigation, like every other link here; the page-level
             # no-referrer meta already keeps this origin out of the Referer.
-            account = f'<a href="{html.escape(account_url)}">Account</a> · '
+            account = f'<a href="{html.escape(account_url)}">Billing</a> · '
         footer = (
             '<div class="identity">Signed in as '
             f"<strong>{html.escape(identity_label)}</strong> · "

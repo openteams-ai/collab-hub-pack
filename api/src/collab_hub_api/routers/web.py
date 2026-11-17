@@ -22,7 +22,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from urllib.parse import unquote
 
-from fastapi import APIRouter, Depends, FastAPI, Request, Response, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.routing import APIRoute
 from starlette.concurrency import run_in_threadpool
@@ -41,7 +41,7 @@ from ..web.authz import (
 )
 from ..web.data_statement import data_statement_page
 from ..web.forms import FormRefused
-from ..web.home import COLLAB_MARK_SVG, HOME_STYLESHEET, account_page, billing_page, home_page
+from ..web.home import COLLAB_MARK_SVG, HOME_STYLESHEET, account_page, home_page
 from ..web.pages import (
     SECURITY_HEADERS,
     STYLE_PATH,
@@ -603,13 +603,16 @@ def make_router(
         )
 
     @router.get(BILLING_PATH)
-    async def billing(request: Request, session: WebSession = Depends(require_web_session)) -> Response:
-        """Billing, in the account dashboard. Empty for now."""
+    async def billing(_session: WebSession = Depends(require_web_session)) -> Response:
+        """Billing lives on the external account page; this path only forwards there.
 
-        return page_response(
-            billing_page(surface=surface, session=session, root_path=_root_path(request)),
-            path=BILLING_PATH,
-        )
+        The dashboard sidebar links to ``web.account_page_url`` directly. This
+        keeps the hub's old Billing address working, and a hub without an
+        account page has no Billing at all."""
+
+        if not surface.account_page_url:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        return _redirect(surface.account_page_url)
 
     @router.post(SIGNOUT_PATH)
     async def signout(request: Request, _session: WebSession = Depends(require_csrf)) -> Response:

@@ -607,10 +607,12 @@ still kept:
   `web.surface.account_page_url(request)`, which looks up the `WebSurface` the
   app was built with — the same posture as `public_base_url` above. Nothing
   in the request can steer where the link points.
-- **One owner.** `pages.render_page` is the only place the link is written,
-  inside the same footer as the sign-out form, so there is one rule for when
-  it appears (a signed-in page, and the value is set) and a page cannot grow
-  a second copy with another.
+- **One rule, three places.** The link is written in two places: the
+  signed-in footer (`pages.render_page`, beside the sign-out form, as
+  `Account`) and the account dashboard's sidebar (`home._dashboard`, as
+  `Billing`); `/web/account/billing` only forwards to it. All three follow
+  the same rule: a signed-in page, and the value is set. Unset, none of them
+  shows anything.
 - **Checked at startup, to the surface's usual bar.** `WebConfig` runs the
   value through `web.oidc.invalid_link_url_reason`, which follows the same rules
   as the realm-URL check: absolute `https://` (plain `http://` only on
@@ -638,14 +640,15 @@ What a person sees at the hub's address. Signed out: Sign in and Sign up
 person's name, Sign out, and one click to each of the web client
 (`https://collab.<domain>/`), Frames (`https://collab.<domain>/frames`), the desktop
 download and docs (when configured) and the hub's own account page
-(`/web/account`). That page and Billing (`/web/account/billing`) share a
-dashboard with a sidebar; Billing links to `web.account_page_url` when it is
-set and is otherwise empty.
+(`/web/account`). That page is a dashboard with a sidebar whose Billing
+entry links straight to `web.account_page_url`; with no account page set
+there is no Billing entry. `/web/account/billing` forwards to the account
+page when one is set and is not found otherwise.
 
 Every link comes from configuration, never the request: the domain from
 `web.hub_domain` or the issuer, the rest from the settings above. The pages
 load two scripts from this origin and nothing inline (`script-src 'self'`):
-`/web/theme.js` on the home, account and billing pages, for the theme switch, the menus and the
+`/web/theme.js` on the home and account pages, for the theme switch, the menus and the
 dashboard sidebar, and `/web/home.js` on the home page only, for the demo
 Collab window, whose replies are made up on the page and sent nowhere. The
 pages have their own stylesheet, with fonts referenced relative to it so a

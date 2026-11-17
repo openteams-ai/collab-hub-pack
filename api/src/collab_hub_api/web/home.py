@@ -3,8 +3,9 @@
 What a person sees at the hub's address: the product's front door. Signed
 out, it offers sign-in and sign-up, both of which come back here; signed in,
 it names the person and puts the web client, the desktop download, Frames,
-the docs and the hub's account page one click away. The account page and
-Billing share a dashboard (:func:`account_page`, :func:`billing_page`).
+the docs and the hub's account page one click away. The account page
+(:func:`account_page`) sits in a dashboard whose sidebar also links to
+Billing, the external ``web.account_page_url``, when one is set.
 
 Every link comes from configuration, never the request: the web client and
 Frames from the hub's domain (:func:`hub_domain`), the rest from ``web.*``
@@ -33,7 +34,6 @@ from urllib.parse import quote, urlsplit
 from .session import WebSession
 from .surface import (
     ACCOUNT_PATH,
-    BILLING_PATH,
     DATA_STATEMENT_PATH,
     HOME_FONT_FILES,
     HOME_FONT_PATHS,
@@ -814,17 +814,10 @@ and every chat starts informed. It all runs on your organization's own hub.</p>
     return _document(title="Collab Hub", chrome=chrome, main=main, scripts=(HOME_SCRIPT_PATH,), footer=True)
 
 
-# The account dashboard's sections: path, label, icon, in sidebar order.
-_DASHBOARD = (
-    (ACCOUNT_PATH, "Account", "account"),
-    (BILLING_PATH, "Billing", "card"),
-)
+def _dashboard(*, surface: WebSurface, session: WebSession, root_path: str, title: str, body: str) -> str:
+    """The account dashboard: the Account page, with a sidebar beside it."""
 
-
-def _dashboard(*, surface: WebSurface, session: WebSession, root_path: str, current: str, title: str, body: str) -> str:
-    """The account dashboard: a sidebar of sections beside the one shown."""
-
-    chrome = _chrome(surface, session, root_path, current)
+    chrome = _chrome(surface, session, root_path, ACCOUNT_PATH)
 
     def entry(href: str, label: str, icon: str, attrs: str = "") -> str:
         # The name doubles as a tooltip, for when the sidebar is folded to icons.
@@ -833,10 +826,11 @@ def _dashboard(*, surface: WebSurface, session: WebSession, root_path: str, curr
             f"{icon}<span>{label}</span></a></li>"
         )
 
-    sections = "".join(
-        entry(root_path + path, label, _icon(icon, "icon-sm"), ' aria-current="page"' if path == current else "")
-        for path, label, icon in _DASHBOARD
-    )
+    sections = entry(root_path + ACCOUNT_PATH, "Account", _icon("account", "icon-sm"), ' aria-current="page"')
+    # Billing is the external account page (``web.account_page_url``), served on
+    # its own host; a hub without one shows no Billing entry at all.
+    if surface.account_page_url:
+        sections += entry(surface.account_page_url, "Billing", _icon("card", "icon-sm"))
     product = entry(chrome.web_client, "Collab", _mark()) + entry(chrome.frames, "Frames", _icon("frames", "icon-sm"))
     fold = (
         '<button type="button" class="dash-fold" data-sidebar-toggle aria-controls="dash-nav" '
@@ -868,24 +862,7 @@ def account_page(*, surface: WebSurface, session: WebSession, root_path: str = "
 <a class="btn primary" href="{html.escape(f"https://collab.{domain}/")}">{_mark()}Open Collab</a>
 {_signout_form(html.escape(root_path), session, "btn outline")}
 </div>"""
-    return _dashboard(
-        surface=surface, session=session, root_path=root_path, current=ACCOUNT_PATH, title="Your account", body=body
-    )
-
-
-def billing_page(*, surface: WebSurface, session: WebSession, root_path: str = "") -> str:
-    """Billing, in the account dashboard. Empty for now."""
-
-    plan = (
-        f'<a class="btn outline" href="{html.escape(surface.account_page_url)}">{_icon("card", "icon-sm")}'
-        "Plan and billing</a>"
-        if surface.account_page_url
-        else ""
-    )
-    body = f"<h1>Billing</h1>{plan}"
-    return _dashboard(
-        surface=surface, session=session, root_path=root_path, current=BILLING_PATH, title="Billing", body=body
-    )
+    return _dashboard(surface=surface, session=session, root_path=root_path, title="Your account", body=body)
 
 
 # The Collab mark's four quadrants: shape and colour. The served mark draws

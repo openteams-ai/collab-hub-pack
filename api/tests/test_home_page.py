@@ -314,40 +314,64 @@ async def test_the_hub_root_opens_the_home_page_where_the_web_pages_run(tmp_path
 
 
 BILLING = "/web/account/billing"
+BILLING_URL = "https://billing.example.com/account?plan=1"
 
 
-async def test_the_billing_page_needs_a_session(tmp_path, idp):
-    app = make_web_app(tmp_path, idp)
+def sidebar(text: str) -> str:
+    start = text.index('<nav class="dash-nav"')
+    return text[start : text.index("</nav>", start)]
+
+
+async def test_the_billing_address_needs_a_session(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"account_page_url": BILLING_URL})
     async with web_client(app) as client:
         response = await client.get(BILLING)
     assert response.status_code == 303
     assert response.headers["location"].startswith("/web/signin")
 
 
-@pytest.mark.parametrize("path", [ACCOUNT, BILLING])
-async def test_the_account_dashboard_has_a_sidebar_with_account_and_billing(tmp_path, idp, path):
+async def test_the_account_dashboard_has_a_sidebar(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as client:
-        await sign_in(client, idp, next_path=path)
-        page = await client.get(path)
+        await sign_in(client, idp, next_path=ACCOUNT)
+        page = await client.get(ACCOUNT)
     assert page.status_code == 200
-    start = page.text.index('<nav class="dash-nav"')
-    sidebar = page.text[start : page.text.index("</nav>", start)]
-    assert link(ACCOUNT) in sidebar
-    assert link(BILLING) in sidebar
+    nav = sidebar(page.text)
     # The page being shown is the one marked current.
-    assert f'{link(path)} aria-current="page"' in sidebar
+    assert f'{link(ACCOUNT)} aria-current="page"' in nav
     # The product links live in the sidebar too, and the landing page's
     # framed column is not used here.
-    assert link("https://collab.127.0.0.1/") in sidebar
-    assert link("https://collab.127.0.0.1/frames") in sidebar
+    assert link("https://collab.127.0.0.1/") in nav
+    assert link("https://collab.127.0.0.1/frames") in nav
     assert 'class="frame"' not in page.text
     assert "<footer" not in page.text
     assert "font-src 'self'" in page.headers["content-security-policy"]
 
 
-async def test_the_dashboard_sidebar_can_be_collapsed(tmp_path, idp):
+async def test_the_sidebar_billing_entry_is_the_configured_account_page(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"account_page_url": BILLING_URL})
+    async with web_client(app) as client:
+        await sign_in(client, idp, next_path=ACCOUNT)
+        page = await client.get(ACCOUNT)
+    nav = sidebar(page.text)
+    # Straight to the external page, escaped, same tab, never marked current.
+    assert f'{link(BILLING_URL)} title="Billing">' in nav
+    assert "target=" not in nav
+    assert link(BILLING) not in nav
+
+
+async def test_without_an_account_page_the_sidebar_has_no_billing(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await sign_in(client, idp, next_path=ACCOUNT)
+        page = await client.get(ACCOUNT)
+    nav = sidebar(page.text)
+    assert "Billing" not in nav
+    assert link(BILLING) not in nav
+
+
+async def test_the_dashboard_sidebar_can_be_collapsed(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"account_page_url": BILLING_URL})
     async with web_client(app) as client:
         await sign_in(client, idp, next_path=ACCOUNT)
         page = await client.get(ACCOUNT)
@@ -357,15 +381,27 @@ async def test_the_dashboard_sidebar_can_be_collapsed(tmp_path, idp):
         '<button type="button" class="dash-fold" data-sidebar-toggle aria-controls="dash-nav" '
         'aria-expanded="true" aria-label="Collapse sidebar">'
     ) in page.text
-    assert f'{link(BILLING)} title="Billing"' in page.text
+    assert f'{link(ACCOUNT)} aria-current="page" title="Account"' in page.text
+    assert f'{link(BILLING_URL)} title="Billing"' in page.text
 
 
-async def test_the_billing_page_is_empty_for_now(tmp_path, idp):
+async def test_the_old_billing_address_forwards_to_the_account_page(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"account_page_url": BILLING_URL})
+    async with web_client(app) as client:
+        await sign_in(client, idp, next_path=ACCOUNT)
+        response = await client.get(BILLING)
+    assert response.status_code == 303
+    assert response.headers["location"] == BILLING_URL
+    # The hub's address stays out of the billing site's logs.
+    assert response.headers["referrer-policy"] == "no-referrer"
+
+
+async def test_without_an_account_page_the_old_billing_address_is_not_found(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as client:
-        await sign_in(client, idp, next_path=BILLING)
-        page = await client.get(BILLING)
-    assert "<h1>Billing</h1>" in page.text
+        await sign_in(client, idp, next_path=ACCOUNT)
+        response = await client.get(BILLING)
+    assert response.status_code == 404
 
 
 async def test_the_header_offers_the_download_whether_or_not_signed_in(tmp_path, idp):

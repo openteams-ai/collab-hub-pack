@@ -408,7 +408,7 @@ async def test_an_invitee_with_no_account_sees_the_page(tmp_path, idp):
 
 
 ACCOUNT_URL = "https://billing.example.com/account"
-ACCOUNT_LINK = f'<a href="{ACCOUNT_URL}">Account</a>'
+ACCOUNT_LINK = f'<a href="{ACCOUNT_URL}">Billing</a>'
 
 
 async def test_the_signed_in_page_carries_the_account_link_when_set(tmp_path, idp):
@@ -422,7 +422,7 @@ async def test_the_signed_in_page_carries_the_account_link_when_set(tmp_path, id
     assert page.text.count(ACCOUNT_LINK) == 1
     # Beside the sign-out button in the footer; the page body also says
     # "Sign out" in its own copy, so compare against the button.
-    assert page.text.index(">Account</a>") < page.text.index('class="link">Sign out</button>')
+    assert page.text.index(">Billing</a>") < page.text.index('class="link">Sign out</button>')
 
 
 async def test_the_anonymous_page_never_carries_the_account_link(tmp_path, idp):
@@ -434,7 +434,7 @@ async def test_the_anonymous_page_never_carries_the_account_link(tmp_path, idp):
     assert page.status_code == 200
     assert 'class="identity"' not in page.text
     assert ACCOUNT_URL not in page.text
-    assert ">Account</a>" not in page.text
+    assert ">Billing</a>" not in page.text
 
 
 async def test_an_anonymous_redemption_is_refused_by_the_guard(tmp_path, idp):

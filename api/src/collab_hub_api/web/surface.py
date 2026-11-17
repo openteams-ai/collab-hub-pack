@@ -213,7 +213,8 @@ ACCOUNT_PATH = "/web/account"
 Requires a session like every route not in :data:`PUBLIC_WEB_PATHS`."""
 
 BILLING_PATH = f"{ACCOUNT_PATH}/billing"
-"""The account dashboard's billing page. Empty for now; requires a session."""
+"""The hub's old Billing address. Requires a session; forwards to
+``web.account_page_url`` when one is set and is not found otherwise."""
 
 HOME_STYLE_PATH = f"{WEB_PATH_PREFIX}/home.css"
 """The home page's stylesheet. Public like :data:`STYLE_ASSET_PATH`: the page
@@ -269,8 +270,8 @@ set before the page draws."""
 HOME_SCRIPT_PATH = f"{WEB_PATH_PREFIX}/home.js"
 """The home page's one script: the demo Collab window (model picker, mock chat).
 Served from this origin; the page's CSP allows ``script-src 'self'`` and
-nothing inline. No other page runs it; the home, account and
-billing pages all run :data:`HOME_THEME_SCRIPT_PATH`."""
+nothing inline. No other page runs it; the home and account
+pages both run :data:`HOME_THEME_SCRIPT_PATH`."""
 
 HOME_ASSETS = {
     **{path: (f"fonts/{name}", "font/woff2") for path, name in zip(HOME_FONT_PATHS, HOME_FONT_FILES, strict=True)},

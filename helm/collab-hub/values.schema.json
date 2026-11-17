@@ -1152,6 +1152,73 @@
       },
       "additionalProperties": false
     },
+    "home": {
+      "type": "object",
+      "description": "The Collab Hub home page: its links, and the root-host redirect to it.",
+      "properties": {
+        "hubDomain": {
+          "type": "string",
+          "description": "Domain the home page builds its links from; empty takes the issuer's host without keycloak. A bare host name.",
+          "pattern": "^$|^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$"
+        },
+        "desktopDownloadUrl": {
+          "type": "string",
+          "description": "The home page's desktop download link; empty renders none. Same shape as accountPageUrl.",
+          "pattern": "^$|^([Hh][Tt][Tt][Pp][Ss]://([A-Za-z0-9._-]+|\\[[0-9A-Fa-f:.]+\\])|[Hh][Tt][Tt][Pp]://([Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|127\\.0\\.0\\.1|\\[::1\\]))(:[0-9]{1,5})?([/?#][^\\s\\x00-\\x1f\\x7f]*)?$"
+        },
+        "docsUrl": {
+          "type": "string",
+          "description": "The home page's docs link; empty renders none. Same shape as accountPageUrl.",
+          "pattern": "^$|^([Hh][Tt][Tt][Pp][Ss]://([A-Za-z0-9._-]+|\\[[0-9A-Fa-f:.]+\\])|[Hh][Tt][Tt][Pp]://([Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|127\\.0\\.0\\.1|\\[::1\\]))(:[0-9]{1,5})?([/?#][^\\s\\x00-\\x1f\\x7f]*)?$"
+        },
+        "rootHost": {
+          "type": "object",
+          "description": "The hub's pages on home.hubDomain: / opens the home page, /web, /invite and /admin go to the API.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "parentRefs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "namespace": {
+                    "type": "string"
+                  },
+                  "sectionName": {
+                    "type": "string"
+                  },
+                  "port": {
+                    "type": "integer"
+                  },
+                  "group": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "namespace": {
+              "type": "string",
+              "description": "Namespace the route is created in; empty is the release namespace."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "features": {
       "type": "object",
       "description": "Feature flags for work in progress. Every flag is off until it is listed here and set to true; each entry becomes COLLAB_HUB_API__FEATURES__<NAME>.",

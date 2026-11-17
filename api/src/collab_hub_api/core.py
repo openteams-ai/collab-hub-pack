@@ -10,7 +10,7 @@ from fastapi.exception_handlers import http_exception_handler, request_validatio
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -91,6 +91,7 @@ from .web.authz import platform_role_source_name, verify_web_route_protection
 from .web.guard import WebSessionGuardMiddleware
 from .web.pages import WebSecurityHeadersMiddleware
 from .web.surface import (
+    HOME_PATH,
     WEB_SURFACE_PREFIXES,
     build_web_surface,
     enforce_web_surface_map_access,
@@ -600,10 +601,13 @@ def make_app(config: BaseConfig) -> FastAPI:
         app.add_middleware(WebSecurityHeadersMiddleware, prefixes=WEB_SURFACE_PREFIXES)
 
     @app.get("/", include_in_schema=False)
-    async def home() -> HTMLResponse:
-        # The hub landing-page tile points at this origin, so the root serves
-        # a small directory of the browser-facing pages instead of jumping
-        # straight to the API docs.
+    async def home() -> Response:
+        # Where the browser pages run, the root opens the Collab Hub home page,
+        # so this host and the hub's address show the same page. Otherwise it
+        # serves a small directory of the browser-facing pages instead of
+        # jumping straight to the API docs.
+        if config.web.enabled:
+            return RedirectResponse(f"{app.root_path}{HOME_PATH}", status_code=status.HTTP_303_SEE_OTHER)
         return HTMLResponse(
             """<!DOCTYPE html>
 <html lang="en">

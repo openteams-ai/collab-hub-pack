@@ -59,6 +59,14 @@ check "serving on with routeTimeout off: no /v2 rule, no timeout" serve-httprout
 check "indexer on with its own resources: one Recreate replica, the API's env, the API does not sweep" indexer-resources $STATIC --set cogs.index.enabled=true --set cogs.indexer.resources.requests.memory=1Gi --set cogs.indexer.resources.limits.memory=2Gi
 check "feature flags: each entry renders as its variable" features --set features.cogs_ui=true --set features.new_thing=false
 check "account link: the API carries it, the indexer serves no pages" account-link-with-indexer $STATIC --set cogs.index.enabled=true --set web.accountPageUrl=https://billing.example.com/account
+check "home page: its domain and links reach the API" home-page --set home.hubDomain=example.org \
+  --set home.desktopDownloadUrl=https://downloads.example.com/collab --set home.docsUrl=https://docs.example.com/collab
+ROOT_HOST='--namespace nebari-nexus --set api.nebariapp.enabled=true --set api.nebariapp.hostname=frames.example.org --set home.hubDomain=example.org'
+check "root host off by default: nothing routed on the root host" no-root-host $ROOT_HOST
+check "root host on: / opens the home page, the browser pages go to the API" root-host $ROOT_HOST --set home.rootHost.enabled=true
+check "root host on another app's listener: its namespace and section, and a ReferenceGrant" root-host-listener $ROOT_HOST \
+  --set home.rootHost.enabled=true --set home.rootHost.namespace=nebari-system --set home.rootHost.parentRefs[0].name=nebari-gateway \
+  --set home.rootHost.parentRefs[0].namespace=envoy-gateway-system --set home.rootHost.parentRefs[0].sectionName=tls-landing
 refused() { # <label> <needle> <helm args...>: the chart must refuse to render, naming <needle>
   local label="$1" needle="$2" out
   shift 2
@@ -73,6 +81,10 @@ refused() { # <label> <needle> <helm args...>: the chart must refuse to render, 
 refused "feature flags: a non-boolean value is refused" "/features/cogs_ui" --set-string features.cogs_ui=maybe
 # The account link's coarse schema shape (docs/web-surface.md); the API's check
 # at startup is the authoritative one (api/tests/test_web_surface.py).
+refused "root host: refused without the root host's name" "home.rootHost needs home.hubDomain" \
+  --set api.nebariapp.enabled=true --set api.nebariapp.hostname=frames.example.org --set home.rootHost.enabled=true
+refused "home page: a hub domain that is not a bare host is refused" "/home/hubDomain" --set home.hubDomain=https://example.org
+refused "home page: a javascript: docs link is refused" "/home/docsUrl" --set home.docsUrl='javascript:alert(1)'
 refused "account link: plain http to a remote host is refused" "/web/accountPageUrl" --set web.accountPageUrl=http://billing.example.com/account
 refused "account link: credentials are refused" "/web/accountPageUrl" --set web.accountPageUrl=https://user:pw@billing.example.com/
 refused "account link: javascript: is refused" "/web/accountPageUrl" --set web.accountPageUrl='javascript:alert(1)'

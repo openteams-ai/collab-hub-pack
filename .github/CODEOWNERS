@@ -5,17 +5,17 @@
 # settles (a @nebari-dev/collab-hub team would be better than individuals).
 
 # Default owners for everything.
-*                       @ns-mkusper @trentoliphant @jhullot @dillonroach @echarles @CAM-Gerlach
+*                       @trentoliphant @jhullot @dillonroach @CAM-Gerlach @TimHunt12
 
 # CI / release / deploy machinery.
-/.github/               @ns-mkusper @trentoliphant @dillonroach @jhullot @echarles @CAM-Gerlach
+/.github/               @trentoliphant @dillonroach @jhullot @CAM-Gerlach @TimHunt12
 
 # Helm chart.
-/helm/                  @ns-mkusper @trentoliphant @jhullot @dillonroach @echarles @CAM-Gerlach
+/helm/                  @trentoliphant @jhullot @dillonroach @CAM-Gerlach @TimHunt12
 
 # Auth — the request/identity boundary.
-/api/src/collab_hub_api/auth.py         @ns-mkusper @trentoliphant @jhullot @dillonroach @echarles @CAM-Gerlach
-/api/src/collab_hub_api/frames/auth.py  @ns-mkusper @trentoliphant @jhullot @dillonroach @echarles @CAM-Gerlach
+/api/src/collab_hub_api/auth.py         @trentoliphant @jhullot @dillonroach @CAM-Gerlach @TimHunt12
+/api/src/collab_hub_api/frames/auth.py  @trentoliphant @jhullot @dillonroach @CAM-Gerlach @TimHunt12
 
 # Connectors — external-service access.
-/api/src/collab_hub_api/connectors/     @ns-mkusper @trentoliphant @jhullot @dillonroach @echarles @CAM-Gerlach
+/api/src/collab_hub_api/connectors/     @trentoliphant @jhullot @dillonroach @CAM-Gerlach @TimHunt12

@@ -127,8 +127,11 @@ npm ci --ignore-scripts && npm test          # the admin panel (Vitest)
 ```
 
 CI runs both: the `test` job runs pytest against a real Postgres service, and
-the `admin-ui` job runs `npm ci`, `npm audit`, the typecheck, Vitest and the
-production build.
+the `admin-ui` job runs `npm ci`, `npm audit` (through
+[`scripts/check_npm_audit.py`](scripts/check_npm_audit.py), which accepts only
+the advisories [`api/admin-ui/audit-allowlist.json`](api/admin-ui/audit-allowlist.json)
+lists, until each entry expires, and warns on an entry whose advisory is no
+longer reported), the typecheck, Vitest and the production build.
 
 ## Documentation
 

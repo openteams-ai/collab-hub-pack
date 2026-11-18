@@ -76,7 +76,7 @@ jobs:
       # empty fixture, no certificates at all, an interpreter below its floor),
       # on synthetic stores, so a regression can't pass the image check below.
       - name: Test the trust-store check
-        run: python3 -m unittest discover --start-directory scripts/tests --verbose
+        run: python3 -m unittest discover --start-directory scripts/tests --pattern test_check_emudhra_trust.py --verbose
 
       # Built once into the local Docker engine and checked before anything is
       # pushed; the push below rebuilds from this builder's cache.

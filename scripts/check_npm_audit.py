@@ -8,12 +8,17 @@ advisory at or above LEVEL (default ``low``, as ``npm audit --audit-level=low``)
 DIRECTORY/audit-allowlist.json. It fails on:
 
 - an advisory at or above LEVEL whose GHSA ID no allowlist entry names;
-- an allowlist entry past its ``expires`` date (if it has one), so that exception is reviewed again;
+- an allowlist entry past its ``expires`` date (if it has one), whether or not its advisory is
+  still reported, so that exception is reviewed again;
 - a ``dev_only`` allowlist entry whose advisory reaches a copy of a package that
   DIRECTORY/package-lock.json does not mark ``dev``, so it would ship;
-- an allowlist entry no advisory in the report matches, so a fixed advisory's exception is removed
-  rather than left to cover a later recurrence;
 - a report npm could not produce (a registry error, say), and a malformed allowlist.
+
+It warns, without failing, on an unexpired allowlist entry no advisory in the report matches, so a
+fixed or withdrawn advisory's exception is removed rather than left to cover a later recurrence.
+That is a warning because it follows from a change upstream (a fix, a withdrawn advisory, a
+narrowed range), not in this repo, and should not turn every open pull request red. Under GitHub
+Actions it is a ``::warning::`` annotation on the entry's line in the allowlist.
 
 It exists because ``npm audit`` cannot ignore an advisory, and an advisory with no patched release
 otherwise blocks CI until upstream ships one. audit-ci is not used: its last release (7.1.0)
@@ -29,8 +34,9 @@ The allowlist is a JSON object whose ``allowlist`` list holds one entry per advi
      "dev_only": true}
 
 An entry covers its advisory, wherever it appears in the dependency tree, through the end of its
-``expires`` day (UTC), or for as long as the advisory is reported when ``expires`` is null. Null
-must be written out: an entry without the key is refused, so no exception is permanent by omission.
+``expires`` day (UTC), or, when ``expires`` is null, until the entry is removed (with a warning once
+its advisory is no longer reported, as it would cover the advisory again if it came back). Null must
+be written out: an entry without the key is refused, so no exception is permanent by omission.
 
 ``dev_only`` is optional (default false). When true, the entry covers its advisory only while every
 vulnerable copy npm audit reports is a devDependency-only node in the lockfile (``"dev": true``; a
@@ -43,6 +49,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -193,9 +200,14 @@ def check(
     level: str,
     today: datetime.date,
     lock_packages: dict[str, dict] | None = None,
-) -> tuple[list[str], list[str]]:
-    """Return (report lines, failures). ``lock_packages`` is required if any entry is dev_only."""
-    lines, failures = [], []
+) -> tuple[list[str], list[str], dict[str, str]]:
+    """Return (report lines, failures, warnings by GHSA ID).
+
+    ``lock_packages`` is required if any entry is dev_only.
+    """
+    lines: list[str] = []
+    failures: list[str] = []
+    warnings: dict[str, str] = {}
     threshold = SEVERITIES.index(level)
     for advisory in sorted(advisories.values(), key=lambda a: (-SEVERITIES.index(a.severity), a.id)):
         packages = ", ".join(sorted(advisory.packages))
@@ -217,13 +229,39 @@ def check(
                     f"{advisory.id}: allowlisted as dev_only, but not dev-only in the lockfile: {', '.join(shipped)}"
                 )
                 continue
-        until = f"until {entry.expires}" if entry.expires else "until no longer reported"
+        until = f"until {entry.expires}" if entry.expires else "with no expiry"
         scope = " (dev-only, checked)" if entry.dev_only else ""
         lines.append(f"         allowlisted{scope} {until}: {entry.reason} ({entry.tracking})")
     for entry in allowlist.values():
-        if entry.id not in advisories:
-            failures.append(f"{entry.id}: allowlisted but no longer reported; remove its allowlist entry")
-    return lines, failures
+        if entry.id in advisories:
+            continue
+        if entry.expires is not None and entry.expires < today:
+            failures.append(f"{entry.id}: allowlist entry expired on {entry.expires}; no longer reported, so remove it")
+        else:
+            warnings[entry.id] = f"{entry.id}: allowlisted but no longer reported; remove its allowlist entry"
+    return lines, failures, warnings
+
+
+def annotation(message: str, allowlist_path: Path, advisory_id: str) -> str:
+    """Return a GitHub Actions ``::warning::`` command for ``message``, on the entry's line if found."""
+
+    def escape_data(value: str) -> str:
+        return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+    def escape_property(value: str) -> str:
+        return escape_data(value).replace(":", "%3A").replace(",", "%2C")
+
+    properties = [f"file={escape_property(allowlist_path.as_posix())}"]
+    try:
+        text = allowlist_path.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    for number, line in enumerate(text.splitlines(), start=1):
+        if f'"{advisory_id}"' in line:
+            properties.append(f"line={number}")
+            break
+    properties.append("title=Stale npm audit allowlist entry")
+    return f"::warning {','.join(properties)}::{escape_data(message)}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -237,18 +275,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--today", type=datetime.date.fromisoformat, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
-    allowlist = load_allowlist(args.allowlist or args.directory / ALLOWLIST_NAME)
+    allowlist_path = args.allowlist or args.directory / ALLOWLIST_NAME
+    allowlist = load_allowlist(allowlist_path)
     lock_packages = None
     if any(entry.dev_only for entry in allowlist.values()):
         lock_packages = load_lockfile(args.directory / LOCKFILE_NAME)
     text = args.report.read_text(encoding="utf-8") if args.report else run_npm_audit(args.directory)
     advisories = parse_report(text)
     today = args.today or datetime.datetime.now(datetime.timezone.utc).date()
-    lines, failures = check(advisories, allowlist, args.level, today, lock_packages)
+    lines, failures, warnings = check(advisories, allowlist, args.level, today, lock_packages)
 
     print(f"Advisories reported: {len(advisories)}; allowlisted: {len(allowlist)}; failing at {args.level} or above")
     for line in lines:
         print(line)
+    in_github_actions = os.environ.get("GITHUB_ACTIONS") == "true"
+    for advisory_id, warning in warnings.items():
+        # GitHub reads workflow commands from stdout only.
+        if in_github_actions:
+            print(annotation(warning, allowlist_path, advisory_id))
+        else:
+            print(f"WARNING: {warning}")
     sys.stdout.flush()
     for failure in failures:
         print(f"FAIL: {failure}", file=sys.stderr)

@@ -179,8 +179,9 @@ jobs:
       # `npm audit` at --audit-level=low, except for the advisories
       # api/admin-ui/audit-allowlist.json accepts: npm cannot ignore one, and an
       # advisory with no patched release would otherwise block CI until
-      # upstream ships one. It also fails on an entry past its expiry, and on
-      # one no longer reported, so no exception outlives its reason.
+      # upstream ships one. It also fails on an entry past its expiry, and
+      # annotates one no longer reported with a warning rather than failing:
+      # that follows from a fix or withdrawal upstream, not from the PR.
       - name: Audit
         run: python3 scripts/check_npm_audit.py api/admin-ui
 

@@ -13,10 +13,12 @@ import copy
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "check_npm_audit.py"
 _spec = importlib.util.spec_from_file_location("check_npm_audit", SCRIPT)
@@ -85,13 +87,17 @@ class CheckTestCase(unittest.TestCase):
         self.report = copy.deepcopy(REPORT)
         self.allowlist: object = {"allowlist": [entry()]}
         self.lockfile: object = copy.deepcopy(LOCKFILE)
+        # Whether the check runs as under GitHub Actions; these tests themselves run there in CI.
+        self.github_actions = False
+        self.stdout = ""
 
     def write(self, name: str, data: object) -> Path:
         path = self.tmp / name
-        path.write_text(data if isinstance(data, str) else json.dumps(data), encoding="utf-8")
+        path.write_text(data if isinstance(data, str) else json.dumps(data, indent=2), encoding="utf-8")
         return path
 
     def run_main(self, *argv: str) -> tuple[int, str]:
+        """Run the check; return (exit code, stderr), and keep its stdout in ``self.stdout``."""
         if self.lockfile is not None:
             self.write("package-lock.json", self.lockfile)
         args = [
@@ -104,13 +110,19 @@ class CheckTestCase(unittest.TestCase):
             TODAY,
             *argv,
         ]
-        stderr = io.StringIO()
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        environment = {"GITHUB_ACTIONS": "true" if self.github_actions else ""}
+        with (
+            mock.patch.dict(os.environ, environment),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
             try:
                 code = check.main(args)
             except SystemExit as error:
                 code, message = 2, str(error.code)
                 stderr.write(message)
+        self.stdout = stdout.getvalue()
         return code, stderr.getvalue()
 
     def add_advisory(self, package: str, ghsa: str, severity: str = "critical") -> None:
@@ -185,22 +197,64 @@ class AllowlistTests(CheckTestCase):
         self.assertEqual(code, 1)
         self.assertIn(f"{ALLOWED}: allowlist entry expired on 2026-11-16", stderr)
 
-    def test_entry_no_longer_reported_fails(self) -> None:
+    def test_entry_no_longer_reported_warns(self) -> None:
         self.report["vulnerabilities"] = {}
-        code, stderr = self.run_main()
-        self.assertEqual(code, 1)
-        self.assertIn(f"{ALLOWED}: allowlisted but no longer reported", stderr)
+        # A fix or a withdrawn advisory upstream must not fail every open pull request.
+        self.assertEqual(self.run_main(), (0, ""))
+        self.assertIn(f"WARNING: {ALLOWED}: allowlisted but no longer reported", self.stdout)
 
     def test_entry_without_expiry_never_expires(self) -> None:
         self.allowlist = {"allowlist": [entry(expires=None)]}
         self.assertEqual(self.run_main("--today", "2099-12-31"), (0, ""))
+        self.assertNotIn("WARNING", self.stdout)
 
-    def test_entry_without_expiry_still_fails_once_no_longer_reported(self) -> None:
-        self.allowlist = {"allowlist": [entry(expires=None)]}
+    def test_dev_only_entry_without_expiry_warns_once_no_longer_reported(self) -> None:
+        # The shape of the picomatch entry after GHSA-fc5q-39xc-vjpf was withdrawn.
+        self.allowlist = {"allowlist": [entry(expires=None, dev_only=True)]}
+        self.report["vulnerabilities"] = {}
+        self.assertEqual(self.run_main(), (0, ""))
+        self.assertIn(f"WARNING: {ALLOWED}: allowlisted but no longer reported", self.stdout)
+
+    def test_expired_entry_no_longer_reported_fails(self) -> None:
+        self.allowlist = {"allowlist": [entry(expires="2026-11-16")]}
         self.report["vulnerabilities"] = {}
         code, stderr = self.run_main()
         self.assertEqual(code, 1)
-        self.assertIn(f"{ALLOWED}: allowlisted but no longer reported", stderr)
+        self.assertIn(f"{ALLOWED}: allowlist entry expired on 2026-11-16; no longer reported", stderr)
+        self.assertNotIn("WARNING", self.stdout)
+
+    def test_stale_entry_beside_a_live_one_warns_only_for_itself(self) -> None:
+        self.allowlist = {"allowlist": [entry(), entry(ghsa="GHSA-2222-3333-4444")]}
+        self.assertEqual(self.run_main(), (0, ""))
+        self.assertIn("WARNING: GHSA-2222-3333-4444: allowlisted but no longer reported", self.stdout)
+        self.assertNotIn(f"WARNING: {ALLOWED}", self.stdout)
+
+    def test_stale_entry_does_not_hide_a_failure(self) -> None:
+        self.allowlist = {"allowlist": [entry(ghsa="GHSA-2222-3333-4444")]}
+        code, stderr = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertIn(f"{ALLOWED} (high, picomatch) is not allowlisted", stderr)
+        self.assertIn("WARNING: GHSA-2222-3333-4444: allowlisted but no longer reported", self.stdout)
+
+    def test_stale_entry_is_a_github_annotation_on_its_line(self) -> None:
+        self.github_actions = True
+        self.report["vulnerabilities"] = {}
+        self.assertEqual(self.run_main(), (0, ""))
+        # The allowlist is written indented, so the entry's "id" is on line 4.
+        self.assertRegex(
+            self.stdout,
+            r"(?m)^::warning file=[^,\n]*allowlist\.json,line=4,title=Stale npm audit allowlist entry::"
+            + ALLOWED
+            + ": allowlisted but no longer reported; remove its allowlist entry$",
+        )
+        self.assertNotIn("WARNING:", self.stdout)
+
+    def test_annotation_escapes_workflow_command_characters(self) -> None:
+        # Not written: an unreadable allowlist still yields an annotation, just without a line.
+        command = check.annotation("50% done\nnext", Path("C:/odd,100%.json"), ALLOWED)
+        self.assertEqual(
+            command, "::warning file=C%3A/odd%2C100%25.json,title=Stale npm audit allowlist entry::50%25 done%0Anext"
+        )
 
     def test_malformed_allowlists_are_refused(self) -> None:
         # Each case names the refusal it must hit, so one caught by the wrong check fails the test.

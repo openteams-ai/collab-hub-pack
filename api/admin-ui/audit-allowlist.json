@@ -1,12 +1,4 @@
 {
   "$comment": "npm audit advisories CI accepts until each entry expires; checked by scripts/check_npm_audit.py. Add an entry only for an advisory with no usable fix that does not reach production, and remove it once one ships: the check warns on an entry no longer reported, and fails on one past its expiry. \"expires\": null means no expiry; the entry then lasts until it is removed, with a warning once its advisory is no longer reported. \"dev_only\": true makes the check also fail if any vulnerable copy is not dev-only in package-lock.json; set it whenever the reason is that the advisory does not ship.",
-  "allowlist": [
-    {
-      "id": "GHSA-fc5q-39xc-vjpf",
-      "expires": null,
-      "dev_only": true,
-      "reason": "picomatch ReDoS (<=4.0.7), no patched release. Reaches only devDependencies (vite, vitest) at build/test time, with globs this repo writes; the image ships only dist/.",
-      "tracking": "https://github.com/micromatch/picomatch/issues/234"
-    }
-  ]
+  "allowlist": []
 }

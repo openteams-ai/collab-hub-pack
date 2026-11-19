@@ -1,0 +1,26 @@
+# The web client on its own host, beside a hub that checks bearer tokens.
+frames:
+  auth:
+    bearer:
+      jwksUrl: https://keycloak.example.test/realms/nebari/protocol/openid-connect/certs
+      issuer: https://keycloak.example.test/realms/nebari
+      audience: apollo-desktop
+web:
+  enabled: true
+  image:
+    tag: sha-abc1234
+    pullSecrets:
+      - name: ghcr-pull
+  nebariapp:
+    hostname: collab.example.test
+  hubUrl: https://example.test
+  llmBaseUrl: https://llm-internal.example.test/v1
+  models:
+    - id: qwen
+      displayName: Qwen
+      supportsTools: true
+    - id: Org/Model-7B
+      displayName: Model 7B
+  database:
+    existingSecret: web-chat-postgres
+    databaseUrlKey: DATABASE_URL

@@ -486,10 +486,18 @@ def test_a_worker_from_an_artifact_mounts_its_package_read_only_and_its_locks_en
     assert cache_mounts[package]["mountPath"] == f"/var/cache/collab-hub/{package}"
     assert {v["name"]: v for v in pod["volumes"]}["cache"] == {"name": "cache",
                                                               "persistentVolumeClaim": {"claimName": "cog-cache"}}
-    # A package of the image mounts the whole cache, as before.
+    # A package of the image mounts the whole cache, which is then an emptyDir of its pod's own, never the claim
+    # every organization's workers share; so does a worker_command's.
     deployment, _ = ex._manifests("openteams/reviewer", "run-1", "cog-reviewer-x")
     [runner] = deployment["spec"]["template"]["spec"]["containers"]
     assert [m["mountPath"] for m in runner["volumeMounts"] if m["name"] == "cache"] == ["/var/cache/collab-hub"]
+    cache = {v["name"]: v for v in deployment["spec"]["template"]["spec"]["volumes"]}["cache"]
+    assert "persistentVolumeClaim" not in cache and "emptyDir" in cache
+    ex.worker_command = ["python", "serve.py"]
+    deployment, _ = ex._manifests(ARTIFACT, "run-1", "cog-notes-x", lock_digest=LOCK)
+    cache = {v["name"]: v for v in deployment["spec"]["template"]["spec"]["volumes"]}["cache"]
+    assert "persistentVolumeClaim" not in cache and "emptyDir" in cache
+    ex.worker_command = None
     with pytest.raises(ValueError, match="lock digest"):
         ex._manifests(ARTIFACT, "run-1", "cog-notes-x")
 

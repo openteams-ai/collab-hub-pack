@@ -101,8 +101,9 @@ spec:
     - port: 5000
       targetPort: 5000
 ---
-# The cache every worker pod mounts, shared, keyed by each package's pixi.lock digest: what makes a second run on
-# the same lock find the package and the environment pixi built for it. kind's default storage class.
+# The cache every artifact worker pod mounts, shared, scoped by the installing organization: each package under
+# its artifact's digest, each environment under its pixi.lock digest, which is what makes a second run of that
+# organization on the same lock find the environment pixi built for it. kind's default storage class.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

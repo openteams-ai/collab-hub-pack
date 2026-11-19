@@ -55,7 +55,8 @@ PACKAGES_ROOT = "/opt/collab-hub/cogs"
 CACHE_PATH, TMP_PATH = "/var/cache/collab-hub", "/tmp"
 """Where a worker pod writes: the pixi environment its package needs, and what the Cog writes under HOME."""
 ARTIFACT_CACHE_PATH = f"{CACHE_PATH}/artifacts"
-"""Where a worker pod's init container materializes the Cog's artifact, keyed by the digest of its lock."""
+"""Where a worker pod's init container materializes the Cog's artifact: its package under the installing
+organization's scope and the artifact's digest, the environment of its lock under that scope and the lock's digest."""
 BINDING_PATH = "/etc/collab-hub/binding"
 """Where the files the binding delivers are mounted, from the worker's own Secret."""
 PULL_CONTAINER = "pull"
@@ -477,10 +478,14 @@ class KubernetesCogExecutor:
             "volumeMounts": mounts,
         }
         # The cache: the environment pixi builds and, from an artifact, the package itself. A shared claim
-        # keeps both for the next pod of the same lock; an emptyDir is the pod's own, gone with it. Past an
-        # emptyDir's limit the kubelet evicts the pod, which the controller reads as its step's failure. The
-        # init container mounts the whole of it to pull; the Cog's container only its subPaths (above).
-        cache: dict[str, Any] = ({"persistentVolumeClaim": {"claimName": self.cache_claim}} if self.cache_claim
+        # keeps both for the next pod of the same lock and organization; an emptyDir is the pod's own, gone with
+        # it. Past an emptyDir's limit the kubelet evicts the pod, which the controller reads as its step's
+        # failure. The init container mounts the whole of it to pull; the Cog's container only its subPaths
+        # (above). Only a worker from an artifact, whose container mounts those subPaths alone, is given the
+        # claim: a package of the image, or a worker_command, mounts its whole cache writable, so it gets an
+        # emptyDir of its own rather than every organization's part of the claim.
+        shared = bool(self.cache_claim) and self.from_artifact(cog) and not self.worker_command
+        cache: dict[str, Any] = ({"persistentVolumeClaim": {"claimName": self.cache_claim}} if shared
                                  else {"emptyDir": {"sizeLimit": self.cache_size_limit}})
         volumes: list[dict[str, Any]] = [{"name": "cache", **cache},
                                          {"name": "tmp", "emptyDir": {"sizeLimit": self.tmp_size_limit}}]

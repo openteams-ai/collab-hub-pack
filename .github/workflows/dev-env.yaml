@@ -516,9 +516,11 @@ jobs:
           # api-full is also the only target that sets WEB_ENV. An anonymous
           # sign-in must be sent to the realm's collab-web client, and Keycloak
           # must accept the callback URL the hub asks it to return to: a
-          # mismatch between the two breaks every browser sign-in.
+          # mismatch between the two breaks every browser sign-in. Asked on
+          # PUBLIC_BASE_URL's host (localhost), as a browser would: on any
+          # other host, /web/signin first moves the browser there.
           signin=$(curl -s -m 10 -o /dev/null -w '%{http_code} %{redirect_url}' \
-                     http://127.0.0.1:8000/web/signin)
+                     http://localhost:8000/web/signin)
           case "$signin" in
             "303 http://localhost:8080/realms/nebari/protocol/openid-connect/auth?"*client_id=collab-web*) ;;
             *) echo "/web/signin did not start the collab-web sign-in: $signin"; exit 1 ;;

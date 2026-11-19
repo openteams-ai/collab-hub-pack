@@ -43,7 +43,7 @@ from httpx import ConnectError, ConnectTimeout
 
 from . import artifacts, run_tokens
 from .binding import BINDING_FILE_ENV, Delivered, as_delivered
-from .envelope import CODE_FOR_STATUS, EnvelopeInvalid, ResultEnvelope
+from .envelope import CODE_FOR_STATUS, ERROR_STATUSES, EnvelopeInvalid, ResultEnvelope
 from .ops import _NO_SIGNAL
 
 _log = logging.getLogger(__name__)
@@ -263,6 +263,7 @@ class KubernetesCogExecutor:
         registry_plain_http: Sequence[str] = (),
         registry: artifacts.RegistryClient | None = None,
         org_of: OrgOf | None = None,
+        hub_url: str | None = None,
     ) -> None:
         # A worker's /invoke endpoint is unauthenticated, so the network boundary is
         # the control. Force an explicit choice at construction — the secure path
@@ -304,6 +305,8 @@ class KubernetesCogExecutor:
                                      else dict(DEFAULT_POD_SECURITY_CONTEXT))
         self.cache_size_limit = cache_size_limit
         self.tmp_size_limit = tmp_size_limit
+        self.hub_url = hub_url.rstrip("/") if hub_url else None
+        """Where a worker reaches the hub's worker-facing endpoints (the keyed claim), as ``COLLAB_HUB_URL``."""
         self.cache_claim = cache_claim
         """A PersistentVolumeClaim the cache volume is, shared by every worker pod, so a package and the environment
         pixi built for it are found by the next pod of the same lock; an emptyDir of the pod's own when ``None``."""
@@ -386,13 +389,16 @@ class KubernetesCogExecutor:
         return ["python", "-m", "collab_hub_execution.artifacts", "materialize", cog, "--cache", ARTIFACT_CACHE_PATH,
                 "--scope", artifacts.checked_scope(scope)]
 
-    def _environment(self, cog: str, run_id: str, files: Mapping[str, str]) -> list[dict[str, str]]:
+    def _environment(self, cog: str, run_id: str, files: Mapping[str, str] = ()) -> list[dict[str, str]]:
         """The seam's variables, which name nothing secret: on the pod template as literal values."""
         env = {"COG_ID": cog, "COLLAB_COG_ID": cog, "COLLAB_RUN_ID": run_id, "COLLAB_COG_HOST": "0.0.0.0",
                "COLLAB_COG_PORT": str(RUNNER_PORT), "HOME": TMP_PATH}
         for name in files:
             if name == "binding.json":
                 env[BINDING_FILE_ENV] = f"{BINDING_PATH}/{name}"
+        if self.hub_url:
+            # Where the worker reaches the hub's worker-facing endpoints (the keyed claim) with its run token.
+            env["COLLAB_HUB_URL"] = self.hub_url
         return [{"name": name, "value": value} for name, value in env.items()]
 
     def _pull_environment(self) -> list[dict[str, str]]:
@@ -878,15 +884,16 @@ class _KubernetesWorker:
             # A Cog cannot pause a run: an answer that is not an envelope, a
             # `{"pause": true}` included, fails the step as EnvelopeInvalid.
             return ResultEnvelope.parse(body)
+        if status in ERROR_STATUSES and isinstance(body, dict) and "envelope" in body:
+            # The envelope document's error statuses, carrying an error envelope: its code is the failure.
+            envelope = ResultEnvelope.parse(body)
+            if envelope.ok:
+                raise EnvelopeInvalid(f"HTTP {status} carried an ok: true envelope")
+            return envelope
         if status in CODE_FOR_STATUS:
-            # The envelope document's error statuses. The body is an error
-            # envelope; when it is not one (a proxy's page, a worker that died
-            # mid-answer) the status alone still names the failure.
-            if isinstance(body, dict) and "envelope" in body:
-                envelope = ResultEnvelope.parse(body)
-                if envelope.ok:
-                    raise EnvelopeInvalid(f"HTTP {status} carried an ok: true envelope")
-                return envelope
+            # No envelope (a proxy's page, a worker that died mid-answer): the status alone names the
+            # failure. A bare 409 is not read as outcome-unknown: it fails the step below, as a transport
+            # error a retry runs again.
             return ResultEnvelope.failure(CODE_FOR_STATUS[status], f"HTTP {status} from the worker without an envelope")
         response.raise_for_status()
         raise EnvelopeInvalid(f"unexpected HTTP {status} from /invoke")

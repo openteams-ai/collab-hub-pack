@@ -13,6 +13,7 @@ from __future__ import annotations
 import threading
 
 import pytest
+from claims_support import ClaimingExecutor, HostStops
 
 from collab_hub_execution import (
     Gate,
@@ -23,6 +24,7 @@ from collab_hub_execution import (
     OpStep,
     ResultEnvelope,
     RunState,
+    intents,
 )
 
 
@@ -162,6 +164,82 @@ def test_starting_leaves_a_run_this_host_is_advancing_alone():
     release.set()
     thread.join(5)
     assert outcome["state"] is RunState.COMPLETED
+
+
+# --- the keyed claim: a worker replaced around its side effect ---------------------------------------
+
+
+def _failed_step(track, run_id):
+    [failed] = [e.payload for e in track.replay(run_id) if e.event_type == "step_failed"]
+    return failed
+
+
+def test_a_worker_replaced_after_reserving_before_committing_leaves_the_step_outcome_unknown():
+    # The side effect happened, and the worker was lost before it committed its result. The retry's worker
+    # finds the key reserved by a worker that is gone: it acts on nothing, and the step ends outcome-unknown.
+    executor = ClaimingExecutor({"c": lambda entry, value: {"sent": value}}, stop_after={"r:s:0": "acted"})
+    track = InMemoryTrackStore()
+    op = OpDefinition("r", (OpStep("s", "c", "run", 1),))
+    with pytest.raises(HostStops):
+        _runner(track, executor).submit(op)
+    host = _runner(track, executor)
+    assert host.start() == ("r",)
+    assert host.retry("r") is RunState.FAILED
+    assert executor.acted == ["r:s:0"]  # once; nothing acted twice
+    failed = _failed_step(track, "r")
+    assert failed["error"] == "outcome-unknown" and failed["step"] == "s" and failed["key"] == "r:s:0"
+    assert executor.store.get("r", "r:s:0").state == "outcome_unknown"
+    # An ordinary retry is refused: only a person settles what the lost worker did.
+    with pytest.raises(ValueError, match="ended outcome-unknown"):
+        host.retry("r")
+    with pytest.raises(intents.NotRetryable, match="reconciled by a person"):
+        intents.request_retry(track, "r", actor="bob")
+    assert host.observe("r") is RunState.FAILED and executor.acted == ["r:s:0"]
+
+
+def test_a_reconciled_outcome_lets_the_step_run_again_as_a_new_attempt():
+    executor = ClaimingExecutor({"c": lambda entry, value: {"sent": value}}, stop_after={"r:s:0": "acted"})
+    track = InMemoryTrackStore()
+    with pytest.raises(HostStops):
+        _runner(track, executor).submit(OpDefinition("r", (OpStep("s", "c", "run", 1),)))
+    host = _runner(track, executor)
+    host.start()
+    assert host.retry("r") is RunState.FAILED
+    with pytest.raises(intents.NotRetryable, match="nothing to reconcile"):
+        intents.reconcile_outcome(track, "r", step="other", actor="ops", claims=executor.store)
+    assert executor.store.get("r", "r:s:0").state == "outcome_unknown"  # a refusal moves nothing
+    view = intents.reconcile_outcome(track, "r", step="s", actor="ops", note="the email was sent once",
+                                     claims=executor.store)
+    assert view.state is RunState.FAILED and intents.outcome_unknown_step(track.replay("r")) is None
+    # The Track and the claim agree: both are settled, naming the person.
+    claim = executor.store.get("r", "r:s:0")
+    assert claim.state == "recorded" and claim.actor == "ops"
+    with pytest.raises(intents.NotRetryable):
+        intents.reconcile_outcome(track, "r", step="s", actor="ops")  # once
+    assert intents.request_retry(track, "r", actor="bob").retry_asked_by == "bob"
+    assert host.retry("r", asked=True) is RunState.COMPLETED
+    assert executor.acted == ["r:s:0", "r:s:1"]  # a new attempt, under a new key, as a recorded failure retries
+    [reconciled] = [e.payload for e in track.replay("r") if e.event_type == "outcome_reconciled"]
+    assert reconciled == {"step": "s", "actor": "ops", "note": "the email was sent once"}
+
+
+def test_a_worker_replaced_after_committing_before_the_step_was_recorded_answers_with_its_envelope():
+    executor = ClaimingExecutor({"c": lambda entry, value: ResultEnvelope.success({"sent": value},
+                                                                                  usage={"tokens": 7})},
+                                stop_after={"r:s:0": "committed"})
+    track = InMemoryTrackStore()
+    with pytest.raises(HostStops):
+        _runner(track, executor).submit(OpDefinition("r", (OpStep("s", "c", "run", 1),)))
+    host = _runner(track, executor)
+    host.start()
+    assert host.retry("r") is RunState.COMPLETED
+    assert executor.acted == ["r:s:0"]
+    [completed] = [e.payload for e in track.replay("r") if e.event_type == "step_completed"]
+    assert completed["payload"] == {"sent": 1} and completed["usage"] == {"tokens": 7}
+    # The stopped host recorded nothing of its interaction; the one answered from the claim is accounted once,
+    # with what the committed envelope reported.
+    usages = [e.payload["usage"] for e in track.replay("r") if e.event_type == "interaction_usage"]
+    assert usages == [{"tokens": 7}]
 
 
 @pytest.mark.parametrize("backend", [])  # dbos (Phase 27) and temporal (Phase 33) join here

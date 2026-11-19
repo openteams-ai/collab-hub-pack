@@ -1312,6 +1312,7 @@ the approver roles come from `make seed-org`.
 | `CONTROLLER_ID` | `dev` | the controller's name, held while it runs, recorded on each run it picks up |
 | `ENVIRONMENT` | `pixi` | `host` runs a package's `serve` task directly, without its pixi environment |
 | `HEALTH_PORT` | none | serves `/healthz` and `/readyz` |
+| `HUB_URL` | `http://127.0.0.1:8000` | where each worker reaches the hub, `make api`: handed to it as `COLLAB_HUB_URL`, where it reserves and commits its step's keyed claim with its run token |
 
 Several controllers share one Track, each under its own `CONTROLLER_ID`, and
 each run is picked up by one of them:
@@ -1329,6 +1330,24 @@ alone — until that controller starts again under the same id, which records it
 `interrupted` and reaps any of its workers left alive. A second controller under
 an id already running refuses to start. `spender` declares a budget, which is the
 runner's, so it runs with `make op` only.
+
+**The keyed claim.** Each worker `make controller` starts is told where
+`make api` is (`HUB_URL`), and reserves its step's idempotency key there
+(`POST /v1/claims/reserve`, with the run token the controller minted) before
+it acts, then commits its envelope; its stderr under `.local/runs/` says
+`claim <key>: reserved`, then `committed`
+([the contract](../docs/cog-execution/op-cog-seam.md#the-keyed-claim)). The
+claims sit in `.local/track.sqlite` beside the Track. Retry the run whose
+controller you killed (`make run-retry RUN=`): its worker had reserved its key
+and was reaped before committing, so the retry's worker finds the key
+`outcome_unknown`, acts on nothing, and the run ends `FAILED` with
+`outcome-unknown`; a second `make run-retry` is refused, naming the step, since
+only a person settles what the lost worker did. Settling it is
+`collab-hub run reconcile RUN STEP`, a platform operator's act: at level 2,
+`make seed-org` grants the dev user that role; at level 1 nobody holds one,
+and `intents.reconcile_outcome(track, run_id, step=..., actor=...,
+claims=SqliteClaimStore(path))` from Python records the same. `make op`, which
+runs no API, gives its workers no hub, and they claim nothing.
 
 ### Fake Ops — `make op`
 
@@ -1438,6 +1457,8 @@ list against Postgres.
 | A launched run stays `SUBMITTED` | No controller is watching the Track | `make controller` in another terminal |
 | `make controller` says a controller named `dev` is running | One controller per id on a Track | Stop the other one, or give this one its own `CONTROLLER_ID` |
 | A run stays `RUNNING` after its controller was killed | Its controller owns it, and records it `interrupted` only when it starts again | Start that controller again, under the same `CONTROLLER_ID` |
+| A step fails `hub-unavailable` | The worker could not reach the hub to reserve its key: `make controller` was given a `HUB_URL` nothing answers on | Start `make api` (or point `HUB_URL` at the API that serves this Track), then `make run-retry` |
+| A retried run ends `FAILED` with `outcome-unknown`, and `make run-retry` refuses it | Its worker reserved its key and was lost before committing: whether the step's side effect happened is for a person to settle | `collab-hub run reconcile RUN STEP --note "..."` as a platform operator (level 2, `make seed-org`), or `intents.reconcile_outcome` from Python at level 1, then retry; see [runs.md](../docs/cog-execution/runs.md#the-keyed-claim) |
 | `make controller TRACK=postgresql://...` says this Postgres has no Track | The Track's tables come from the hub's migrations | Run `make api-pg` once against that database |
 | `make submit OP=spender` refuses | A budget is the runner's, not the Op's | `make op OP=spender` |
 | `make op` says another `make op` is running | A previous one is still running on the same Track, possibly in another terminal | Let it finish or stop it; one host per Track until run pickup (#121) |
@@ -1487,7 +1508,7 @@ that gap.
 
 | Level | Where | What it asserts |
 |---|---|---|
-| 1 | Linux **and macOS** | `hosts-check` both ways, then a frame written and read back with no token, and the empty Cog catalog (`/v1/cogs`, `/v1/cogs/catalog.v1.json`); every fake Op of `make op` ends as it should, and a run whose host is killed mid-step is reported `interrupted` by the next; `make submit` hands the fake Ops to `make controller`, another process, which picks each up and ends it as it should, and a controller killed with `SIGKILL` mid-run records the run `interrupted` when it starts again; with `LOCATION=local`, `echo` runs as real worker processes in its pixi environment, and a host killed with `SIGKILL` mid-step leaves no worker |
+| 1 | Linux **and macOS** | `hosts-check` both ways, then a frame written and read back with no token, and the empty Cog catalog (`/v1/cogs`, `/v1/cogs/catalog.v1.json`); every fake Op of `make op` ends as it should, and a run whose host is killed mid-step is reported `interrupted` by the next; `make submit` hands the fake Ops to `make controller`, another process, which picks each up and ends it as it should, each step's worker reserving and committing its keyed claim on `make api` with its run token, and a controller killed with `SIGKILL` mid-run records the run `interrupted` when it starts again, after which its retry ends `outcome-unknown` and a second retry is refused; with `LOCATION=local`, `echo` runs as real worker processes in its pixi environment, and a host killed with `SIGKILL` mid-step leaves no worker |
 | 2 | Linux | `/health/db` reports a real database, `/v1/frame-groups` answers 200 instead of 503, and a `/v1/cogs` list with every filter answers 200 from Postgres; two controllers on one Postgres Track complete eight runs submitted at once, and none is picked up twice. The install sequence itself (fetch, bind, check, uninstall) runs against the three install stores in `test-execution.yaml`, and against a registry in a cluster in `test-execution-e2e.yaml` |
 | 3 | Linux | 401 without a bearer, 200 with one, and the token carries a `sub` |
 | 4 | Linux | Rendered only — the chart, the dev-auth switches, the `IMAGE` override and the port overrides; `lint.yaml`'s render tests also build the worker Deployment a rendered `remote` controller would make and assert its init container pulls the Cog's artifact by digest |
@@ -1559,6 +1580,7 @@ works as a set:
 | `REGISTRY_HOST` | `127.0.0.1:5050` | The dev registry `make cog-publish` publishes to, `make api-registry` indexes and `make controller` pulls from |
 | `REGISTRY_REPOS` | `cogs/echo,cogs/hermes` | The repositories of that registry the catalog indexes |
 | `COG` | `echo` | The Cog `make cog-publish` publishes (a package name or path) and `make cog-install` installs (a catalog id or pinned reference) |
+| `HUB_URL` | `http://127.0.0.1:8000` | The hub `make controller` tells its workers to claim against: `make api` |
 | `LOCATION` | *(empty)* | Where `make op` runs each step's worker: empty for in process, `local` for a real process per worker (needs pixi) |
 
 ## Files in this directory
@@ -1572,5 +1594,5 @@ works as a set:
 | `sql/bootstrap.sql` | Org + owner membership + operator grant, in one transaction |
 | `proxy/Caddyfile` | Host-routing front door for the desktop client |
 | `values/kind.yaml` | Helm values for the kind install |
-| `op.py`, `ops/`, `cogs/` | `make op`: the script, the fake Ops, and the fake Cog packages they name (`cogs/fake_worker.py` serves the seam for each) |
+| `op.py`, `ops/`, `cogs/` | `make op`: the script, the fake Ops, and the fake Cog packages they name (`cogs/fake_worker.py` serves the seam for each, and is the reference worker for the keyed claim; it reads the envelope's status table from `worker/src`) |
 | `.local/` | Frame bodies, the `make op` Track, the output of local workers (`runs/`), and scratch state (git-ignored, `make clean` removes it) |

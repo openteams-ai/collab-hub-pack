@@ -125,7 +125,7 @@ desktop reaches them through the authenticated loopback proxy with no credential
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET  | `/status` | Capability probe: `GET /me` **then** a bounded `POST /search/query` (size 1). A token that brokers but cannot read reports `reconnect_required`, not `connected`. Zero hits is still connected. `account` is the signed-in display name. |
+| GET  | `/status` | Capability probe: `GET /me` **and** a bounded `POST /search/query` (size 1), run concurrently. A token that brokers but cannot read reports `reconnect_required`, not `connected`. Zero hits is still connected. `account` is the signed-in display name. |
 | POST | `/search` | Microsoft Search over `driveItem`s (files and folders in document libraries). `query` words are wrapped in their own KQL group; `days_back`/`since_date`/`until_date` (in `time_zone`) become a `LastModifiedTime` clause **and** are re-checked per hit. `sort` is `relevance` or `modified` (newest first). Offset paging via an opaque `page_token` bound to the search. |
 | POST | `/drives/{drive_id}/items/{item_id}/read` | Metadata plus bounded text of one file. Text files are read directly; PDFs are downloaded; Word/PowerPoint/Excel (and the other formats Graph converts) go through `/content?format=pdf`; text is extracted in the Hub. Folders, images, archives, oversized or image-only files return `unsupported: true` with a reason and the metadata. |
 
@@ -135,6 +135,8 @@ Error mapping: `409` not connected / reconnect, `422` bad id / stale or garbage
 (timeout, 5xx, bad JSON), `503` connector unconfigured. Only Graph's top-level
 `error.message` is ever surfaced; `innerError` (request and tenant ids) and
 non-JSON bodies are never forwarded.
+
+Transport failures during Graph profile, search, and metadata requests identify the operation and HTTP client error type in the response and the `sharepoint_graph_transport_error` operator log. For capability checks, `profile access check` identifies `/me` and `search access check` identifies `/search/query`; for example, `ReadTimeout` distinguishes a timed-out request from a Graph 401/403 that requires reconnecting. Raw transport exception messages, request headers, and provider URLs are not included in these diagnostics. The operation and error type help investigate a failed request; they do not establish its underlying network cause.
 
 ## Runtime boundary
 

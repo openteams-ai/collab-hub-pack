@@ -48,6 +48,9 @@ from .packages import CogPackage, DirectoryPackageSource
 
 LOOPBACK = "127.0.0.1"
 HOST_ENV, PORT_ENV, COG_ENV, RUN_ENV = "COLLAB_COG_HOST", "COLLAB_COG_PORT", "COLLAB_COG_ID", "COLLAB_RUN_ID"
+HUB_ENV = "COLLAB_HUB_URL"
+"""Where the worker reaches the hub's worker-facing endpoints (the keyed claim, ``/v1/claims``), with its run
+token; absent when the controller was given no hub, in which case a worker claims nothing."""
 
 # What a worker inherits from the controller: enough to find and run programs, and nothing that
 # carries the controller's configuration or credentials.
@@ -150,6 +153,10 @@ class LocalProcessCogExecutor:
     materialization, with the Cog, the run and the instance, and what it
     returns enters that one child's environment only: never another worker's,
     never the Track, never a file. The executor keeps none of it.
+
+    ``hub_url`` is where a worker reaches the hub's worker-facing endpoints
+    with its run token, the keyed claim first: handed to each worker as
+    ``COLLAB_HUB_URL``. Without one a worker claims nothing.
     """
 
     location = "local"
@@ -169,6 +176,7 @@ class LocalProcessCogExecutor:
         registry: artifacts.RegistryClient | None = None,
         artifact_cache: str | Path | None = None,
         org_of: Callable[[str, str], str | None] | None = None,
+        hub_url: str | None = None,
     ) -> None:
         if environment not in ENVIRONMENTS:
             raise ValueError(f"unknown worker environment {environment!r}; it is one of {', '.join(ENVIRONMENTS)}")
@@ -188,6 +196,7 @@ class LocalProcessCogExecutor:
         self.ready_timeout = ready_timeout
         self.poll_interval = poll_interval
         self.grace = grace
+        self.hub_url = hub_url.rstrip("/") if hub_url else None
         # trust_env=False: a proxy named in the controller's environment is never used to reach a
         # worker on loopback, so the run token and the payload go to the worker and nowhere else.
         self._http = httpx.Client(trust_env=False, timeout=httpx.Timeout(
@@ -245,6 +254,8 @@ class LocalProcessCogExecutor:
             env.update(artifacts.serve_environment(artifacts.locate(package.name, self.artifact_cache, scope=scope)))
         env.update({HOST_ENV: LOOPBACK, PORT_ENV: str(port), COG_ENV: package.name, RUN_ENV: run_id,
                     run_tokens.RUN_TOKEN_ENV: token})
+        if self.hub_url:
+            env[HUB_ENV] = self.hub_url
         return env
 
     def _package(self, cog: str, scope: str = artifacts.NO_ORG_SCOPE) -> CogPackage:

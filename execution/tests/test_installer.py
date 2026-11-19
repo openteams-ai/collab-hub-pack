@@ -111,6 +111,7 @@ def published(registry, tmp_path, name="ctx"):
     """The echo fake Cog, made a self-contained package (its worker beside it) and published under ``name``."""
     root = packages(tmp_path / name) / "echo"
     shutil.copy(root.parent / "fake_worker.py", root / "fake_worker.py")
+    shutil.copytree(root.parent / "collab_hub_cog_worker", root / "collab_hub_cog_worker")  # what it imports
     (root / "serve.py").write_text((root / "serve.py").read_text().replace(".parent.parent", ".parent"))
     (root / "COG.md").write_text(f"---\nname: {name}\n---\n")  # one digest per name
     return publish(root, f"{registry.host}/cogs/{name}:1", RegistryClient(plain_http={registry.host}))

@@ -80,10 +80,13 @@ controllers, one picks up each run
 ## Known limitations
 
 - **The `none` durability backend does not survive a restart.** Cog execution
-  runs Ops on `none` today: nothing is checkpointed, so a run in flight — or
+  runs Ops on `none`: nothing is checkpointed, so a run in flight — or
   waiting at a Gate — when its host stops is recorded `interrupted` when a host
-  starts again, and continues only when someone retries it. `dbos` (#104) is
-  the backend that resumes runs; see
+  starts again, and continues only when someone retries it. The retry never
+  repeats a step's side effect: a worker reserves its step's key on the hub
+  before it acts and commits its result after (the keyed claim), so the retry
+  is answered with that result, or ends `outcome-unknown` for a person to
+  settle. `dbos` (#104) is the backend that resumes runs; see
   [`docs/cog-execution/runs.md`](docs/cog-execution/runs.md).
 - **Cogs on a deployed hub run from their artifacts, bound once at install.**
   Every hub serves the run API (`/v1/runs`) on its own database. With
@@ -131,8 +134,11 @@ npm ci --ignore-scripts && npm test          # the admin panel (Vitest)
 ```
 
 CI runs both: the `test` job runs pytest against a real Postgres service, and
-the `admin-ui` job runs `npm ci`, `npm audit`, the typecheck, Vitest and the
-production build.
+the `admin-ui` job runs `npm ci`, `npm audit` (through
+[`scripts/check_npm_audit.py`](scripts/check_npm_audit.py), which accepts only
+the advisories [`api/admin-ui/audit-allowlist.json`](api/admin-ui/audit-allowlist.json)
+lists, until each entry expires, and warns on an entry whose advisory is no
+longer reported), the typecheck, Vitest and the production build.
 
 ## Documentation
 

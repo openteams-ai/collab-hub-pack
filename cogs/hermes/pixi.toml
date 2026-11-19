@@ -67,13 +67,24 @@ audience = "usage"
 python = ">=3.12.16,<3.13"
 
 [pypi-dependencies]
+# 0.19.0 is the last hermes-agent on PyPI: Hermes has since dropped PyPI as a
+# distribution channel. Where the Cog gets Hermes from next is tracked in #320.
 hermes-agent = { version = "==0.19.0", extras = ["acp", "anthropic"] }
 # The worker SDK, from this repository: the Cog lives beside it, so it pins the SDK by path.
 collab-hub-cog-worker = { path = "../../worker" }
 
-[pypi-options]
+[pypi-options.dependency-overrides]
 # hermes-agent 0.19.0 pins certifi==2026.5.20, which still trusts the compromised
-# eMudhra intermediates. Override until a hermes-agent release lifts the pin
-# (its main already carries certifi==2026.10.19), then drop this override only:
-# the worker's own trust-store default (serve.py, README) stays.
-dependency-overrides = { certifi = ">=2026.10.19" }
+# eMudhra intermediates. Override until the Cog moves to a Hermes that lifts the
+# pin (its main already carries certifi==2026.10.19; no PyPI release will, see
+# #320), then drop this override only: the worker's own trust-store default
+# (serve.py, README) stays.
+certifi = ">=2026.10.19"
+# hermes-agent 0.19.0 pins PyJWT[crypto]==2.13.0, which has open advisories fixed
+# in 2.14.0 and 2.15.0 (#195). The Cog does not reach them: only Hermes's dashboard,
+# gateway and Skills Hub use PyJWT, and `hermes acp` never imports it. This keeps
+# the lock clear of them all the same. No hermes-agent release on PyPI will lift
+# the pin, as Hermes has dropped PyPI as a distribution channel: remove this
+# override once the Cog sources Hermes through an alternative distribution
+# option (#320).
+pyjwt = ">=2.15.0"

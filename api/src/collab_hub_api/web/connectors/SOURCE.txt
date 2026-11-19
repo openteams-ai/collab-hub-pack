@@ -1,0 +1,10 @@
+Connector logos for the home page.
+
+gmail, google-drive, google-calendar, github, notion, slack: Iconify "logos"
+set (@iconify-json/logos 1.2.17, CC0 1.0), icons google-gmail, google-drive,
+google-calendar, github-icon, notion-icon, slack-icon.
+sharepoint: Iconify "theSVG Color" set (@iconify-json/thesvg-color 1.2.21, MIT),
+icon microsoft-sharepoint.
+The MIT notice for sharepoint is in LICENSE-thesvg.txt.
+The logos are trademarks of their owners and are shown to name the tools
+Collab connects to.

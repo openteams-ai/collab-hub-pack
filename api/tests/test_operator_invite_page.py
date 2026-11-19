@@ -539,8 +539,8 @@ async def test_the_page_carries_the_account_link_when_the_deployment_sets_one(tm
         await signed_in(client, idp)
         page = await client.get(ADMIN_INVITATIONS_PATH)
     assert page.status_code == 200
-    assert page.text.count(f'<a href="{url}">Account</a>') == 1
-    assert page.text.index(">Account</a>") < page.text.index("Sign out")
+    assert page.text.count(f'<a href="{url}">Billing</a>') == 1
+    assert page.text.index(">Billing</a>") < page.text.index("Sign out")
 
 
 async def test_the_address_is_trimmed_and_ascii_lowercased(tmp_path, idp):

@@ -10,7 +10,7 @@ from fastapi.exception_handlers import http_exception_handler, request_validatio
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -92,6 +92,7 @@ from .web.authz import platform_role_source_name, verify_web_route_protection
 from .web.guard import WebSessionGuardMiddleware
 from .web.pages import WebSecurityHeadersMiddleware
 from .web.surface import (
+    HOME_PATH,
     WEB_SURFACE_PREFIXES,
     build_web_surface,
     enforce_web_surface_map_access,
@@ -557,6 +558,15 @@ def make_app(config: BaseConfig) -> FastAPI:
             return get_caller_identity(request)
         return get_auth_context(request)
 
+    def _self_authenticating(registry_served: bool):
+        # The claim routes (/v1/claims) authenticate every request with a worker's run token, which
+        # the hub's bearer auth would refuse before they could; the registry surface likewise, with
+        # the challenge its clients need. Neither is a map entry, so no operator rule can undo it.
+        def passes(path: str) -> bool:
+            return runs_router.claims_path(path) or (registry_served and registry.registry_path(path))
+
+        return passes
+
     # The same map, readable by a route that honors a `public` entry itself
     # (the Cog catalog's anonymous discovery, issue #85).
     app.state.path_rules = tuple(config.security.paths)
@@ -569,7 +579,7 @@ def make_app(config: BaseConfig) -> FastAPI:
         # itself, with the challenge registry clients need to find its token
         # endpoint; this middleware's refusal would pre-empt it with the Hub
         # API's envelope. Not a map entry, so no operator rule can undo it.
-        self_authenticating=registry.registry_path if cog_registry_serving is not None else None,
+        self_authenticating=_self_authenticating(cog_registry_serving is not None),
         unauthorized_response=_unauthorized_response,
         authenticate_error_response=_authenticate_error_response,
     )
@@ -601,10 +611,13 @@ def make_app(config: BaseConfig) -> FastAPI:
         app.add_middleware(WebSecurityHeadersMiddleware, prefixes=WEB_SURFACE_PREFIXES)
 
     @app.get("/", include_in_schema=False)
-    async def home() -> HTMLResponse:
-        # The hub landing-page tile points at this origin, so the root serves
-        # a small directory of the browser-facing pages instead of jumping
-        # straight to the API docs.
+    async def home() -> Response:
+        # Where the browser pages run, the root opens the Collab Hub home page,
+        # so this host and the hub's address show the same page. Otherwise it
+        # serves a small directory of the browser-facing pages instead of
+        # jumping straight to the API docs.
+        if config.web.enabled:
+            return RedirectResponse(f"{app.root_path}{HOME_PATH}", status_code=status.HTTP_303_SEE_OTHER)
         return HTMLResponse(
             """<!DOCTYPE html>
 <html lang="en">
@@ -806,6 +819,8 @@ def make_app(config: BaseConfig) -> FastAPI:
         # /v2/ there and nowhere else. Absent unless cogs.serve.enabled.
         app.include_router(registry.router)
     app.include_router(runs_router.router, prefix="/v1")
+    # The keyed claim, for workers, authorized by the run token (docs/cog-execution/op-cog-seam.md).
+    app.include_router(runs_router.claims_router, prefix="/v1")
     # Who is calling, and how the collab-hub CLI signs in. /auth/cli is public:
     # the hardened map lists it, since a client asks it before it holds a token.
     app.include_router(identity.router, prefix="/v1")

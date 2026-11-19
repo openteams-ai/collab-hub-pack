@@ -82,13 +82,13 @@ class CogWorker(Protocol):
         retry or a send back at a Gate uses a *new* key. ``input`` always contains
         the step's original input; ``signal`` carries a send back's findings
         separately and is omitted until a step is sent back.
-        A worker that persists results by key can turn the
-        replay into a no-op — but that durability is the worker's to provide. The
-        reference and Kubernetes workers here do NOT persist keys across pod
-        replacement, so a replaced worker re-runs the side effect: execution is
-        at-least-once across pod replacement. Crash-safe, exactly-once execution
-        (a durable keyed claim) lands with the crash-safe engine backing tracked
-        in #1.
+        A worker honours the key through the keyed claim (``claims.py``): it
+        reserves the key on the hub before it acts and commits its envelope
+        after, so a replay of a committed key is answered with that envelope,
+        and a replay of a key reserved by a worker that was lost before
+        committing fails the step ``outcome-unknown`` rather than acting
+        twice. The Worker SDK and the fake Cogs of ``dev/cogs`` do this; a
+        worker given no hub (``COLLAB_HUB_URL``) acts on every invocation.
         """
 
 

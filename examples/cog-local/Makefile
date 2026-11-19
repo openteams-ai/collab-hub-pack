@@ -130,9 +130,10 @@ api: ## The hub's API, verifying the realm's tokens (foreground)
 # The controller watches the hub's own database, the Track the API records runs in. Its tables come
 # from the API's migrations, so the controller starts once the API answers.
 TRACK ?= postgresql://collab:collab@127.0.0.1:5432/collab
+# HUB_URL is where each worker reaches this hub for its keyed claim: the API on PORT, not dev's default.
 controller: ## The run controller, which starts each Cog as a local process (foreground)
 	@until curl -sf $(COLLAB_HUB_URL)/health > /dev/null; do sleep 1; done
-	$(MAKE) -C $(DEV) controller TRACK=$(TRACK)
+	$(MAKE) -C $(DEV) controller TRACK=$(TRACK) HUB_URL=$(COLLAB_HUB_URL)
 
 start: | $(LOCAL) ## The fake model (if used), the API and the controller in the background; logs in .local/
 	@echo "  Hermes's model: $(MODEL_SOURCE)$(if $(filter claude,$(MODEL_SOURCE)), ($(CLAUDE_MODEL)))"

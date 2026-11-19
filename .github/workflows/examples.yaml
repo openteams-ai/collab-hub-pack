@@ -85,8 +85,9 @@ jobs:
       - name: Logs on failure
         if: failure()
         run: |
-          tail -40 examples/cog-local/.local/*.log || true
-          find dev/.local/runs -name stderr.log -exec tail -20 {} + || true
+          # coreutils by path: the pixi on PATH shadows `tail` with one that reads `-40` as a flag.
+          /usr/bin/tail -n 40 examples/cog-local/.local/*.log || true
+          find dev/.local/runs -name stderr.log -exec /usr/bin/tail -n 20 {} + || true
 
       - name: Stop the containers
         if: always()

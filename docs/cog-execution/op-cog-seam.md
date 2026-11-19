@@ -94,6 +94,79 @@ its harness takes them — embedded resources for an ACP agent that advertises
 and an input that cannot fit the bound model's context window with its Frames
 fails the step `context-exhausted` ([the envelope](result-envelope.md)).
 
+## The keyed claim
+
+Every task bundle carries an `idempotency_key`, stable for one step attempt
+(`{run}:{step}:{attempt}`, each component percent-escaped). A step can be
+invoked again under that key after it already acted: a durable backend
+resuming after a crash, or a person retrying an interrupted run. A worker
+honours the key through the hub's claim routes, with its run token as the
+bearer. The key travels in the request body, or the query, never the path, so
+any step name fits:
+
+| Route | What it does |
+|---|---|
+| `POST /v1/claims/reserve` `{"key": ...}` | Before acting. 201 with `yours: true`: the key is this worker's, act and then commit or release. 200 with `state: committed` and the `envelope`: answer with that envelope, and act on nothing. 200 with `state: outcome_unknown`: another worker reserved the key and never committed it, so its side effect may have happened; answer `ok: false` with `error.code: outcome-unknown` (HTTP 409), and act on nothing |
+| `POST /v1/claims/commit` `{"key": ..., "envelope": ...}` | After acting, with the envelope `/invoke` is about to answer with. 200; 409 `claim_refused` for a key this worker does not hold; 422 for a body that is no envelope |
+| `POST /v1/claims/release` `{"key": ...}` | When nothing acted under a key this worker reserved: the key is free again, and a replay reserves it afresh and runs the step. 204; 409 `claim_refused` for a key this worker does not hold, a committed one included |
+| `GET /v1/claims?key=` | What became of the worker's own key; 404 for one never reserved |
+
+**What is committed, and what is released.** The worker commits the envelope
+when the entry point was called: it answered, it failed on its own (a
+`WorkerError` it raised, an exception), or it was cancelled while it ran (the
+run was terminated, or the worker stopped, mid-prompt: the agent may have run
+its tools already). It commits nothing, and releases the key, when nothing
+acted: the task was refused before the entry point was called (no such entry
+point, a session already held, a harness that could not start or was
+cancelled while starting: `invalid-input`, `model-unavailable`,
+`binding-invalid`, or the cancellation's `model-call-failed`). A replay of a
+released key runs the step; a replay of a committed failure is answered with
+that failure, since the step acted, and the run's retry runs it as a new
+attempt. A key the hub answered
+`committed` or `outcome_unknown` to is neither committed nor released by the
+worker that asked: it is not that worker's.
+
+**Who reaches which key.** In order, and nothing is read before the first
+three pass: the bearer is there (else 401 `run_token_required`); it has the
+shape of a run token (else 401 `run_token_invalid`); the key has the shape of
+an idempotency key naming a run (else 422 `claim_key_invalid`). The hub then
+reads that run's Track directly and verifies the token against the hash
+`worker_started` recorded, never asking the controller. A reserve takes a
+worker that is up, on a run that has not ended. A commit, a release and a
+read take only a worker whose step attempt has no outcome on the Track yet,
+whether or not the worker is still up or the run was since recorded
+`interrupted` or `cancelled`: a worker whose controller died keeps acting and
+commits what it produced, and the retry of the interrupted run is answered
+with it. Last, the key must be the one the worker's `worker_started` admits
+it to, its own step attempt's: another step's key, or another attempt's, is
+403 `claim_not_yours`, and a key of another run, or of no run, is 401 like an
+unknown token, so the answer never says whether such a run exists. The routes
+are for workers, which reach the API inside the cluster by its Service. The
+chart's default ingress routes `/` to the API, so they are reachable from
+outside too, refusing everything but a run token before any read; an
+installation that lists its ingress paths need not include `/v1/claims`.
+
+The hub is `COLLAB_HUB_URL` in the worker's environment; a worker given none
+claims nothing and acts on every invocation. A hub that cannot be reached for
+the reservation fails the step `hub-unavailable` (HTTP 503) before anything
+acts; a commit or a release the hub does not take is logged, and the envelope
+answered all the same, since the controller records it. The claim narrows the
+window in which a lost worker's side effect is unaccounted for to the gap
+between reserve and commit, and makes it visible as `outcome-unknown`; it
+does not pretend to close it. Such a step is never retried by the run API: a
+platform operator settles what happened and records it (`POST
+/v1/runs/{id}/reconcile`, `collab-hub run reconcile`; the
+`outcome_reconciled` event on the Track, and the claim `recorded`), before the
+run is retried as a new attempt.
+
+The [Worker SDK](../../worker/README.md) does all of this for every Cog built
+on it, and `dev/cogs/fake_worker.py` is the reference implementation for a
+worker that is not (its `handle` always acts, so it never releases). The
+hub's side is `collab_hub_execution.claims`: three stores, in memory, SQLite
+beside the SQLite Track and Postgres beside the hub's, under one conformance
+suite, and the step attempt machine of [states.md](states.md) deciding every
+move.
+
 ## The two sides already fit
 
 | Op factory concept | Cog-side implementation |

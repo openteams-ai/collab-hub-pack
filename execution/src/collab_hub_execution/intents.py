@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
+from .claims import ClaimRefused, ClaimStore, attempt_of
 from .gates import DEFAULT_APPROVERS
 from .ops import OpDefinition, _deserialize_op, _serialize_op
 from .states import InvalidTransition, Run, RunState
@@ -535,6 +536,105 @@ class NotRetryable(InvalidTransition):
     """A retry asked of a run the machine does not retry from where it is, or that holds one already."""
 
 
+OUTCOME_RECONCILED = "outcome_reconciled"
+
+
+def outcome_unknown_step(events: Iterable[TrackEvent]) -> str | None:
+    """The step whose attempt ended ``outcome-unknown`` since the run last ran, and was not reconciled; ``None`` when
+    there is none.
+
+    The worker reserved the attempt's key and was lost before committing its
+    envelope: its side effect may have happened. Such a step is never retried
+    through the run API; a person settles what the worker did and records it
+    (:func:`reconcile_outcome`), and the run is then retried as a new attempt.
+    """
+    step = None
+    for event in events:
+        if event.event_type == "retry_requested":
+            step = None
+        elif event.event_type == "step_failed" and event.payload.get("error") == "outcome-unknown":
+            step = event.payload.get("step")
+        elif event.event_type == OUTCOME_RECONCILED and event.payload.get("step") == step:
+            step = None
+    return step
+
+
+def unknown_outcome_key(events: Iterable[TrackEvent], step: str) -> str | None:
+    """The idempotency key of ``step``'s attempt that ended ``outcome-unknown``, as its ``step_failed`` records
+    it; ``None`` when the step did not."""
+    key = None
+    for event in events:
+        if event.event_type == "step_failed" and event.payload.get("step") == step \
+                and event.payload.get("error") == "outcome-unknown":
+            key = event.payload.get("key")
+    return key if isinstance(key, str) else None
+
+
+def reconcile_outcome(track: TrackStore, run_id: str, *, step: str, actor: str, note: str | None = None,
+                      claims: ClaimStore | None = None) -> RunView:
+    """Record that ``actor`` settled what a lost worker did on ``step``, whose attempt ended ``outcome-unknown``.
+
+    The step attempt machine's ``reconcile``, on the Track and, given the
+    ``claims`` the hub serves, on the attempt's claim too, which is
+    ``recorded`` from here on, so the two agree. The run stays failed, and a
+    retry asked after this runs the step as a new attempt under a new key,
+    since a person has established whether the side effect happened and done
+    what that calls for. ``LookupError`` for a run never submitted;
+    :class:`NotRetryable` for a run that has not ended on that step's unknown
+    outcome. The Track is written only while that holds, in one step; a claim
+    that is not there to reconcile (pruned, or kept by another store) is
+    logged, the Track being what a retry reads.
+    """
+    if not actor:
+        raise ValueError("a reconciliation names who made it")
+
+    def unknown(events: tuple[TrackEvent, ...]) -> bool:
+        events = tuple(upgrade(event) for event in events)
+        run = Run.replay(events)
+        return run is not None and run.state.ended and outcome_unknown_step(events) == step
+
+    payload: dict[str, Any] = {"step": step, "actor": actor}
+    if note:
+        payload["note"] = note[:1024]
+    record = TrackEvent(run_id=run_id, event_type=OUTCOME_RECONCILED, payload=payload, schema=SCHEMA_VERSION)
+    recorded = track.append_if(record, unknown)
+    view = describe(track, run_id)
+    if view is None:
+        raise LookupError(f"no run {run_id!r} on the Track")
+    if recorded is None:
+        raise NotRetryable(view.state, OUTCOME_RECONCILED,
+                           f"run {run_id!r} did not end on an unknown outcome of step {step!r}; nothing to reconcile")
+    if claims is not None:
+        key = unknown_outcome_key(track.replay(run_id), step)
+        try:
+            if key is None:
+                raise ClaimRefused(f"the step_failed of {step!r} names no key")
+            claims.reconcile(run_id, key, actor=actor)
+        except ClaimRefused as exc:
+            _log.warning("the claim of run %s step %s was not reconciled with the Track: %s", run_id, step, exc)
+    return view
+
+
+_NEVER_RETRIED = frozenset({RunState.COMPLETED, RunState.REJECTED, RunState.CANCELLED})
+
+
+def attempt_settled(events: Iterable[TrackEvent], key: str) -> bool:
+    """Whether the step attempt ``key`` names has nothing left for its claim to answer: its outcome is on the
+    Track (``step_completed`` or ``step_failed`` for that step and attempt), or its run ended in a state no
+    retry leaves. A key that names no attempt counts as settled. What the hub asks before pruning a claim."""
+    named = attempt_of(key)
+    if named is None:
+        return True
+    _, step, attempt = named
+    events = tuple(upgrade(event) for event in events)
+    for event in events:
+        if event.event_type in ("step_completed", "step_failed") and event.payload.get("step") == step \
+                and event.payload.get("attempt") == attempt:
+            return True
+    run = Run.replay(events)
+    return run is not None and run.state in _NEVER_RETRIED
+
+
 def retry_ask(events: Iterable[TrackEvent]) -> str | None:
     """Who asked for a retry since the run last ended, while no controller has taken or refused it."""
     actor = None
@@ -553,8 +653,9 @@ def request_retry(track: TrackStore, run_id: str, *, actor: str) -> RunView:
     that has not ended, that the machine does not retry from its state
     (completed, rejected, cancelled), or that holds an ask already. A run that
     exhausted its budget is refused here too: the runner starts no new budget
-    epoch, so a new run is the answer. The check and the append are one step
-    on the Track.
+    epoch, so a new run is the answer. So is a run whose step ended
+    ``outcome-unknown``, naming the step: it is reconciled, not retried. The
+    check and the append are one step on the Track.
     """
     if not actor:
         raise ValueError("a retry names who asked for it")
@@ -563,7 +664,8 @@ def request_retry(track: TrackStore, run_id: str, *, actor: str) -> RunView:
         events = tuple(upgrade(event) for event in events)
         run = Run.replay(events)
         return (run is not None and run.state.ended and run.state is not RunState.BUDGET_EXCEEDED
-                and RUN.accepts(run.state, "retry") and retry_ask(events) is None)
+                and RUN.accepts(run.state, "retry") and retry_ask(events) is None
+                and outcome_unknown_step(events) is None)
 
     request = TrackEvent(run_id=run_id, event_type=RETRY_ASKED, payload={"actor": actor}, schema=SCHEMA_VERSION)
     recorded = track.append_if(request, retryable)
@@ -577,6 +679,11 @@ def request_retry(track: TrackStore, run_id: str, *, actor: str) -> RunView:
             raise NotRetryable(view.state, RETRY_ASKED, f"a retry was already asked for by {view.retry_asked_by}")
         if view.state is RunState.BUDGET_EXCEEDED:
             raise NotRetryable(view.state, RETRY_ASKED, "the run exhausted its budget; start a new run instead")
+        unknown = outcome_unknown_step(tuple(upgrade(event) for event in track.replay(run_id)))
+        if unknown is not None:
+            raise NotRetryable(view.state, RETRY_ASKED, f"step {unknown!r} ended outcome-unknown: its worker was lost "
+                                                        f"between its side effect and its result, so the step is "
+                                                        f"reconciled by a person, not retried")
         raise NotRetryable(view.state, RETRY_ASKED, f"the run {view.status.lower()}; there is nothing to retry")
     return view
 

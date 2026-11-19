@@ -69,7 +69,7 @@ def link(url: str) -> str:
 
 
 async def test_every_link_is_built_from_the_deployment_domain(tmp_path, idp):
-    app = make_web_app(tmp_path, idp, web={"hub_domain": "hub.example.org"})
+    app = make_web_app(tmp_path, idp, web={"hub_domain": "hub.example.org", "web_client": True})
     async with web_client(app) as client:
         await sign_in(client, idp, next_path=HOME)
         page = await client.get(HOME)
@@ -81,7 +81,9 @@ async def test_every_link_is_built_from_the_deployment_domain(tmp_path, idp):
 
 
 async def test_the_domain_defaults_to_the_issuer_host_without_keycloak(tmp_path, idp):
-    app = make_web_app(tmp_path, idp, web={"issuer_url": "https://keycloak.dev.example.org/realms/nebari"})
+    app = make_web_app(
+        tmp_path, idp, web={"issuer_url": "https://keycloak.dev.example.org/realms/nebari", "web_client": True}
+    )
     async with web_client(app) as client:
         page = await client.get(HOME)
     assert link("https://collab.dev.example.org/") in page.text
@@ -160,7 +162,9 @@ async def test_the_page_brings_its_own_fonts_from_this_origin(tmp_path, idp):
 
 
 async def test_under_a_root_path_the_fonts_and_the_door_mark_stay_under_it(tmp_path, idp):
-    app = make_web_app(tmp_path, idp)
+    # The door mark is the "Open Collab in your browser" door's, shown only
+    # where the web client runs.
+    app = make_web_app(tmp_path, idp, web={"web_client": True})
     page = await probe(app, "/hub/web/home", root_path="/hub")
     stylesheet = await probe(app, "/hub/web/home.css", root_path="/hub")
     urls = re.findall(r"url\(([^)]+)\)", stylesheet.text)
@@ -331,7 +335,7 @@ async def test_the_billing_address_needs_a_session(tmp_path, idp):
 
 
 async def test_the_account_dashboard_has_a_sidebar(tmp_path, idp):
-    app = make_web_app(tmp_path, idp)
+    app = make_web_app(tmp_path, idp, web={"web_client": True})
     async with web_client(app) as client:
         await sign_in(client, idp, next_path=ACCOUNT)
         page = await client.get(ACCOUNT)
@@ -417,6 +421,140 @@ async def test_the_header_offers_the_download_whether_or_not_signed_in(tmp_path,
 
     assert link(DOWNLOAD_URL) in header_nav(anonymous.text)
     assert link(DOWNLOAD_URL) in header_nav(signed_in.text)
+
+
+def hero(text: str) -> str:
+    start = text.index('<div class="hero-actions">')
+    return text[start : text.index("</div>", start)]
+
+
+async def test_a_signed_out_visitor_can_download_the_desktop_app_without_an_account(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"desktop_download_url": DOWNLOAD_URL})
+    async with web_client(app) as client:
+        page = await client.get(HOME)
+    assert link(DOWNLOAD_URL) in hero(page.text)
+    assert f'href="{SIGN_UP_HREF}"' in hero(page.text)
+
+
+WEB_CLIENT_LINKS = ("https://collab.hub.example.org/", "https://collab.hub.example.org/frames")
+
+
+async def test_a_hub_links_into_the_web_client_only_when_told_it_runs_one(tmp_path, idp):
+    """Issue #332: off by default, so a hub that never names a web client
+    (the public one) shows no dead collab.<domain> links."""
+
+    app = make_web_app(tmp_path, idp, web={"hub_domain": "hub.example.org"})
+    async with web_client(app) as client:
+        await sign_in(client, idp, next_path=HOME)
+        home = await client.get(HOME)
+        account = await client.get(ACCOUNT)
+    for page in (home, account):
+        assert "collab.hub.example.org" not in page.text
+        assert "Open Collab" not in page.text
+
+
+@pytest.mark.parametrize("path", [HOME, ACCOUNT])
+@pytest.mark.parametrize("signed_in", [False, True])
+async def test_a_hub_without_the_web_client_links_nowhere_into_it(tmp_path, idp, path, signed_in):
+    """Issue #332: on a hub where nothing answers at collab.<domain>, every
+    link there (navigation, sidebar, Open Collab, Manage your Frames, footer)
+    would be dead, so none is rendered."""
+
+    if path == ACCOUNT and not signed_in:
+        pytest.skip("the account page needs a session")
+    app = make_web_app(
+        tmp_path,
+        idp,
+        web={"hub_domain": "hub.example.org", "web_client": False, "desktop_download_url": DOWNLOAD_URL},
+    )
+    async with web_client(app) as client:
+        if signed_in:
+            await sign_in(client, idp, next_path=path)
+        page = await client.get(path)
+    assert page.status_code == 200
+    for url in WEB_CLIENT_LINKS:
+        assert link(url) not in page.text
+    assert "Open Collab" not in page.text
+    assert "Manage your Frames" not in page.text
+    # Nor is a link left behind with nowhere to go (it would just reload the page).
+    assert 'href=""' not in page.text
+    # What does not depend on the web client is still there. The account
+    # dashboard has no header navigation or footer, so it never carried these.
+    if path == HOME:
+        assert link(DOWNLOAD_URL) in page.text
+        assert link("https://frames.hub.example.org/docs") in page.text
+    else:
+        assert 'action="/web/signout"' in page.text
+
+
+async def test_with_the_web_client_open_collab_leads_and_the_download_follows(tmp_path, idp):
+    app = make_web_app(
+        tmp_path,
+        idp,
+        web={"hub_domain": "hub.example.org", "web_client": True, "desktop_download_url": DOWNLOAD_URL},
+    )
+    async with web_client(app) as client:
+        await sign_in(client, idp, next_path=HOME)
+        page = await client.get(HOME)
+    actions = hero(page.text)
+    assert actions.startswith(
+        '<div class="hero-actions"><a class="btn primary large" href="https://collab.hub.example.org/">'
+    )
+    assert link(DOWNLOAD_URL) in actions
+    assert actions.index("Open Collab") < actions.index(link(DOWNLOAD_URL))
+
+
+async def test_without_the_web_client_the_download_is_the_signed_in_main_action(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"web_client": False, "desktop_download_url": DOWNLOAD_URL})
+    async with web_client(app) as client:
+        await sign_in(client, idp, next_path=HOME)
+        page = await client.get(HOME)
+    assert f'<a class="btn primary large" href="{html.escape(DOWNLOAD_URL)}">' in hero(page.text)
+
+
+async def test_without_the_web_client_or_a_download_the_account_page_is_the_main_action(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"web_client": False})
+    async with web_client(app) as client:
+        await sign_in(client, idp, next_path=HOME)
+        page = await client.get(HOME)
+    assert f'<a class="btn primary large" {link(ACCOUNT)}>' in hero(page.text)
+    # No door is left to show, so the section that lists them is gone too.
+    assert "Start wherever you work." not in page.text
+    # Nor is there anywhere for "your chats are waiting" to point.
+    assert "Pick up where you left off." not in page.text
+
+
+async def test_without_the_web_client_or_a_download_a_visitor_can_still_sign_up(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"hub_domain": "hub.example.org", "web_client": False})
+    async with web_client(app) as client:
+        page = await client.get(HOME)
+    assert page.status_code == 200
+    assert f'href="{SIGN_UP_HREF}"' in hero(page.text)
+    assert "collab.hub.example.org" not in page.text
+    assert "Create your account" in page.text
+
+
+async def test_the_demo_window_names_the_web_client_only_where_one_runs(tmp_path, idp):
+    on = make_web_app(tmp_path, idp, web={"hub_domain": "hub.example.org", "web_client": True})
+    async with web_client(on) as client:
+        page = await client.get(HOME)
+    assert "<em>collab.hub.example.org</em>" in page.text
+    off = make_web_app(tmp_path, idp, web={"hub_domain": "hub.example.org", "web_client": False})
+    async with web_client(off) as client:
+        page = await client.get(HOME)
+    assert "collab.hub.example.org" not in page.text
+
+
+async def test_the_account_sidebar_without_the_web_client_keeps_only_the_account_entries(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"web_client": False, "account_page_url": BILLING_URL})
+    async with web_client(app) as client:
+        await sign_in(client, idp, next_path=ACCOUNT)
+        page = await client.get(ACCOUNT)
+    nav = sidebar(page.text)
+    assert f'{link(ACCOUNT)} aria-current="page"' in nav
+    assert link(BILLING_URL) in nav
+    assert 'title="Collab"' not in nav
+    assert 'title="Frames"' not in nav
 
 
 @pytest.mark.parametrize(

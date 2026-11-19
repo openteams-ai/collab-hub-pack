@@ -867,6 +867,12 @@ home:
   # issuer's host without its leading "keycloak.", as the desktop does. A bare
   # host name. Becomes COLLAB_HUB_API__WEB__HUB_DOMAIN on the API only.
   hubDomain: ""
+  # -- Whether this hub runs the Collab web client at collab.<hubDomain>.
+  # false (the default) shows no link into it on the home and account pages;
+  # true adds "Collab", "Frames", "Open Collab" and "Manage your Frames". Set
+  # it only where the web client actually runs. Becomes
+  # COLLAB_HUB_API__WEB__WEB_CLIENT on the API only.
+  webClient: false
   # -- Where the home page's desktop download link points: the Collab macOS
   # installer, the same file for every hub. Empty renders no link. Same rules
   # as accountPageUrl.

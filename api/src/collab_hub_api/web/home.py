@@ -9,7 +9,8 @@ Billing, the external ``web.account_page_url``, when one is set.
 
 Every link comes from configuration, never the request: the web client and
 Frames from the hub's domain (:func:`hub_domain`), the rest from ``web.*``
-settings checked at startup. Its look is one stylesheet
+settings checked at startup. A hub that runs no web client
+(``web.web_client`` off) shows no link into it at all (issue #332). Its look is one stylesheet
 (:data:`HOME_STYLESHEET`), the Collab mark (:data:`COLLAB_MARK_SVG`) and the
 fonts in ``web/fonts``, all served from this origin. Two scripts, also from
 this origin: ``theme.js`` on these pages (theme, menus, the dashboard sidebar)
@@ -57,6 +58,16 @@ def hub_domain(surface: WebSurface) -> str:
         return surface.hub_domain
     host = urlsplit(surface.issuer_url).hostname or ""
     return host.removeprefix("keycloak.")
+
+
+def web_client_url(surface: WebSurface, path: str = "/") -> str:
+    """The web client's ``path`` on this hub, or ``""`` when the hub runs none.
+
+    The one place a link into the web client is built, so a hub without one
+    (``web.web_client`` off, issue #332) renders none anywhere.
+    """
+
+    return f"https://collab.{hub_domain(surface)}{path}" if surface.web_client else ""
 
 
 # Line icons, drawn inline: CSP allows inline SVG markup (it is not script) and
@@ -445,11 +456,13 @@ def _chat_replica(root: str) -> str:
     )
 
 
-def _showcase(root: str, domain: str) -> str:
+def _showcase(root: str, address: str) -> str:
     """Collab, clickable: the tabs and the screenshot's own sidebar switch views.
 
     No script: one radio per view, and labels for it in the tab row and over
     the screenshot's sidebar entry. The stylesheet shows the checked view.
+    ``address`` is the mock window's address bar: the web client's host, or
+    empty on a hub without one, so it names no host that does not answer.
     """
 
     radios = "".join(
@@ -476,7 +489,7 @@ def _showcase(root: str, domain: str) -> str:
         f'<div class="showcase">{radios}'
         f'<div class="tabs">{tabs}</div>'
         '<div class="window">'
-        f'<div class="window-bar"><span></span><span></span><span></span><em>collab.{html.escape(domain)}</em></div>'
+        f'<div class="window-bar"><span></span><span></span><span></span><em>{html.escape(address)}</em></div>'
         f'<div class="screen">{shots}{hotspots}</div>'
         "</div>"
         "</div>"
@@ -574,7 +587,9 @@ class _Chrome:
     root: str
     domain: str
     web_client: str
+    """The web client's address; empty when the hub runs none."""
     frames: str
+    """Its Frames page; empty when the hub runs no web client."""
     download: str
     nav: str
     header_actions: str
@@ -586,24 +601,27 @@ class _Chrome:
 
 def _chrome(surface: WebSurface, session: WebSession | None, root_path: str, back_path: str) -> _Chrome:
     domain = hub_domain(surface)
-    web_client = f"https://collab.{domain}/"
+    web_client = web_client_url(surface)
     # Frames are managed in the web client; the hub's own host serves its API.
-    frames = f"https://collab.{domain}/frames"
+    frames = web_client_url(surface, "/frames")
     api_docs = f"https://frames.{domain}/docs"
     root = html.escape(root_path)
     download = surface.desktop_download_url
     docs = surface.docs_url
 
-    nav = [f'<a href="{html.escape(web_client)}">Collab</a>', f'<a href="{html.escape(frames)}">Frames</a>']
+    nav = []
+    if web_client:
+        nav += [f'<a href="{html.escape(web_client)}">Collab</a>', f'<a href="{html.escape(frames)}">Frames</a>']
     if docs:
         nav.append(f'<a href="{html.escape(docs)}">Docs</a>')
     if download:
         nav.append(f'<a href="{html.escape(download)}">Download</a>')
 
-    product_links = [("Open Collab", web_client)]
+    product_links = [("Open Collab", web_client)] if web_client else []
     if download:
         product_links.append(("Download for macOS", download))
-    product_links.append(("Frames", frames))
+    if frames:
+        product_links.append(("Frames", frames))
     if docs:
         product_links.append(("Docs", docs))
     product_links.append(("API docs", api_docs))
@@ -727,31 +745,49 @@ def home_page(*, surface: WebSurface, session: WebSession | None, root_path: str
     root, domain, web_client, download = chrome.root, chrome.domain, chrome.web_client, chrome.download
     docs = surface.docs_url
 
-    doors = [_door(root, "collab", "Open Collab in your browser", "Nothing to install.", web_client)]
+    doors = []
+    if web_client:
+        doors.append(_door(root, "collab", "Open Collab in your browser", "Nothing to install.", web_client))
     if download:
         doors.append(_door(root, "apple", "Download Collab for macOS", "Local agents and capabilities.", download))
-    doors.append(_door(root, "frames", "Manage your Frames", "Your team's shared context.", chrome.frames))
+    if chrome.frames:
+        doors.append(_door(root, "frames", "Manage your Frames", "Your team's shared context.", chrome.frames))
     if docs:
         doors.append(_door(root, "docs", "Read the docs", "Set up, connect tools, go further.", docs))
 
+    # The desktop download needs no account: it is offered signed in or out.
+    download_button = (
+        f'<a class="btn outline large" href="{html.escape(download)}">{_apple()}Download for macOS</a>'
+        if download
+        else ""
+    )
     if session is None:
         sign_in, sign_up = html.escape(chrome.sign_in), html.escape(chrome.sign_up)
         hero_actions = (
             f'<a class="btn primary large" href="{sign_up}">Get started{_icon("arrow", "icon-sm")}</a>'
             f'<a class="btn outline large" href="{sign_in}">Log in</a>'
+            f"{download_button}"
         )
         closing_title = "Bring your team in."
         closing_text = "Create an account on this hub and start your first chat in a minute."
         closing_action = f'<a class="btn primary large" href="{sign_up}">Create your account</a>'
     else:
-        hero_actions = f'<a class="btn primary large" href="{html.escape(web_client)}">{_mark()}Open Collab</a>'
-        if download:
-            hero_actions += (
-                f'<a class="btn outline large" href="{html.escape(download)}">{_apple()}Download for macOS</a>'
-            )
+        # Without the web client, the desktop app is where Collab is opened;
+        # with neither, the account page is the one place left to go.
+        if web_client:
+            primary = f'<a class="btn primary large" href="{html.escape(web_client)}">{_mark()}Open Collab</a>'
+        elif download:
+            primary = f'<a class="btn primary large" href="{html.escape(download)}">{_apple()}Download for macOS</a>'
+        else:
+            primary = f'<a class="btn primary large" href="{root}{ACCOUNT_PATH}">Your account</a>'
+        hero_actions = primary + (download_button if web_client else "")
         closing_title = "Pick up where you left off."
         closing_text = "Your chats, Frames and connectors are waiting in Collab."
-        closing_action = f'<a class="btn primary large" href="{html.escape(web_client)}">{_mark()}Open Collab</a>'
+        closing_action = primary
+        if not web_client and not download:
+            # Nothing on the hub holds the chats this band points to, and the
+            # hero already offers the account page.
+            closing_title = ""
 
     chapters = "".join(
         (
@@ -785,7 +821,7 @@ def home_page(*, surface: WebSurface, session: WebSession | None, root_path: str
 and every chat starts informed. It all runs on your organization's own hub.</p>
 <div class="hero-actions">{hero_actions}</div>
 </section>
-<section class="band show">{_showcase(root, domain)}</section>
+<section class="band show">{_showcase(root, urlsplit(web_client).hostname or "")}</section>
 <section class="band connectors">
 <p>Works with the tools your team already uses</p>
 <ul>{_connectors(root)}</ul>
@@ -802,15 +838,8 @@ and every chat starts informed. It all runs on your organization's own hub.</p>
 </div>
 </section>
 {chapters}
-<section class="band ways">
-<h2>Start wherever you work.</h2>
-<div class="doors">{"".join(doors)}</div>
-</section>
-<section class="band closing">
-<h2>{html.escape(closing_title)}</h2>
-<p>{html.escape(closing_text)}</p>
-{closing_action}
-</section>"""
+{f'<section class="band ways"><h2>Start wherever you work.</h2><div class="doors">{"".join(doors)}</div></section>' if doors else ""}
+{f'<section class="band closing"><h2>{html.escape(closing_title)}</h2><p>{html.escape(closing_text)}</p>{closing_action}</section>' if closing_title else ""}"""
     return _document(title="Collab Hub", chrome=chrome, main=main, scripts=(HOME_SCRIPT_PATH,), footer=True)
 
 
@@ -831,14 +860,18 @@ def _dashboard(*, surface: WebSurface, session: WebSession, root_path: str, titl
     # its own host; a hub without one shows no Billing entry at all.
     if surface.account_page_url:
         sections += entry(surface.account_page_url, "Billing", _icon("card", "icon-sm"))
-    product = entry(chrome.web_client, "Collab", _mark()) + entry(chrome.frames, "Frames", _icon("frames", "icon-sm"))
+    product = (
+        entry(chrome.web_client, "Collab", _mark()) + entry(chrome.frames, "Frames", _icon("frames", "icon-sm"))
+        if chrome.web_client
+        else ""
+    )
     fold = (
         '<button type="button" class="dash-fold" data-sidebar-toggle aria-controls="dash-nav" '
         f'aria-expanded="true" aria-label="Collapse sidebar">{_icon("sidebar", "icon-sm")}</button>'
     )
     main = (
         '<section class="dash">'
-        f'<nav class="dash-nav" id="dash-nav" aria-label="Account"><ul>{sections}</ul><ul>{product}</ul>{fold}</nav>'
+        f'<nav class="dash-nav" id="dash-nav" aria-label="Account"><ul>{sections}</ul>{f"<ul>{product}</ul>" if product else ""}{fold}</nav>'
         f'<div class="dash-main">{body}</div>'
         "</section>"
     )
@@ -855,12 +888,15 @@ def account_page(*, surface: WebSurface, session: WebSession, root_path: str = "
         rows.append(("Email", html.escape(session.email)))
     rows.append(("Hub", f'<span class="mono">{html.escape(domain)}</span>'))
     details = "".join(f"<div><dt>{label}</dt><dd>{value}</dd></div>" for label, value in rows)
+    web_client = web_client_url(surface)
+    open_collab = (
+        f'<a class="btn primary" href="{html.escape(web_client)}">{_mark()}Open Collab</a>\n' if web_client else ""
+    )
     body = f"""<div class="acct-head">{_avatar(session.user)}<div><h1>{html.escape(identity)}</h1>
 <p>Your account on {html.escape(domain)}</p></div></div>
 <dl class="acct-list">{details}</dl>
 <div class="acct-actions">
-<a class="btn primary" href="{html.escape(f"https://collab.{domain}/")}">{_mark()}Open Collab</a>
-{_signout_form(html.escape(root_path), session, "btn outline")}
+{open_collab}{_signout_form(html.escape(root_path), session, "btn outline")}
 </div>"""
     return _dashboard(surface=surface, session=session, root_path=root_path, title="Your account", body=body)
 

@@ -1482,7 +1482,15 @@ class _LoopbackBrowser:
     """
 
     def __init__(self, base_url: str) -> None:
-        self._client = httpx.Client(base_url=base_url, timeout=15.0, follow_redirects=False)
+        # The Host a browser on the deployment sends: PUBLIC_BASE_URL's. The
+        # socket is loopback, but sign-in moves any other host to the public
+        # one before it starts (a __Host- cookie must reach the callback).
+        self._client = httpx.Client(
+            base_url=base_url,
+            headers={"Host": urlsplit(PUBLIC_BASE_URL).netloc},
+            timeout=15.0,
+            follow_redirects=False,
+        )
         self._cookies: dict[str, str] = {}
 
     def __enter__(self) -> "_LoopbackBrowser":

@@ -1262,12 +1262,98 @@ async def test_a_hardened_map_with_a_public_web_prefix_serves_the_surface(tmp_pa
         assert (await client.get("/", follow_redirects=False)).status_code == 401
 
 
+PUBLIC_BASE_URL = "https://frames.example.com"
+
+
+def public_host_client(app, host: str = PUBLIC_BASE_URL) -> AsyncClient:
+    return AsyncClient(transport=ASGITransport(app=app), base_url=host)
+
+
 async def test_the_public_base_url_overrides_request_derived_redirects(tmp_path, idp):
-    app = make_web_app(tmp_path, idp, web={"public_base_url": "https://frames.example.com"})
-    async with web_client(app) as client:
+    app = make_web_app(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL})
+    async with public_host_client(app) as client:
         response = await client.get("/web/signin")
         params = authorize_params(response.headers["location"])
         assert params["redirect_uri"] == "https://frames.example.com/web/oidc/callback"
+
+
+# --- a sign-in started on another host moves to the public host first ---------
+#
+# The transient cookie is __Host-, so it only reaches the host that set it, and
+# Keycloak returns to public_base_url's host. A sign-in started on an alias
+# used to set the cookie where the callback could not see it and always ended on
+# "Sign-in did not complete" (a Billing link to the hub's frames. host on Dev).
+
+
+async def test_a_signin_on_another_host_moves_to_the_public_host_before_setting_a_cookie(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL})
+    async with public_host_client(app, "https://alias.example.com") as client:
+        response = await client.get("/web/signin", params={"next": "/web/account"})
+    assert response.status_code == 303
+    location = urlsplit(response.headers["location"])
+    assert (location.scheme, location.netloc, location.path) == ("https", "frames.example.com", "/web/signin")
+    assert parse_qs(location.query) == {"next": ["/web/account"], "hop": ["1"]}
+    # No sign-in starts on the alias: nothing there could finish it.
+    assert TRANSIENT_COOKIE not in response.headers.get("set-cookie", "")
+
+
+async def test_the_move_keeps_renew_and_register(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL})
+    async with public_host_client(app, "https://alias.example.com") as client:
+        response = await client.get("/web/signin", params={"next": "/web", "renew": "1", "register": "1"})
+    query = parse_qs(urlsplit(response.headers["location"]).query)
+    assert query == {"next": ["/web"], "renew": ["1"], "register": ["1"], "hop": ["1"]}
+
+
+async def test_the_move_carries_only_a_sanitized_next(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL})
+    async with public_host_client(app, "https://alias.example.com") as client:
+        response = await client.get("/web/signin", params={"next": "https://evil.example.com/"})
+    location = urlsplit(response.headers["location"])
+    assert location.netloc == "frames.example.com"
+    assert parse_qs(location.query)["next"] == ["/web"]
+
+
+@pytest.mark.parametrize("host", ["https://frames.example.com", "https://FRAMES.example.com:8443"])
+async def test_a_signin_on_the_public_host_starts_there(tmp_path, idp, host):
+    # Same host name, any case or port: cookies don't separate hosts by port.
+    app = make_web_app(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL})
+    async with public_host_client(app, host) as client:
+        response = await client.get("/web/signin")
+    assert response.headers["location"].startswith(f"{idp.issuer}/protocol/openid-connect/auth?")
+    assert TRANSIENT_COOKIE in response.headers["set-cookie"]
+
+
+async def test_a_signin_already_moved_once_starts_where_it_is(tmp_path, idp):
+    # A proxy that rewrites Host means the app never sees the public host
+    # arrive; the marker stops a redirect loop and keeps today's behaviour.
+    app = make_web_app(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL})
+    async with public_host_client(app, "https://internal.svc.example") as client:
+        response = await client.get("/web/signin", params={"next": "/web", "hop": "1"})
+    assert response.headers["location"].startswith(f"{idp.issuer}/protocol/openid-connect/auth?")
+
+
+async def test_without_a_public_base_url_a_signin_starts_on_any_host(tmp_path, idp):
+    app = make_web_app(tmp_path, idp)
+    async with public_host_client(app, "https://alias.example.com") as client:
+        response = await client.get("/web/signin")
+    params = authorize_params(response.headers["location"])
+    assert params["redirect_uri"] == "https://alias.example.com/web/oidc/callback"
+
+
+async def test_signed_in_on_the_public_host_a_page_on_an_alias_lands_signed_in(tmp_path, idp):
+    """The Dev report: signed in on the hub, a link to the frames. host's
+    account page ended on "Sign-in did not complete". It now lands on the
+    account page on the public host, without asking Keycloak again."""
+
+    app = make_web_app(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL})
+    async with public_host_client(app) as client:
+        signed_in = await sign_in(client, idp, "/web")
+        assert signed_in.status_code == 303
+        response = await client.get("https://alias.example.com/web/account", follow_redirects=True)
+    assert response.status_code == 200
+    assert response.url == "https://frames.example.com/web/account"
+    assert not any(str(r.url).startswith(idp.issuer) for r in response.history)
 
 
 # --- non-ASCII hostile values must refuse, never crash ---------------------------

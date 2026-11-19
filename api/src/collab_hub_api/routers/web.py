@@ -20,7 +20,7 @@ import posixpath
 import secrets
 from collections.abc import Sequence
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlencode, urlsplit
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -119,6 +119,14 @@ only when the person closes the tab.
 The callback is listed with it because it is the same category and costs one
 entry — landing there without a transient cookie renders the fixed
 sign-in-failed page, which terminates but is nobody's intended destination.
+"""
+
+SIGNIN_HOP_PARAM = "hop"
+"""Marks a sign-in that has already been moved to ``web.public_base_url``'s host.
+
+A deployment whose proxy rewrites the Host header would otherwise send the
+browser to the public host forever: the app never sees that host arrive. The
+marker allows one move; a second arrival with it starts the flow where it is.
 """
 
 
@@ -390,6 +398,37 @@ def make_router(
         clear_transient_cookie(response)
         return response
 
+    def _signin_on_public_host(request: Request, next_path: str, *, renew: bool, register: bool) -> str | None:
+        """Where to send a sign-in started on a host other than ``web.public_base_url``'s, if anywhere.
+
+        The transient cookie is ``__Host-``: the browser sends it only to the
+        host that set it. Keycloak returns the person to ``redirect_uri``, which
+        is on ``public_base_url``'s host. A sign-in started on any other host
+        that serves these pages (an alias, or a link from another service
+        naming one) sets the cookie where the callback will never see it, and
+        always ends on the failure page. Moving the browser first makes the
+        cookie and the callback share a host.
+
+        Hosts are compared by name only, as cookies are: a port does not
+        separate them. ``None`` when no public origin is configured (the
+        redirect URI then comes from this request, so they already match), when
+        the request is already on that host, or when it was already moved once.
+        """
+
+        base = surface.public_base_url
+        if not base or request.query_params.get(SIGNIN_HOP_PARAM) == "1":
+            return None
+        public_host = (urlsplit(base).hostname or "").lower()
+        if (request.url.hostname or "").lower() == public_host:
+            return None
+        query = {"next": next_path}
+        if renew:
+            query["renew"] = "1"
+        if register:
+            query["register"] = "1"
+        query[SIGNIN_HOP_PARAM] = "1"
+        return f"{base.rstrip('/')}{SIGNIN_PATH}?{urlencode(query)}"
+
     @public_router.get(SIGNIN_PATH)
     async def signin(request: Request) -> Response:
         """Start the authorization-code flow (or skip it, if already signed in).
@@ -422,6 +461,12 @@ def make_router(
         next_path = sanitize_next_path(request.query_params.get("next"))
         renew = request.query_params.get("renew") == "1"
         register = request.query_params.get("register") == "1"
+        # Before the signed-in shortcut: a person signed in on the public host
+        # has no session on an alias, and is signed in once they arrive there.
+        public_signin = _signin_on_public_host(request, next_path, renew=renew, register=register)
+        if public_signin is not None:
+            logger.info("web_sign_in_moved_to_public_host")
+            return _redirect(public_signin)
         if not renew and get_web_session(request) is not None:
             return _redirect(f"{_root_path(request)}{next_path}")
         state = oidc.generate_state()

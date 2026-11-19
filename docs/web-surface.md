@@ -115,6 +115,15 @@ The redirect URI registered on the Keycloak client must be exactly
 client registered against any other path fails at the *first* sign-in with
 `Invalid parameter: redirect_uri` — before the surface's own code runs.
 
+When `public_base_url` is set, a sign-in started on any other host that serves
+these pages (an alias, or another service's link naming one) is first sent to
+`<public_base_url>/web/signin`, keeping `next`, `renew` and `register`. The
+flow's transient cookie is `__Host-`, so the browser returns it only to the
+host that set it, and the callback is on `public_base_url`'s host: a sign-in
+begun elsewhere could never complete. Hosts are compared by name, as cookies
+are. The move carries `hop=1` and happens at most once, so a proxy that
+rewrites the Host header gets one extra redirect, not a loop.
+
 ### The identity pin, and why operator pages depend on it
 
 One more setting has to line up with the deployment, and it is not a `web.*`

@@ -72,6 +72,7 @@ than dead-ending a signed-in operator.
 | `COLLAB_HUB_API__WEB__ADMIN_GROUP` | Identity-provider group whose members hold the operator role, reconciled at each sign-in from the ID token's `groups` claim. Matches with or without a leading slash. Empty (default) turns sync off. Needs a groups mapper on the client so the ID token carries the claim; see [frames-operations.md](frames-operations.md#where-operator-rows-come-from-source-and-sign-in-sync). |
 | `COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL` | Optional. An external account page (plan, usage, invoices) the signed-in navigation links to as "Billing". Empty (default) renders no link. Same https/loopback rule as the issuer, plus a real host, a valid port, no credentials and no control characters, checked at startup. Chart value `web.accountPageUrl`. See [the account link](#the-account-link-an-optional-extension-point). |
 | `COLLAB_HUB_API__WEB__HUB_DOMAIN` | Optional. The domain [the home page](#the-home-page-webhome) builds its links from (the web client and its Frames page at `collab.<domain>`, the API docs at `frames.<domain>`). Empty (default) takes the issuer's host without its leading `keycloak.`. A bare host name, checked at startup. Chart value `home.hubDomain`. |
+| `COLLAB_HUB_API__WEB__WEB_CLIENT` | Optional, default `true`. Whether this hub runs the Collab web client at `collab.<domain>`. `false` renders no link into it on the home and account pages ("Collab" and "Frames" in the navigation and sidebar, "Open Collab", "Manage your Frames"); the download, docs and API docs links are unaffected. Chart value `home.webClient`. |
 | `COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL` | Optional. The home page's desktop download link. Empty renders none. Same rules as `ACCOUNT_PAGE_URL`. Chart value `home.desktopDownloadUrl`. |
 | `COLLAB_HUB_API__WEB__DOCS_URL` | Optional. The home page's docs link. Empty renders none. Same rules as `ACCOUNT_PAGE_URL`. Chart value `home.docsUrl`. |
 
@@ -636,11 +637,14 @@ still kept:
 ### The home page (`/web/home`)
 
 What a person sees at the hub's address. Signed out: Sign in and Sign up
-(`/web/signin?register=1`), both returning to the page. Signed in: the
+(`/web/signin?register=1`), both returning to the page, and the desktop
+download when one is configured, which needs no account. Signed in: the
 person's name, Sign out, and one click to each of the web client
 (`https://collab.<domain>/`), Frames (`https://collab.<domain>/frames`), the desktop
 download and docs (when configured) and the hub's own account page
-(`/web/account`). That page is a dashboard with a sidebar whose Billing
+(`/web/account`). With `web.web_client` off, the web client and Frames links
+are left out everywhere they appear, on this page and the account page, and
+the desktop download takes the web client's place as the main action. That page is a dashboard with a sidebar whose Billing
 entry links straight to `web.account_page_url`; with no account page set
 there is no Billing entry. `/web/account/billing` forwards to the account
 page when one is set and is not found otherwise.

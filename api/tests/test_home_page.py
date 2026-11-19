@@ -419,6 +419,84 @@ async def test_the_header_offers_the_download_whether_or_not_signed_in(tmp_path,
     assert link(DOWNLOAD_URL) in header_nav(signed_in.text)
 
 
+def hero(text: str) -> str:
+    start = text.index('<div class="hero-actions">')
+    return text[start : text.index("</div>", start)]
+
+
+async def test_a_signed_out_visitor_can_download_the_desktop_app_without_an_account(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"desktop_download_url": DOWNLOAD_URL})
+    async with web_client(app) as client:
+        page = await client.get(HOME)
+    assert link(DOWNLOAD_URL) in hero(page.text)
+    assert f'href="{SIGN_UP_HREF}"' in hero(page.text)
+
+
+WEB_CLIENT_LINKS = ("https://collab.hub.example.org/", "https://collab.hub.example.org/frames")
+
+
+@pytest.mark.parametrize("path", [HOME, ACCOUNT])
+@pytest.mark.parametrize("signed_in", [False, True])
+async def test_a_hub_without_the_web_client_links_nowhere_into_it(tmp_path, idp, path, signed_in):
+    """Issue #332: on a hub where nothing answers at collab.<domain>, every
+    link there (navigation, sidebar, Open Collab, Manage your Frames, footer)
+    would be dead, so none is rendered."""
+
+    if path == ACCOUNT and not signed_in:
+        pytest.skip("the account page needs a session")
+    app = make_web_app(
+        tmp_path,
+        idp,
+        web={"hub_domain": "hub.example.org", "web_client": False, "desktop_download_url": DOWNLOAD_URL},
+    )
+    async with web_client(app) as client:
+        if signed_in:
+            await sign_in(client, idp, next_path=path)
+        page = await client.get(path)
+    assert page.status_code == 200
+    for url in WEB_CLIENT_LINKS:
+        assert link(url) not in page.text
+    assert "Open Collab" not in page.text
+    assert "Manage your Frames" not in page.text
+    # What does not depend on the web client is still there. The account
+    # dashboard has no header navigation or footer, so it never carried these.
+    if path == HOME:
+        assert link(DOWNLOAD_URL) in page.text
+        assert link("https://frames.hub.example.org/docs") in page.text
+    else:
+        assert 'action="/web/signout"' in page.text
+
+
+async def test_without_the_web_client_the_download_is_the_signed_in_main_action(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"web_client": False, "desktop_download_url": DOWNLOAD_URL})
+    async with web_client(app) as client:
+        await sign_in(client, idp, next_path=HOME)
+        page = await client.get(HOME)
+    assert f'<a class="btn primary large" href="{html.escape(DOWNLOAD_URL)}">' in hero(page.text)
+
+
+async def test_without_the_web_client_or_a_download_the_account_page_is_the_main_action(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"web_client": False})
+    async with web_client(app) as client:
+        await sign_in(client, idp, next_path=HOME)
+        page = await client.get(HOME)
+    assert f'<a class="btn primary large" {link(ACCOUNT)}>' in hero(page.text)
+    # No door is left to show, so the section that lists them is gone too.
+    assert "Start wherever you work." not in page.text
+
+
+async def test_the_account_sidebar_without_the_web_client_keeps_only_the_account_entries(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"web_client": False, "account_page_url": BILLING_URL})
+    async with web_client(app) as client:
+        await sign_in(client, idp, next_path=ACCOUNT)
+        page = await client.get(ACCOUNT)
+    nav = sidebar(page.text)
+    assert f'{link(ACCOUNT)} aria-current="page"' in nav
+    assert link(BILLING_URL) in nav
+    assert 'title="Collab"' not in nav
+    assert 'title="Frames"' not in nav
+
+
 @pytest.mark.parametrize(
     ("package", "notice", "holder"),
     [

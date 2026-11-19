@@ -38,6 +38,7 @@ WEB_PAGE_VARS = (
     "COLLAB_HUB_API__WEB__HUB_DOMAIN",
     "COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL",
     "COLLAB_HUB_API__WEB__DOCS_URL",
+    "COLLAB_HUB_API__WEB__WEB_CLIENT",
 )
 
 
@@ -309,6 +310,14 @@ def case_home_page(r: Rendered) -> None:
     assert r.value("COLLAB_HUB_API__WEB__HUB_DOMAIN") == "example.org"
     assert r.value("COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL") == "https://downloads.example.com/collab"
     assert r.value("COLLAB_HUB_API__WEB__DOCS_URL") == "https://docs.example.com/collab"
+    # The web client is on unless said otherwise, so nothing renders for it.
+    assert "COLLAB_HUB_API__WEB__WEB_CLIENT" not in r.env, sorted(r.env)
+
+
+def case_no_web_client(r: Rendered) -> None:
+    # A hub without the web client (issue #332) tells the API so, which then
+    # renders no link into it.
+    assert r.value("COLLAB_HUB_API__WEB__WEB_CLIENT") == "false"
 
 
 GATEWAY_REF = {"group": "gateway.networking.k8s.io", "kind": "Gateway"}
@@ -587,6 +596,7 @@ def case_run_controller_remote_existing_namespace(r: Rendered) -> None:
 
 CASES = {
     "home-page": case_home_page,
+    "no-web-client": case_no_web_client,
     "root-host": case_root_host,
     "root-host-listener": case_root_host_listener,
     "no-root-host": case_no_root_host,

@@ -5,7 +5,8 @@ Pinned here:
 1. **Who may call.** Only a configured add-on's client-credentials token:
    the wrong service, a person's token (even one issued through an add-on's
    own client), an ID token, an unsigned or foreign-signed token, a browser
-   cookie and no credential at all are each refused.
+   cookie and no credential at all are each refused. Cookies are ignored, so
+   a service whose HTTP client keeps a cookie jar is not locked out.
 2. **What it says.** Exactly the documented fields, and nothing else about an
    organization.
 3. **Freshness.** A removal, an ownership change and a join are in the very
@@ -278,20 +279,38 @@ async def test_a_browser_session_is_refused(api):
     client, _ = api
     owner_cookie = {"Cookie": f"IdToken-test={_unsigned({'sub': ALICE})}"}
     response = await client.get(f"/v1/membership/organizations/{ORG_ONE}", headers=owner_cookie)
-    assert response.status_code == 403
+    # The cookie isn't read at all, so this is a request with no credential.
+    assert response.status_code == 401
     # The same owner can read their own identity through the people path, so
     # the refusal above is this API's policy, not a broken cookie.
     me = await client.get("/v1/me", headers=owner_cookie)
     assert me.status_code == 200 and me.json()["org_role"] == ROLE_OWNER
 
 
-async def test_any_cookie_is_refused_even_beside_a_valid_service_token(api):
+async def test_cookies_beside_a_valid_service_token_are_ignored(api):
+    """An ingress affinity cookie kept by the service's cookie jar must not lock it out."""
+
     client, _ = api
     response = await client.get(
         f"/v1/membership/organizations/{ORG_ONE}",
-        headers={**service(), "Cookie": "__Host-collab_session=abc"},
+        headers={**service(), "Cookie": "AWSALB=abc; __Host-collab_session=abc"},
     )
-    assert response.status_code == 403
+    assert response.status_code == 200
+    assert response.json()["org_id"] == ORG_ONE
+
+
+async def test_an_owner_cookie_adds_nothing_to_a_person_token(api):
+    """Ignoring cookies can't turn a refused token into an accepted one."""
+
+    client, _ = api
+    owner_cookie = f"IdToken-test={_unsigned({'sub': ALICE})}"
+    person = service_claims(USAGE_CONTROL, sub=ALICE, client_id=None, preferred_username="alice")
+    for label, headers in {
+        "wrong service": {**service("another-addon"), "Cookie": owner_cookie},
+        "person through the add-on's client": {**bearer(_signed(person)), "Cookie": owner_cookie},
+    }.items():
+        response = await client.get(f"/v1/membership/organizations/{ORG_ONE}", headers=headers)
+        assert response.status_code == 403, label
 
 
 async def test_a_forwarded_user_header_grants_nothing(api):

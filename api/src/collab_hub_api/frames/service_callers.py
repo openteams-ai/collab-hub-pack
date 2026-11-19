@@ -17,10 +17,14 @@ algorithms (:func:`~.auth.decode_verified_jwt`). What it accepts:
   carries the same id in Keycloak's ``client_id`` claim (``clientId`` before
   Keycloak 25). Only the client-credentials grant sets that claim, so a person
   signing in through an add-on's client -- whose token has the same ``azp`` --
-  is not taken for the service. ``azp`` alone is never enough;
-- on a request carrying **no cookies**. The endpoints are for services, which
-  send none; a request with cookies is a browser, and a browser session is
-  never a way in here, whatever else the request carries.
+  is not taken for the service. ``azp`` alone is never enough.
+
+Cookies are ignored, never read and never refused. A browser session is no
+way in, because nothing here looks at it: a request with only a session cookie
+has no bearer token and gets a 401. Refusing any request that carries a cookie
+was tried first and locked out real services: an ingress that sets an affinity
+cookie, plus an HTTP client that keeps a cookie jar (``httpx`` does by
+default), turned every request after the first into a 403.
 
 Nothing here reads a forwarded user header, resolves a membership or records
 the caller as a user: a service caller has no organization and is not a
@@ -96,11 +100,6 @@ class ServiceCallerAuthenticator:
         )
 
     def authenticate(self, request: Request) -> ServiceCaller:
-        if request.cookies or request.headers.get("cookie"):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="This endpoint is for add-on services: browser sessions and cookies are refused",
-            )
         token = get_bearer_token(request)
         if token is None:
             raise HTTPException(

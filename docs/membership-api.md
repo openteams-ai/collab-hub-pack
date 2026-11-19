@@ -58,9 +58,12 @@ A request is accepted only when all of these hold:
   Keycloak 25). Only the client-credentials grant sets that claim, so a person
   who signs in through an add-on's client is refused even though their token
   has the same `azp`. `azp` alone is never enough.
-- The request carries **no cookies**. Services send none; a request with
-  cookies comes from a browser, and a browser session never authenticates
-  here, even beside a valid service token.
+
+Cookies are ignored. A browser session never authenticates here, because
+nothing on this path reads it: a request with only a session cookie has no
+bearer token and gets a `401`. A service whose HTTP client keeps a cookie jar
+(`httpx` does by default) and picks up an ingress affinity cookie keeps
+working.
 
 Forwarded user headers are ignored. A service caller is never resolved to a
 person or an organization, and isn't recorded as a hub user.
@@ -70,7 +73,6 @@ person or an organization, and isn't recorded as a hub user.
 | No bearer token | 401 | `unauthorized` |
 | Token invalid, expired, foreign-signed, wrong issuer or audience, not an access token, or no expiry | 401 | `unauthorized` |
 | Valid token, but not a listed add-on's client-credentials token (another client, or a person's token) | 403 | `forbidden` |
-| Any cookie on the request | 403 | `forbidden` |
 
 A refused service token is logged as `membership_api_caller_refused` with the
 `azp` it named (never the token), so a misconfigured add-on is visible in the
@@ -137,6 +139,13 @@ can be `null`. An organization whose members have all left answers `200` with
 `member_count: 0`. An id that was never an organization answers `404` with
 `error.code` `organization_not_found`.
 
+Check `error.code`, not only the status. Only `organization_not_found` means
+the organization doesn't exist. Any other `404` (`error.code` `not_found`)
+means the route isn't served: the API is switched off, or the request reached
+the wrong host. Treat that like a `503`, never as "this organization is gone".
+With the API off and a hardened access map, the same request answers `403`
+`no_organization` instead.
+
 ### `GET /v1/membership/organizations`
 
 Query parameters: `limit` (1–500, default 100) and `cursor`.
@@ -160,6 +169,16 @@ organization's last member leave.
 Each page is one consistent read. Pages are read separately, so a change made
 between two page reads can appear in a later page and not an earlier one; the
 next sync reconciles it.
+
+**One pass over the pages is not a complete snapshot.** Organizations are
+paged in `org_id` order, and ids are random, so an organization created while
+you page can sort before your cursor and be missing from this pass. The next
+pass includes it. So:
+
+- An organization that is in a listing exists.
+- An organization that is missing from one listing may still exist. Before you
+  treat it as gone, ask the per-organization route, and act only on `404` with
+  `organization_not_found`.
 
 ## What isn't exposed
 
@@ -197,3 +216,7 @@ There is no change feed. Membership rows record when a member joined but not
 when a role or status last changed, so a `changed_since` cursor would need a
 schema change. At the sizes this API serves, a full sync each minute is cheap
 (one query per page). Add a feed if that stops being true.
+
+Organizations are never deleted today, so there is no deletion time to report:
+an organization that has been listed keeps answering, with `member_count: 0`
+once everyone has left.

@@ -24,8 +24,11 @@ before resolution has chosen that model):
    no.
 
 A removal tears down what the install's workers left, evicts the package
-from the artifact cache when no other install shares its lock, and records
-``uninstalled``. Every move is a transition of the install machine
+from its organization's part of the artifact cache unless another live
+install of that organization holds the same artifact, and the environment of
+its lock there unless another live install of that organization shares the
+lock, and records ``uninstalled``. Another organization's installs never
+share either (``artifacts.org_scope``), so they keep or lose nothing. Every move is a transition of the install machine
 (``states.install``), recorded with its events in the install store, each
 record guarded by the state it moves from, so two controllers never write
 over each other's move; the API reads the state there and never calls the
@@ -103,7 +106,7 @@ class Installer:
         environ: Mapping[str, str] | None = None,
         inventory_filter: InventoryFilter = no_filter,
         cache: Path | str | None = None,
-        evict: Callable[[str, bool], bool] | None = None,
+        evict: Callable[[str, str | None, bool], bool] | None = None,
     ) -> None:
         self.store = store
         self.executor = executor
@@ -118,12 +121,14 @@ class Installer:
         """The artifact cache this controller reaches itself (the ``local`` location's), where an uninstall evicts a
         package; ``None`` when it reaches none."""
         self.evict = evict
-        """How an uninstall evicts a package: given the reference and whether to keep its lock's environment (another
-        install shares it), whether a package was removed. The cache this controller reaches itself when it has one;
+        """How an uninstall evicts a package: given the reference, the organization whose part of the cache it is in,
+        and whether to keep its lock's environment there (another install of the organization shares it), whether a
+        package was removed. The cache this controller reaches itself when it has one;
         at ``remote``, the executor's, through a pod of the workers' namespace; ``None`` evicts nothing (each
         worker's cache went with its pod)."""
         if self.evict is None and self.cache is not None:
-            self.evict = lambda reference, keep_lock: artifacts.evict(reference, self.cache, keep_lock=keep_lock)
+            self.evict = lambda reference, org_id, keep_lock: artifacts.evict(
+                reference, self.cache, scope=artifacts.org_scope(org_id), keep_lock=keep_lock)
         self._deliveries: dict[str, Delivered] = {}
         self._lock = threading.Lock()
         self._threads: dict[str, threading.Thread] = {}
@@ -344,15 +349,23 @@ class Installer:
             except Exception:  # noqa: BLE001 - what could not be swept is logged, and the removal goes on
                 _log.exception("sweeping the workers of install %s failed", install_id)
         if self.evict is not None and artifacts.is_reference(row.reference) and row.lock_digest:
-            # The package goes with its install; the environment of its lock goes when the last install of that
-            # lock does, since another install with the same lock (the same reference installed by another
-            # organization, or another artifact with the same environment) shares it.
+            # The cache is scoped by organization: the package and the environment of its lock are this
+            # organization's, and another organization's installs, of the same reference or the same lock, have
+            # their own. Within the organization, the package goes with its install unless another live install
+            # holds the same artifact (its worker mounts that package), and the environment of its lock goes when
+            # the last live install of that lock does. An org-less install is of the no-org scope, shared by every
+            # org-less install, as the hub's API already treats them as one tenant.
             others = [r for r in self.store.list(include_uninstalled=False)
-                      if r.id != row.id and r.lock_digest == row.lock_digest]
-            try:
-                self.evict(row.reference, bool(others))
-            except Exception:  # noqa: BLE001
-                _log.exception("evicting %s from the cache failed", row.reference)
+                      if r.id != row.id and r.org_id == row.org_id]
+            package = _artifact_digest(row.reference)
+            if any(_artifact_digest(r.reference) == package for r in others):
+                _log.info("install %s: %s is kept in the cache: another install of the organization holds it",
+                          install_id, row.reference)
+            else:
+                try:
+                    self.evict(row.reference, row.org_id, any(r.lock_digest == row.lock_digest for r in others))
+                except Exception:  # noqa: BLE001
+                    _log.exception("evicting %s from the cache failed", row.reference)
         with self._lock:
             self._deliveries.pop(row.run_id, None)
         try:
@@ -366,6 +379,13 @@ class Installer:
         except InstallConflict as exc:
             _log.warning("install %s: %s; recorded by another controller", install_id, exc)
             return self.store.get(install_id)
+
+
+def _artifact_digest(reference: str) -> str | None:
+    """The digest an artifact's package directory is keyed by; ``None`` for a package run by name."""
+    if not artifacts.is_reference(reference):
+        return None
+    return artifacts.ArtifactReference.parse(reference).digest
 
 
 class _Stay:

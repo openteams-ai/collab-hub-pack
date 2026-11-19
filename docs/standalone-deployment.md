@@ -504,13 +504,15 @@ runs:
 - **Each worker is a pod of its own**: the hub's image, which ships pixi and
   the artifact puller and no Cog. An init container pulls the Cog's artifact
   at its pinned digest, every blob verified, into the cache under the
-  artifact's digest, with the environment directory of the package's
-  `pixi.lock` beside it, and the pod's container runs the package's own
-  `serve` task there in the environment pixi builds for that lock, locked.
-  The Cog's container mounts its package read-only and, writable, its lock's
-  environment directory alone. With `worker.cacheClaim` naming a claim of
-  the workers' namespace (ReadWriteMany where workers land on several
-  nodes), the next pod of any artifact with that lock finds the environment
+  installing organization's scope and the artifact's digest, with the
+  environment directory of the package's `pixi.lock` beside it in that
+  scope, and the pod's container runs the package's own `serve` task there
+  in the environment pixi builds for that lock, locked. The Cog's container
+  mounts its package read-only and, writable, its lock's environment
+  directory of its organization alone: no two organizations share one, even
+  with the same lock. With `worker.cacheClaim` naming a claim of the
+  workers' namespace (ReadWriteMany where workers land on several nodes),
+  the next pod of any of that organization's artifacts with that lock finds the environment
   and solves nothing again (`workerStartSeconds` bounds a first build;
   several minutes for Hermes), a package found there is verified file for
   file before a pod trusts it, and an uninstall evicts through a pod of that

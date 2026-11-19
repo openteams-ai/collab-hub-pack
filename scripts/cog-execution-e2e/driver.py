@@ -107,6 +107,7 @@ def main() -> int:
                                  "allow_ingress_from": {"app": "op-driver"},
                                  "allow_ingress_from_namespace": {"kubernetes.io/metadata.name": namespace},
                                  "ready_timeout": 600, "poll_interval": 2, "deliver": delivery,
+                                 "org_of": delivery.org_of,
                                  "cache_claim": cache_claim, "registry_plain_http": [registry_host]})
     executor = engine.executor
     api = executor.api
@@ -118,7 +119,8 @@ def main() -> int:
     evicted: list[bool] = []
     installer = Installer(installs, executor, controller="op-driver", registry=client,
                           # An uninstall evicts through a pod of the workers' namespace that mounts the claim.
-                          evict=lambda reference, keep_lock: evicted.append(executor.evict(reference, keep_lock)),
+                          evict=lambda reference, org_id, keep_lock: evicted.append(
+                              executor.evict(reference, org_id, keep_lock)),
                           inventory=lambda org: inventory(models, harnesses_installed(installs, org)))
     delivery.installer = installer
 

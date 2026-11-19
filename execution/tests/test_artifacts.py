@@ -1,4 +1,4 @@
-"""Cog artifacts: pulled by their pinned reference, verified, cached by the digest of their lock."""
+"""Cog artifacts: pulled by their pinned reference, verified, cached by organization and digest."""
 
 from __future__ import annotations
 
@@ -14,17 +14,28 @@ from collab_hub_execution.artifacts import (
     ArtifactReference,
     PullError,
     RegistryClient,
-    evict,
     fetch,
     is_reference,
-    locate,
-    materialize,
     package_files,
     publish,
     serve_command,
 )
 
 MANIFEST = '[workspace]\nname = "echo"\n\n[tasks]\nserve = "python serve.py"\n'
+SCOPE = artifacts.org_scope("org-a")
+"""The organization the tests below materialize for, unless they name another."""
+
+
+def materialize(reference, cache, registry_client, *, scope=SCOPE, **settings):
+    return artifacts.materialize(reference, cache, registry_client, scope=scope, **settings)
+
+
+def locate(reference, cache, *, scope=SCOPE):
+    return artifacts.locate(reference, cache, scope=scope)
+
+
+def evict(reference, cache, *, scope=SCOPE, keep_lock=False):
+    return artifacts.evict(reference, cache, scope=scope, keep_lock=keep_lock)
 
 
 @pytest.fixture
@@ -109,11 +120,11 @@ def test_a_package_is_published_and_pulled_back_byte_for_byte_into_the_cache(tmp
     said = []
     pulled = materialize(reference, cache, client(registry), log=said.append)
     assert not pulled.cached and pulled.serve == "python serve.py"
-    assert pulled.directory == cache / "packages" / artifacts._hex(reference.digest)  # the artifact's own
+    assert pulled.directory == cache / "packages" / SCOPE / artifacts._hex(reference.digest)  # the artifact's own
     for name in ("pixi.toml", "pixi.lock", "serve.py", "COG.md"):
         assert (pulled.directory / name).read_bytes() == (tmp_path / "echo" / name).read_bytes()
     # The environment is never published; what pixi builds goes to the lock's directory, through the link.
-    assert pulled.environment == cache / "envs" / artifacts._hex(pulled.lock_digest)
+    assert pulled.environment == cache / "envs" / SCOPE / artifacts._hex(pulled.lock_digest)
     link = pulled.directory / ".pixi"
     assert link.is_symlink() and link.resolve() == pulled.environment / "pixi"
     assert any(line.startswith("artifact pulling") for line in said)
@@ -193,7 +204,7 @@ def test_a_blob_that_does_not_match_its_digest_is_refused_and_nothing_is_kept(tm
     cache = tmp_path / "cache"
     with pytest.raises(PullError, match="does not match its digest"):
         materialize(reference, cache, client(registry))
-    assert not (cache / "packages").exists() or not list((cache / "packages").iterdir())
+    assert not (cache / "packages" / SCOPE).exists() or not list((cache / "packages" / SCOPE).iterdir())
     with pytest.raises(PullError, match="not been materialized"):
         locate(reference, cache)
 
@@ -276,16 +287,22 @@ def test_the_command_line_materializes_and_pulls(tmp_path, registry, monkeypatch
     reference = publish(package(tmp_path), f"{registry.host}/cogs/echo:1", client(registry))
     monkeypatch.setenv(artifacts.PLAIN_HTTP_ENV, registry.host)
     cache = tmp_path / "cache"
-    assert artifacts.main(["materialize", str(reference), "--cache", str(cache)]) == 0
+    assert artifacts.main(["materialize", str(reference), "--cache", str(cache), "--scope", SCOPE]) == 0
     assert capsys.readouterr().out.strip() == str(locate(reference, cache).directory)
-    assert artifacts.main(["evict", str(reference), "--cache", str(cache), "--keep-lock"]) == 0
-    assert not locate_or_none(reference, cache) and (cache / "envs").is_dir()
+    assert artifacts.main(["evict", str(reference), "--cache", str(cache), "--scope", SCOPE, "--keep-lock"]) == 0
+    assert not locate_or_none(reference, cache) and (cache / "envs" / SCOPE).is_dir()
     assert artifacts.main(["pull", str(reference), "--into", str(tmp_path / "out")]) == 0
     assert (tmp_path / "out" / "serve.py").read_text() == "print('hi')\n"
     assert artifacts.main(["publish", str(tmp_path / "echo"), f"{registry.host}/cogs/echo:2"]) == 0
     assert capsys.readouterr().out.strip() == str(reference)  # the same files: the same digest
-    assert artifacts.main(["materialize", "not-a-reference", "--cache", str(cache)]) == 1
+    assert artifacts.main(["materialize", "not-a-reference", "--cache", str(cache), "--scope", SCOPE]) == 1
     assert "not a pinned artifact reference" in capsys.readouterr().err
+    # A scope is one org_scope makes, never a path.
+    for bad in ("../" + SCOPE, SCOPE.upper(), "org-a", ""):
+        assert artifacts.main(["materialize", str(reference), "--cache", str(cache), "--scope", bad]) == 1
+        assert "is not a cache scope" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        artifacts.main(["materialize", str(reference), "--cache", str(cache)])  # --scope is required
 
 
 def test_serve_execs_pixi_on_the_materialized_package(tmp_path, registry, monkeypatch):
@@ -296,7 +313,59 @@ def test_serve_execs_pixi_on_the_materialized_package(tmp_path, registry, monkey
     executed = []
     monkeypatch.setattr(artifacts.os, "execvp", lambda file, args: executed.append((file, list(args))))
     monkeypatch.setattr(artifacts.os, "chdir", lambda path: executed.append(("chdir", str(path))))
-    artifacts.main(["serve", str(reference), "--cache", str(cache), "--pixi", sys.executable])
+    artifacts.main(["serve", str(reference), "--cache", str(cache), "--scope", SCOPE, "--pixi", sys.executable])
     package_dir = locate(reference, cache).directory
     assert executed == [("chdir", str(package_dir)), (sys.executable, [
         sys.executable, "run", "--locked", "--manifest-path", str(package_dir / "pixi.toml"), "serve"])]
+
+
+def test_an_organizations_scope_is_a_hash_of_its_id_and_an_install_of_none_is_the_no_org_scope():
+    a, b = artifacts.org_scope("org-a"), artifacts.org_scope("org-b")
+    assert a != b and len(a) == 64 and int(a, 16) >= 0 and a == artifacts.org_scope("org-a")
+    assert artifacts.org_scope(None) == artifacts.NO_ORG_SCOPE != artifacts.org_scope("no-org")
+    assert artifacts.org_scope("../../etc") != "../../etc" and "/" not in artifacts.org_scope("a/b")
+    for scope in (a, artifacts.NO_ORG_SCOPE):
+        assert artifacts.checked_scope(scope) == scope
+    for bad in ("org-a", "../" + a, a[:-1], a.upper(), "", None):
+        with pytest.raises(PullError, match="is not a cache scope"):
+            artifacts.checked_scope(bad)
+        with pytest.raises(PullError, match="is not a cache scope"):
+            artifacts.environment_directory(Path("/cache"), "sha256:" + "b" * 64, bad)
+
+
+def test_two_organizations_with_the_same_lock_get_environments_and_packages_of_their_own(tmp_path, registry):
+    """A pixi.lock is public in any published artifact: an organization whose Cog carries another organization's
+    lock, or installs the very same artifact, is given a writable environment of its own, never the other's."""
+    victim = publish(package(tmp_path / "victim"), f"{registry.host}/cogs/victim:1", client(registry))
+    copier_dir = package(tmp_path / "copier")  # the same pixi.lock, byte for byte
+    (copier_dir / "serve.py").write_text("print('mine')\n")
+    copier = publish(copier_dir, f"{registry.host}/cogs/copier:1", client(registry))
+    cache = tmp_path / "cache"
+    org_a, org_b = artifacts.org_scope("org-a"), artifacts.org_scope("org-b")
+    theirs = materialize(victim, cache, client(registry), scope=org_a)
+    (theirs.environment / "pixi" / "envs").mkdir()  # what pixi built for org A's worker
+    mine = materialize(copier, cache, client(registry), scope=org_b)
+    assert mine.lock_digest == theirs.lock_digest
+    assert mine.environment != theirs.environment and not mine.environment.is_relative_to(theirs.environment)
+    assert (mine.directory / ".pixi").resolve() == mine.environment / "pixi"
+    assert (theirs.directory / ".pixi").resolve() == theirs.environment / "pixi"
+    # The same artifact installed by both: a package and an environment each, so neither link moves the other's.
+    same = materialize(victim, cache, client(registry), scope=org_b)
+    assert same.directory != theirs.directory and same.environment == mine.environment
+    assert (theirs.directory / ".pixi").resolve() == theirs.environment / "pixi"
+    assert locate(victim, cache, scope=org_a).environment == theirs.environment
+    assert locate(victim, cache, scope=org_b).environment == mine.environment
+    with pytest.raises(PullError, match="not been materialized"):
+        locate(copier, cache, scope=org_a)
+
+
+def test_an_eviction_touches_nothing_of_another_organizations_scope(tmp_path, registry):
+    reference = publish(package(tmp_path), f"{registry.host}/cogs/echo:1", client(registry))
+    cache = tmp_path / "cache"
+    org_a, org_b = artifacts.org_scope("org-a"), artifacts.org_scope("org-b")
+    a = materialize(reference, cache, client(registry), scope=org_a)
+    b = materialize(reference, cache, client(registry), scope=org_b)
+    assert evict(reference, cache, scope=org_b) is True
+    assert not b.directory.exists() and not b.environment.exists()
+    assert a.directory.is_dir() and a.environment.is_dir() and locate(reference, cache, scope=org_a).cached
+    assert evict(reference, cache, scope=org_b) is False

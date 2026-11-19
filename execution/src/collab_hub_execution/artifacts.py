@@ -10,16 +10,21 @@ is what a ``remote`` worker's init container runs:
     python -m collab_hub_execution.artifacts materialize <reference> --cache /var/cache/collab-hub
     python -m collab_hub_execution.artifacts serve <reference> --cache /var/cache/collab-hub
 
-``materialize`` pulls the artifact into the cache, under a directory named by
-the artifact's own digest (``packages/<digest>``), and verifies every blob
-against its digest; a package found there is verified file for file against
-the manifest before it is trusted, and pulled again otherwise. ``serve``
-finds that directory and runs the package's ``serve`` task there with pixi,
-``--locked``. The environment is the lock's: ``envs/<lock digest>``, which
-the package's ``.pixi`` links to, so two artifacts with one lock share one
-environment and a second run on the same lock solves nothing again, while
-no two artifacts ever share a package. ``evict`` removes a package, and the
-environment of its lock unless another install shares it.
+Everything in the cache is under the scope of the organization that installed
+the Cog (``--scope``, ``org_scope``): a runner gets its environment writable,
+so a directory a runner can write is never one another organization's runner
+reads. ``materialize`` pulls the artifact into the cache, under a directory
+named by the scope and the artifact's own digest (``packages/<scope>/<digest>``),
+and verifies every blob against its digest; a package found there is verified
+file for file against the manifest before it is trusted, and pulled again
+otherwise. ``serve`` finds that directory and runs the package's ``serve``
+task there with pixi, ``--locked``. The environment is the lock's, within the
+scope: ``envs/<scope>/<lock digest>``, which the package's ``.pixi`` links
+to, so two artifacts of one organization with one lock share one environment
+and a second run on the same lock solves nothing again, while no two
+artifacts ever share a package and no two organizations share anything.
+``evict`` removes a package, and the environment of its lock unless another
+install of the scope shares it.
 
 Authentication is the distribution token flow: a ``401`` with a ``Bearer``
 challenge is answered by asking the challenge's realm for a token, with a
@@ -483,16 +488,38 @@ def _hex(digest: str) -> str:
     return digest.partition(":")[2]
 
 
-def package_directory(cache: Path, reference: ArtifactReference) -> Path:
-    """Where an artifact's files are: keyed by the artifact's own digest, so no two artifacts ever share a package,
-    whatever their locks."""
-    return Path(cache) / "packages" / _hex(reference.digest)
+NO_ORG_SCOPE = "no-org"
+"""The scope of installs that name no organization (``org_id`` absent): one tenant, as the hub's API already treats
+them, whose installs see each other's. It cannot be a hashed scope, which is hex."""
+_SCOPE = re.compile(rf"^(?:{NO_ORG_SCOPE}|[0-9a-f]{{64}})$")
 
 
-def environment_directory(cache: Path, lock_digest: str) -> Path:
-    """Where the environment of a lock is: keyed by the lock's digest, shared by every artifact with that lock, since
-    the lock is what names the environment."""
-    return Path(cache) / "envs" / _hex(lock_digest)
+def org_scope(org_id: str | None) -> str:
+    """The directory segment of an organization's part of the cache: the SHA-256 of its id, so any id is path-safe
+    and no id names another's directory; ``NO_ORG_SCOPE`` for an install of no organization."""
+    if org_id is None:
+        return NO_ORG_SCOPE
+    return hashlib.sha256(b"collab-hub-org\0" + str(org_id).encode()).hexdigest()
+
+
+def checked_scope(scope: str) -> str:
+    """``scope`` when it is one ``org_scope`` makes; ``PullError`` otherwise, so a scope is never a path."""
+    if not isinstance(scope, str) or not _SCOPE.match(scope):
+        raise PullError(f"{scope!r} is not a cache scope: {NO_ORG_SCOPE!r} or 64 hex characters (org_scope)")
+    return scope
+
+
+def package_directory(cache: Path, reference: ArtifactReference, scope: str) -> Path:
+    """Where an artifact's files are, for one organization: keyed by its scope and the artifact's own digest, so no
+    two artifacts ever share a package, whatever their locks, and no two organizations do."""
+    return Path(cache) / "packages" / checked_scope(scope) / _hex(reference.digest)
+
+
+def environment_directory(cache: Path, lock_digest: str, scope: str) -> Path:
+    """Where the environment of a lock is, for one organization: keyed by its scope and the lock's digest, shared by
+    every artifact of that organization with that lock, and by no other organization's. The runner writes it, so a
+    lock copied from another organization's published artifact names a directory of the copier's own."""
+    return Path(cache) / "envs" / checked_scope(scope) / _hex(lock_digest)
 
 
 def _marker(directory: Path) -> dict[str, Any] | None:
@@ -521,15 +548,20 @@ def _verified(directory: Path, layers: tuple[Layer, ...]) -> str | None:
 
 
 def materialize(reference: ArtifactReference | str, cache: Path | str, client: RegistryClient,
-                *, log=None) -> MaterializedPackage:
-    """Pull the artifact into the cache under its own digest, unless its package is there and verifies.
+                *, scope: str, log=None) -> MaterializedPackage:
+    """Pull the artifact into the organization's part of the cache under its own digest, unless its package is
+    there and verifies.
 
-    The package directory is keyed by the artifact's digest, so two artifacts
-    never share files, whatever their locks: a new version of a Cog with the
-    same lock is its own package. What they share is the environment of
-    their lock, ``envs/<lock digest>``, which the package's ``.pixi`` links
-    to, so pixi builds an environment once per lock and the next
-    materialization of any artifact with that lock solves nothing. A package
+    The package directory is keyed by the scope and the artifact's digest, so
+    two artifacts never share files, whatever their locks: a new version of a
+    Cog with the same lock is its own package. What two artifacts of one
+    organization share is the environment of their lock,
+    ``envs/<scope>/<lock digest>``, which the package's ``.pixi`` links to, so
+    pixi builds an environment once per lock and organization, and the next
+    materialization of any of its artifacts with that lock solves nothing.
+    Another organization's artifact with the same lock gets an environment of
+    its own: the runner writes its environment, and a lock is public in any
+    published artifact. A package
     found in the cache is verified against the manifest, every file against
     its layer's digest, before it is trusted; one that does not verify is
     pulled again. The pull lands in a directory of its own and is moved
@@ -543,8 +575,8 @@ def materialize(reference: ArtifactReference | str, cache: Path | str, client: R
     manifest = client.manifest(reference)
     layers = layers_of(manifest, reference)
     lock = lock_layer(layers, reference)
-    directory = package_directory(cache, reference)
-    environment = environment_directory(cache, lock.digest)
+    directory = package_directory(cache, reference, scope)
+    environment = environment_directory(cache, lock.digest, scope)
     serve = _verified(directory, layers)
     cached = serve is not None
     if cached:
@@ -606,33 +638,35 @@ def _link_environment(directory: Path, environment: Path) -> None:
     link.symlink_to(target, target_is_directory=True)
 
 
-def locate(reference: ArtifactReference | str, cache: Path | str) -> MaterializedPackage:
-    """The package ``materialize`` put in the cache for this reference; ``PullError`` when there is none."""
+def locate(reference: ArtifactReference | str, cache: Path | str, *, scope: str) -> MaterializedPackage:
+    """The package ``materialize`` put in the organization's part of the cache for this reference; ``PullError``
+    when there is none."""
     reference = reference if isinstance(reference, ArtifactReference) else ArtifactReference.parse(reference)
     cache = Path(cache)
-    directory = package_directory(cache, reference)
+    directory = package_directory(cache, reference, scope)
     marker = _marker(directory)
     if marker is None:
-        raise PullError(f"{reference.short} has not been materialized into {cache}")
+        raise PullError(f"{reference.short} has not been materialized into {cache} for scope {scope}")
     lock_digest = str(marker.get("lock_digest") or "")
     return MaterializedPackage(reference=reference, directory=directory, lock_digest=lock_digest,
                                serve=str(marker.get("serve") or ""), cached=True,
-                               environment=environment_directory(cache, lock_digest))
+                               environment=environment_directory(cache, lock_digest, scope))
 
 
-def evict(reference: ArtifactReference | str, cache: Path | str, *, keep_lock: bool = False) -> bool:
-    """Remove the artifact's package from the cache, and the environment of its lock unless ``keep_lock`` (another
-    install shares the lock). Returns whether a package was there to remove."""
+def evict(reference: ArtifactReference | str, cache: Path | str, *, scope: str, keep_lock: bool = False) -> bool:
+    """Remove the artifact's package from the organization's part of the cache, and the environment of its lock
+    unless ``keep_lock`` (another install of the organization shares the lock). Nothing of another scope is touched.
+    Returns whether a package was there to remove."""
     reference = reference if isinstance(reference, ArtifactReference) else ArtifactReference.parse(reference)
     cache = Path(cache)
-    directory = package_directory(cache, reference)
+    directory = package_directory(cache, reference, scope)
     marker = _marker(directory)
     if marker is None:
         return False
     lock_digest = str(marker.get("lock_digest") or "")
     shutil.rmtree(directory, ignore_errors=True)
     if not keep_lock and lock_digest:
-        shutil.rmtree(environment_directory(cache, lock_digest), ignore_errors=True)
+        shutil.rmtree(environment_directory(cache, lock_digest, scope), ignore_errors=True)
     return True
 
 
@@ -642,7 +676,8 @@ def serve_command(package: MaterializedPackage, pixi: str = "pixi") -> list[str]
 
 
 def serve_environment(package: MaterializedPackage) -> dict[str, str]:
-    """What ``serve_command`` runs with: pixi's home and its package cache under the lock's environment directory,
+    """What ``serve_command`` runs with: pixi's home and its package cache under the lock's environment directory of
+    the organization,
     so the environment is built under the package's ``.pixi`` link and nothing of it lands outside that directory."""
     return {"PIXI_HOME": str(package.environment / ENVIRONMENT_HOME),
             "PIXI_CACHE_DIR": str(package.environment / ENVIRONMENT_CACHE)}
@@ -726,13 +761,16 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("reference", help="<host>/<repository>@sha256:<digest>")
         command.add_argument("--cache", default=os.environ.get(CACHE_ENV), metavar="DIR",
                              help=f"the artifact cache (or ${CACHE_ENV})")
+        command.add_argument("--scope", required=True,
+                             help="the installing organization's part of the cache (org_scope)")
         if name == "serve":
             command.add_argument("--pixi", default="pixi")
     gone = commands.add_parser("evict", help="remove the artifact's package from the cache")
     gone.add_argument("reference")
     gone.add_argument("--cache", default=os.environ.get(CACHE_ENV), metavar="DIR")
+    gone.add_argument("--scope", required=True, help="the installing organization's part of the cache (org_scope)")
     gone.add_argument("--keep-lock", action="store_true",
-                      help="keep the environment of its lock: another install shares it")
+                      help="keep the environment of its lock: another install of the scope shares it")
     pull = commands.add_parser("pull", help="pull the artifact's files into a directory")
     pull.add_argument("reference")
     pull.add_argument("--into", required=True, metavar="DIR")
@@ -746,10 +784,10 @@ def main(argv: list[str] | None = None) -> int:
             if not args.cache:
                 parser.error(f"--cache (or ${CACHE_ENV}) names the artifact cache")
             if args.command == "materialize":
-                package = materialize(args.reference, args.cache, client, log=_say)
+                package = materialize(args.reference, args.cache, client, scope=args.scope, log=_say)
                 print(str(package.directory))
                 return 0
-            package = locate(args.reference, args.cache)
+            package = locate(args.reference, args.cache, scope=args.scope)
             command = serve_command(package, args.pixi)
             _say(f"artifact serving: {package.reference.short} from {package.directory}: {' '.join(command)}")
             os.environ.update(serve_environment(package))
@@ -759,7 +797,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "evict":
             if not args.cache:
                 parser.error(f"--cache (or ${CACHE_ENV}) names the artifact cache")
-            removed = evict(args.reference, args.cache, keep_lock=args.keep_lock)
+            removed = evict(args.reference, args.cache, scope=args.scope, keep_lock=args.keep_lock)
             _say(f"artifact {'evicted' if removed else 'not in the cache'}: {args.reference}")
             return 0
         if args.command == "pull":

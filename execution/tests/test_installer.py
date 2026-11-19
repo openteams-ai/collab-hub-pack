@@ -36,7 +36,7 @@ from collab_hub_execution import (
     intents,
     inventory,
 )
-from collab_hub_execution.artifacts import RegistryClient, locate, materialize, publish
+from collab_hub_execution.artifacts import NO_ORG_SCOPE, RegistryClient, locate, materialize, org_scope, publish
 from collab_hub_execution.binding import (
     MANIFEST_SECRET_TABLES,
     harness_satisfier,
@@ -422,15 +422,31 @@ def test_a_run_of_an_installed_cog_is_delivered_its_binding_and_every_step_event
         assert events[(kind, "ask")]["binding_id"] == done.binding_id and events[(kind, "ask")]["install"] == asked.id
         assert "binding_id" not in events[(kind, "echo")]
     assert "fake-secret" not in json.dumps([e.payload for e in track.replay("r")])
+    # The organization a worker's part of the artifact cache is scoped by: the install's, for its check and for
+    # a run's step on it; the submitter's for a package run by name; refused for what cannot be read.
+    assert delivery.org_of(str(reference), f"install:{asked.id}") == "acme"
+    assert delivery.org_of(str(reference), "r") == "acme" and delivery.org_of("echo", "r") == "acme"
+    with pytest.raises(BindingResolutionError, match="organization is unknown"):
+        delivery.org_of(str(reference), "install:inst-gone")
+    with pytest.raises(BindingResolutionError, match="organization is unknown"):
+        delivery.org_of(str(reference), "no-such-run")
+    stray = OpDefinition("stray", (OpStep("ask", str(reference), "ask", {}, digest=reference.digest,
+                                          install=asked.id, binding=done.binding_id),))
+    intents.submit(track, stray, by={"user": "mallory", "org_id": "other"})
+    with pytest.raises(BindingResolutionError, match="of another organization"):
+        delivery.org_of(str(reference), "stray")  # a Track the API would never write: neither org's cache
     # A step naming an install that is not invokable is not materialized.
     store.record(asked.id, done.machine().uninstall())
     with pytest.raises(BindingResolutionError, match="only an invokable Cog is materialized"):
         delivery(str(reference), "r", "ask:0")
 
 
-def test_an_uninstall_sweeps_the_installs_workers_and_evicts_its_package_keeping_a_shared_locks_environment(
-        registry, tmp_path):
+def test_an_uninstall_sweeps_the_installs_workers_and_evicts_within_its_organization_alone(registry, tmp_path):
+    """The cache is scoped by organization: an uninstall evicts its package, and the environment of its lock when no
+    other live install of its organization shares the lock; another organization's install of the same reference
+    keeps its own package and environment throughout."""
     reference = published(registry, tmp_path)
+    sibling = published(registry, tmp_path, "ctx2")  # another artifact, the same pixi.lock
     store = InMemoryInstallStore()
     swept = []
 
@@ -439,13 +455,18 @@ def test_an_uninstall_sweeps_the_installs_workers_and_evicts_its_package_keeping
             swept.append(run_id)
 
     cache = tmp_path / "cache"
-    pulled = materialize(reference, cache, RegistryClient(plain_http={registry.host}))
-    package, environment = pulled.directory, pulled.environment
-    executor = Sweeping({str(reference): selecting()})
+    client = RegistryClient(plain_http={registry.host})
+    acme, other = org_scope("acme"), org_scope("other")
+    ours = materialize(reference, cache, client, scope=acme)
+    ours_sibling = materialize(sibling, cache, client, scope=acme)
+    theirs = materialize(reference, cache, client, scope=other)
+    assert ours.environment == ours_sibling.environment != theirs.environment
+    executor = Sweeping({str(reference): selecting(), str(sibling): selecting()})
     install = installer(store, executor, registry, cache=cache)
     first = store.create(row(reference))
-    second = store.create(row(reference, org="other"))
-    for asked in (first, second):
+    second = store.create(row(sibling))
+    third = store.create(row(reference, org="other"))
+    for asked in (first, second, third):
         store.claim(asked.id, "one")
         assert install.install(asked.id).invokable
     store.request_uninstall(first.id, "alice")
@@ -454,32 +475,64 @@ def test_an_uninstall_sweeps_the_installs_workers_and_evicts_its_package_keeping
     gone = store.get(first.id)
     assert gone.state == "uninstalled" and swept == [f"install:{first.id}"]
     assert [e.event_type for e in store.events(first.id)][-1] == "uninstalled"
-    # The package goes with its install; the other install shares the lock, so the lock's environment stays.
-    assert not package.exists() and environment.is_dir()
+    # The package goes with its install; the sibling shares the lock in acme, so acme's environment stays.
+    assert not ours.directory.exists() and ours.environment.is_dir() and ours_sibling.directory.is_dir()
     with pytest.raises(Exception, match="not been materialized"):
-        locate(reference, cache)
-    materialize(reference, cache, RegistryClient(plain_http={registry.host}))  # the other install's next run
-    store.request_uninstall(second.id, "bob")
+        locate(reference, cache, scope=acme)
+    assert theirs.directory.is_dir() and theirs.environment.is_dir()  # the other organization's, untouched
+    store.request_uninstall(second.id, "alice")
     install.uninstall(second.id)
-    assert not package.exists() and not environment.exists()  # the last install of that lock: both go
+    # The last acme install of that lock: acme's environment goes. The other organization's install of the same
+    # reference and the same lock does not keep it, and loses nothing.
+    assert not ours_sibling.directory.exists() and not ours.environment.exists()
+    assert theirs.directory.is_dir() and theirs.environment.is_dir() and locate(reference, cache, scope=other).cached
+    store.request_uninstall(third.id, "bob")
+    install.uninstall(third.id)
+    assert not theirs.directory.exists() and not theirs.environment.exists()
 
 
-def test_an_uninstall_at_remote_evicts_through_the_executor(registry, tmp_path):
+def test_an_uninstall_keeps_the_package_while_another_live_install_of_its_scope_holds_the_same_artifact(
+        registry, tmp_path):
+    """Two live installs of one artifact in one scope (org-less installs: the database's uniqueness does not
+    cover a null organization) mount one package: removing either leaves it, and its environment, to the other."""
     reference = published(registry, tmp_path)
     store = InMemoryInstallStore()
     evicted = []
-    executor = InMemoryCogExecutor({str(reference): selecting()})
-    install = installer(store, executor, registry, evict=lambda ref, keep: evicted.append((ref, keep)) or True)
-    first = store.create(row(reference))
-    second = store.create(row(reference, org="other"))
-    for asked in (first, second):
+    install = installer(store, InMemoryCogExecutor({str(reference): selecting()}), registry,
+                        evict=lambda ref, org, keep: evicted.append((ref, org, keep)) or True)
+    first = store.create(row(reference, org=None))
+    twin = row(reference, org=None)
+    store._rows[twin.id] = twin  # what a second org-less insert leaves in the database
+    for asked in (first, twin):
         store.claim(asked.id, "one")
         assert install.install(asked.id).invokable
     store.request_uninstall(first.id, "alice")
-    install.uninstall(first.id)
-    store.request_uninstall(second.id, "bob")
-    install.uninstall(second.id)
-    assert evicted == [(str(reference), True), (str(reference), False)]
+    assert install.uninstall(first.id).state == "uninstalled"
+    assert evicted == []  # the twin's worker mounts that package
+    store.request_uninstall(twin.id, "alice")
+    install.uninstall(twin.id)
+    assert evicted == [(str(reference), None, False)]
+
+
+def test_an_uninstall_at_remote_evicts_through_the_executor_in_its_organizations_scope(registry, tmp_path):
+    reference = published(registry, tmp_path)
+    sibling = published(registry, tmp_path, "ctx2")  # the same lock
+    store = InMemoryInstallStore()
+    evicted = []
+    executor = InMemoryCogExecutor({str(reference): selecting(), str(sibling): selecting()})
+    install = installer(store, executor, registry,
+                        evict=lambda ref, org, keep: evicted.append((ref, org, keep)) or True)
+    first = store.create(row(reference))
+    second = store.create(row(reference, org="other"))
+    third = store.create(row(sibling))
+    for asked in (first, second, third):
+        store.claim(asked.id, "one")
+        assert install.install(asked.id).invokable
+    for asked in (first, second, third):
+        store.request_uninstall(asked.id, "alice")
+        install.uninstall(asked.id)
+    # acme's sibling shares the lock in acme; the other organization's install of the same lock shares nothing.
+    assert evicted == [(str(reference), "acme", True), (str(reference), "other", False), (str(sibling), "acme", False)]
     assert store.pending() == ()
 
 
@@ -519,7 +572,8 @@ def test_a_published_cog_runs_as_a_local_worker_from_its_artifact_with_its_bindi
     record = BindingRecord.of(str(reference), {"model": "model:fake"}, inventory(MODELS))
     deliver = lambda cog, run_id, instance: record.delivery(ENVIRON)  # noqa: E731
     executor = select_executor("local", packages=[packages(tmp_path / "pk")], work_dir=tmp_path / "runs",
-                               environment="host", grace=1.0, ready_timeout=30.0, registry=client, deliver=deliver)
+                               environment="host", grace=1.0, ready_timeout=30.0, registry=client, deliver=deliver,
+                               org_of=lambda cog, run_id: "acme")
     track = InMemoryTrackStore()
     runner = LifecycleRunner(executor=executor, track=track, controller="one")
     state = runner.submit(OpDefinition("r", (OpStep("a", str(reference), "run", {"x": 1}, digest=reference.digest,
@@ -528,8 +582,10 @@ def test_a_published_cog_runs_as_a_local_worker_from_its_artifact_with_its_bindi
     [started] = [e.payload for e in track.replay("r") if e.event_type == "worker_started"]
     assert started["artifact"] == str(reference) and started["package"]["digest"] == reference.digest
     assert started["binding_id"] == record.id
-    package = locate(reference, tmp_path / "runs" / "artifacts")
+    package = locate(reference, tmp_path / "runs" / "artifacts", scope=org_scope("acme"))
     assert (package.directory / "serve.py").is_file()
+    assert package.directory.parent.name == org_scope("acme")  # the installing organization's part of the cache
+    assert not (tmp_path / "runs" / "artifacts" / "packages" / NO_ORG_SCOPE).exists()
     binding_file = next((tmp_path / "runs").glob("**/binding.json"))
     assert oct(binding_file.stat().st_mode & 0o777) == "0o600"
     assert json.loads(binding_file.read_text())["auth_ref"] == "env:COLLAB_MODEL_API_KEY"

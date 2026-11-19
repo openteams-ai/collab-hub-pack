@@ -111,6 +111,37 @@ class BindingDelivery:
             return Delivered(env=self._by_name(cog, run_id, instance))
         return Delivered()
 
+    def org_of(self, cog: str, run_id: str) -> str | None:
+        """The organization a worker of ``cog`` for ``run_id`` runs for, which scopes its part of the artifact cache:
+        the install's, for an install under check or a step that runs one, else the run's submitter's. ``None`` is
+        an install or run of no organization. A run or install that cannot be read is refused rather than given the
+        no-organization scope."""
+        if run_id.startswith(INSTALL_RUN_PREFIX):
+            row = self.installs.get(run_id[len(INSTALL_RUN_PREFIX):]) if self.installs is not None else None
+            if row is None:
+                raise BindingResolutionError(f"{run_id} names no install: its organization is unknown")
+            return row.org_id
+        try:
+            view = self.views.view(run_id)
+        except intents.RunUnreadable as exc:
+            raise BindingResolutionError(f"{run_id} cannot be read: its organization is unknown") from exc
+        if view is None:
+            raise BindingResolutionError(f"{run_id} is not on the Track: its organization is unknown")
+        by = view.submitted_by or {}
+        submitter = str(by["org_id"]) if by.get("org_id") is not None else None
+        install_id = next((step.install for step in view.op.steps if step.cog == cog and step.install), None)
+        if install_id is not None and self.installs is not None:
+            row = self.installs.get(install_id)
+            if row is None:
+                raise BindingResolutionError(f"step of {run_id} runs install {install_id}, which is gone")
+            if "org_id" in by and row.org_id != submitter:
+                # The API admits a step only on an install of the submitter's organization; a Track that says
+                # otherwise is given neither organization's part of the cache. (A run submitted to the engine
+                # directly records no submitter, and is the install's.)
+                raise BindingResolutionError(f"step of {run_id} runs install {install_id} of another organization")
+            return row.org_id
+        return submitter
+
     def _install_of(self, cog: str, run_id: str) -> str | None:
         try:
             view = self.views.view(run_id)
@@ -848,7 +879,8 @@ def main(argv: list[str] | None = None) -> int:
     runner = LifecycleRunner(
         track=track, backend=args.backend, location=args.location, controller=args.id,
         location_settings={**location_settings, "interaction_timeout": args.interaction_timeout or None,
-                           "ready_timeout": args.worker_start_timeout, "deliver": delivery})
+                           "ready_timeout": args.worker_start_timeout, "deliver": delivery,
+                           "org_of": delivery.org_of})
     packages = runner.executor.source if args.location == "local" else None
     installer = Installer(
         installs, runner.executor, controller=args.id, registry=registry, packages=packages, cache=cache_path,

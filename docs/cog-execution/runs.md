@@ -55,26 +55,33 @@ reads the manifest through the registry's distribution API (the hub's own
 `/v2/` when the hub serves pulls, with a registry credential the controller
 hands the init container through a Secret of its own, which the Cog's
 container never sees), verifies it against the digest and every blob against
-its own, and lands the package in the cache under the artifact's own digest
-(`artifacts/packages/<digest>`), with the environment directory of its
-`pixi.lock` beside it (`artifacts/envs/<lock digest>`, which the package's
-`.pixi` links to); the pod's container then runs `artifacts serve
-<reference>`, which is `pixi run --locked ... serve` on that package, in the
-environment pixi builds there. No two artifacts share a package: a new
+its own, and lands the package in the cache under the scope of the
+organization that installed it and the artifact's own digest
+(`artifacts/packages/<scope>/<digest>`), with the environment directory of
+its `pixi.lock` beside it (`artifacts/envs/<scope>/<lock digest>`, which the
+package's `.pixi` links to); the pod's container then runs `artifacts serve
+<reference> --scope <scope>`, which is `pixi run --locked ... serve` on that
+package, in the environment pixi builds there. The scope is the SHA-256 of
+the organization's id, or `no-org` for an install of no organization, which
+the API already treats as one tenant. No two artifacts share a package: a new
 version of a Cog with the same lock is its own package, and a package found
 in the cache is verified file for file against the manifest before a pod
-trusts it, and pulled again otherwise. What artifacts with one lock share is
-the environment, since the lock names it: the next pod of any artifact with
-that lock, on a cache that outlives pods (`runs.controller.worker.cacheClaim`,
-a claim of the workers' namespace every worker pod mounts), finds the
-environment and solves nothing again, which the init container's log says
-(`artifact cached:` rather than `artifact pulling:`); on an `emptyDir` of the
-pod's own each pod builds its environment. The Cog's container mounts its
-package read-only and, writable, the environment directory of its lock
-alone, as subPaths of the cache volume: on a shared claim a Cog alters no
-other Cog's package and no other lock's environment, and pixi's home and
-package cache are the lock's own (`PIXI_HOME`, `PIXI_CACHE_DIR`, set by
-`artifacts serve`). The init container, the hub's own code, mounts the whole
+trusts it, and pulled again otherwise. What one organization's artifacts
+with one lock share is the environment, since the lock names it: the next
+pod of any of its artifacts with that lock, on a cache that outlives pods
+(`runs.controller.worker.cacheClaim`, a claim of the workers' namespace every
+worker pod mounts), finds the environment and solves nothing again, which the
+init container's log says (`artifact cached:` rather than `artifact
+pulling:`); on an `emptyDir` of the pod's own each pod builds its
+environment. Another organization never shares it, even with the same lock or
+the same artifact: the Cog writes its environment, and a `pixi.lock` is public
+in any published artifact, so a shared one would let one organization's Cog
+change what another's next worker imports. The Cog's container mounts its
+package read-only and, writable, the environment directory of its lock in its
+organization's scope alone, as subPaths of the cache volume: on a shared claim
+a Cog alters no other Cog's package, no other lock's environment and nothing
+of another organization's, and pixi's home and package cache are the lock's
+own (`PIXI_HOME`, `PIXI_CACHE_DIR`, set by `artifacts serve`). The init container, the hub's own code, mounts the whole
 cache. A step naming a package by name runs it
 from the image's packages under `/opt/collab-hub/cogs`, which the chart's
 `remote` location does not offer and the tests keep. It is given what a local worker
@@ -285,7 +292,7 @@ through the install machine of [states.md](states.md).
 | `POST /v1/cogs/installs` | Ask for an install: `cog_id` (its newest present version, or with `digest`), or `reference`, a pinned `<host>/<repository>@<digest>` the catalog holds; at a development hub, `package`, a package of the directory source. Records the card and answers 202 with the install, `published`. One live install of a digest per organization: a second ask is a 409 naming the first. The organization's owners and platform operators ask, where the hub resolves memberships (a member is a 403, `install_forbidden`); on a hub whose organization comes from the token's claims alone, every member does |
 | `GET /v1/cogs/installs` | The organization's installs, newest first; `state` filters, and `include_uninstalled` shows removed ones |
 | `GET /v1/cogs/installs/{id}` | One install: its `state`, `invokable`, the `failed_step` (`fetch`, `bind`, `materialize` or `check`) and `failure` when a step failed, its `binding` record and `binding_id`, the `lock_digest` of its package, which controller took it, and every event its controller recorded |
-| `DELETE /v1/cogs/installs/{id}` | Ask for its removal, under the same role as an install: answers 202, and the controller sweeps every workload of the install, evicts its package from the cache (and the environment of its lock, when no other install shares it; at `remote` through a pod of the workers' namespace that mounts the claim), and records it `uninstalled` |
+| `DELETE /v1/cogs/installs/{id}` | Ask for its removal, under the same role as an install: answers 202, and the controller sweeps every workload of the install, evicts its package from its organization's part of the cache (unless another live install of the organization holds the same artifact) and the environment of its lock there (when no other live install of the organization shares it; at `remote` through a pod of the workers' namespace that mounts the claim), and records it `uninstalled` |
 
 What the controller does with an ask, in order, because a Cog's `check` may
 probe what its binding gives it:

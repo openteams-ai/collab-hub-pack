@@ -187,6 +187,9 @@ def _default_worker_http(interaction_timeout: float | None = 60.0) -> Any:
 
 
 Delivery = Callable[[str, str, str], Mapping[str, str]]
+OrgOf = Callable[[str, str], "str | None"]
+"""Given a Cog and a run id, the organization whose install the worker runs (``None`` for an install of none): what
+scopes its part of the artifact cache."""
 
 
 class KubernetesCogExecutor:
@@ -198,12 +201,16 @@ class KubernetesCogExecutor:
     the cache volume under the artifact's digest, verified file for file when
     it is there already, and the pod's container runs the package's ``serve``
     task from there in the environment pixi builds for its lock, ``--locked``.
-    The Cog's container mounts its package read-only and, writable, the
-    environment directory of its lock alone (``artifacts/envs/<lock
-    digest>``), nothing else of the cache: on a shared claim
-    (``cache_claim``) a Cog can alter no other Cog's package and no other
-    lock's environment, and the next pod of the same lock finds the
-    environment and solves nothing again. The lock's digest is read from the
+    The cache is scoped by the organization whose install the worker runs
+    (``org_of``, ``artifacts.org_scope``). The Cog's container mounts its
+    package read-only and, writable, the environment directory of its lock
+    in its organization's scope alone (``artifacts/envs/<scope>/<lock
+    digest>``), nothing else of the cache: on a shared claim (``cache_claim``)
+    a Cog can alter no other Cog's package, no other lock's environment and
+    nothing another organization's worker reads, even with a lock copied from
+    that organization's artifact, and the next pod of the same lock and
+    organization finds the environment and solves nothing again. The lock's
+    digest is read from the
     artifact's manifest through the registry before the pod is made. An
     uninstall evicts a package from the claim through a pod of this
     namespace (``evict``), the claim being of the workers' namespace and the
@@ -254,6 +261,7 @@ class KubernetesCogExecutor:
         registry_token: str | None = None,
         registry_plain_http: Sequence[str] = (),
         registry: artifacts.RegistryClient | None = None,
+        org_of: OrgOf | None = None,
     ) -> None:
         # A worker's /invoke endpoint is unauthenticated, so the network boundary is
         # the control. Force an explicit choice at construction — the secure path
@@ -305,6 +313,13 @@ class KubernetesCogExecutor:
         self.registry_plain_http = tuple(registry_plain_http)
         self._registry = registry
         self._lock_digests: dict[str, str] = {}
+        self.org_of = org_of
+        """The organization a worker runs for, which scopes its part of the cache; every worker is of no
+        organization (``artifacts.NO_ORG_SCOPE``) when ``None``, as a single-tenant development executor is."""
+
+    def scope_of(self, cog: str, run_id: str) -> str:
+        """The part of the cache a worker of ``cog`` for ``run_id`` is given: its organization's."""
+        return artifacts.org_scope(self.org_of(cog, run_id) if self.org_of is not None else None)
 
     @property
     def registry(self) -> artifacts.RegistryClient:
@@ -356,16 +371,18 @@ class KubernetesCogExecutor:
         """Whether a Cog is materialized from its published artifact: it is named by a pinned reference."""
         return artifacts.is_reference(cog)
 
-    def _command(self, cog: str) -> list[str]:
+    def _command(self, cog: str, scope: str = artifacts.NO_ORG_SCOPE) -> list[str]:
         """What the pod runs: the package's ``serve`` task, from its artifact in the cache, or from the image."""
         if self.worker_command:
             return list(self.worker_command)
         if self.from_artifact(cog):
-            return ["python", "-m", "collab_hub_execution.artifacts", "serve", cog, "--cache", ARTIFACT_CACHE_PATH]
+            return ["python", "-m", "collab_hub_execution.artifacts", "serve", cog, "--cache", ARTIFACT_CACHE_PATH,
+                    "--scope", artifacts.checked_scope(scope)]
         return ["pixi", "run", "--locked", "--manifest-path", f"{self.packages_root}/{cog}/pixi.toml", "serve"]
 
-    def _pull_command(self, cog: str) -> list[str]:
-        return ["python", "-m", "collab_hub_execution.artifacts", "materialize", cog, "--cache", ARTIFACT_CACHE_PATH]
+    def _pull_command(self, cog: str, scope: str) -> list[str]:
+        return ["python", "-m", "collab_hub_execution.artifacts", "materialize", cog, "--cache", ARTIFACT_CACHE_PATH,
+                "--scope", artifacts.checked_scope(scope)]
 
     def _environment(self, cog: str, run_id: str, files: Mapping[str, str]) -> list[dict[str, str]]:
         """The seam's variables, which name nothing secret: on the pod template as literal values."""
@@ -413,17 +430,19 @@ class KubernetesCogExecutor:
             "stringData": dict(data),
         }
 
-    def _cache_mounts(self, cog: str, lock_digest: str | None) -> list[dict[str, Any]]:
+    def _cache_mounts(self, cog: str, lock_digest: str | None,
+                      scope: str = artifacts.NO_ORG_SCOPE) -> list[dict[str, Any]]:
         """What the Cog's container sees of the cache: for an artifact, its package read-only and the environment
-        directory of its lock writable, each a subPath of the cache volume, so a Cog on a shared claim reaches no
-        other artifact's package and no other lock's environment; for a package of the image, the whole cache."""
+        directory of its lock in its organization's scope writable, each a subPath of the cache volume, so a Cog on
+        a shared claim reaches no other artifact's package, no other lock's environment and no directory of another
+        organization's; for a package of the image, the whole cache."""
         if not (self.from_artifact(cog) and not self.worker_command):
             return [{"name": "cache", "mountPath": CACHE_PATH}]
         if not lock_digest:
             raise ValueError(f"the lock digest of {cog} names its environment directory; none was given")
         reference = artifacts.ArtifactReference.parse(cog)
-        package = artifacts.package_directory(Path(ARTIFACT_CACHE_PATH), reference)
-        environment = artifacts.environment_directory(Path(ARTIFACT_CACHE_PATH), lock_digest)
+        package = artifacts.package_directory(Path(ARTIFACT_CACHE_PATH), reference, scope)
+        environment = artifacts.environment_directory(Path(ARTIFACT_CACHE_PATH), lock_digest, scope)
         return [
             {"name": "cache", "mountPath": str(package), "subPath": str(package.relative_to(CACHE_PATH)),
              "readOnly": True},
@@ -431,19 +450,19 @@ class KubernetesCogExecutor:
         ]
 
     def _manifests(self, cog: str, run_id: str, name: str, files: Mapping[str, str] = (),
-                   lock_digest: str | None = None) -> tuple[dict, dict]:
+                   lock_digest: str | None = None, scope: str = artifacts.NO_ORG_SCOPE) -> tuple[dict, dict]:
         labels = self._labels(cog, run_id, name)
         # Label values are charset/length-constrained; keep the exact run id in an
         # annotation (unconstrained) so nothing is lost and creation never fails.
         annotations = {"collab-hub/run-id": run_id}
-        mounts = [*self._cache_mounts(cog, lock_digest), {"name": "tmp", "mountPath": TMP_PATH}]
+        mounts = [*self._cache_mounts(cog, lock_digest, scope), {"name": "tmp", "mountPath": TMP_PATH}]
         if files:
             mounts.append({"name": "binding", "mountPath": BINDING_PATH, "readOnly": True})
         container = {
             "name": "runner",
             "image": self.runner_image,
             "imagePullPolicy": "IfNotPresent",
-            "command": self._command(cog),
+            "command": self._command(cog, scope),
             "ports": [{"containerPort": RUNNER_PORT}],
             "env": self._environment(cog, run_id, files),
             "envFrom": [{"secretRef": {"name": name}}],
@@ -485,7 +504,7 @@ class KubernetesCogExecutor:
                 "name": PULL_CONTAINER,
                 "image": self.runner_image,
                 "imagePullPolicy": "IfNotPresent",
-                "command": self._pull_command(cog),
+                "command": self._pull_command(cog, scope),
                 "env": self._pull_environment(),
                 "envFrom": [{"secretRef": {"name": f"{name}-pull"}}],
                 "resources": self.resources,
@@ -651,7 +670,9 @@ class KubernetesCogExecutor:
         token = run_tokens.mint()
         delivered = self._delivered(cog, run_id, instance, token)
         lock_digest = self.lock_digest_of(cog) if self.from_artifact(cog) and not self.worker_command else None
-        deployment, service = self._manifests(cog, run_id, name, delivered.files, lock_digest=lock_digest)
+        scope = self.scope_of(cog, run_id) if lock_digest else artifacts.NO_ORG_SCOPE
+        deployment, service = self._manifests(cog, run_id, name, delivered.files, lock_digest=lock_digest,
+                                              scope=scope)
         try:
             if self.allow_ingress_from is not None:
                 # Put the ingress restriction in place before the pod can serve.
@@ -686,12 +707,14 @@ class KubernetesCogExecutor:
             details["cache"] = f"claim:{self.cache_claim}" if self.cache_claim else "emptyDir"
             if lock_digest:
                 details["lock_digest"] = lock_digest
+                details["scope"] = scope
         return _KubernetesWorker(cog, name, self._service_url(name), self.worker_http, run_token=token,
                                  details=details)
 
-    def evict(self, reference: str, keep_lock: bool = False) -> bool:
-        """Remove an artifact's package from the shared cache, and the environment of its lock unless ``keep_lock``,
-        through a pod of this namespace that mounts the claim and runs the puller's ``evict``: the claim is of the
+    def evict(self, reference: str, org_id: str | None, keep_lock: bool = False) -> bool:
+        """Remove an artifact's package from the organization's part of the shared cache, and the environment of its
+        lock there unless ``keep_lock``, through a pod of this namespace that mounts the claim and runs the puller's
+        ``evict``, which touches nothing of another organization's scope: the claim is of the
         workers' namespace, which the controller's pod is not in. ``False`` when there is no claim (each pod's cache
         went with it) or the pod did not succeed; the pod is deleted either way."""
         if not self.cache_claim:
@@ -699,7 +722,8 @@ class KubernetesCogExecutor:
         parsed = artifacts.ArtifactReference.parse(reference)
         name = f"cog-evict-{artifacts._hex(parsed.digest)[:12]}-{uuid.uuid4().hex[:6]}"
         command = ["python", "-m", "collab_hub_execution.artifacts", "evict", str(parsed), "--cache",
-                   ARTIFACT_CACHE_PATH, *(["--keep-lock"] if keep_lock else [])]
+                   ARTIFACT_CACHE_PATH, "--scope", artifacts.org_scope(org_id),
+                   *(["--keep-lock"] if keep_lock else [])]
         labels = {"app": name, "app.kubernetes.io/managed-by": "collab-hub-executor"}
         if self.controller:
             labels["collab-hub/controller"] = label_value(self.controller)

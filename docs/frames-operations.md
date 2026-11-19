@@ -1173,7 +1173,7 @@ an invitation to point somewhere else, revoke it and issue a new one.
 
 #### Owner invitations during a rollout or rollback
 
-Migration version 17 adds `collab_invitations.role`, which lets the admin
+Migration version 18 adds `collab_invitations.role`, which lets the admin
 panel invite someone into an existing organization as `owner`. A release
 before it ignores that column: it accepts any invitation into an existing
 organization as `member`. So an owner invitation accepted by an older pod
@@ -1186,7 +1186,7 @@ both:
 - **Rolling out.** While pods from the previous release are still serving,
   any of them can take the acceptance. Issue owner invitations only after the
   rollout has finished and no older pod is left.
-- **Rolling back** past the release that added migration 17. Before the
+- **Rolling back** past the release that added migration 18. Before the
   downgrade, revoke every pending owner invitation (`status = 'pending' AND
   role = 'owner'`) and reissue them once the newer release is back.
 

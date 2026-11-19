@@ -483,6 +483,29 @@ async def test_without_the_web_client_or_a_download_the_account_page_is_the_main
     assert f'<a class="btn primary large" {link(ACCOUNT)}>' in hero(page.text)
     # No door is left to show, so the section that lists them is gone too.
     assert "Start wherever you work." not in page.text
+    # Nor is there anywhere for "your chats are waiting" to point.
+    assert "Pick up where you left off." not in page.text
+
+
+async def test_without_the_web_client_or_a_download_a_visitor_can_still_sign_up(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"hub_domain": "hub.example.org", "web_client": False})
+    async with web_client(app) as client:
+        page = await client.get(HOME)
+    assert page.status_code == 200
+    assert f'href="{SIGN_UP_HREF}"' in hero(page.text)
+    assert "collab.hub.example.org" not in page.text
+    assert "Create your account" in page.text
+
+
+async def test_the_demo_window_names_the_web_client_only_where_one_runs(tmp_path, idp):
+    on = make_web_app(tmp_path, idp, web={"hub_domain": "hub.example.org"})
+    async with web_client(on) as client:
+        page = await client.get(HOME)
+    assert "<em>collab.hub.example.org</em>" in page.text
+    off = make_web_app(tmp_path, idp, web={"hub_domain": "hub.example.org", "web_client": False})
+    async with web_client(off) as client:
+        page = await client.get(HOME)
+    assert "collab.hub.example.org" not in page.text
 
 
 async def test_the_account_sidebar_without_the_web_client_keeps_only_the_account_entries(tmp_path, idp):

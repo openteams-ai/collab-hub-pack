@@ -318,6 +318,8 @@ def case_no_web_client(r: Rendered) -> None:
     # A hub without the web client (issue #332) tells the API so, which then
     # renders no link into it.
     assert r.value("COLLAB_HUB_API__WEB__WEB_CLIENT") == "false"
+    assert r.indexer is not None
+    assert "COLLAB_HUB_API__WEB__WEB_CLIENT" not in r.indexer.env, sorted(r.indexer.env)
 
 
 GATEWAY_REF = {"group": "gateway.networking.k8s.io", "kind": "Gateway"}

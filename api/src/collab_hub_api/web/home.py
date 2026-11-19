@@ -456,11 +456,13 @@ def _chat_replica(root: str) -> str:
     )
 
 
-def _showcase(root: str, domain: str) -> str:
+def _showcase(root: str, address: str) -> str:
     """Collab, clickable: the tabs and the screenshot's own sidebar switch views.
 
     No script: one radio per view, and labels for it in the tab row and over
     the screenshot's sidebar entry. The stylesheet shows the checked view.
+    ``address`` is the mock window's address bar: the web client's host, or
+    empty on a hub without one, so it names no host that does not answer.
     """
 
     radios = "".join(
@@ -487,7 +489,7 @@ def _showcase(root: str, domain: str) -> str:
         f'<div class="showcase">{radios}'
         f'<div class="tabs">{tabs}</div>'
         '<div class="window">'
-        f'<div class="window-bar"><span></span><span></span><span></span><em>collab.{html.escape(domain)}</em></div>'
+        f'<div class="window-bar"><span></span><span></span><span></span><em>{html.escape(address)}</em></div>'
         f'<div class="screen">{shots}{hotspots}</div>'
         "</div>"
         "</div>"
@@ -782,6 +784,10 @@ def home_page(*, surface: WebSurface, session: WebSession | None, root_path: str
         closing_title = "Pick up where you left off."
         closing_text = "Your chats, Frames and connectors are waiting in Collab."
         closing_action = primary
+        if not web_client and not download:
+            # Nothing on the hub holds the chats this band points to, and the
+            # hero already offers the account page.
+            closing_title = ""
 
     chapters = "".join(
         (
@@ -815,7 +821,7 @@ def home_page(*, surface: WebSurface, session: WebSession | None, root_path: str
 and every chat starts informed. It all runs on your organization's own hub.</p>
 <div class="hero-actions">{hero_actions}</div>
 </section>
-<section class="band show">{_showcase(root, domain)}</section>
+<section class="band show">{_showcase(root, urlsplit(web_client).hostname or "")}</section>
 <section class="band connectors">
 <p>Works with the tools your team already uses</p>
 <ul>{_connectors(root)}</ul>
@@ -833,11 +839,7 @@ and every chat starts informed. It all runs on your organization's own hub.</p>
 </section>
 {chapters}
 {f'<section class="band ways"><h2>Start wherever you work.</h2><div class="doors">{"".join(doors)}</div></section>' if doors else ""}
-<section class="band closing">
-<h2>{html.escape(closing_title)}</h2>
-<p>{html.escape(closing_text)}</p>
-{closing_action}
-</section>"""
+{f'<section class="band closing"><h2>{html.escape(closing_title)}</h2><p>{html.escape(closing_text)}</p>{closing_action}</section>' if closing_title else ""}"""
     return _document(title="Collab Hub", chrome=chrome, main=main, scripts=(HOME_SCRIPT_PATH,), footer=True)
 
 

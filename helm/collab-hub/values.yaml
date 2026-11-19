@@ -847,18 +847,6 @@ cogs:
     # outage. Publishing again to a pending name is never refused by it.
     maxPendingRepositories: 20
 
-# The browser web surface (docs/web-surface.md). Enabling it -- the OIDC client,
-# its secret, the session secret -- goes through api.deployment.extraEnv, where
-# valueFrom is accepted; only the settings that are safe in a rendered manifest
-# live here.
-web:
-  # -- Where the signed-in navigation's "Account" link points: an external page
-  # (plan, usage, invoices) that an add-on provides. Empty (default) renders no
-  # link and needs no billing configuration. Must be an absolute https URL
-  # (http only on loopback) with no credentials; the API applies the full rule
-  # at startup. Becomes COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL on the API only.
-  accountPageUrl: ""
-
 # The Collab Hub home page (/web/home): where its links point, and whether
 # the hub's root host answers with it. See docs/web-surface.md.
 home:
@@ -993,6 +981,12 @@ runs:
 # browser, on a host of its own behind the gateway, with a chat service that
 # acts as the signed-in user. Its images are built by apollo-desktop.
 web:
+  # -- Where the signed-in navigation's "Account" link points: an external page
+  # (plan, usage, invoices) that an add-on provides. Empty (default) renders no
+  # link and needs no billing configuration. Must be an absolute https URL
+  # (http only on loopback) with no credentials; the API applies the full rule
+  # at startup. Becomes COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL on the API only.
+  accountPageUrl: ""
   # -- Whether to deploy the web client.
   enabled: false
   image:

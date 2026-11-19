@@ -1140,18 +1140,6 @@
       },
       "additionalProperties": false
     },
-    "web": {
-      "type": "object",
-      "description": "The browser web surface's chart-managed settings (docs/web-surface.md). Enabling the surface goes through api.deployment.extraEnv.",
-      "properties": {
-        "accountPageUrl": {
-          "type": "string",
-          "description": "External account page the signed-in navigation links to; empty renders no link. Absolute https URL (http only on loopback), no credentials; the API applies the full rule at startup.",
-          "pattern": "^$|^([Hh][Tt][Tt][Pp][Ss]://([A-Za-z0-9._-]+|\\[[0-9A-Fa-f:.]+\\])|[Hh][Tt][Tt][Pp]://([Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|127\\.0\\.0\\.1|\\[::1\\]))(:[0-9]{1,5})?([/?#][^\\s\\x00-\\x1f\\x7f]*)?$"
-        }
-      },
-      "additionalProperties": false
-    },
     "home": {
       "type": "object",
       "description": "The Collab Hub home page: its links, and the root-host redirect to it.",
@@ -1367,6 +1355,11 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "accountPageUrl": {
+          "type": "string",
+          "description": "External account page the signed-in navigation links to; empty renders no link. Absolute https URL (http only on loopback), no credentials; the API applies the full rule at startup.",
+          "pattern": "^$|^([Hh][Tt][Tt][Pp][Ss]://([A-Za-z0-9._-]+|\\[[0-9A-Fa-f:.]+\\])|[Hh][Tt][Tt][Pp]://([Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|127\\.0\\.0\\.1|\\[::1\\]))(:[0-9]{1,5})?([/?#][^\\s\\x00-\\x1f\\x7f]*)?$"
+        },
         "enabled": {
           "type": "boolean"
         },

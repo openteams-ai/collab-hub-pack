@@ -1022,7 +1022,7 @@ COLLAB_SCHEMA_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
         ),
     ),
     (
-        18,
+        19,
         (
             # The role an invitation grants, when its issuer chose one. Until
             # now the role was derived: owner of the organization an

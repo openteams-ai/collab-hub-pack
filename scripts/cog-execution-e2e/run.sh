@@ -29,13 +29,16 @@ if [ ! -f "$HERE/cog/pixi.lock" ]; then
 fi
 
 echo "== apply the namespaces (the driver's and the workers'), RBAC, the registry, the cache, the fake Cog's files, and the driver Job"
-kubectl --context "$CTX" delete job op-driver -n cogs-e2e --ignore-not-found >/dev/null 2>&1 || true
-kubectl --context "$CTX" apply -f "$HERE/k8s.yaml"
+# One driver at a time: the Job is applied once, after the files it mounts exist, and a Job left by an earlier
+# run is deleted with its pod first. A driver pod deleted while it runs keeps running through its grace period
+# (Python as PID 1 ignores SIGTERM), and two drivers on the same run ids delete each other's workers.
+kubectl --context "$CTX" create namespace cogs-e2e --dry-run=client -o yaml | kubectl --context "$CTX" apply -f -
 kubectl --context "$CTX" -n cogs-e2e create configmap e2e-cog \
   --from-file=pixi.toml="$HERE/cog/pixi.toml" --from-file=pixi.lock="$HERE/cog/pixi.lock" \
   --from-file=COG.md="$HERE/cog/COG.md" --from-file=serve.py="$HERE/cog/serve.py" \
   --dry-run=client -o yaml | kubectl --context "$CTX" apply -f -
-kubectl --context "$CTX" delete job op-driver -n cogs-e2e --ignore-not-found >/dev/null 2>&1 || true
+kubectl --context "$CTX" delete job op-driver -n cogs-e2e --ignore-not-found --cascade=foreground --wait=true \
+  >/dev/null 2>&1 || true
 kubectl --context "$CTX" apply -f "$HERE/k8s.yaml"
 
 echo "== wait for the driver Job (publishes, installs, materializes cog pods by digest, runs the Ops)"

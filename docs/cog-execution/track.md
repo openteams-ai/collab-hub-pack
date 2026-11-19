@@ -212,7 +212,7 @@ never both start it.
 
 The keyed claim's stores (`collab_hub_execution.claims`) have the same shape
 beside each Track store: in memory, in the SQLite Track's own file, and
-`collab_claims` on Postgres from migration 19, under one conformance suite
+`collab_claims` on Postgres from migration 17, under one conformance suite
 (`execution/tests/test_claims_conformance.py`). A claim is kept for thirty
 days after it last changed, and then only until its attempt is settled on the
 Track (its `step_completed` or `step_failed`, or a run that ended where no

@@ -390,7 +390,7 @@ shared `frames.postgres.url`, migrated by the same
   package and local use. A partial unique index admits one `op_submitted` per
   run, so two replicas cannot both start it. `collab_track_runs` (version 15)
   is the index of runs the listing reads.
-- `collab_claims` (version 19) — the keyed claim
+- `collab_claims` (version 17) — the keyed claim
   ([runs](cog-execution/runs.md#the-keyed-claim)): one row per step attempt's
   idempotency key, scoped to its run, with its state (`reserved`, `committed`,
   `outcome_unknown`, `recorded`), the sha256 of the run token of the worker

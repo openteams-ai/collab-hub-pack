@@ -1022,9 +1022,7 @@ COLLAB_SCHEMA_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
         ),
     ),
     (
-        # 17 and 18 are taken by pull requests ahead of this one in the queue (#176 and #105's); the
-        # runner applies versions above the highest applied, so this one must land after them.
-        19,
+        17,
         (
             # The keyed claim (issue #104): what became of each step attempt's
             # idempotency key, beside the Track. A worker reserves the key on

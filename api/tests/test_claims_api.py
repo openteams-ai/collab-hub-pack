@@ -421,7 +421,7 @@ async def test_on_the_hubs_database_the_claims_live_in_the_table_its_migrations_
         with database.connection() as conn:
             for table in COLLAB_TABLES:
                 conn.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
-        run_collab_schema_migrations(database)  # collab_claims comes from migration 19
+        run_collab_schema_migrations(database)  # collab_claims comes from migration 17
         package(tmp_path / "cogs", "echo")
         config = Config.parse(
             {

@@ -37,6 +37,13 @@ app.kubernetes.io/instance: {{ .top.Release.Name }}
 app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
+{{- /* At the remote location, the namespace of the workers' own (issue #253): where the run controller makes each
+worker and where its Role is. Named by runs.controller.workerNamespace.name, or the release namespace with
+`-workers` on it. */ -}}
+{{- define "collab-hub.worker-namespace" -}}
+{{- default (printf "%s-workers" .Release.Namespace | trunc 63 | trimSuffix "-") .Values.runs.controller.workerNamespace.name -}}
+{{- end -}}
+
 {{- define "collab-hub.frames-storage-claim" -}}
 {{- if .Values.frames.storage.persistence.existingClaim -}}
 {{- .Values.frames.storage.persistence.existingClaim -}}
@@ -785,6 +792,18 @@ indexer carries too: a publish source needs it, and a sweep reads it.) */}}
 {{- /* The browser surface renders only on the API; the indexer serves no pages. */}}
 {{- with .Values.web.accountPageUrl }}
 - name: COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.home.hubDomain }}
+- name: COLLAB_HUB_API__WEB__HUB_DOMAIN
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.home.desktopDownloadUrl }}
+- name: COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.home.docsUrl }}
+- name: COLLAB_HUB_API__WEB__DOCS_URL
   value: {{ . | quote }}
 {{- end }}
 {{- end }}

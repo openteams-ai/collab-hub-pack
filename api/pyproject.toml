@@ -66,6 +66,11 @@ select = [
     "W",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# The home page carries its stylesheet and inline SVG icon paths as data;
+# wrapping path data or one CSS rule across lines makes it harder to read.
+"src/collab_hub_api/web/home.py" = ["E501"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 # Measure coverage of the application package on every run and emit both a

@@ -1,0 +1,15 @@
+{{- $controller := .Values.runs.controller }}
+{{- if and .Values.api.enabled $controller.enabled (eq $controller.location "remote") $controller.workerNamespace.create }}
+{{- /* The namespace of the workers' own (issue #253): every worker pod is made here, and the run controller's Role
+and RoleBinding are here (run-controller-rbac.yaml), so the controller's identity holds nothing in the release
+namespace. Pointed at a namespace that exists with workerNamespace.create: false, as namespace.yaml is. */}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "collab-hub.worker-namespace" . }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" "run-worker") | nindent 4 }}
+    {{- with $controller.workerNamespace.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

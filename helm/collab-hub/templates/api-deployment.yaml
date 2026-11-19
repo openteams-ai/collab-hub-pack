@@ -9,6 +9,9 @@
 {{- if and $sidecar (or .Values.api.autoscaling.enabled (ne (int .Values.api.deployment.replicaCount) 1)) }}
 {{- fail "runs.controller.location: local needs exactly one API pod (api.deployment.replicaCount: 1, api.autoscaling.enabled: false): each pod would run a controller, under one id" }}
 {{- end }}
+{{- if and (not $sidecar) (eq (include "collab-hub.worker-namespace" .) .Release.Namespace) }}
+{{- fail (printf "runs.controller.workerNamespace.name: %s is the release namespace: at the remote location workers run in a namespace of their own, where the controller's Role is, so its identity holds nothing in the release namespace" .Release.Namespace) }}
+{{- end }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment

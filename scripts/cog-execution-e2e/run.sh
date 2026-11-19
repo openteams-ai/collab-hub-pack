@@ -21,7 +21,7 @@ echo "== build + load the E2E image (context: repo root)"
 docker build --pull -t "$IMAGE" -f "$HERE/Dockerfile" "$ROOT"
 kind load docker-image "$IMAGE" --name "$CLUSTER"
 
-echo "== apply namespace, RBAC, and the driver Job"
+echo "== apply the namespaces (the driver's and the workers'), RBAC, and the driver Job"
 kubectl --context "$CTX" delete job op-driver -n cogs-e2e --ignore-not-found >/dev/null 2>&1 || true
 kubectl --context "$CTX" apply -f "$HERE/k8s.yaml"
 

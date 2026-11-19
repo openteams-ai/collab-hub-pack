@@ -62,6 +62,14 @@ check "account link: the API carries it, the indexer serves no pages" account-li
 MEMBERSHIP='--set frames.auth.orgSource=membership --set frames.auth.identityClaim=sub --set frames.postgres.url=postgresql://db.example.com/hub --set frames.auth.bearer.jwksUrl=https://id.example.com/certs --set frames.auth.bearer.issuer=https://id.example.com'
 check "membership API off by default: no settings rendered" membership-api-off $MEMBERSHIP
 check "membership API on: client ids and audience reach the API, not the indexer" membership-api $STATIC $MEMBERSHIP --set cogs.index.enabled=true --set 'frames.membershipApi.clientIds={usage-control,subscription-manager}' --set frames.membershipApi.audience=collab-hub-membership
+check "home page: its domain and links reach the API" home-page --set home.hubDomain=example.org \
+  --set home.desktopDownloadUrl=https://downloads.example.com/collab --set home.docsUrl=https://docs.example.com/collab
+ROOT_HOST='--namespace nebari-nexus --set api.nebariapp.enabled=true --set api.nebariapp.hostname=frames.example.org --set home.hubDomain=example.org'
+check "root host off by default: nothing routed on the root host" no-root-host $ROOT_HOST
+check "root host on: / opens the home page, the browser pages go to the API" root-host $ROOT_HOST --set home.rootHost.enabled=true
+check "root host on another app's listener: its namespace and section, and a ReferenceGrant" root-host-listener $ROOT_HOST \
+  --set home.rootHost.enabled=true --set home.rootHost.namespace=nebari-system --set home.rootHost.parentRefs[0].name=nebari-gateway \
+  --set home.rootHost.parentRefs[0].namespace=envoy-gateway-system --set home.rootHost.parentRefs[0].sectionName=tls-landing
 refused() { # <label> <needle> <helm args...>: the chart must refuse to render, naming <needle>
   local label="$1" needle="$2" out
   shift 2
@@ -82,6 +90,10 @@ refused "membership API: a repeated client id is refused" "/frames/membershipApi
 refused "membership API: an unknown key is refused" "clientIdz" $MEMBERSHIP --set 'frames.membershipApi.clientIdz={a}'
 # The account link's coarse schema shape (docs/web-surface.md); the API's check
 # at startup is the authoritative one (api/tests/test_web_surface.py).
+refused "root host: refused without the root host's name" "home.rootHost needs home.hubDomain" \
+  --set api.nebariapp.enabled=true --set api.nebariapp.hostname=frames.example.org --set home.rootHost.enabled=true
+refused "home page: a hub domain that is not a bare host is refused" "/home/hubDomain" --set home.hubDomain=https://example.org
+refused "home page: a javascript: docs link is refused" "/home/docsUrl" --set home.docsUrl='javascript:alert(1)'
 refused "account link: plain http to a remote host is refused" "/web/accountPageUrl" --set web.accountPageUrl=http://billing.example.com/account
 refused "account link: credentials are refused" "/web/accountPageUrl" --set web.accountPageUrl=https://user:pw@billing.example.com/
 refused "account link: javascript: is refused" "/web/accountPageUrl" --set web.accountPageUrl='javascript:alert(1)'
@@ -98,8 +110,16 @@ if [ "$(checksum)" != "$(checksum --set-string runs.controller.models='[models.o
 else
   fail "run controller: a new models block changes the pod template" "the checksum did not change"
 fi
-check "run controller remote: a Deployment of its own with the only workload Role, the API with none" \
-  run-controller-remote -f "$TESTDATA/run-controller-remote.yaml"
+# Workers in a namespace of their own (issue #253): the Role there, nothing in the release namespace.
+check "run controller remote: a Deployment of its own with the only workload Role, in the workers' namespace, the API with none" \
+  run-controller-remote -f "$TESTDATA/run-controller-remote.yaml" --namespace hub
+check "run controller remote: a workers' namespace that exists is used, not made" \
+  run-controller-remote-existing-namespace -f "$TESTDATA/run-controller-remote.yaml" --namespace hub \
+  --set runs.controller.workerNamespace.name=cog-workers --set runs.controller.workerNamespace.create=false
+refused "run controller remote: the release namespace as the workers' is refused" "namespace of their own" \
+  -f "$TESTDATA/run-controller-remote.yaml" --namespace hub --set runs.controller.workerNamespace.name=hub
+refused "run controller remote: a workers' namespace that is no DNS label is refused" "workerNamespace" \
+  -f "$TESTDATA/run-controller-remote.yaml" --set runs.controller.workerNamespace.name=Cog_Workers
 refused "run controller: refused without the hub's database" "needs frames.postgres" --set runs.controller.enabled=true
 # Frames on S3, so the chart's own storage rules allow more than one API pod and it is this rule that refuses.
 SHARED_FRAMES='--set frames.storage.backend=s3 --set frames.s3.bucket=frames --set frames.activeState.backend=postgres'

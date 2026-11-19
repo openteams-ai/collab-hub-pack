@@ -1,8 +1,11 @@
 """In-cluster E2E driver: run a gated multi-step Op via the KubernetesCogExecutor.
 
-Runs as a Job with the cog-executor ServiceAccount. It materializes real Cog
-worker pods, runs a 2-step Op whose second step declares a sign-off Gate, sends
-that step back once with findings, approves the revision, and asserts the Track. Exits 0 on success, 1 on failure — so it doubles as the
+Runs as a Job with the cog-executor ServiceAccount, in one namespace, and makes
+its workers in another, where its Role is (issue #253), as the chart deploys a
+hub. It materializes real Cog worker pods, runs a 2-step Op whose second step
+declares a sign-off Gate, sends that step back once with findings, approves the
+revision, and asserts the Track; and it asserts that its identity holds nothing
+in its own namespace. Exits 0 on success, 1 on failure — so it doubles as the
 repo's reproduction base.
 """
 
@@ -23,8 +26,10 @@ from collab_hub_execution import (
 
 
 def main() -> int:
-    namespace = os.environ["E2E_NAMESPACE"]
+    namespace = os.environ["E2E_NAMESPACE"]  # the driver's own: the stand-in hub's
+    worker_namespace = os.environ["E2E_WORKER_NAMESPACE"]  # the workers' own, where the Role is
     runner_image = os.environ["E2E_RUNNER_IMAGE"]
+    assert worker_namespace != namespace, "the workers' namespace is one of their own"
 
     track = InMemoryTrackStore()
     # Three interactions of 10 tokens: research, the review, and its revision.
@@ -32,14 +37,23 @@ def main() -> int:
     # location is configuration too: remote, a worker pod per step, through the one switch.
     engine = LifecycleRunner(track=track, budget=RunBudget(max_tokens=35), backend="none", location="remote",
                              controller="op-driver", location_settings={
-                                 "image": runner_image, "namespace": namespace,
+                                 "image": runner_image, "namespace": worker_namespace,
                                  # The E2E image is not the hub's: its worker is a command of its own.
                                  "worker_command": ["python", "-m", "e2e.runner"],
-                                 # Materialize a NetworkPolicy admitting only this driver (the stand-in hub)
-                                 # to each worker. kind's default CNI does not enforce NetworkPolicy, so this
-                                 # exercises the secure code path; a policy-enforcing CNI enforces it.
+                                 # Materialize a NetworkPolicy admitting only this driver (the stand-in hub),
+                                 # from its own namespace, to each worker. kind's default CNI does not enforce
+                                 # NetworkPolicy, so this exercises the secure code path; a policy-enforcing
+                                 # CNI enforces it.
                                  "allow_ingress_from": {"app": "op-driver"},
+                                 "allow_ingress_from_namespace": {"kubernetes.io/metadata.name": namespace},
                                  "ready_timeout": 120, "poll_interval": 2})
+
+    # The identity that makes workers holds nothing where the hub is: a list of its own namespace's
+    # Deployments is forbidden, while the workers' namespace answers.
+    api = engine.executor.api
+    assert api.get(f"/apis/apps/v1/namespaces/{namespace}/deployments").status_code == 403, \
+        "the executor's identity reads Deployments of the hub's namespace"
+    assert api.get(f"/apis/apps/v1/namespaces/{worker_namespace}/deployments").status_code == 200
 
     op = OpDefinition(
         "e2e-run",
@@ -80,6 +94,7 @@ def main() -> int:
     # both Cogs were materialized as real pods, each with a run token the Track names only by its hash
     started = [e.payload for e in track.replay("e2e-run") if e.event_type == "worker_started"]
     assert started and all(s["location"] == "remote" and len(s["run_token_sha256"]) == 64 for s in started)
+    assert all(s["namespace"] == worker_namespace for s in started), "a worker was made outside its namespace"
     materialized = [e for e in track.replay("e2e-run") if e.event_type == "materialized"]
     assert any(e.payload.get("digest") == "sha256:research" for e in materialized)
     assert any(e.payload.get("digest") == "sha256:reviewer" for e in materialized)
@@ -96,8 +111,8 @@ def main() -> int:
         if e.event_type == "interaction_usage"
     ) == 30  # research, the review, and its revision
 
-    print("E2E OK: real Cog worker pods materialized, a Gate sent a step back and approved it, Track asserted",
-          flush=True)
+    print("E2E OK: real Cog worker pods materialized in a namespace of their own, a Gate sent a step back and "
+          "approved it, Track asserted", flush=True)
     return 0
 
 

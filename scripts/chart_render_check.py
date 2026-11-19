@@ -32,6 +32,13 @@ INDEX_VARS = (
     "COLLAB_HUB_API__COGS__INDEX__RUN_ON_STARTUP",
     "COLLAB_HUB_API__COGS__INDEX__REMOVED_SOURCE_RETENTION_HOURS",
 )
+# The browser pages' settings render on the API only; the indexer serves no pages.
+WEB_PAGE_VARS = (
+    "COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL",
+    "COLLAB_HUB_API__WEB__HUB_DOMAIN",
+    "COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL",
+    "COLLAB_HUB_API__WEB__DOCS_URL",
+)
 
 
 class Workload:
@@ -61,10 +68,13 @@ class Rendered:
         deployments = {d["metadata"]["labels"][COMPONENT_LABEL]: d for d in docs if d.get("kind") == "Deployment"}
         assert set(deployments) <= {"api", "indexer", "run-controller"}, sorted(deployments)
         self.api = Workload(deployments["api"])
+        self.release_namespace = deployments["api"]["metadata"]["namespace"]
         self.indexer = Workload(deployments["indexer"]) if "indexer" in deployments else None
         self.controller = Workload(deployments["run-controller"]) if "run-controller" in deployments else None
         self.roles = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "Role"}
         self.bindings = [d for d in docs if d.get("kind") == "RoleBinding"]
+        self.cluster_grants = [d for d in docs if d.get("kind") in ("ClusterRole", "ClusterRoleBinding")]
+        self.namespaces = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "Namespace"}
         self.service_accounts = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "ServiceAccount"}
         self.services = [d for d in docs if d.get("kind") == "Service"]
         self.configmaps = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "ConfigMap"}
@@ -109,7 +119,7 @@ class Rendered:
         assert indexer.pod["serviceAccountName"] == api.pod["serviceAccountName"]
         assert indexer.pod.get("securityContext") == api.pod.get("securityContext")
         assert indexer.container.get("securityContext") == api.container.get("securityContext")
-        api_env = {name: entry for name, entry in api.env.items() if name not in INDEX_VARS}
+        api_env = {name: entry for name, entry in api.env.items() if name not in INDEX_VARS + WEB_PAGE_VARS}
         indexer_env = {name: entry for name, entry in indexer.env.items() if name not in INDEX_VARS}
         assert indexer_env == api_env, "the indexer's environment differs from the API's beyond the index switch"
         # Nothing routes to it: its component label is its own, and no
@@ -314,6 +324,87 @@ def case_membership_api_off(r: Rendered) -> None:
     assert not [n for n in r.env if n.startswith(MEMBERSHIP_API_PREFIX)], sorted(r.env)
 
 
+def case_home_page(r: Rendered) -> None:
+    # The home page's links: the domain and the two named links reach the API
+    # replicas as the settings the API reads.
+    assert r.value("COLLAB_HUB_API__WEB__HUB_DOMAIN") == "example.org"
+    assert r.value("COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL") == "https://downloads.example.com/collab"
+    assert r.value("COLLAB_HUB_API__WEB__DOCS_URL") == "https://docs.example.com/collab"
+
+
+GATEWAY_REF = {"group": "gateway.networking.k8s.io", "kind": "Gateway"}
+WEB_PREFIXES = ("/web", "/invite", "/admin")
+
+
+def root_host_rules(backend: dict) -> list:
+    """The root host's rules: "/" opens the home page on the same host, and
+    the browser pages' prefixes go to the API. Nothing else is routed there,
+    so /v1 and /mcp stay on the API's own host."""
+
+    return [
+        {
+            "matches": [{"path": {"type": "Exact", "value": "/"}}],
+            "filters": [
+                {
+                    "type": "RequestRedirect",
+                    "requestRedirect": {
+                        "path": {"type": "ReplaceFullPath", "replaceFullPath": "/web/home"},
+                        "statusCode": 302,
+                    },
+                }
+            ],
+        },
+        {
+            "matches": [{"path": {"type": "PathPrefix", "value": prefix}} for prefix in WEB_PREFIXES],
+            "backendRefs": [backend],
+        },
+    ]
+
+
+def case_root_host(r: Rendered) -> None:
+    # The hub's pages on the root host, from a route in the release namespace:
+    # the API Service is reached directly and no ReferenceGrant is needed.
+    routes = [d for d in r.docs if d.get("kind") == "HTTPRoute"]
+    assert len(routes) == 1, routes
+    route = routes[0]
+    assert route["metadata"]["namespace"] == "nebari-nexus", route["metadata"]
+    spec = route["spec"]
+    assert spec["hostnames"] == ["example.org"], spec["hostnames"]
+    # group and kind are written out: the API server fills them in anyway, and
+    # leaving them to it makes ArgoCD report the route as drifted forever.
+    assert spec["parentRefs"] == [
+        {**GATEWAY_REF, "name": "nebari-gateway", "namespace": "envoy-gateway-system"}
+    ], spec["parentRefs"]
+    api = {"group": "", "kind": "Service", "name": "t-collab-hub-api", "port": 80, "weight": 1}
+    assert spec["rules"] == root_host_rules(api), spec["rules"]
+    assert kind(r, "ReferenceGrant") is None
+
+
+def case_root_host_listener(r: Rendered) -> None:
+    # On a cluster where another app owns a listener for the root host (the
+    # Nebari operator gives nebari-landing one, open to its namespace only),
+    # the route is created in that namespace, attaches to that listener, and
+    # reaches the API across namespaces through a ReferenceGrant beside it.
+    route = kind(r, "HTTPRoute")
+    assert route["metadata"]["namespace"] == "nebari-system", route["metadata"]
+    assert route["spec"]["parentRefs"] == [
+        {**GATEWAY_REF, "name": "nebari-gateway", "namespace": "envoy-gateway-system", "sectionName": "tls-landing"}
+    ], route["spec"]["parentRefs"]
+    api = {"group": "", "kind": "Service", "name": "t-collab-hub-api", "namespace": "nebari-nexus", "port": 80, "weight": 1}
+    assert route["spec"]["rules"] == root_host_rules(api), route["spec"]["rules"]
+    grant = kind(r, "ReferenceGrant")
+    assert grant is not None, "a cross-namespace backend needs a ReferenceGrant"
+    assert grant["metadata"]["namespace"] == "nebari-nexus", grant["metadata"]
+    assert grant["spec"] == {
+        "from": [{"group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "namespace": "nebari-system"}],
+        "to": [{"group": "", "kind": "Service", "name": "t-collab-hub-api"}],
+    }, grant["spec"]
+
+
+def case_no_root_host(r: Rendered) -> None:
+    assert kind(r, "HTTPRoute") is None
+
+
 def case_serve_with_indexer(r: Rendered) -> None:
     # Serving and sweeping both on: /v2 routes to the API replicas only, but
     # the indexer carries the same serve settings. A sweep is held to the
@@ -456,17 +547,15 @@ def case_run_controller_remote(r: Rendered) -> None:
     assert controller.container["image"] == r.api.container["image"]
     assert controller.value("COLLAB_CONTROLLER_LOCATION") == "remote"
     assert controller.value("COLLAB_CONTROLLER_IMAGE") == r.api.container["image"]
-    assert controller.value("COLLAB_CONTROLLER_ID") == "hub" and controller.value("COLLAB_CONTROLLER_NAMESPACE")
+    assert controller.value("COLLAB_CONTROLLER_ID") == "hub"
     assert controller.env["COLLAB_CONTROLLER_TRACK"]["valueFrom"]["secretKeyRef"] == {"name": "hub-db", "key": "url"}
     assert controller.value("COLLAB_CONTROLLER_MODELS") == "/etc/collab-hub/runs/models.toml"
-    allow = json.loads(controller.value("COLLAB_CONTROLLER_ALLOW_INGRESS_FROM"))
-    assert allow == controller.selector, (allow, controller.selector)  # only the controller's pods reach a worker
     assert "livenessProbe" in controller.container and "readinessProbe" not in controller.container
     assert re.fullmatch(r"[0-9a-f]{64}", controller.annotations.get("checksum/run-models", "")), controller.annotations
-    sa = controller.pod["serviceAccountName"]
-    assert sa == "t-collab-hub-run-controller" and sa in r.service_accounts
-    [binding] = [b for b in r.bindings if any(s["name"] == sa for s in b["subjects"])]
-    role = r.roles[binding["roleRef"]["name"]]
+    role, workers = workers_namespace_of_their_own(r, workers=f"{r.release_namespace}-workers")
+    assert workers in r.namespaces, "the chart did not make the workers' namespace"
+    # The chart's own default, not a value the test adds: the namespace it makes refuses a privileged pod.
+    assert r.namespaces[workers]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "restricted"
     rules = {(rule["apiGroups"][0], rule["resources"][0]): sorted(rule["verbs"]) for rule in role["rules"]}
     assert rules == {
         ("apps", "deployments"): ["create", "delete", "deletecollection", "get", "list", "patch", "watch"],
@@ -482,9 +571,48 @@ def case_run_controller_remote(r: Rendered) -> None:
     assert "run-cache" not in r.volumes and "run-tmp" not in r.volumes  # nothing of a worker's on the API pod
 
 
+def workers_namespace_of_their_own(r: Rendered, *, workers: str) -> tuple[dict, str]:
+    """Issue #253: the controller's Role and RoleBinding are in ``workers``, the namespace its workers are made
+    in, bound to its ServiceAccount in the release namespace; the identity holds nothing in the release namespace,
+    and each worker's NetworkPolicy admits the controller's pods from there. Returns the Role and the namespace."""
+    controller = r.controller
+    hub = r.release_namespace
+    assert workers != hub
+    assert controller.deployment["metadata"]["namespace"] == hub
+    assert controller.value("COLLAB_CONTROLLER_NAMESPACE") == workers
+    sa = controller.pod["serviceAccountName"]
+    assert sa == "t-collab-hub-run-controller" and r.service_accounts[sa]["metadata"]["namespace"] == hub
+    [binding] = [b for b in r.bindings if any(s["name"] == sa for s in b["subjects"])]
+    assert binding["metadata"]["namespace"] == workers, binding["metadata"]
+    assert binding["subjects"] == [{"kind": "ServiceAccount", "name": sa, "namespace": hub}]
+    role = r.roles[binding["roleRef"]["name"]]
+    assert role["metadata"]["namespace"] == workers, role["metadata"]
+    # Nothing in the release namespace: no Role or RoleBinding there, and no grant across the cluster.
+    in_hub = [d["metadata"]["name"] for d in [*r.roles.values(), *r.bindings] if d["metadata"]["namespace"] == hub]
+    assert not in_hub, f"the controller's identity holds a grant in the release namespace: {in_hub}"
+    assert not r.cluster_grants, [d["metadata"]["name"] for d in r.cluster_grants]
+    # The NetworkPolicy's peer: the controller's pods, in the release namespace, by the label Kubernetes sets.
+    allow = json.loads(controller.value("COLLAB_CONTROLLER_ALLOW_INGRESS_FROM"))
+    assert allow == controller.selector, (allow, controller.selector)
+    peer_namespace = json.loads(controller.value("COLLAB_CONTROLLER_ALLOW_INGRESS_FROM_NAMESPACE"))
+    assert peer_namespace == {"kubernetes.io/metadata.name": hub}, peer_namespace
+    return role, workers
+
+
+def case_run_controller_remote_existing_namespace(r: Rendered) -> None:
+    # A workers' namespace the operator named and owns: the chart uses it and makes no Namespace for it.
+    role, workers = workers_namespace_of_their_own(r, workers="cog-workers")
+    assert workers not in r.namespaces, "the chart made a Namespace it was told exists"
+    assert role["rules"], role
+
+
 CASES = {
     "membership-api": case_membership_api,
     "membership-api-off": case_membership_api_off,
+    "home-page": case_home_page,
+    "root-host": case_root_host,
+    "root-host-listener": case_root_host_listener,
+    "no-root-host": case_no_root_host,
     "sharepoint": case_sharepoint,
     "serve-off": case_serve_off,
     "serve-with-indexer": case_serve_with_indexer,
@@ -496,6 +624,7 @@ CASES = {
     "serve-httproute-no-timeout": case_serve_httproute_no_timeout,
     "run-controller": case_run_controller,
     "run-controller-remote": case_run_controller_remote,
+    "run-controller-remote-existing-namespace": case_run_controller_remote_existing_namespace,
     "no-run-controller": case_no_run_controller,
     "features": case_features,
     "default": case_default,

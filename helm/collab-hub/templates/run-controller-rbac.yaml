@@ -2,9 +2,14 @@
 {{- if and .Values.api.enabled $controller.enabled (eq $controller.location "remote") }}
 {{- $component := "run-controller" }}
 {{- $name := include "collab-hub.component-name" (dict "top" . "component" $component) }}
+{{- $workers := include "collab-hub.worker-namespace" . }}
 {{- /* The run controller's identity, and the only workload permissions the chart grants (ADR-0002
-invariant 3): over the kinds it materializes, in its namespace, with the verbs it uses, and nothing
-on the API's ServiceAccount. Workers themselves carry no ServiceAccount token. */}}
+invariant 3): over the kinds it materializes, with the verbs it uses, in the namespace of the workers'
+own (issue #253) and nowhere else. The ServiceAccount is in the release namespace, the controller's
+pod's; the Role and the RoleBinding are in the workers' namespace, so the identity can start a pod
+under no ServiceAccount of the release namespace and mount no Secret of it, the database URL and the
+Keycloak client secret among them. Nothing on the API's ServiceAccount. Workers themselves carry no
+ServiceAccount token. */}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -21,7 +26,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ $name }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ $workers }}
   labels:
     {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
 rules:
@@ -38,8 +43,8 @@ rules:
   neither is a literal on a pod template that `get deployments` reads. The Secret is owned by the worker's
   Deployment and collected with it: the controller creates Secrets, deletes one by name only when a
   Deployment it patched left one behind, and never reads, lists or sweeps them, so `patch`,
-  `deletecollection`, `get` and `list` stay out, and the hub's own Secrets and Helm's release records out
-  of reach. A namespace of the workers' own (#253) narrows the rest. */}}
+  `deletecollection`, `get` and `list` stay out; and the Role being in the workers' namespace, the hub's own
+  Secrets and Helm's release records are out of reach whatever the verbs. */}}
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create", "delete"]
@@ -48,7 +53,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ $name }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ $workers }}
   labels:
     {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
 subjects:

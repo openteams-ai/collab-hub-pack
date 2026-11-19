@@ -456,6 +456,16 @@ def make_router(
         which IdP screen appears first and skips nothing — an existing
         session still short-circuits it, and the code exchange, state, nonce
         and PKCE are identical.
+
+        When ``web.public_base_url`` is set and this request arrived on another
+        host, the flow does not start here: the browser is first moved to the
+        same sign-in on the public host (see ``_signin_on_public_host``), which
+        is the only host whose callback can read the transient cookie. That
+        move runs before the signed-in shortcut, so a session on the alias
+        cannot keep the person there. ``?hop=1`` marks a request that was
+        already moved and stops a loop behind a proxy that rewrites Host. Set
+        by hand (or kept in a bookmark) it skips the move and gives back the
+        behaviour from before the move existed, which needs nothing to undo.
         """
 
         next_path = sanitize_next_path(request.query_params.get("next"))
@@ -465,7 +475,15 @@ def make_router(
         # has no session on an alias, and is signed in once they arrive there.
         public_signin = _signin_on_public_host(request, next_path, renew=renew, register=register)
         if public_signin is not None:
-            logger.info("web_sign_in_moved_to_public_host")
+            # Both hosts: an alias and a proxy that rewrites Host look alike
+            # from in here, and these are what tell an operator which it is.
+            logger.info(
+                "web_sign_in_moved_to_public_host",
+                extra={
+                    "request_host": request.url.hostname,
+                    "public_host": urlsplit(surface.public_base_url).hostname,
+                },
+            )
             return _redirect(public_signin)
         if not renew and get_web_session(request) is not None:
             return _redirect(f"{_root_path(request)}{next_path}")

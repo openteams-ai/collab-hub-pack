@@ -122,7 +122,11 @@ flow's transient cookie is `__Host-`, so the browser returns it only to the
 host that set it, and the callback is on `public_base_url`'s host: a sign-in
 begun elsewhere could never complete. Hosts are compared by name, as cookies
 are. The move carries `hop=1` and happens at most once, so a proxy that
-rewrites the Host header gets one extra redirect, not a loop.
+rewrites the Host header gets one extra redirect, not a loop. A link or
+bookmark that already carries `hop=1` skips the move and behaves as sign-in did
+before it existed. Each move logs `web_sign_in_moved_to_public_host` with
+`request_host` and `public_host`, which tells an alias apart from a proxy
+rewriting Host.
 
 ### The identity pin, and why operator pages depend on it
 

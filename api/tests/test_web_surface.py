@@ -1333,6 +1333,37 @@ async def test_a_signin_already_moved_once_starts_where_it_is(tmp_path, idp):
     assert response.headers["location"].startswith(f"{idp.issuer}/protocol/openid-connect/auth?")
 
 
+async def test_the_move_runs_before_the_signed_in_shortcut(tmp_path, idp):
+    """A session on the alias (one from a hop=1 sign-in, or from before
+    public_base_url was set) must not short-circuit the move: answering
+    "already signed in" there would keep the person on a host whose sign-in
+    can never complete again."""
+
+    app = make_web_app(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL})
+    now = int(time.time())
+    alias_session = SessionCodec(SESSION_SECRET).encode_session(
+        WebSession(user="subject-alice", name=None, email=None, csrf="c", issued_at=now, expires_at=now + 600)
+    )
+    async with public_host_client(app, "https://alias.example.com") as client:
+        client.cookies.set(SESSION_COOKIE, alias_session, domain="alias.example.com", path="/")
+        response = await client.get("/web/signin", params={"next": "/web/account"})
+    assert response.status_code == 303
+    location = urlsplit(response.headers["location"])
+    assert (location.netloc, location.path) == ("frames.example.com", "/web/signin")
+
+
+async def test_the_move_logs_both_hosts(tmp_path, idp, caplog):
+    # An alias and a proxy rewriting Host look alike from inside; the hosts
+    # on the line are what tells an operator which one they have.
+    app = make_web_app(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL})
+    with caplog.at_level("INFO", logger="frames_server.web"):
+        async with public_host_client(app, "https://alias.example.com") as client:
+            await client.get("/web/signin")
+    records = [r for r in caplog.records if r.getMessage() == "web_sign_in_moved_to_public_host"]
+    assert len(records) == 1
+    assert (records[0].request_host, records[0].public_host) == ("alias.example.com", "frames.example.com")
+
+
 async def test_without_a_public_base_url_a_signin_starts_on_any_host(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     async with public_host_client(app, "https://alias.example.com") as client:

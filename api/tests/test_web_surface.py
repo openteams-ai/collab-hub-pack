@@ -1311,7 +1311,8 @@ async def test_the_move_carries_only_a_sanitized_next(tmp_path, idp):
         response = await client.get("/web/signin", params={"next": "https://evil.example.com/"})
     location = urlsplit(response.headers["location"])
     assert location.netloc == "frames.example.com"
-    assert parse_qs(location.query)["next"] == ["/web"]
+    # Whatever sign-in's own fallback is: the move adds no rule of its own.
+    assert parse_qs(location.query)["next"] == [sanitize_next_path(None)]
 
 
 @pytest.mark.parametrize("host", ["https://frames.example.com", "https://FRAMES.example.com:8443"])

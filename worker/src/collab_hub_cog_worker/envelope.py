@@ -17,17 +17,19 @@ ENVELOPE_VERSION = 1
 
 ERROR_CODES = frozenset({
     "binding-invalid", "invalid-input", "model-unavailable", "model-call-failed", "model-response-malformed",
-    "context-exhausted",
+    "context-exhausted", "outcome-unknown", "hub-unavailable",
 })
 
 # Over HTTP, the status a worker answers each code with.
 STATUS_FOR_CODE: Mapping[str, int] = {
     "invalid-input": 422,
     "context-exhausted": 422,
+    "outcome-unknown": 409,
     "model-call-failed": 502,
     "model-response-malformed": 502,
     "model-unavailable": 503,
     "binding-invalid": 503,
+    "hub-unavailable": 503,
 }
 
 SEVERITIES = ("error", "warn")
@@ -86,6 +88,16 @@ def envelope(cog: str, version: str, task: str | None, *, payload: Any = None, e
 def status_for(error: WorkerError | None) -> int:
     """The HTTP status an envelope is answered with: 200 for an answer, the code's own status for a failure."""
     return 200 if error is None else STATUS_FOR_CODE[error.code]
+
+
+def status_of(answer: Mapping[str, Any]) -> int:
+    """The HTTP status an envelope already written is answered with: 200 when ``ok``, its error code's status
+    otherwise, and 502 for a code this version does not know. What a committed envelope is replayed with."""
+    if answer.get("ok"):
+        return 200
+    error = answer.get("error")
+    code = error.get("code") if isinstance(error, Mapping) else None
+    return STATUS_FOR_CODE.get(code, 502)
 
 
 class Stopwatch:

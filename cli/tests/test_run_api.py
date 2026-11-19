@@ -176,6 +176,29 @@ def test_run_decide_refuses_a_run_that_waits_on_nothing(stub, cli):
     assert result.exit_code == 1 and "waits on no decision" in result.stderr and not stub.decisions
 
 
+def test_run_reconcile_records_what_a_person_settled_of_an_outcome_unknown_step(stub, cli):
+    cli("--hub", HUB, "cog", "launch", "echo")
+    stub.progress["run-000000000001"] = ["FAILED"]
+    run = next(r for r in stub.runs if r["id"] == "run-000000000001")
+    cli("--hub", HUB, "run", "show", "run-000000000001")
+    run["error"] = "outcome-unknown"
+    result = cli("--hub", HUB, "run", "reconcile", "run-000000000001", "fetch/data", "--note", "sent once")
+    assert result.exit_code == 0, result.output
+    assert stub.reconciled == [("run-000000000001", "fetch/data", {"note": "sent once"})]  # in the body, as is
+    assert "step fetch/data reconciled" in result.stderr and "run retry run-000000000001" in result.stderr
+    assert result.stdout.strip() == "FAILED"
+    as_json = cli("--hub", HUB, "run", "reconcile", "run-000000000001", "echo", "--json")
+    assert json.loads(as_json.stdout)["id"] == "run-000000000001" and stub.reconciled[-1][2] == {}
+    # A step that did not end outcome-unknown has nothing to reconcile; a caller without the operator role is
+    # refused by the hub.
+    run["error"] = None
+    nothing = cli("--hub", HUB, "run", "reconcile", "run-000000000001", "echo")
+    assert nothing.exit_code == 1 and "nothing to reconcile" in nothing.stderr
+    stub.operator = False
+    refused = cli("--hub", HUB, "run", "reconcile", "run-000000000001", "echo")
+    assert refused.exit_code == 1 and "403" in refused.stderr
+
+
 def test_run_retry_asks_for_an_ended_run_to_run_again_and_says_how(stub, cli):
     cli("--hub", HUB, "cog", "launch", "echo")
     stub.progress["run-000000000001"] = ["FAILED"]

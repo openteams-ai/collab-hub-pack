@@ -6,7 +6,7 @@ subject to breaking changes. See execution/README.md for current limitations.
 Guarantees and non-goals
 ------------------------
 ``LifecycleRunner`` runs Ops on the durability backend its configuration names.
-Only ``none`` is built, and it is single-owner, at-least-once, and not durable:
+Only ``none`` is built, and it is single-owner and not durable:
 
 - **Not durable.** Nothing survives the host. When a host starts, ``start()``
   records every run a stopped host left running or waiting at a Gate as
@@ -16,15 +16,17 @@ Only ``none`` is built, and it is single-owner, at-least-once, and not durable:
 - **Single-owner.** It holds no cross-replica lease, so one run must be advanced
   by one owner at a time. The Postgres Track's one-submission-per-run index guards
   a duplicate *submission*, not two callers concurrently *advancing* the same run.
-- **At-least-once.** The reference and Kubernetes workers do not persist keys, so
-  a retried attempt re-runs its side effect until the keyed claim (#102) answers
-  for it. Terminal runs are immutable apart from ``retry()``; runs that exhausted a
-  duration/token/cost budget require a new run id.
+- **Once per attempt, through the keyed claim.** A worker reserves its
+  attempt's idempotency key on the hub before it acts and commits its envelope
+  after (``claims``), so a retried attempt is answered with the envelope it
+  already produced, and one whose worker was lost between acting and committing
+  ends ``outcome-unknown`` instead of acting twice. A worker given no hub to
+  claim against acts on every invocation. Terminal runs are immutable apart from
+  ``retry()``; runs that exhausted a duration/token/cost budget require a new run id.
 
 Do not use it for multi-replica production execution until the ``dbos`` backend
-(#104), run pickup (#121) and the keyed claim (#102) land. ``WorkflowEngine`` and
-the Track, executor and backend interfaces separate these concerns, but their
-shapes are still experimental.
+(#104) lands. ``WorkflowEngine`` and the Track, executor and backend interfaces
+separate these concerns, but their shapes are still experimental.
 """
 
 from . import intents
@@ -36,6 +38,15 @@ from .binding import (
     DeclaredCapabilityResolver,
     ModelBinding,
     ModelCog,
+)
+from .claims import (
+    CLAIM_RETENTION,
+    Claim,
+    ClaimRefused,
+    ClaimStore,
+    InMemoryClaimStore,
+    PostgresClaimStore,
+    SqliteClaimStore,
 )
 from .envelope import (
     ENVELOPE_VERSION,
@@ -81,6 +92,13 @@ from .track import (
 )
 
 __all__ = [
+    "CLAIM_RETENTION",
+    "Claim",
+    "ClaimRefused",
+    "ClaimStore",
+    "InMemoryClaimStore",
+    "PostgresClaimStore",
+    "SqliteClaimStore",
     "BindingResolutionError",
     "CapabilityRequirement",
     "ContextCog",

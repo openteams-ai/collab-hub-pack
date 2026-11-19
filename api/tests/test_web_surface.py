@@ -851,9 +851,12 @@ async def test_signout_returns_to_the_configured_public_base_url(tmp_path, idp):
     # Keycloak checks post_logout_redirect_uri against the client's registered
     # list, which names the public host, not whatever Host this request bore.
     app = make_web_app(tmp_path, idp, web={"public_base_url": "https://hub.example"})
-    async with web_client(app) as client:
+    # Signed in on the public host, as a sign-in started anywhere ends up.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://hub.example") as client:
         await sign_in(client, idp)
-        response = await client.post("/web/signout", data={"csrf_token": await rendered_csrf(client)})
+        token = await rendered_csrf(client)
+        # The sign-out arrives bearing another Host (a proxy, an alias).
+        response = await client.post("/web/signout", data={"csrf_token": token}, headers={"Host": "internal.svc"})
         _endpoint, params = realm_logout_target(response)
         assert params["post_logout_redirect_uri"] == "https://hub.example/web/signed-out"
 

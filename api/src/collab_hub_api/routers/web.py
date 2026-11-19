@@ -74,6 +74,7 @@ from ..web.surface import (
     BILLING_PATH,
     CALLBACK_PATH,
     DATA_STATEMENT_PATH,
+    DEFAULT_SIGNIN_TARGET,
     HOME_ASSETS,
     HOME_MARK_PATH,
     HOME_PATH,
@@ -181,21 +182,21 @@ def sanitize_next_path(value: str | None) -> str:
 
     Anything else — absolute URLs, scheme-relative ``//host`` forms,
     backslash variants browsers normalize into them, control characters, and
-    the flow's own routes — falls back to the overview page. This is the whole
+    the flow's own routes — falls back to the home page (``DEFAULT_SIGNIN_TARGET``). This is the whole
     open-redirect surface of the flow, so the rule is an allowlist of shape,
     not a denylist of known-bad prefixes.
     """
 
     if not value or len(value) > MAX_NEXT_LENGTH:
-        return LANDING_PATH
+        return DEFAULT_SIGNIN_TARGET
     if not value.startswith("/") or value.startswith("//"):
-        return LANDING_PATH
+        return DEFAULT_SIGNIN_TARGET
     if "\\" in value or ":" in value.split("?", 1)[0]:
-        return LANDING_PATH
+        return DEFAULT_SIGNIN_TARGET
     if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
-        return LANDING_PATH
+        return DEFAULT_SIGNIN_TARGET
     if _targets_flow_route(value):
-        return LANDING_PATH
+        return DEFAULT_SIGNIN_TARGET
     return value
 
 
@@ -659,7 +660,7 @@ def make_router(
         return page_response(
             signed_out_page(
                 root_path=_root_path(request),
-                next_path=None if next_path == LANDING_PATH else next_path,
+                next_path=None if next_path == DEFAULT_SIGNIN_TARGET else next_path,
             )
         )
 

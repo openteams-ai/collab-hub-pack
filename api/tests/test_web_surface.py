@@ -373,8 +373,8 @@ def test_codec_refuses_a_weak_secret():
         "/%2e/web/signin",
     ],
 )
-def test_unsafe_next_targets_fall_back_to_the_overview(value):
-    assert sanitize_next_path(value) == "/web"
+def test_unsafe_next_targets_fall_back_to_the_home_page(value):
+    assert sanitize_next_path(value) == "/web/home"
 
 
 async def test_a_next_naming_the_signin_route_does_not_loop(tmp_path, idp):
@@ -390,7 +390,7 @@ async def test_a_next_naming_the_signin_route_does_not_loop(tmp_path, idp):
         idp.nonce = params["nonce"]
         callback = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
     assert callback.status_code == 303
-    assert callback.headers["location"] == "/web"
+    assert callback.headers["location"] == "/web/home"
 
 
 def test_safe_next_targets_are_preserved():
@@ -864,7 +864,8 @@ async def test_signout_returns_to_the_configured_public_base_url(tmp_path, idp):
         ("/admin/", "https://web.test/web/signed-out?next=%2Fadmin%2F"),
         ("https://evil.example/", "https://web.test/web/signed-out"),
         ("//evil.example/", "https://web.test/web/signed-out"),
-        ("/web", "https://web.test/web/signed-out"),
+        ("/web/home", "https://web.test/web/signed-out"),
+        ("/web", "https://web.test/web/signed-out?next=%2Fweb"),
     ],
 )
 async def test_signout_carries_a_safe_next_through_the_realm(tmp_path, idp, next_path, expected):
@@ -946,6 +947,54 @@ async def test_an_id_token_too_large_for_the_cookie_is_left_out_not_the_sign_in(
         _endpoint, params = realm_logout_target(signout)
         assert "id_token_hint" not in params
         assert params["client_id"] == WEB_CLIENT_ID
+
+
+async def test_a_signin_without_next_lands_on_the_home_page(tmp_path, idp):
+    # #335: sign-in lands on /web/home. The operations overview at /web is for
+    # operators, who reach it by its link, never as anyone's default landing.
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        params = await start_signin_without_next(client, idp)
+        response = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": params["state"]})
+    assert response.status_code == 303
+    assert response.headers["location"] == "/web/home"
+
+
+async def start_signin_without_next(client: AsyncClient, idp: _StubIdp) -> dict[str, str]:
+    response = await client.get("/web/signin")
+    assert response.status_code == 303
+    params = authorize_params(response.headers["location"])
+    idp.nonce = params["nonce"]
+    return params
+
+
+async def test_signing_out_from_the_account_page_and_in_again_lands_on_home(tmp_path, idp):
+    """The run-through that found it: Log out on /web/account, then "Sign in
+    again" on the signed-out page, ended on the operations overview."""
+
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await sign_in(client, idp, "/web/account")
+        account = (await client.get("/web/account")).text
+        token = re.search(r'name="csrf_token" value="([^"]+)"', account).group(1)
+        signout = await client.post("/web/signout", data={"csrf_token": token})
+        _endpoint, params = realm_logout_target(signout)
+        # The realm returns the browser here; follow it as the browser would.
+        signed_out = await client.get(params["post_logout_redirect_uri"])
+        again = html.unescape(re.search(r'<a href="([^"]+)">Sign in again</a>', signed_out.text).group(1))
+        start = await client.get(again)
+        idp.nonce = authorize_params(start.headers["location"])["nonce"]
+        state = authorize_params(start.headers["location"])["state"]
+        landed = await client.get("/web/oidc/callback", params={"code": "stub-code", "state": state})
+    assert landed.headers["location"] == "/web/home"
+
+
+async def test_an_explicit_next_to_the_overview_still_lands_there(tmp_path, idp):
+    # Operators keep their page: only the default moved.
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        response = await sign_in(client, idp, "/web")
+    assert response.headers["location"] == "/web"
 
 
 def test_the_session_cookie_fits_at_every_id_token_size_up_to_the_limit():

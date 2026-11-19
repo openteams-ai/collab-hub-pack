@@ -200,6 +200,13 @@ nothing from the request, with nothing to act on.
 """
 
 HOME_PATH = "/web/home"
+
+DEFAULT_SIGNIN_TARGET = HOME_PATH
+"""Where a sign-in with no (or no acceptable) ``next`` lands (#335).
+
+The home page, not the operations overview at :data:`LANDING_PATH`: that page
+is for operators, who reach it by its link, and landing everyone else there
+after "Sign in again" looked like sign-in had gone somewhere wrong."""
 """The Collab Hub home page: where a person arriving at the hub's address
 lands, signed in or not. The copy and layout live in :mod:`.home`.
 
@@ -602,7 +609,7 @@ class WebSurface:
 
         base = (self.public_base_url or str(request.base_url)).rstrip("/")
         landing = f"{base}{SIGNED_OUT_PATH}"
-        if next_path and next_path != LANDING_PATH:
+        if next_path and next_path != DEFAULT_SIGNIN_TARGET:
             landing += f"?{urlencode({'next': next_path})}"
         return oidc_logout_url(
             logout_endpoint=realm_logout_endpoint(self.issuer_url),

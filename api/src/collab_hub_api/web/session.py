@@ -66,13 +66,13 @@ CLOCK_SKEW_SECONDS = 60
 """Tolerance for an ``iat`` slightly in the future (replica clock drift)."""
 
 MIN_SESSION_SECRET_LENGTH = 32
+"""The signing secret must carry real entropy; a short one is refused at
+startup rather than silently signing weakly (see ``config.WebConfig``)."""
 
 MAX_SESSION_COOKIE_BYTES = 4096
 """The largest ``name=value`` a browser is relied on to keep (RFC 6265 §6.1's
 minimum). Above it a browser drops the cookie without saying so, and the
 sign-in it carried never sticks."""
-"""The signing secret must carry real entropy; a short one is refused at
-startup rather than silently signing weakly (see ``config.WebConfig``)."""
 
 VERIFIED_CLAIM_MAX_AGE_SECONDS = 300
 """How old the session's ``email``/``email_verified`` assertion may be when it

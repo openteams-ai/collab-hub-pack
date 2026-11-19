@@ -948,6 +948,60 @@ async def test_an_id_token_too_large_for_the_cookie_is_left_out_not_the_sign_in(
         assert params["client_id"] == WEB_CLIENT_ID
 
 
+def test_the_session_cookie_fits_at_every_id_token_size_up_to_the_limit():
+    """The bound counts what the browser counts: ``name=value``, not the value
+    alone. Walk the ID token across the limit and check every cookie fits, and
+    that a token which does fit is kept rather than dropped early."""
+
+    codec = SessionCodec(SESSION_SECRET)
+    now = int(time.time())
+    kept_near_limit = False
+    for length in range(2800, 3300):
+        session = WebSession(
+            user="subject-alice",
+            name="Alice",
+            email="alice@example.com",
+            csrf="c" * 43,
+            issued_at=now,
+            expires_at=now + 60,
+            id_token="t" * length,
+        )
+        value = codec.encode_session(session)
+        cookie_bytes = len(f"{SESSION_COOKIE}={value}")
+        assert cookie_bytes <= MAX_SESSION_COOKIE_BYTES, length
+        decoded = codec.decode_session(value)
+        assert decoded is not None
+        if decoded.id_token is not None:
+            assert decoded.id_token == session.id_token
+            kept_near_limit = kept_near_limit or cookie_bytes > MAX_SESSION_COOKIE_BYTES - 8
+    assert kept_near_limit, "a token that fits must be kept, not dropped early"
+
+
+@pytest.mark.parametrize("idt", [5, "", None, ["a"], {"t": "x"}])
+def test_a_session_id_token_that_is_not_a_nonempty_string_decodes_to_none(idt):
+    codec = SessionCodec(SESSION_SECRET)
+    now = int(time.time())
+    value = codec.encode(
+        SESSION_PURPOSE,
+        {"sub": "subject-alice", "csrf": "x", "iat": now, "exp": now + 60, "idt": idt},
+    )
+    decoded = codec.decode_session(value)
+    assert decoded is not None
+    assert decoded.id_token is None
+
+
+async def test_the_signout_refresh_url_is_html_escaped(tmp_path, idp):
+    # The realm URL has `&` between parameters; inside the attribute it must
+    # be `&amp;`, or a parameter named like an entity would be mangled.
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        response = await client.post("/web/signout", data={"csrf_token": await rendered_csrf(client)})
+        raw = LOGOUT_REFRESH.search(response.text).group(1)
+        assert "&amp;" in raw
+        assert "&" not in raw.replace("&amp;", "")
+
+
 def test_codec_round_trips_a_session_with_its_id_token():
     codec = SessionCodec(SESSION_SECRET)
     now = int(time.time())

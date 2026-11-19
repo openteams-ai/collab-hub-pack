@@ -654,8 +654,8 @@ def make_router(
     @public_router.get(SIGNED_OUT_PATH)
     async def signed_out(request: Request) -> Response:
         # The same allowlist the sign-in redirect applies, so the link can only
-        # ever carry a target sign-in would accept. The overview is sign-in's
-        # own default, so it is left off the link.
+        # ever carry a target sign-in would accept. The home page is sign-in's
+        # own default (DEFAULT_SIGNIN_TARGET), so it is left off the link.
         next_path = sanitize_next_path(request.query_params.get("next"))
         return page_response(
             signed_out_page(

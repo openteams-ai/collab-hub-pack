@@ -333,10 +333,10 @@ a protection the middleware does not itself enforce.
 | Route | What |
 |---|---|
 | `GET /web` | Signed-in overview; redirects to sign-in when there is no session. |
-| `GET /web/signin?next=&renew=` | Starts the code flow. `next` accepts only app-relative paths that are not the flow's own routes — anything else falls back to `/web` (no open redirect, and no self-referential loop). `renew=1` runs the flow even with a valid session, which is how the acceptance page obtains current claims. |
+| `GET /web/signin?next=&renew=` | Starts the code flow. `next` accepts only app-relative paths that are not the flow's own routes — anything else, and a missing `next`, falls back to `/web/home` (no open redirect, and no self-referential loop; the operations overview at `/web` is reached by its link, not as a default). `renew=1` runs the flow even with a valid session, which is how the acceptance page obtains current claims. |
 | `GET /web/oidc/callback` | Finishes the flow, mints the session. Every failure renders one fixed page; nothing from the request or the IdP response is echoed. |
-| `POST /web/signout` | CSRF-protected; clears the session cookie. |
-| `GET /web/signed-out` | Confirmation page. |
+| `POST /web/signout?next=` | CSRF-protected; clears the session cookie and ends the realm session too: it answers with a page that forwards the browser to the realm's RP-initiated logout (`id_token_hint` from the session, `client_id`, and `post_logout_redirect_uri` = `<public base>/web/signed-out`, carrying a safe `next`). A page rather than a redirect because `form-action 'self'` applies to every hop of a form's redirect chain. Asked for JSON (`Accept: application/json`, the admin panel's `fetch`), it answers `{"location": …}` instead. The realm client must list `<public base>/web/signed-out*` under its valid post-logout redirect URIs (`post.logout.redirect.uris`), or every sign-out ends on Keycloak's "Invalid redirect uri" page. |
+| `GET /web/signed-out?next=` | Confirmation page; where the realm returns the browser after sign-out. "Sign in again" carries a safe `next`, or lands on `/web/home` without one. |
 | `GET /web/app.css` | The shared stylesheet (documents keep `style-src 'self'`). |
 | `GET /web/collab-logo.png` | The product wordmark the server-rendered pages show (documents allow `img-src 'self'`). **Anonymous**, like the stylesheet: the sign-in and acceptance pages show it before anybody has a session. |
 | `GET /web/home` | [The Collab Hub home page](#the-home-page-webhome). **Anonymous**: signed out it offers sign-in and sign-up; signed in it shows who is signed in, the sign-out form and the hub's links. |

@@ -32,6 +32,14 @@
   if (read(SIDEBAR_KEY) === "folded") root.dataset.sidebar = "folded";
   system.addEventListener("change", apply);
 
+  // A page Back restores from the browser's back/forward cache is the copy from
+  // before: after Log out it still showed the person signed in, with no request
+  // to the server (#335). `no-store` does not keep Chrome from caching it, so a
+  // restored page asks the server again and shows who is signed in now.
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) window.location.reload();
+  });
+
   document.addEventListener("DOMContentLoaded", () => {
     for (const toggle of document.querySelectorAll("[data-theme-toggle]")) {
       toggle.addEventListener("click", () => {

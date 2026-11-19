@@ -54,6 +54,7 @@ from ..web.pages import (
     render_page,
     sign_in_failed_page,
     signed_out_page,
+    signing_out_page,
 )
 from ..web.privacy_statement import privacy_statement_page
 from ..web.request_limits import connection_close_headers
@@ -73,6 +74,7 @@ from ..web.surface import (
     BILLING_PATH,
     CALLBACK_PATH,
     DATA_STATEMENT_PATH,
+    DEFAULT_SIGNIN_TARGET,
     HOME_ASSETS,
     HOME_MARK_PATH,
     HOME_PATH,
@@ -188,21 +190,21 @@ def sanitize_next_path(value: str | None) -> str:
 
     Anything else — absolute URLs, scheme-relative ``//host`` forms,
     backslash variants browsers normalize into them, control characters, and
-    the flow's own routes — falls back to the overview page. This is the whole
+    the flow's own routes — falls back to the home page (``DEFAULT_SIGNIN_TARGET``). This is the whole
     open-redirect surface of the flow, so the rule is an allowlist of shape,
     not a denylist of known-bad prefixes.
     """
 
     if not value or len(value) > MAX_NEXT_LENGTH:
-        return LANDING_PATH
+        return DEFAULT_SIGNIN_TARGET
     if not value.startswith("/") or value.startswith("//"):
-        return LANDING_PATH
+        return DEFAULT_SIGNIN_TARGET
     if "\\" in value or ":" in value.split("?", 1)[0]:
-        return LANDING_PATH
+        return DEFAULT_SIGNIN_TARGET
     if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
-        return LANDING_PATH
+        return DEFAULT_SIGNIN_TARGET
     if _targets_flow_route(value):
-        return LANDING_PATH
+        return DEFAULT_SIGNIN_TARGET
     return value
 
 
@@ -600,6 +602,9 @@ def make_router(
             # claims reader has already reduced anything that is not boolean
             # true to False.
             email_verified=display.email_verified,
+            # Kept for sign-out only: the realm ends its session without a
+            # confirmation screen when shown the ID token it issued (#335).
+            id_token=token_response["id_token"],
             csrf=secrets.token_urlsafe(32),
             issued_at=now,
             expires_at=now + lifetime,
@@ -679,29 +684,46 @@ def make_router(
         return _redirect(target)
 
     @router.post(SIGNOUT_PATH)
-    async def signout(request: Request, _session: WebSession = Depends(require_csrf)) -> Response:
-        """End the session on this browser.
+    async def signout(request: Request, session: WebSession = Depends(require_csrf)) -> Response:
+        """End the session on this browser, and the realm session behind it.
 
         The cookie is stateless, so this deletes the browser's copy; it cannot
         recall copies made before this moment (see ``web.session``). Authority
         does not ride the cookie — roles are checked per request — so the
         exposure of a pre-sign-out copy is identity, bounded by ``exp``.
+
+        Deleting the cookie alone left the realm session alive, so the next
+        "Log in" came straight back without a password and sign-out looked
+        broken (#335). The browser is therefore sent on to the realm's logout,
+        which returns it to the signed-out page. ``next`` rides the query
+        string, not the form, so the body is read once, by ``require_csrf``,
+        under its bound. A caller that asks for JSON (the admin panel's
+        ``fetch``, which cannot follow anyone to the realm) is told the URL
+        and navigates there itself.
         """
 
-        response = _redirect(f"{_root_path(request)}{SIGNED_OUT_PATH}")
+        next_param = request.query_params.get("next")
+        next_path = sanitize_next_path(next_param) if next_param else None
+        logout = surface.logout_url(request, session, next_path=next_path)
+        if "application/json" in request.headers.get("accept", ""):
+            response: Response = JSONResponse(
+                {"location": logout}, headers={**SECURITY_HEADERS, "Cache-Control": "no-store"}
+            )
+        else:
+            response = page_response(signing_out_page(logout_url=logout, root_path=_root_path(request)))
         clear_session_cookie(response)
         return response
 
     @public_router.get(SIGNED_OUT_PATH)
     async def signed_out(request: Request) -> Response:
         # The same allowlist the sign-in redirect applies, so the link can only
-        # ever carry a target sign-in would accept. The overview is sign-in's
-        # own default, so it is left off the link.
+        # ever carry a target sign-in would accept. The home page is sign-in's
+        # own default (DEFAULT_SIGNIN_TARGET), so it is left off the link.
         next_path = sanitize_next_path(request.query_params.get("next"))
         return page_response(
             signed_out_page(
                 root_path=_root_path(request),
-                next_path=None if next_path == LANDING_PATH else next_path,
+                next_path=None if next_path == DEFAULT_SIGNIN_TARGET else next_path,
             )
         )
 

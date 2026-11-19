@@ -148,7 +148,8 @@ def main() -> int:
         print(f"{run_id}: {status}", flush=True)
         for event in track.replay(run_id):
             extra = event.payload.get("error") or event.payload.get("reason") or ""
-            print(f"  - {event.event_type} {extra}".rstrip(), flush=True)
+            message = event.payload.get("message") or event.payload.get("failure_reason") or ""
+            print(f"  - {event.event_type} {extra} {message}".rstrip(), flush=True)
         assert status is RunState.COMPLETED, f"{run_id} ended {status}"
         [started] = [e.payload for e in track.replay(run_id) if e.event_type == "worker_started"]
         assert started["artifact"] == str(reference) and started["binding_id"] == install.binding_id

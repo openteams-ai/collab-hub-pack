@@ -65,6 +65,7 @@ from collab_hub_api.web.privacy_statement import (
     privacy_statement_page,
 )
 from collab_hub_api.web.session import (
+    MAX_SESSION_COOKIE_BYTES,
     SESSION_COOKIE,
     SESSION_PURPOSE,
     TRANSIENT_COOKIE,
@@ -126,6 +127,7 @@ class _StubIdp:
         self.signing_pem = REALM_KEY_PEM
         self.nonce: str | None = None
         self.sub = "subject-alice"
+        self.minted: list[str] = []
 
         idp = self
 
@@ -191,7 +193,9 @@ class _StubIdp:
         claims.update(self.claims_override)
         for name in self.drop_claims:
             claims.pop(name, None)
-        return jwt.encode(claims, self.signing_pem, algorithm="RS256", headers={"kid": "web-key-1"})
+        token = jwt.encode(claims, self.signing_pem, algorithm="RS256", headers={"kid": "web-key-1"})
+        self.minted.append(token)
+        return token
 
     def close(self) -> None:
         self._server.shutdown()
@@ -734,8 +738,7 @@ async def test_signout_with_the_rendered_csrf_token_ends_the_session(tmp_path, i
         match = re.search(r'name="csrf_token" value="([^"]+)"', page)
         assert match, "the layout must render the CSRF token into the sign-out form"
         response = await client.post("/web/signout", data={"csrf_token": match.group(1)})
-        assert response.status_code == 303
-        assert response.headers["location"] == "/web/signed-out"
+        assert_signout_accepted(response, idp)
         signed_out = await client.get("/web/signed-out")
         assert signed_out.status_code == 200
         assert (await client.get("/web")).status_code == 303
@@ -774,7 +777,190 @@ async def test_the_csrf_token_is_accepted_as_a_header_too(tmp_path, idp):
         page = (await client.get("/web")).text
         token = re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
         response = await client.post("/web/signout", headers={"X-CSRF-Token": token})
-        assert response.status_code == 303
+        assert_signout_accepted(response, idp)
+
+
+# --- issue #335: sign-out ends the realm session too ------------------------------
+#
+# Clearing this surface's cookie alone left the Keycloak session alive, so the
+# next "Log in" signed the person straight back in with no password: sign-out
+# looked broken. Sign-out now hands the browser to the realm's RP-initiated
+# logout. It does so from a page rather than a 303, because the pages' CSP has
+# `form-action 'self'`, and browsers apply form-action to every hop of a form
+# submission's redirect chain: a redirect to the realm would be blocked.
+
+LOGOUT_REFRESH = re.compile(r'<meta http-equiv="refresh" content="0;url=([^"]+)">')
+
+
+def realm_logout_target(response) -> tuple[str, dict[str, str]]:
+    """The realm logout URL a sign-out page sends the browser to, split into
+    the endpoint and its query parameters."""
+
+    match = LOGOUT_REFRESH.search(response.text)
+    assert match, "the sign-out page must forward the browser to the realm logout"
+    url = html.unescape(match.group(1))
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}{parts.path}", {k: v[0] for k, v in parse_qs(parts.query).items()}
+
+
+def assert_signout_accepted(response, idp: _StubIdp) -> None:
+    """Sign-out ran: the answer is the page that forwards to the realm logout."""
+
+    assert response.status_code == 200
+    endpoint, _params = realm_logout_target(response)
+    assert endpoint == f"{idp.issuer}/protocol/openid-connect/logout"
+
+
+async def rendered_csrf(client: AsyncClient) -> str:
+    return re.search(r'name="csrf_token" value="([^"]+)"', (await client.get("/web")).text).group(1)
+
+
+async def test_signout_hands_the_browser_to_the_realm_logout_with_the_id_token(tmp_path, idp):
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        response = await client.post("/web/signout", data={"csrf_token": await rendered_csrf(client)})
+
+        assert response.status_code == 200
+        endpoint, params = realm_logout_target(response)
+        assert endpoint == f"{idp.issuer}/protocol/openid-connect/logout"
+        assert params == {
+            "client_id": WEB_CLIENT_ID,
+            # The ID token this session was minted from: with it Keycloak ends
+            # the session without asking "Do you want to log out?" again.
+            "id_token_hint": idp.minted[-1],
+            "post_logout_redirect_uri": "https://web.test/web/signed-out",
+        }
+        # A person whose browser ignores the refresh still has a way through.
+        links = [html.unescape(h) for h in re.findall(r'<a href="([^"]+)">', response.text)]
+        assert html.unescape(LOGOUT_REFRESH.search(response.text).group(1)) in links
+        # The surface's own session is gone before the realm is even asked.
+        assert (await client.get("/web")).status_code == 303
+
+
+async def test_the_signout_page_is_never_cached(tmp_path, idp):
+    # It carries the ID token in its links; no cache may keep a copy.
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        response = await client.post("/web/signout", data={"csrf_token": await rendered_csrf(client)})
+        assert "no-store" in response.headers["cache-control"]
+
+
+async def test_signout_returns_to_the_configured_public_base_url(tmp_path, idp):
+    # Keycloak checks post_logout_redirect_uri against the client's registered
+    # list, which names the public host, not whatever Host this request bore.
+    app = make_web_app(tmp_path, idp, web={"public_base_url": "https://hub.example"})
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        response = await client.post("/web/signout", data={"csrf_token": await rendered_csrf(client)})
+        _endpoint, params = realm_logout_target(response)
+        assert params["post_logout_redirect_uri"] == "https://hub.example/web/signed-out"
+
+
+@pytest.mark.parametrize(
+    ("next_path", "expected"),
+    [
+        ("/admin/", "https://web.test/web/signed-out?next=%2Fadmin%2F"),
+        ("https://evil.example/", "https://web.test/web/signed-out"),
+        ("//evil.example/", "https://web.test/web/signed-out"),
+        ("/web", "https://web.test/web/signed-out"),
+    ],
+)
+async def test_signout_carries_a_safe_next_through_the_realm(tmp_path, idp, next_path, expected):
+    """``next`` survives the round trip through Keycloak to the signed-out
+    page, so "Sign in again" still returns to where the person signed out
+    from. Anything sign-in's own allowlist refuses is dropped."""
+
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        response = await client.post(
+            "/web/signout", params={"next": next_path}, data={"csrf_token": await rendered_csrf(client)}
+        )
+        _endpoint, params = realm_logout_target(response)
+        assert params["post_logout_redirect_uri"] == expected
+
+
+async def test_a_session_minted_without_an_id_token_still_ends_the_realm_session(tmp_path, idp):
+    """Cookies issued before this change carry no ID token. Their sign-out
+    still goes to the realm, identified by client_id; Keycloak then asks the
+    person to confirm, which beats leaving the realm session alive."""
+
+    app = make_web_app(tmp_path, idp)
+    codec = SessionCodec(SESSION_SECRET)
+    now = int(time.time())
+    old_cookie = codec.encode(
+        SESSION_PURPOSE,
+        {"sub": "subject-alice", "name": None, "email": None, "csrf": "old-csrf", "iat": now, "exp": now + 600},
+    )
+    async with web_client(app) as client:
+        client.cookies.set(SESSION_COOKIE, old_cookie, domain="web.test", path="/")
+        response = await client.post("/web/signout", data={"csrf_token": "old-csrf"})
+        assert response.status_code == 200
+        _endpoint, params = realm_logout_target(response)
+        assert "id_token_hint" not in params
+        assert params["client_id"] == WEB_CLIENT_ID
+        assert params["post_logout_redirect_uri"] == "https://web.test/web/signed-out"
+
+
+async def test_a_fetch_signout_is_told_where_to_send_the_browser(tmp_path, idp):
+    """The admin panel signs out with fetch, which cannot follow anyone to the
+    realm. Asked for JSON, sign-out answers with the realm logout URL, and the
+    panel navigates there itself."""
+
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        await sign_in(client, idp)
+        response = await client.post(
+            "/web/signout",
+            params={"next": "/admin/"},
+            headers={"X-CSRF-Token": await rendered_csrf(client), "Accept": "application/json"},
+        )
+        assert response.status_code == 200
+        assert "no-store" in response.headers["cache-control"]
+        location = response.json()["location"]
+        parts = urlsplit(location)
+        assert f"{parts.scheme}://{parts.netloc}{parts.path}" == f"{idp.issuer}/protocol/openid-connect/logout"
+        params = {k: v[0] for k, v in parse_qs(parts.query).items()}
+        assert params["id_token_hint"] == idp.minted[-1]
+        assert params["post_logout_redirect_uri"] == "https://web.test/web/signed-out?next=%2Fadmin%2F"
+        assert (await client.get("/web")).status_code == 303
+
+
+async def test_an_id_token_too_large_for_the_cookie_is_left_out_not_the_sign_in(tmp_path, idp):
+    """Browsers drop a cookie over 4096 bytes without a word, which would turn
+    a large ID token (a long ``groups`` claim, say) into a sign-in that never
+    sticks. The token is only a convenience for sign-out, so it is the thing
+    left out: the session is kept, and sign-out falls back to ``client_id``."""
+
+    idp.claims_override = {"groups": [f"/org/team-{n:04d}" for n in range(200)]}
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        response = await sign_in(client, idp)
+        cookie_headers = [h for h in response.headers.get_list("set-cookie") if h.startswith(f"{SESSION_COOKIE}=")]
+        assert len(cookie_headers) == 1
+        assert len(cookie_headers[0].split(";", 1)[0]) <= MAX_SESSION_COOKIE_BYTES
+        assert (await client.get("/web")).status_code == 200
+        signout = await client.post("/web/signout", data={"csrf_token": await rendered_csrf(client)})
+        _endpoint, params = realm_logout_target(signout)
+        assert "id_token_hint" not in params
+        assert params["client_id"] == WEB_CLIENT_ID
+
+
+def test_codec_round_trips_a_session_with_its_id_token():
+    codec = SessionCodec(SESSION_SECRET)
+    now = int(time.time())
+    session = WebSession(
+        user="subject-alice",
+        name="Alice",
+        email="alice@example.com",
+        csrf="csrf-token",
+        issued_at=now,
+        expires_at=now + 60,
+        id_token="header.payload.signature",
+    )
+    assert codec.decode_session(codec.encode_session(session)) == session
 
 
 async def test_a_csrf_token_from_another_session_is_refused(tmp_path, idp):
@@ -954,8 +1140,7 @@ async def test_the_fallback_reads_the_form_type_however_it_is_spelled(tmp_path, 
             content=f"csrf_token={token}".encode(),
             headers={"Content-Type": content_type},
         )
-        assert response.status_code == 303
-        assert response.headers["location"] == "/web/signed-out"
+        assert_signout_accepted(response, idp)
 
 
 @pytest.mark.parametrize(
@@ -1011,8 +1196,7 @@ async def test_a_padded_form_under_the_cap_still_signs_out(tmp_path, idp):
         page = (await client.get("/web")).text
         token = re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
         response = await client.post("/web/signout", data={"csrf_token": token, "padding": "p" * 3000})
-        assert response.status_code == 303
-        assert response.headers["location"] == "/web/signed-out"
+        assert_signout_accepted(response, idp)
 
 
 async def test_any_route_that_takes_the_dependency_inherits_the_bound(tmp_path, idp):

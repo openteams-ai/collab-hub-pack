@@ -43,7 +43,7 @@ import base64
 import hmac
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 
 from fastapi import Response
@@ -66,6 +66,11 @@ CLOCK_SKEW_SECONDS = 60
 """Tolerance for an ``iat`` slightly in the future (replica clock drift)."""
 
 MIN_SESSION_SECRET_LENGTH = 32
+
+MAX_SESSION_COOKIE_BYTES = 4096
+"""The largest ``name=value`` a browser is relied on to keep (RFC 6265 §6.1's
+minimum). Above it a browser drops the cookie without saying so, and the
+sign-in it carried never sticks."""
 """The signing secret must carry real entropy; a short one is refused at
 startup rather than silently signing weakly (see ``config.WebConfig``)."""
 
@@ -178,6 +183,23 @@ class WebSession:
     field existed decodes to — fail-closed, and the invitee is told to verify
     their address rather than being let through on a claim nobody made.
     """
+    id_token: str | None = None
+    """The ID token this session was minted from, kept only for sign-out (#335).
+
+    Sign-out hands the browser to the realm's RP-initiated logout, and
+    Keycloak ends the realm session without a confirmation screen only when
+    it is shown the ID token it issued (``id_token_hint``). Without that, the
+    person's "Log out" clears this cookie and leaves the realm session alive,
+    and the next "Log in" signs them straight back in with no password.
+
+    Nothing reads it for identity or authorization: the token was verified at
+    sign-in and the claims that matter were copied out then. The cookie is
+    signed, not encrypted, so this adds nothing a holder of the cookie could
+    not already read (name and email are in it too), and the cookie is
+    HttpOnly. ``None`` for a cookie minted before this field existed; that
+    sign-out still reaches the realm, by ``client_id``, and Keycloak asks the
+    person to confirm.
+    """
 
 
 class SessionCodec:
@@ -238,6 +260,21 @@ class SessionCodec:
     # --- session cookie ----------------------------------------------------
 
     def encode_session(self, session: WebSession) -> str:
+        """The session cookie's value, always small enough for a browser to keep.
+
+        The ID token is the only field that can push it past
+        :data:`MAX_SESSION_COOKIE_BYTES` (a long ``groups`` claim, say). It is
+        a sign-out convenience, so it is what gets dropped: the session that
+        carried it still signs the person in, and its sign-out falls back to
+        ``client_id`` and the realm's confirmation screen.
+        """
+
+        value = self._encode_session(session)
+        if session.id_token and len(SESSION_COOKIE) + 1 + len(value) > MAX_SESSION_COOKIE_BYTES:
+            value = self._encode_session(replace(session, id_token=None))
+        return value
+
+    def _encode_session(self, session: WebSession) -> str:
         return self.encode(
             SESSION_PURPOSE,
             {
@@ -245,6 +282,7 @@ class SessionCodec:
                 "name": session.name,
                 "email": session.email,
                 "email_verified": session.email_verified,
+                "idt": session.id_token,
                 "csrf": session.csrf,
                 "iat": session.issued_at,
                 "exp": session.expires_at,
@@ -261,6 +299,7 @@ class SessionCodec:
             return None
         name = data.get("name")
         email = data.get("email")
+        id_token = data.get("idt")
         return WebSession(
             user=user,
             name=name if isinstance(name, str) else None,
@@ -273,6 +312,7 @@ class SessionCodec:
             # string "false" is truthy, and a payload shape this decoder did
             # not mint must not be able to assert verification by accident.
             email_verified=data.get("email_verified") is True,
+            id_token=id_token if isinstance(id_token, str) and id_token else None,
         )
 
 

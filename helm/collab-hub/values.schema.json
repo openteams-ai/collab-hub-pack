@@ -1163,7 +1163,7 @@
         },
         "webClient": {
           "type": "boolean",
-          "description": "Whether the hub runs the Collab web client at collab.<hubDomain>; false hides every link into it."
+          "description": "Whether the hub runs the Collab web client at collab.<hubDomain>; false (default) shows no link into it."
         },
         "desktopDownloadUrl": {
           "type": "string",

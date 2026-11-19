@@ -61,7 +61,7 @@ check "feature flags: each entry renders as its variable" features --set feature
 check "account link: the API carries it, the indexer serves no pages" account-link-with-indexer $STATIC --set cogs.index.enabled=true --set web.accountPageUrl=https://billing.example.com/account
 check "home page: its domain and links reach the API" home-page --set home.hubDomain=example.org \
   --set home.desktopDownloadUrl=https://downloads.example.com/collab --set home.docsUrl=https://docs.example.com/collab
-check "home page without the web client: the API is told so, the indexer is not" no-web-client $STATIC --set cogs.index.enabled=true --set home.webClient=false
+check "home page with the web client: the API is told so, the indexer is not" web-client $STATIC --set cogs.index.enabled=true --set home.webClient=true
 ROOT_HOST='--namespace nebari-nexus --set api.nebariapp.enabled=true --set api.nebariapp.hostname=frames.example.org --set home.hubDomain=example.org'
 check "root host off by default: nothing routed on the root host" no-root-host $ROOT_HOST
 check "root host on: / opens the home page, the browser pages go to the API" root-host $ROOT_HOST --set home.rootHost.enabled=true

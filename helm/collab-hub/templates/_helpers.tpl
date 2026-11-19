@@ -781,9 +781,9 @@ indexer carries too: a publish source needs it, and a sweep reads it.) */}}
 - name: COLLAB_HUB_API__WEB__HUB_DOMAIN
   value: {{ . | quote }}
 {{- end }}
-{{- if eq (toString .Values.home.webClient) "false" }}
+{{- if .Values.home.webClient }}
 - name: COLLAB_HUB_API__WEB__WEB_CLIENT
-  value: "false"
+  value: "true"
 {{- end }}
 {{- with .Values.home.desktopDownloadUrl }}
 - name: COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL

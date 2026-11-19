@@ -69,7 +69,7 @@ def link(url: str) -> str:
 
 
 async def test_every_link_is_built_from_the_deployment_domain(tmp_path, idp):
-    app = make_web_app(tmp_path, idp, web={"hub_domain": "hub.example.org"})
+    app = make_web_app(tmp_path, idp, web={"hub_domain": "hub.example.org", "web_client": True})
     async with web_client(app) as client:
         await sign_in(client, idp, next_path=HOME)
         page = await client.get(HOME)
@@ -81,7 +81,9 @@ async def test_every_link_is_built_from_the_deployment_domain(tmp_path, idp):
 
 
 async def test_the_domain_defaults_to_the_issuer_host_without_keycloak(tmp_path, idp):
-    app = make_web_app(tmp_path, idp, web={"issuer_url": "https://keycloak.dev.example.org/realms/nebari"})
+    app = make_web_app(
+        tmp_path, idp, web={"issuer_url": "https://keycloak.dev.example.org/realms/nebari", "web_client": True}
+    )
     async with web_client(app) as client:
         page = await client.get(HOME)
     assert link("https://collab.dev.example.org/") in page.text
@@ -160,7 +162,9 @@ async def test_the_page_brings_its_own_fonts_from_this_origin(tmp_path, idp):
 
 
 async def test_under_a_root_path_the_fonts_and_the_door_mark_stay_under_it(tmp_path, idp):
-    app = make_web_app(tmp_path, idp)
+    # The door mark is the "Open Collab in your browser" door's, shown only
+    # where the web client runs.
+    app = make_web_app(tmp_path, idp, web={"web_client": True})
     page = await probe(app, "/hub/web/home", root_path="/hub")
     stylesheet = await probe(app, "/hub/web/home.css", root_path="/hub")
     urls = re.findall(r"url\(([^)]+)\)", stylesheet.text)
@@ -331,7 +335,7 @@ async def test_the_billing_address_needs_a_session(tmp_path, idp):
 
 
 async def test_the_account_dashboard_has_a_sidebar(tmp_path, idp):
-    app = make_web_app(tmp_path, idp)
+    app = make_web_app(tmp_path, idp, web={"web_client": True})
     async with web_client(app) as client:
         await sign_in(client, idp, next_path=ACCOUNT)
         page = await client.get(ACCOUNT)
@@ -435,6 +439,20 @@ async def test_a_signed_out_visitor_can_download_the_desktop_app_without_an_acco
 WEB_CLIENT_LINKS = ("https://collab.hub.example.org/", "https://collab.hub.example.org/frames")
 
 
+async def test_a_hub_links_into_the_web_client_only_when_told_it_runs_one(tmp_path, idp):
+    """Issue #332: off by default, so a hub that never names a web client
+    (the public one) shows no dead collab.<domain> links."""
+
+    app = make_web_app(tmp_path, idp, web={"hub_domain": "hub.example.org"})
+    async with web_client(app) as client:
+        await sign_in(client, idp, next_path=HOME)
+        home = await client.get(HOME)
+        account = await client.get(ACCOUNT)
+    for page in (home, account):
+        assert "collab.hub.example.org" not in page.text
+        assert "Open Collab" not in page.text
+
+
 @pytest.mark.parametrize("path", [HOME, ACCOUNT])
 @pytest.mark.parametrize("signed_in", [False, True])
 async def test_a_hub_without_the_web_client_links_nowhere_into_it(tmp_path, idp, path, signed_in):
@@ -498,7 +516,7 @@ async def test_without_the_web_client_or_a_download_a_visitor_can_still_sign_up(
 
 
 async def test_the_demo_window_names_the_web_client_only_where_one_runs(tmp_path, idp):
-    on = make_web_app(tmp_path, idp, web={"hub_domain": "hub.example.org"})
+    on = make_web_app(tmp_path, idp, web={"hub_domain": "hub.example.org", "web_client": True})
     async with web_client(on) as client:
         page = await client.get(HOME)
     assert "<em>collab.hub.example.org</em>" in page.text

@@ -551,8 +551,8 @@ class WebSurface:
     """The home page's docs link; empty = no link."""
     hub_domain: str = ""
     """The domain the home page's links are built from; empty = the issuer's host without ``keycloak.``."""
-    web_client: bool = True
-    """Whether the hub runs the web client; off = the pages render no links into it."""
+    web_client: bool = False
+    """Whether the hub runs the web client; off (the default) = the pages render no links into it."""
 
     def __post_init__(self) -> None:
         if self.session_lifetime_seconds <= 0:

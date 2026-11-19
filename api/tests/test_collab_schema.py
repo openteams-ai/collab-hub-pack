@@ -462,7 +462,7 @@ def test_migration_creates_the_cog_publishing_schema():
         "org_id text",
     ):
         assert name not in earlier, name
-    assert LATEST_COLLAB_SCHEMA_VERSION == 19
+    assert LATEST_COLLAB_SCHEMA_VERSION == 18
 
 
 def test_migration_creates_the_install_tables():
@@ -478,12 +478,12 @@ def test_migration_creates_the_install_tables():
     assert "failed_step text," in installs and "uninstall_requested_by text," in installs
     (events,) = server.ddl_for("collab_cog_install_events")
     assert "install_id text NOT NULL" in events and "payload jsonb NOT NULL DEFAULT '{}'::jsonb" in events
-    statements = dict(COLLAB_SCHEMA_MIGRATIONS)[19]
+    statements = dict(COLLAB_SCHEMA_MIGRATIONS)[18]
     assert "collab_cog_installs_one_live" in " ".join(statements)  # one live install of a digest per organization
     assert not any("ALTER" in statement or "DROP" in statement for statement in statements)
-    # Appended as version 19: nothing earlier mentions any of it.
+    # Appended as version 18: nothing earlier mentions any of it.
     earlier = " ".join(
-        statement for version, statements in COLLAB_SCHEMA_MIGRATIONS if version < 19 for statement in statements
+        statement for version, statements in COLLAB_SCHEMA_MIGRATIONS if version < 18 for statement in statements
     )
     for name in ("collab_cog_installs", "collab_cog_install_events", "collab_cog_install_event_sequence"):
         assert name not in earlier, name
@@ -576,7 +576,7 @@ PINNED_CHECKSUMS = {
     15: "94c87d3dc97dfc138ea1ee78bdb067ba114163995f4ef27d44398a930690d84d",
     16: "b2140ce96b42c4e7e9daabbac44b8ee6828d3ce9b39cccd37ca7f818747ca33f",
     17: "b128d44c95c0c2719207bd1bdd880bd3dcce3777663ced40a1c58767b31929c4",
-    19: "7b58a1999dbbe5c7828a6e9dce8a33aa7e9cfede23b0a5e6672a31a3c179d8aa",
+    18: "7b58a1999dbbe5c7828a6e9dce8a33aa7e9cfede23b0a5e6672a31a3c179d8aa",
 }
 
 

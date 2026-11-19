@@ -476,6 +476,8 @@ async def test_a_hub_without_the_web_client_links_nowhere_into_it(tmp_path, idp,
         assert link(url) not in page.text
     assert "Open Collab" not in page.text
     assert "Manage your Frames" not in page.text
+    # Nor is a link left behind with nowhere to go (it would just reload the page).
+    assert 'href=""' not in page.text
     # What does not depend on the web client is still there. The account
     # dashboard has no header navigation or footer, so it never carried these.
     if path == HOME:
@@ -483,6 +485,23 @@ async def test_a_hub_without_the_web_client_links_nowhere_into_it(tmp_path, idp,
         assert link("https://frames.hub.example.org/docs") in page.text
     else:
         assert 'action="/web/signout"' in page.text
+
+
+async def test_with_the_web_client_open_collab_leads_and_the_download_follows(tmp_path, idp):
+    app = make_web_app(
+        tmp_path,
+        idp,
+        web={"hub_domain": "hub.example.org", "web_client": True, "desktop_download_url": DOWNLOAD_URL},
+    )
+    async with web_client(app) as client:
+        await sign_in(client, idp, next_path=HOME)
+        page = await client.get(HOME)
+    actions = hero(page.text)
+    assert actions.startswith(
+        '<div class="hero-actions"><a class="btn primary large" href="https://collab.hub.example.org/">'
+    )
+    assert link(DOWNLOAD_URL) in actions
+    assert actions.index("Open Collab") < actions.index(link(DOWNLOAD_URL))
 
 
 async def test_without_the_web_client_the_download_is_the_signed_in_main_action(tmp_path, idp):

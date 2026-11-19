@@ -36,7 +36,7 @@ from collab_hub_execution import (
     RunState,
     inventory,
 )
-from collab_hub_execution.artifacts import RegistryClient, publish
+from collab_hub_execution.artifacts import RegistryClient, org_scope, publish
 from collab_hub_execution.controller import BindingDelivery
 from collab_hub_execution.installer import Installer, harnesses_installed
 from collab_hub_execution.installs import InstallRow, new_install_id
@@ -188,11 +188,13 @@ def main() -> int:
     print(pull_log, flush=True)
     assert "artifact cached:" in pull_log, "the second run pulled the artifact again"
     assert "artifact pulling:" not in pull_log
-    # The Cog's container mounts its package read-only and the environment directory of its lock alone.
+    # The Cog's container mounts its package read-only and the environment directory of its lock alone, both in
+    # the installing organization's scope.
     mounts = {m["subPath"]: m for m in worker_mounts["e2e-second"]}
-    package_mount = f"artifacts/packages/{reference.digest.partition(':')[2]}"
+    scope = org_scope("e2e")
+    package_mount = f"artifacts/packages/{scope}/{reference.digest.partition(':')[2]}"
     assert package_mount in mounts and mounts[package_mount]["readOnly"] is True, mounts
-    assert len(mounts) == 2 and any(path.startswith("artifacts/envs/") for path in mounts), mounts
+    assert len(mounts) == 2 and any(path.startswith(f"artifacts/envs/{scope}/") for path in mounts), mounts
 
     print("== a gated two-step Op on the installed Cog", flush=True)
     op = OpDefinition("e2e-run", (

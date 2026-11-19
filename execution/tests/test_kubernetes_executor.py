@@ -517,6 +517,14 @@ def test_two_organizations_with_the_same_lock_mount_writable_environments_of_the
         raise LookupError("no such run")
     with pytest.raises(LookupError):
         _artifact_executor(FakeK8sApi(), cache_claim="cog-cache", org_of=unknown).materialize(ARTIFACT, "x", "a:0")
+    # On a shared claim, an executor given no way to find the organization makes no worker from an artifact.
+    unscoped = FakeK8sApi()
+    with pytest.raises(ValueError, match="no organization to scope it by"):
+        _artifact_executor(unscoped, cache_claim="cog-cache").materialize(ARTIFACT, "x", "a:0")
+    assert not [p for p, _ in unscoped.bodies if p.endswith("/deployments")]
+    # On a cache of the pod's own nothing is shared: the no-org scope.
+    own = FakeK8sApi()
+    assert _artifact_executor(own).materialize(ARTIFACT, "x", "a:0").details["scope"] == NO_ORG_SCOPE
 
 
 def test_an_eviction_runs_as_a_pod_of_the_workers_namespace_that_mounts_the_claim_and_is_deleted_after():

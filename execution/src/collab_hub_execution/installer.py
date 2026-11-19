@@ -354,16 +354,21 @@ class Installer:
             # their own. Within the organization, the package goes with its install unless another live install
             # holds the same artifact (its worker mounts that package), and the environment of its lock goes when
             # the last live install of that lock does. An org-less install is of the no-org scope, shared by every
-            # org-less install, as the hub's API already treats them as one tenant.
+            # org-less install, as the hub's API already treats them as one tenant. An install whose removal is
+            # asked for holds nothing (its workers are swept), so two removals of one lock do not each keep it for
+            # the other; one not yet fetched has no lock on record and may have this one, so it keeps the
+            # environment. What an install created after this listing materializes meanwhile is built again by its
+            # next worker.
             others = [r for r in self.store.list(include_uninstalled=False)
-                      if r.id != row.id and r.org_id == row.org_id]
+                      if r.id != row.id and r.org_id == row.org_id and r.uninstall_requested_by is None]
             package = _artifact_digest(row.reference)
             if any(_artifact_digest(r.reference) == package for r in others):
                 _log.info("install %s: %s is kept in the cache: another install of the organization holds it",
                           install_id, row.reference)
             else:
+                keep_lock = any(r.lock_digest in (row.lock_digest, None) for r in others)
                 try:
-                    self.evict(row.reference, row.org_id, any(r.lock_digest == row.lock_digest for r in others))
+                    self.evict(row.reference, row.org_id, keep_lock)
                 except Exception:  # noqa: BLE001
                     _log.exception("evicting %s from the cache failed", row.reference)
         with self._lock:

@@ -92,9 +92,11 @@ pulls the artifact at its pinned digest through the registry's distribution
 API (every blob verified against its digest) into a cache under the artifact's
 own digest, verified file for file when it is there already, and the pod runs
 the package's declared `serve` task there with pixi, locked to that lock, in
-the environment directory of the lock, which every artifact with that lock
-shares and the next worker of any of them finds built; the Cog's container
-mounts its package read-only and that environment directory alone writable.
+the environment directory of the lock within the installing organization's
+part of the cache, which every artifact of that organization with that lock
+shares and the next worker of any of them finds built, and no other
+organization's worker reaches; the Cog's container mounts its package
+read-only and that environment directory alone writable.
 At the `local` location the same reference is pulled into a cache under the
 controller's work directory and served the same way. The Cog contains nothing
 that knows which ([runs.md](runs.md#agent-locations)).

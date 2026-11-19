@@ -514,6 +514,35 @@ def test_an_uninstall_keeps_the_package_while_another_live_install_of_its_scope_
     assert evicted == [(str(reference), None, False)]
 
 
+def test_two_removals_of_one_lock_do_not_each_keep_it_and_an_unfetched_install_keeps_it(registry, tmp_path):
+    """An install whose removal is asked for holds nothing, so two removals of one lock in one organization leave
+    nothing behind; an install of the organization not yet fetched may have the lock, so the environment stays."""
+    reference = published(registry, tmp_path)
+    sibling = published(registry, tmp_path, "ctx2")  # the same lock
+    store = InMemoryInstallStore()
+    evicted = []
+    executor = InMemoryCogExecutor({str(reference): selecting(), str(sibling): selecting()})
+    install = installer(store, executor, registry,
+                        evict=lambda ref, org, keep: evicted.append((ref, org, keep)) or True)
+    first, second = store.create(row(reference)), store.create(row(sibling))
+    for asked in (first, second):
+        store.claim(asked.id, "one")
+        assert install.install(asked.id).invokable
+    store.request_uninstall(first.id, "alice")
+    store.request_uninstall(second.id, "alice")  # both asked before either is taken
+    install.uninstall(first.id)
+    install.uninstall(second.id)
+    assert evicted == [(str(reference), "acme", False), (str(sibling), "acme", False)]
+    evicted.clear()
+    third = store.create(row(reference))
+    store.claim(third.id, "one")
+    assert install.install(third.id).invokable
+    store.create(row(sibling))  # asked, not yet fetched: no lock on record
+    store.request_uninstall(third.id, "alice")
+    install.uninstall(third.id)
+    assert evicted == [(str(reference), "acme", True)]
+
+
 def test_an_uninstall_at_remote_evicts_through_the_executor_in_its_organizations_scope(registry, tmp_path):
     reference = published(registry, tmp_path)
     sibling = published(registry, tmp_path, "ctx2")  # the same lock

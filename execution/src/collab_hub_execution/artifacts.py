@@ -7,8 +7,8 @@ whose layers are the package's files, each named by its
 through any OCI distribution endpoint, the hub's own ``/v2/`` included, and
 is what a ``remote`` worker's init container runs:
 
-    python -m collab_hub_execution.artifacts materialize <reference> --cache /var/cache/collab-hub
-    python -m collab_hub_execution.artifacts serve <reference> --cache /var/cache/collab-hub
+    python -m collab_hub_execution.artifacts materialize <reference> --cache /var/cache/collab-hub --scope <scope>
+    python -m collab_hub_execution.artifacts serve <reference> --cache /var/cache/collab-hub --scope <scope>
 
 Everything in the cache is under the scope of the organization that installed
 the Cog (``--scope``, ``org_scope``): a runner gets its environment writable,

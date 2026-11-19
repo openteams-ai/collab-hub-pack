@@ -314,8 +314,9 @@ class KubernetesCogExecutor:
         self._registry = registry
         self._lock_digests: dict[str, str] = {}
         self.org_of = org_of
-        """The organization a worker runs for, which scopes its part of the cache; every worker is of no
-        organization (``artifacts.NO_ORG_SCOPE``) when ``None``, as a single-tenant development executor is."""
+        """The organization a worker runs for, which scopes its part of the cache. When ``None``, every worker is
+        of no organization (``artifacts.NO_ORG_SCOPE``) on a cache of its pod's own, and a worker from an artifact
+        is refused on a shared ``cache_claim``."""
 
     def scope_of(self, cog: str, run_id: str) -> str:
         """The part of the cache a worker of ``cog`` for ``run_id`` is given: its organization's."""
@@ -670,6 +671,11 @@ class KubernetesCogExecutor:
         token = run_tokens.mint()
         delivered = self._delivered(cog, run_id, instance, token)
         lock_digest = self.lock_digest_of(cog) if self.from_artifact(cog) and not self.worker_command else None
+        if lock_digest and self.cache_claim and self.org_of is None:
+            # On a claim every worker pod shares, a worker of no known organization would be given the one
+            # writable no-org environment of its lock, shared with every other such worker: refused instead.
+            raise ValueError(f"{cog} would be materialized on the shared cache claim {self.cache_claim} with no "
+                             "organization to scope it by: this executor was given no org_of")
         scope = self.scope_of(cog, run_id) if lock_digest else artifacts.NO_ORG_SCOPE
         deployment, service = self._manifests(cog, run_id, name, delivered.files, lock_digest=lock_digest,
                                               scope=scope)

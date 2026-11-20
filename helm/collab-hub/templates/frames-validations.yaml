@@ -279,6 +279,19 @@ crash-looping pod. "single" is membership resolution plus auto-admission
 {{- end }}
 {{- end }}
 {{- /*
+The membership API for add-on services (issue #270) answers from
+collab_org_members, so it mirrors make_app's startup checks: organizations must
+come from membership rows, and service tokens must be verifiable.
+*/}}
+{{- if (dig "membershipApi" "clientIds" list (.Values.frames | default dict)) }}
+{{- if not (or (eq $orgSource "membership") (eq $orgSource "single")) }}
+{{- fail "frames.membershipApi.clientIds requires frames.auth.orgSource=membership or single: under claims the hub does not read collab_org_members, so the membership API would describe a tenancy the hub does not enforce." }}
+{{- end }}
+{{- if not .Values.frames.auth.bearer.jwksUrl }}
+{{- fail "frames.membershipApi.clientIds requires frames.auth.bearer.jwksUrl: add-on service tokens are verified against the realm's signing keys." }}
+{{- end }}
+{{- end }}
+{{- /*
 The single-organization declaration (issue #91). Complete when the mode is on,
 absent otherwise — a filled-in singleOrg under any other orgSource is a
 declaration nothing reads, which is exactly the half-armed state that would

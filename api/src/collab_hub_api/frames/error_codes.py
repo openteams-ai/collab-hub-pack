@@ -136,3 +136,12 @@ feature is simply not configured. Its guarantees are the row lock, the
 primary key, and the transaction, so there is no in-memory backend to fall
 back to.
 """
+
+# --- Membership API for add-on services (issue #270) --------------------------
+
+ORGANIZATION_NOT_FOUND = "organization_not_found"
+"""``GET /v1/membership/organizations/{org_id}`` names no organization (404).
+
+An organization whose members were all removed still exists and answers 200
+with an empty roster; this code means the id was never an organization here.
+"""

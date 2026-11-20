@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from collections.abc import Callable
 from contextlib import asynccontextmanager, nullcontext, suppress
 from pathlib import Path
@@ -66,6 +67,7 @@ from .frames.org_source import (
     single_org_declaration,
 )
 from .frames.orgs import OrgsUnavailableError, UnavailableOrgStore
+from .frames.service_callers import ServiceCallerAuthenticator, unsigned_bearer_tokens_allowed
 from .frames.store import ConcurrentFrameUpdateError
 from .path_protection import PathProtectionMiddleware, api_path, request_path
 from .routers import (
@@ -79,6 +81,7 @@ from .routers import (
     identity,
     invitations,
     invite,
+    membership,
     org_invitations,
     registry,
     tasks,
@@ -196,6 +199,54 @@ class McpAuthMiddleware(BaseHTTPMiddleware):
 
 
 logger = logging.getLogger("frames_server.core")
+
+
+def _self_authenticating_paths(*, registry_serving: bool, membership_api: bool) -> Callable[[str], bool]:
+    """The paths whose routes authenticate every request themselves.
+
+    The claim routes (/v1/claims) are always among them: they authenticate
+    every request with a worker's run token, which the hub's bearer auth would
+    refuse before they could.
+    """
+
+    predicates: list[Callable[[str], bool]] = [runs_router.claims_path]
+    if registry_serving:
+        predicates.append(registry.registry_path)
+    if membership_api:
+        predicates.append(membership.membership_api_path)
+    return lambda path: any(predicate(path) for predicate in predicates)
+
+
+def build_membership_api_authenticator(config: BaseConfig) -> ServiceCallerAuthenticator | None:
+    """The membership API's caller check, or ``None`` when no add-on is configured (issue #270).
+
+    Off by default: an empty ``frames.membership_api.client_ids`` mounts
+    nothing. When it is set, two preconditions fail the rollout rather than
+    the first request:
+
+    - organizations must come from membership rows (``membership`` or
+      ``single``). Under ``claims`` the hub does not read
+      ``collab_org_members``, so answering from it would describe a tenancy
+      the hub does not enforce.
+    - service tokens must be verifiable: a bearer JWKS URL, or the
+      local-development unsigned-token switches.
+    """
+
+    settings = config.frames.membership_api
+    if not settings.client_ids:
+        return None
+    if not org_source_resolves_membership():
+        raise RuntimeError(
+            "frames.membership_api.client_ids is set, but organizations are not resolved from membership:"
+            f" set {ORG_SOURCE_ENV}={ORG_SOURCE_MEMBERSHIP} (or ={ORG_SOURCE_SINGLE}), or remove the client ids."
+        )
+    if not os.environ.get("FRAMES_BEARER_JWKS_URL", "").strip() and not unsigned_bearer_tokens_allowed():
+        raise RuntimeError(
+            "frames.membership_api.client_ids is set, but no bearer JWKS URL (FRAMES_BEARER_JWKS_URL,"
+            " chart value frames.auth.bearer.jwksUrl) is configured to verify service tokens with."
+        )
+    logger.info("membership_api_enabled", extra={"client_ids": sorted(settings.client_ids)})
+    return ServiceCallerAuthenticator(settings.client_ids, audience=settings.audience or None)
 
 
 def _close_quietly(candidate: object) -> None:
@@ -334,6 +385,7 @@ def make_app(config: BaseConfig) -> FastAPI:
                 "member_sources": sorted(single_org.member_sources),
             },
         )
+    membership_api_authenticator = build_membership_api_authenticator(config)
     # Logged here rather than during config validation, which runs before
     # logging is configured.
     for flag in config.features.retired_names:
@@ -513,6 +565,7 @@ def make_app(config: BaseConfig) -> FastAPI:
         redoc_url=None,
         openapi_url=None,
     )
+    app.state.membership_api_authenticator = membership_api_authenticator
     # Added first, so it sits *inside* the observability middleware: a request
     # rejected here still gets a request id, a log line, and a metrics sample.
     # CORS is added after it and therefore stays outside both credential
@@ -557,15 +610,6 @@ def make_app(config: BaseConfig) -> FastAPI:
             return get_caller_identity(request)
         return get_auth_context(request)
 
-    def _self_authenticating(registry_served: bool):
-        # The claim routes (/v1/claims) authenticate every request with a worker's run token, which
-        # the hub's bearer auth would refuse before they could; the registry surface likewise, with
-        # the challenge its clients need. Neither is a map entry, so no operator rule can undo it.
-        def passes(path: str) -> bool:
-            return runs_router.claims_path(path) or (registry_served and registry.registry_path(path))
-
-        return passes
-
     # The same map, readable by a route that honors a `public` entry itself
     # (the Cog catalog's anonymous discovery, issue #85).
     app.state.path_rules = tuple(config.security.paths)
@@ -578,7 +622,15 @@ def make_app(config: BaseConfig) -> FastAPI:
         # itself, with the challenge registry clients need to find its token
         # endpoint; this middleware's refusal would pre-empt it with the Hub
         # API's envelope. Not a map entry, so no operator rule can undo it.
-        self_authenticating=_self_authenticating(cog_registry_serving is not None),
+        #
+        # The claim routes (/v1/claims) authenticate every request with a
+        # worker's run token, and the membership API (issue #270) with an
+        # add-on's service token: its callers have no membership of their own
+        # and would be refused `no_organization` by the people check.
+        self_authenticating=_self_authenticating_paths(
+            registry_serving=cog_registry_serving is not None,
+            membership_api=membership_api_authenticator is not None,
+        ),
         unauthorized_response=_unauthorized_response,
         authenticate_error_response=_authenticate_error_response,
     )
@@ -820,6 +872,11 @@ def make_app(config: BaseConfig) -> FastAPI:
     # Who is calling, and how the collab-hub CLI signs in. /auth/cli is public:
     # the hardened map lists it, since a client asks it before it holds a token.
     app.include_router(identity.router, prefix="/v1")
+    if membership_api_authenticator is not None:
+        # Organization membership for add-on services (issue #270). Absent
+        # unless a deployment names the add-ons allowed to read it.
+        membership.register_exception_handlers(app)
+        app.include_router(membership.router, prefix="/v1")
 
     if config.web.enabled:
         # The browser surface (issue #88): session sign-in and the page

@@ -523,6 +523,20 @@ frames:
       # this mapping is looked up instead, which needs group-read authority.
       # Example: {"/llm": "fcd9e0f8-d05e-4e13-ae25-97846cfade17"}
       groupIds: {}
+  membershipApi:
+    # -- Client ids of the add-on services (for example usage control and a
+    # subscription manager) allowed to read organization membership through
+    # GET /v1/membership/... (docs/membership-api.md). Empty, the default,
+    # mounts nothing. Each add-on signs in with its own client-credentials
+    # client; a token is accepted only when its azp is listed here AND it
+    # carries the same id in Keycloak's client_id claim, so a person signing in
+    # through an add-on's client is refused. Requires frames.auth.orgSource
+    # membership or single, and frames.auth.bearer.jwksUrl.
+    clientIds: []
+    # -- Audience a service token must carry. Empty skips the audience check;
+    # set it (with an audience mapper on each add-on client) so a token minted
+    # for some other resource server is not accepted here.
+    audience: ""
   storage:
     # -- Frame content backend used by the API: local or s3.
     backend: local

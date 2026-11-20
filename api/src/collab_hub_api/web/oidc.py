@@ -29,7 +29,7 @@ from urllib.parse import urlencode, urlsplit
 
 import httpx
 
-from ..frames.auth import TokenDecodeError, decode_verified_jwt
+from ..frames.auth import ACCEPTED_JWT_ALGORITHMS, TokenDecodeError, decode_verified_jwt
 
 AUTHORIZE_ENDPOINT = "/protocol/openid-connect/auth"
 TOKEN_ENDPOINT = "/protocol/openid-connect/token"
@@ -432,8 +432,10 @@ def verify_logout_token(
     token goes through (``frames.auth.decode_verified_jwt``: the realm's JWKS,
     its caching and rotation, ``iss``, ``aud``, and ``exp`` when present):
 
-    * the header's ``alg`` must be ``RS256``, the realm's signing algorithm,
-      checked before the shared verifier, which would also take ``ES256``;
+    * the header's ``alg`` must be one of
+      :data:`~..frames.auth.ACCEPTED_JWT_ALGORITHMS`, the same set the ID token
+      is verified with (one constant, so the two cannot drift), checked first
+      so the refusal names the reason;
     * ``aud`` **is this client**, as for the ID token: a logout token Keycloak
       minted for the Billing page's client must not end anything here;
     * ``iat`` is required, and no older than
@@ -456,8 +458,8 @@ def verify_logout_token(
         header = jwt.get_unverified_header(logout_token)
     except Exception as exc:
         raise OidcFlowError("logout token is not a JWT") from exc
-    if header.get("alg") != "RS256":
-        raise OidcFlowError("logout token is not signed with RS256")
+    if header.get("alg") not in ACCEPTED_JWT_ALGORITHMS:
+        raise OidcFlowError("logout token is not signed with an accepted algorithm")
     try:
         claims = decode_verified_jwt(logout_token, jwks_url=jwks_url, issuer=issuer, audience=client_id)
     except TokenDecodeError as exc:

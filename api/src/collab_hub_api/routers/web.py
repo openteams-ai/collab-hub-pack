@@ -36,7 +36,7 @@ from ..web.authz import (
     WebForbidden,
     WebSessionUndecidable,
     get_web_session,
-    require_csrf,
+    require_signout_csrf,
     require_web_session,
     signin_redirect_target,
 )
@@ -400,6 +400,12 @@ def make_router(
 
     router = APIRouter(include_in_schema=False, dependencies=[Depends(require_web_session)])
     public_router = APIRouter(include_in_schema=False)
+    # Log out alone: its session is read without the ended-session lookup
+    # (``require_signout_session``, through ``require_signout_csrf``), so it
+    # cannot sit under the gated router's ``require_web_session``. Not public:
+    # the guard still requires a cookie that verifies at this path, and the
+    # route lint accepts the signout dependencies at SIGNOUT_PATH only.
+    signout_router = APIRouter(include_in_schema=False)
 
     def _failed_sign_in(request: Request, reason: str) -> Response:
         # One fixed page for every way a sign-in can fail. The reason goes to
@@ -717,8 +723,8 @@ def make_router(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
         return _redirect(target)
 
-    @router.post(SIGNOUT_PATH)
-    async def signout(request: Request, session: WebSession = Depends(require_csrf)) -> Response:
+    @signout_router.post(SIGNOUT_PATH)
+    async def signout(request: Request, session: WebSession = Depends(require_signout_csrf)) -> Response:
         """End the session on this browser, and the realm session behind it.
 
         The session's ``sid`` is recorded as ended first, on every replica
@@ -731,11 +737,17 @@ def make_router(
         deleted and the browser still goes to the realm, but a copy of the
         cookie made before this moment keeps working until it expires.
 
+        The session is read without asking whether it has already ended
+        (``require_signout_csrf``): ending it again is harmless, and with that
+        lookup a down store answered Log out with a 503 that kept the cookie
+        and never reached the realm. The CSRF token is checked as on every
+        POST.
+
         Deleting the cookie alone left the realm session alive, so the next
         "Log in" came straight back without a password and sign-out looked
         broken (#335). The browser is therefore sent on to the realm's logout,
         which returns it to the signed-out page. ``next`` rides the query
-        string, not the form, so the body is read once, by ``require_csrf``,
+        string, not the form, so the body is read once, by its CSRF check,
         under its bound. A caller that asks for JSON (the admin panel's
         ``fetch``, which cannot follow anyone to the realm) is told the URL
         and navigates there itself.
@@ -762,7 +774,7 @@ def make_router(
         """Keycloak, server to server, when a realm session ends (Back-Channel Logout 1.0).
 
         Wherever the realm session ended — this surface's Log out, the Billing
-        page's, an admin in Keycloak — its ``sid`` is recorded as
+        page's, an admin ending that session in Keycloak — its ``sid`` is recorded as
         ended, and every web session cookie minted for it stops working on
         every replica (openteams-ai/subscription-manager-pack#79).
 
@@ -780,7 +792,9 @@ def make_router(
         """
 
         def refused(reason: str, *, body_consumed: bool = True) -> Response:
-            logger.warning("web_backchannel_logout_refused", extra={"reason": reason})
+            # INFO, not WARNING: the endpoint is public, so anyone can make
+            # this line; a refusal is an answer, not a fault of this server.
+            logger.info("web_backchannel_logout_refused", extra={"reason": reason})
             return Response(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 headers={"Cache-Control": "no-store", **connection_close_headers(body_consumed=body_consumed)},
@@ -926,6 +940,7 @@ def make_router(
 
     # The public routes first: FastAPI matches in registration order, and the
     # session-gated router must never shadow the route that mints a session.
+    public_router.include_router(signout_router)
     public_router.include_router(router)
     return public_router
 

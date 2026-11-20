@@ -14,9 +14,10 @@ realm's JWKS.
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import pathlib
-import re
 import sys
 import time
 import uuid
@@ -190,6 +191,7 @@ async def test_a_backchannel_logout_signs_the_session_out_everywhere_it_is_read(
     client = await signed_in_client(app, idp)
     try:
         assert_home_page_signed_in(await client.get("/web/home"))
+        csrf = await rendered_csrf(client)
         response = await backchannel(web_client_without_cookies(app), logout_token(idp))
         assert response.status_code == 200
         assert "no-store" in response.headers["cache-control"]
@@ -199,11 +201,17 @@ async def test_a_backchannel_logout_signs_the_session_out_everywhere_it_is_read(
         # get_web_session: a public page that reads the session sees none.
         assert_home_page_signed_out(await client.get("/web/home"))
         # require_web_session's form-POST callers: no session to check a token against.
-        assert_signed_out_on_a_guarded_page(await client.post("/web/signout", data={"csrf_token": "x"}))
+        assert_signed_out_on_a_guarded_page(await client.post("/web/org/invitations/revoke", data={"csrf_token": csrf}))
         # The admin panel's JSON API refuses it the way it refuses no session.
         api = await client.get("/admin/api/session")
         assert api.status_code == 401
         assert api.json() == {"error": "authentication required"}
+        # Log out alone skips the lookup: ending an ended session again is
+        # harmless, and it still clears the cookie and goes to the realm.
+        signout = await client.post("/web/signout", data={"csrf_token": csrf})
+        assert signout.status_code == 200
+        assert "/protocol/openid-connect/logout" in signout.text
+        assert SESSION_COOKIE not in client.cookies
     finally:
         await client.__aexit__(None, None, None)
 
@@ -381,9 +389,82 @@ async def test_an_invalid_logout_token_is_a_400_that_ends_nothing(tmp_path, idp,
         await client.__aexit__(None, None, None)
     refusals = [r for r in caplog.records if r.getMessage() == "web_backchannel_logout_refused"]
     assert len(refusals) == 1
+    # INFO: the endpoint is public, so anyone can produce this line.
+    assert refusals[0].levelno == logging.INFO
     # A fixed reason, never anything from the token.
     assert token not in caplog.text
     assert idp.sid not in caplog.text
+
+
+def _token_with_alg(alg: str) -> str:
+    def part(value: dict) -> str:
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+
+    return f"{part({'alg': alg, 'typ': 'JWT'})}.{part({})}.sig"
+
+
+def test_the_logout_token_and_the_id_token_share_one_algorithm_policy(monkeypatch):
+    """One constant decides both, so they cannot drift: the logout token's
+    header check and the shared verifier (the ID token's) both read
+    ``ACCEPTED_JWT_ALGORITHMS``."""
+
+    from collab_hub_api.frames import auth
+
+    seen = []
+
+    def fake_decode(token, key, algorithms, **kwargs):
+        seen.append(tuple(algorithms))
+        raise jwt.InvalidTokenError("stop here")
+
+    class _Client:
+        def get_signing_key_from_jwt(self, token):
+            return type("Key", (), {"key": "k"})()
+
+    monkeypatch.setattr(auth, "_get_jwks_client", lambda url: _Client())
+    monkeypatch.setattr(jwt, "decode", fake_decode)
+    for alg in ("ES384", "PS256", "HS256", "none"):
+        assert alg not in auth.ACCEPTED_JWT_ALGORITHMS
+        with pytest.raises(oidc.OidcFlowError, match="not signed with an accepted algorithm"):
+            oidc.verify_logout_token(_token_with_alg(alg), jwks_url="https://k", issuer="i", client_id="c")
+    assert seen == []
+    for alg in auth.ACCEPTED_JWT_ALGORITHMS:
+        with pytest.raises(oidc.OidcFlowError, match="failed verification"):
+            oidc.verify_logout_token(_token_with_alg(alg), jwks_url="https://k", issuer="i", client_id="c")
+    assert seen == [auth.ACCEPTED_JWT_ALGORITHMS] * len(auth.ACCEPTED_JWT_ALGORITHMS)
+
+
+async def test_a_logout_token_signed_with_es256_is_accepted(tmp_path, idp):
+    """The ID token is accepted signed with ES256 as well as RS256, so the
+    logout token is too: a realm whose active key is EC must not leave every
+    back-channel call refused."""
+
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from jwt.algorithms import ECAlgorithm
+
+    ec_key = ec.generate_private_key(ec.SECP256R1())
+    jwk = ECAlgorithm.to_jwk(ec_key.public_key(), as_dict=True)
+    idp.extra_jwks.append({**jwk, "kid": "web-key-ec", "use": "sig", "alg": "ES256"})
+    app = make_web_app(tmp_path, idp)
+    client = await signed_in_client(app, idp)
+    try:
+        now = int(time.time())
+        claims = {
+            "iss": idp.issuer,
+            "aud": WEB_CLIENT_ID,
+            "iat": now,
+            "exp": now + 300,
+            "jti": str(uuid.uuid4()),
+            "sub": idp.sub,
+            "sid": idp.sid,
+            "typ": "Logout",
+            "events": {BACKCHANNEL_EVENT: {}},
+        }
+        token = jwt.encode(claims, ec_key, algorithm="ES256", headers={"kid": "web-key-ec"})
+        async with web_client(app) as keycloak:
+            assert (await backchannel(keycloak, token)).status_code == 200
+        assert_signed_out_on_a_guarded_page(await client.get("/web"))
+    finally:
+        await client.__aexit__(None, None, None)
 
 
 async def test_the_audience_is_checked_against_the_client_not_merely_the_realm(tmp_path, idp):
@@ -544,6 +625,70 @@ async def test_the_hubs_log_out_still_reaches_the_realm_when_the_store_fails(tmp
     assert any(r.getMessage() == "web_signout_end_session_failed" for r in caplog.records)
 
 
+async def test_log_out_works_while_the_store_can_neither_answer_nor_record(tmp_path, idp, caplog):
+    """Both store methods raise (the database is down): Log out still clears the
+    cookie and sends the browser to the realm's end-session endpoint.
+
+    The test above stubs ``has_ended`` to answer, so it never reached the
+    liveness lookup that used to turn this into a 503 that kept the cookie.
+    """
+
+    app = make_web_app(tmp_path, idp)
+    client = await signed_in_client(app, idp)
+    csrf = await rendered_csrf(client)
+
+    class _Down:
+        def end(self, sid):
+            raise RuntimeError("database down")
+
+        def has_ended(self, sid):
+            raise RuntimeError("database down")
+
+    object.__setattr__(app.state.web_surface, "ended_sessions", _Down())
+    caplog.set_level(logging.ERROR, logger="frames_server.web")
+    try:
+        assert (await client.get("/web")).status_code == 503  # pages still refuse
+        response = await client.post("/web/signout", data={"csrf_token": csrf})
+        assert response.status_code == 200
+        assert f"{idp.issuer}/protocol/openid-connect/logout" in response.text
+        cleared = [h for h in response.headers.get_list("set-cookie") if h.startswith(f"{SESSION_COOKIE}=")]
+        assert cleared and "Max-Age=0" in cleared[0]
+        assert SESSION_COOKIE not in client.cookies
+    finally:
+        await client.__aexit__(None, None, None)
+    assert any(r.getMessage() == "web_signout_end_session_failed" for r in caplog.records)
+
+
+async def test_log_out_still_checks_the_csrf_token_while_the_store_is_down(tmp_path, idp):
+    app = make_web_app(tmp_path, idp)
+    client = await signed_in_client(app, idp)
+
+    class _Down:
+        def end(self, sid):
+            raise AssertionError("a forged Log out must end nothing")
+
+        def has_ended(self, sid):
+            raise RuntimeError("database down")
+
+    object.__setattr__(app.state.web_surface, "ended_sessions", _Down())
+    try:
+        response = await client.post("/web/signout", data={"csrf_token": "forged"})
+        assert response.status_code == 403
+        assert SESSION_COOKIE in client.cookies
+    finally:
+        await client.__aexit__(None, None, None)
+
+
+async def test_log_out_without_a_valid_cookie_is_still_sent_to_sign_in(tmp_path, idp):
+    """Skipping the liveness lookup does not admit a cookie that does not verify."""
+
+    app = make_web_app(tmp_path, idp)
+    async with web_client(app) as client:
+        client.cookies.set(SESSION_COOKIE, "not-a-session", domain="web.test", path="/")
+        response = await client.post("/web/signout", data={"csrf_token": "x"})
+    assert_signed_out_on_a_guarded_page(response)
+
+
 async def test_a_store_that_cannot_record_the_logout_answers_400(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
 
@@ -610,26 +755,140 @@ def test_the_in_memory_store_keeps_the_first_ended_at():
     assert not store.has_ended("sid")
 
 
+# --- startup: the store the surface gets, and the schema behind it -----------
+
+
+def test_an_in_memory_store_is_announced_at_startup(tmp_path, idp, caplog):
+    caplog.set_level(logging.WARNING, logger="frames_server.web")
+    app = make_web_app(tmp_path, idp)
+    assert isinstance(app.state.web_surface.ended_sessions, InMemoryEndedWebSessions)
+    warnings = [r for r in caplog.records if r.getMessage() == "web_ended_sessions_in_memory"]
+    assert len(warnings) == 1
+    assert warnings[0].levelno == logging.WARNING
+
+
+def test_a_postgres_store_is_not_announced(tmp_path, idp, caplog):
+    from collab_hub_api.config import build_ended_web_sessions
+
+    class _Pools:
+        def database(self, url):
+            return object()
+
+    values = web_values(tmp_path, idp)
+    values["frames"]["postgres"] = {"url": "postgresql://unused@127.0.0.1:1/unused"}
+    caplog.set_level(logging.WARNING, logger="frames_server.web")
+    store = build_ended_web_sessions(Config.parse(values), _Pools())
+    assert isinstance(store, PostgresEndedWebSessions)
+    assert not [r for r in caplog.records if r.getMessage() == "web_ended_sessions_in_memory"]
+
+
+def test_the_web_surface_runs_the_collab_schema_preflight(tmp_path, idp, monkeypatch):
+    """Claims mode, so membership does not run it: the web surface alone must."""
+
+    from collab_hub_api import core
+
+    calls = []
+    monkeypatch.setattr(core, "preflight_collab_schema", lambda config, pools: calls.append(config))
+    make_web_app(tmp_path, idp)
+    assert len(calls) == 1
+
+
 # --- a single place decides --------------------------------------------------
+
+
+def _session_cookie_reads(src: pathlib.Path) -> dict[str, set[tuple[str, str]]]:
+    """Every place under *src* that reads or decodes the session cookie, as
+    ``(file, enclosing function)``, by kind. Found in the syntax tree, so a
+    call split across lines or a different receiver name is still found."""
+
+    import ast
+
+    found: dict[str, set[tuple[str, str]]] = {
+        "decode_session": set(),
+        "decode(SESSION_PURPOSE)": set(),
+        "SESSION_PURPOSE": set(),
+        "cookie": set(),
+    }
+
+    def names_session(node) -> bool:
+        return (isinstance(node, ast.Name) and node.id in {"SESSION_PURPOSE", "SESSION_COOKIE"}) or (
+            isinstance(node, ast.Attribute) and node.attr in {"SESSION_PURPOSE", "SESSION_COOKIE"}
+        )
+
+    for path in src.rglob("*.py"):
+        rel = str(path.relative_to(src))
+        tree = ast.parse(path.read_text())
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+        def where(node, rel=rel, parents=parents):
+            while node in parents:
+                node = parents[node]
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return (rel, node.name)
+            return (rel, "<module>")
+
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Name) and node.id == "SESSION_PURPOSE") or (
+                isinstance(node, ast.Attribute) and node.attr == "SESSION_PURPOSE"
+            ):
+                found["SESSION_PURPOSE"].add(where(node))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr == "decode_session":
+                    found["decode_session"].add(where(node))
+                if node.func.attr == "decode" and any(names_session(arg) for arg in node.args):
+                    found["decode(SESSION_PURPOSE)"].add(where(node))
+                receiver = node.func.value
+                if (
+                    node.func.attr == "get"
+                    and isinstance(receiver, ast.Attribute)
+                    and receiver.attr == "cookies"
+                    and node.args
+                    and names_session(node.args[0])
+                ):
+                    found["cookie"].add(where(node))
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "cookies"
+                and names_session(node.slice)
+            ):
+                found["cookie"].add(where(node))
+    return found
 
 
 def test_only_get_web_session_decodes_the_session_cookie():
     """The ended-session check lives in ``get_web_session``. A second reader that
-    decoded the cookie itself would accept an ended session, so there is none."""
+    decoded the cookie itself would accept an ended session, so there is one
+    other, by name: Log out's ``signed_session_for_signout``, which skips the
+    lookup on purpose (ending an ended session is harmless, and Log out must
+    work while the store is down). A direct ``codec.decode(SESSION_PURPOSE, ...)``
+    is a decode too, and is found as one."""
 
     src = pathlib.Path(__file__).parent.parent / "src" / "collab_hub_api"
-    readers = sorted(
-        str(path.relative_to(src))
-        for path in src.rglob("*.py")
-        if re.search(r"\.decode_session\(", path.read_text()) and path.name != "session.py"
+    found = _session_cookie_reads(src)
+    readers = {("web/authz.py", "get_web_session"), ("web/authz.py", "signed_session_for_signout")}
+    assert found["decode_session"] == readers
+    assert found["cookie"] == readers
+    # The raw decode under the session purpose happens inside the codec only.
+    assert found["decode(SESSION_PURPOSE)"] == {("web/session.py", "decode_session")}
+    assert {file for file, _ in found["SESSION_PURPOSE"]} == {"web/session.py"}
+
+
+def test_the_cookie_read_finder_finds_a_direct_decode(tmp_path):
+    """The finder above is not vacuous: a raw decode under the session purpose,
+    and a cookie read, outside the allowed functions are both reported."""
+
+    (tmp_path / "web").mkdir()
+    (tmp_path / "web" / "rogue.py").write_text(
+        "from .session import SESSION_COOKIE, SESSION_PURPOSE\n"
+        "def page(request, codec):\n"
+        "    value = request.cookies.get(SESSION_COOKIE)\n"
+        "    return codec.decode(\n        SESSION_PURPOSE, value\n    )\n"
     )
-    assert readers == ["web/authz.py"]
-    cookie_readers = sorted(
-        str(path.relative_to(src))
-        for path in src.rglob("*.py")
-        if re.search(r"cookies(\.get\(|\[)SESSION_COOKIE", path.read_text())
-    )
-    assert cookie_readers == ["web/authz.py"]
+    found = _session_cookie_reads(tmp_path)
+    assert ("web/rogue.py", "page") in found["decode(SESSION_PURPOSE)"]
+    assert ("web/rogue.py", "page") in found["cookie"]
+    assert ("web/rogue.py", "page") in found["SESSION_PURPOSE"]
 
 
 # --- live Postgres: every replica sees a logout ------------------------------
@@ -695,6 +954,22 @@ def test_live_end_prunes_rows_older_than_the_lifetime(live_db):
     assert not store.has_ended("stale")
     assert store.has_ended("recent")
     assert store.has_ended("fresh")
+
+
+@live_postgres
+def test_live_a_web_surface_behind_on_the_schema_refuses_to_start(tmp_path, idp, live_db):
+    """autoMigrate off, and the database not migrated to version 18: the pod
+    fails its rollout instead of answering every sign-in with a 503."""
+
+    from test_collab_schema import COLLAB_TABLES
+
+    with live_db.connection() as conn:
+        for table in COLLAB_TABLES:
+            conn.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
+    values = web_values(tmp_path, idp)
+    values["frames"]["postgres"] = {"url": POSTGRES_URL, "auto_migrate": False}
+    with pytest.raises(RuntimeError, match="collab_"):
+        make_app(Config.parse(values))
 
 
 @pytest_asyncio.fixture

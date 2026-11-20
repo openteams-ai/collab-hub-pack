@@ -3,7 +3,7 @@
 The session cookie is stateless (``web.session``): any replica verifies it
 with the shared secret and nothing else. That left one thing the Hub could not
 do — end a session before its ``exp``. Logging out anywhere (the Hub's own Log
-out, the Billing page's, an admin in Keycloak) ends the **realm** session, and
+out, the Billing page's, an admin ending that session in Keycloak) ends the **realm** session, and
 Keycloak tells every client that took part in it through OpenID Back-Channel
 Logout, naming the realm session's ``sid`` (``POST
 /web/oidc/backchannel-logout``, ``routers.web``). The cookie carries the

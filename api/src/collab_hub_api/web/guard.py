@@ -49,9 +49,9 @@ from starlette.routing import get_route_path
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..frames.observability import REQUEST_COUNT, UNMATCHED_PATH_LABEL, access_logger
-from .authz import get_web_session, on_web_surface, signin_redirect_target
+from .authz import get_web_session, on_web_surface, signed_session_for_signout, signin_redirect_target
 from .pages import SECURITY_HEADERS, authorization_unavailable_page, page_response
-from .surface import PUBLIC_WEB_PATHS, WEB_SURFACE_PREFIXES, answers_json
+from .surface import PUBLIC_WEB_PATHS, SIGNOUT_PATH, WEB_SURFACE_PREFIXES, answers_json
 
 logger = logging.getLogger("frames_server.web")
 
@@ -139,6 +139,11 @@ async def _session_or_none(scope: Scope, path: str):
     into outer error handling as a 500 that renders no page of this surface.
     Both are refusals; only one matches what the docs promise, and only one is
     certain to carry no internals.
+
+    Log out (:data:`~.surface.SIGNOUT_PATH`, that exact path) is the one
+    exception: it needs a cookie whose signature checks out and nothing more
+    (:func:`~.authz.signed_session_for_signout`), so a down ended-session store
+    cannot stop anyone logging out. Its CSRF check still runs at the route.
     """
 
     surface = getattr(getattr(scope.get("app"), "state", None), "web_surface", None)
@@ -146,6 +151,8 @@ async def _session_or_none(scope: Scope, path: str):
         logger.error("web_guard_surface_unavailable", extra={"path": path})
         return _UNAVAILABLE
     try:
+        if path == SIGNOUT_PATH:
+            return signed_session_for_signout(Request(scope))
         return await get_web_session(Request(scope))
     except Exception:
         # decode_session answers None for every malformed cookie, so reaching

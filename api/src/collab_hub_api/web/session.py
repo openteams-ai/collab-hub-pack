@@ -14,7 +14,7 @@ Design decisions, stated once:
 * **Ended with the realm session.** The payload carries ``sid``, the Keycloak
   (realm) session the sign-in belonged to, taken from the verified ID token;
   sign-in refuses a token without one. When that realm session ends, wherever
-  it ends (this surface's Log out, the Billing page's, an admin in Keycloak),
+  it ends (this surface's Log out, the Billing page's, an admin ending that session in Keycloak),
   Keycloak's back-channel logout names the ``sid`` and the surface records it
   in ``web.ended_sessions``, which every replica reads. A cookie whose ``sid``
   has ended is no session at all, copies captured before the logout included

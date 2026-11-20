@@ -31,7 +31,7 @@ from ..frames.orgs import ROLE_OWNER, OrgStore, OrgsUnavailableError
 from ..path_protection import request_path
 from .forms import FORM_CONTENT_TYPE, MULTIPART_CONTENT_TYPE, form_fields, media_type
 from .session import SESSION_COOKIE, WebSession, csrf_token_matches
-from .surface import SIGNIN_PATH, WebSurface
+from .surface import SIGNIN_PATH, SIGNOUT_PATH, WebSurface
 
 logger = logging.getLogger("frames_server.web")
 
@@ -126,9 +126,11 @@ async def get_web_session(request: Request) -> WebSession | None:
     Every reader of the session cookie comes through here: the session guard
     (``web.guard``), ``require_web_session`` and the role dependencies built
     on it, and the pages that render for anyone but read a session when there
-    is one (the home page, sign-in's shortcut, the acceptance page). A new
-    reader that decodes the cookie itself would accept an ended session; the
-    test that greps for ``decode_session`` callers is there to say so.
+    is one (the home page, sign-in's shortcut, the acceptance page). Log out
+    alone reads it through :func:`signed_session_for_signout` instead, so it
+    works while this lookup cannot be made. A new reader that decodes the
+    cookie itself would accept an ended session; the test that finds every
+    decode of the session cookie is there to say so.
 
     Async because the lookup may be a database read: it runs on a worker
     thread, so the event loop never waits on it. A lookup that fails raises —
@@ -156,6 +158,37 @@ async def _has_ended(surface: WebSurface, sid: str) -> bool:
         return await run_in_threadpool(surface.ended_sessions.has_ended, sid)
     except Exception as exc:
         raise WebSessionUndecidable(f"the ended-session lookup failed: {type(exc).__name__}") from exc
+
+
+def signed_session_for_signout(request: Request) -> WebSession | None:
+    """The session cookie, verified, **without** asking whether it ended. Log out only.
+
+    Signature, purpose and expiry are checked exactly as for every reader; the
+    ended-session lookup is not made. Ending a session that has already ended
+    (or whose state cannot be looked up) is always safe, and Log out must keep
+    working while the ended-session store is down: with the lookup, a broken
+    database answered Log out with a 503, left the cookie in place and never
+    sent the browser to the realm.
+
+    The second, and last, reader of the cookie besides :func:`get_web_session`.
+    Its callers are the session guard for :data:`~.surface.SIGNOUT_PATH` alone
+    and :func:`require_signout_session`; the test that finds every decode of
+    the session cookie names both functions and nothing else.
+    """
+
+    value = request.cookies.get(SESSION_COOKIE)
+    if not value:
+        return None
+    return _surface(request).codec.decode_session(value)
+
+
+async def require_signout_session(request: Request) -> WebSession:
+    """Dependency: :func:`require_web_session` for Log out, without the liveness lookup."""
+
+    session = signed_session_for_signout(request)
+    if session is None:
+        raise WebAuthRequired(_next_path(request))
+    return session
 
 
 def _next_path(request: Request) -> str:
@@ -227,15 +260,27 @@ def route_runs_dependency(route: object, target: object) -> bool:
 
 
 def route_enforces_session(route: object) -> bool:
-    """Whether *route* runs :func:`require_web_session` before its endpoint."""
+    """Whether *route* runs :func:`require_web_session` before its endpoint.
 
-    return route_runs_dependency(route, require_web_session)
+    Log out's :func:`require_signout_session` counts at :data:`~.surface.SIGNOUT_PATH`
+    and nowhere else.
+    """
+
+    if route_runs_dependency(route, require_web_session):
+        return True
+    return getattr(route, "path", None) == SIGNOUT_PATH and route_runs_dependency(route, require_signout_session)
 
 
 def route_enforces_csrf(route: object) -> bool:
-    """Whether *route* runs :func:`require_csrf` before its endpoint."""
+    """Whether *route* runs :func:`require_csrf` before its endpoint.
 
-    return route_runs_dependency(route, require_csrf)
+    Log out's :func:`require_signout_csrf` counts at :data:`~.surface.SIGNOUT_PATH`
+    and nowhere else.
+    """
+
+    if route_runs_dependency(route, require_csrf):
+        return True
+    return getattr(route, "path", None) == SIGNOUT_PATH and route_runs_dependency(route, require_signout_csrf)
 
 
 UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -708,6 +753,12 @@ async def require_csrf(request: Request, session: WebSession = Depends(require_w
     nothing about its token.
     """
 
+    return await _csrf_checked(request, session)
+
+
+async def _csrf_checked(request: Request, session: WebSession) -> WebSession:
+    """The CSRF comparison :func:`require_csrf` and :func:`require_signout_csrf` share."""
+
     presented = request.headers.get("x-csrf-token", "")
     if not presented:
         if media_type(request) in (FORM_CONTENT_TYPE, MULTIPART_CONTENT_TYPE):
@@ -721,6 +772,16 @@ async def require_csrf(request: Request, session: WebSession = Depends(require_w
     if not csrf_token_matches(session, presented):
         raise WebForbidden(f"missing or invalid CSRF token for user {session.user!r}")
     return session
+
+
+async def require_signout_csrf(request: Request, session: WebSession = Depends(require_signout_session)) -> WebSession:
+    """Dependency: :func:`require_csrf` for Log out, on :func:`require_signout_session`.
+
+    The token check is the same one, against the same session's secret; only
+    the session it is checked against skips the ended-session lookup.
+    """
+
+    return await _csrf_checked(request, session)
 
 
 def signin_redirect_target(root_path: str, next_path: str) -> str:

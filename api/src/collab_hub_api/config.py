@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import sys
@@ -1678,6 +1679,16 @@ def build_ended_web_sessions(config: BaseConfig, pools: PostgresPools):
     url = config.frames.postgres.url
     if url:
         return PostgresEndedWebSessions(pools.database(url), lifetime)
+    # A warning, not a refusal: one replica without a database is a real
+    # development setup, and it works. Said at startup because on more than
+    # one replica it does not, and nothing else would say so.
+    logging.getLogger("frames_server.web").warning(
+        "web_ended_sessions_in_memory",
+        extra={
+            "reason": "frames.postgres.url is not set, so a logout reaches only the replica"
+            " that heard it; run one replica, or set frames.postgres.url"
+        },
+    )
     return InMemoryEndedWebSessions(lifetime)
 
 
@@ -2066,8 +2077,9 @@ def preflight_collab_schema(config: BaseConfig, pools: PostgresPools) -> int | N
     tables a version check has nothing to protect, and once something does, the
     alternative to checking is a ``relation does not exist`` traceback from
     whichever authenticated request touched them first. Called by ``make_app``
-    only when membership resolution is on, and only when a shared Postgres URL
-    is configured — with neither, no ``collab_`` table is ever read.
+    when membership resolution is on or the web surface is (its ended sessions
+    are ``collab_`` version 18), and only when a shared Postgres URL is
+    configured — without one, no ``collab_`` table is ever read.
 
     Returns the applied version, ``None`` when the database was unreachable
     (not fatal, see :func:`~.frames.collab_schema.check_collab_schema_version`),

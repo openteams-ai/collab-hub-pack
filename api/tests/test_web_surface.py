@@ -131,13 +131,14 @@ class _StubIdp:
         self.sub = "subject-alice"
         self.sid = "realm-session-1"
         self.minted: list[str] = []
+        self.extra_jwks: list[dict] = []
 
         idp = self
 
         class _Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 if self.path.endswith("/protocol/openid-connect/certs"):
-                    body = json.dumps({"keys": [REALM_KEY_JWK]}).encode()
+                    body = json.dumps({"keys": [REALM_KEY_JWK, *idp.extra_jwks]}).encode()
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(body)))
@@ -1895,22 +1896,32 @@ def test_every_web_route_outside_the_allowlist_requires_a_session(tmp_path, idp)
         if route.path in PUBLIC_WEB_PATHS:
             continue
         checked += 1
-        dependency_calls = [d.call for d in route.dependant.dependencies]
-        assert require_web_session in dependency_calls, (
-            f"{route.path} is not in PUBLIC_WEB_PATHS and does not require a web session"
-        )
+        assert _requires_a_session(route), f"{route.path} is not in PUBLIC_WEB_PATHS and does not require a web session"
     assert checked, "expected at least one session-gated /web route"
+
+
+def _requires_a_session(route) -> bool:
+    """``require_web_session`` as a direct dependency, or, at ``/web/signout`` and
+    nowhere else, Log out's ``require_signout_csrf`` (a verified cookie without
+    the ended-session lookup, so Log out works while that store is down)."""
+
+    from collab_hub_api.web.authz import require_signout_csrf, require_signout_session
+    from collab_hub_api.web.surface import SIGNOUT_PATH
+
+    calls = [d.call for d in route.dependant.dependencies]
+    if require_web_session in calls:
+        return True
+    if route.path != SIGNOUT_PATH or require_signout_csrf not in calls:
+        return False
+    (csrf,) = [d for d in route.dependant.dependencies if d.call is require_signout_csrf]
+    return [d.call for d in csrf.dependencies] == [require_signout_session]
 
 
 def test_the_public_allowlist_is_exactly_what_is_registered_public(tmp_path, idp):
     # The other direction: nothing quietly public that the allowlist does not
     # name, and no stale allowlist entry that no longer exists.
     app = make_web_app(tmp_path, idp)
-    registered_public = {
-        route.path
-        for route in web_routes(app)
-        if require_web_session not in [d.call for d in route.dependant.dependencies]
-    }
+    registered_public = {route.path for route in web_routes(app) if not _requires_a_session(route)}
     assert registered_public == set(PUBLIC_WEB_PATHS)
 
 

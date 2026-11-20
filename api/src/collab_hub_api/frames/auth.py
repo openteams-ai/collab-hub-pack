@@ -691,8 +691,15 @@ def _get_jwks_client(jwks_url: str):
     return client
 
 
+ACCEPTED_JWT_ALGORITHMS = ("RS256", "ES256")
+"""The signing algorithms every realm-signed token is verified with: bearer and
+ID tokens, and the web surface's back-channel logout tokens. One constant so
+the token kinds cannot drift apart. Asymmetric only: ``none`` and the HMAC
+family are refused, so a public key can never be used as a shared secret."""
+
+
 def decode_verified_jwt(token: str, *, jwks_url: str | None, issuer: str | None, audience: str | None) -> dict:
-    """Verify a JWT signature and decode its payload."""
+    """Verify a JWT signature (:data:`ACCEPTED_JWT_ALGORITHMS`) and decode its payload."""
 
     if not jwks_url:
         raise TokenDecodeError("JWT verification is not configured")
@@ -709,7 +716,7 @@ def decode_verified_jwt(token: str, *, jwks_url: str | None, issuer: str | None,
         return jwt.decode(
             token,
             signing_key.key,
-            algorithms=["RS256", "ES256"],
+            algorithms=list(ACCEPTED_JWT_ALGORITHMS),
             audience=audience,
             issuer=issuer,
             options=decode_options,

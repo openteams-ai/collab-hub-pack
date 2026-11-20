@@ -57,6 +57,7 @@ from collab_hub_api.web.authz import (
     verify_web_route_protection,
 )
 from collab_hub_api.web.data_statement import DATA_STATEMENT_CONTACT, DATA_STATEMENT_TEXT
+from collab_hub_api.web.ended_sessions import InMemoryEndedWebSessions
 from collab_hub_api.web.forms import MAX_FORM_BYTES
 from collab_hub_api.web.legal_documents import PLACEHOLDER_NOTICE
 from collab_hub_api.web.privacy_statement import (
@@ -74,6 +75,7 @@ from collab_hub_api.web.session import (
     WebSession,
 )
 from collab_hub_api.web.surface import (
+    BACKCHANNEL_LOGOUT_PATH,
     PRIVACY_PATH,
     PUBLIC_WEB_PATHS,
     TERMS_PATH,
@@ -127,6 +129,7 @@ class _StubIdp:
         self.signing_pem = REALM_KEY_PEM
         self.nonce: str | None = None
         self.sub = "subject-alice"
+        self.sid = "realm-session-1"
         self.minted: list[str] = []
 
         idp = self
@@ -182,6 +185,7 @@ class _StubIdp:
             "azp": WEB_CLIENT_ID,
             "typ": "ID",
             "sub": self.sub,
+            "sid": self.sid,
             "preferred_username": "alice",
             "name": "Alice Example",
             "email": "alice@example.com",
@@ -290,6 +294,7 @@ def test_codec_round_trips_a_session():
         csrf="csrf-token",
         issued_at=now,
         expires_at=now + 60,
+        sid="realm-session-1",
     )
     decoded = codec.decode_session(codec.encode_session(session))
     assert decoded == session
@@ -896,7 +901,15 @@ async def test_a_session_minted_without_an_id_token_still_ends_the_realm_session
     now = int(time.time())
     old_cookie = codec.encode(
         SESSION_PURPOSE,
-        {"sub": "subject-alice", "name": None, "email": None, "csrf": "old-csrf", "iat": now, "exp": now + 600},
+        {
+            "sub": "subject-alice",
+            "sid": "realm-session-1",
+            "name": None,
+            "email": None,
+            "csrf": "old-csrf",
+            "iat": now,
+            "exp": now + 600,
+        },
     )
     async with web_client(app) as client:
         client.cookies.set(SESSION_COOKIE, old_cookie, domain="web.test", path="/")
@@ -1016,6 +1029,7 @@ def test_the_session_cookie_fits_at_every_id_token_size_up_to_the_limit():
             csrf="c" * 43,
             issued_at=now,
             expires_at=now + 60,
+            sid="realm-session-1",
             id_token="t" * length,
         )
         value = codec.encode_session(session)
@@ -1035,7 +1049,7 @@ def test_a_session_id_token_that_is_not_a_nonempty_string_decodes_to_none(idt):
     now = int(time.time())
     value = codec.encode(
         SESSION_PURPOSE,
-        {"sub": "subject-alice", "csrf": "x", "iat": now, "exp": now + 60, "idt": idt},
+        {"sub": "subject-alice", "sid": "realm-session-1", "csrf": "x", "iat": now, "exp": now + 60, "idt": idt},
     )
     decoded = codec.decode_session(value)
     assert decoded is not None
@@ -1064,6 +1078,7 @@ def test_codec_round_trips_a_session_with_its_id_token():
         csrf="csrf-token",
         issued_at=now,
         expires_at=now + 60,
+        sid="realm-session-1",
         id_token="header.payload.signature",
     )
     assert codec.decode_session(codec.encode_session(session)) == session
@@ -1633,7 +1648,15 @@ async def test_the_move_runs_before_the_signed_in_shortcut(tmp_path, idp):
     app = make_web_app(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL})
     now = int(time.time())
     alias_session = SessionCodec(SESSION_SECRET).encode_session(
-        WebSession(user="subject-alice", name=None, email=None, csrf="c", issued_at=now, expires_at=now + 600)
+        WebSession(
+            user="subject-alice",
+            name=None,
+            email=None,
+            csrf="c",
+            issued_at=now,
+            expires_at=now + 600,
+            sid="realm-session-1",
+        )
     )
     async with public_host_client(app, "https://alias.example.com") as client:
         client.cookies.set(SESSION_COOKIE, alias_session, domain="alias.example.com", path="/")
@@ -2215,6 +2238,7 @@ def a_surface(**overrides) -> dict:
         "codec": SessionCodec(SESSION_SECRET),
         "session_lifetime_seconds": 3600,
         "public_base_url": "",
+        "ended_sessions": InMemoryEndedWebSessions(3600),
         **overrides,
     }
 
@@ -2803,6 +2827,10 @@ async def test_the_guard_leaves_the_public_allowlist_reachable(tmp_path, idp):
     async with web_client(app) as client:
         for path in sorted(PUBLIC_WEB_PATHS):
             response = await client.get(path)
+            if path == BACKCHANNEL_LOGOUT_PATH:
+                # Keycloak's server-to-server POST: reached, and not a GET.
+                assert response.status_code == 405, path
+                continue
             assert response.status_code in (200, 303, 400), path
             if response.status_code == 303:
                 # Only the callback bounces, and never back to sign-in.
@@ -3581,17 +3609,21 @@ def test_the_exemption_is_load_bearing_not_a_vacuous_pass(tmp_path, idp):
         verify_web_route_protection(app.routes)
 
 
-def test_signout_is_the_only_state_changing_route_and_it_is_gated(tmp_path, idp):
+def test_signout_and_the_backchannel_logout_are_the_only_state_changing_routes(tmp_path, idp):
     from collab_hub_api.web.authz import route_enforces_csrf, route_unsafe_methods
 
     app = make_web_app(tmp_path, idp)
-    mutating = [
-        route
+    mutating = {
+        route.path: route
         for route in app.routes
         if isinstance(route, APIRoute) and route.path.startswith("/web") and route_unsafe_methods(route)
-    ]
-    assert [route.path for route in mutating] == ["/web/signout"]
-    assert route_enforces_csrf(mutating[0])
+    }
+    assert sorted(mutating) == [BACKCHANNEL_LOGOUT_PATH, "/web/signout"]
+    assert route_enforces_csrf(mutating["/web/signout"])
+    # Keycloak's call carries neither a session nor a CSRF token: the logout
+    # token is its authentication, and all it can do is end a session.
+    assert BACKCHANNEL_LOGOUT_PATH in PUBLIC_WEB_PATHS
+    assert not route_enforces_csrf(mutating[BACKCHANNEL_LOGOUT_PATH])
 
 
 # --- second-reader finding 2: the guard covers three prefixes, the map check one --

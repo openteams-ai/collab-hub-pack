@@ -24,6 +24,7 @@ from urllib.parse import urlencode
 
 from fastapi import Depends, Request
 from fastapi.routing import APIRoute
+from starlette.concurrency import run_in_threadpool
 from starlette.routing import Mount, WebSocketRoute
 
 from ..frames.orgs import ROLE_OWNER, OrgStore, OrgsUnavailableError
@@ -66,6 +67,15 @@ class WebAuthorizationUnavailable(Exception):
     """
 
 
+class WebSessionUndecidable(WebAuthorizationUnavailable):
+    """Whether the session's realm session has ended could not be looked up.
+
+    A subclass of :class:`WebAuthorizationUnavailable` so it renders the same
+    503 page through the same handler: the ended-session store's database is
+    down, and "cannot tell" must never be read as "still signed in".
+    """
+
+
 class WebAuthRequired(Exception):
     """No valid session; the browser should be sent to sign in.
 
@@ -94,17 +104,58 @@ def _surface(request: Request) -> WebSurface:
     return surface
 
 
-def get_web_session(request: Request) -> WebSession | None:
-    """The request's verified web session, or ``None``.
+_SESSION_STATE_KEY = "collab_web_session"
+"""Where :func:`get_web_session` keeps its answer on the request's ``state``.
+
+The guard and the route's ``require_web_session`` both ask on a guarded page;
+the second asks the same question of the same cookie, so it gets the first's
+answer instead of a second lookup. Keyed by the cookie value, so the answer is
+never reused for a different cookie.
+"""
+
+
+async def get_web_session(request: Request) -> WebSession | None:
+    """The request's **live** web session, or ``None``. The one place that decides.
 
     ``None`` for absent, tampered, foreign-purpose, and expired cookies alike
-    — see ``SessionCodec.decode``.
+    — see ``SessionCodec.decode`` — and for a cookie whose realm session has
+    ended (a back-channel logout named its ``sid``, or this surface's own Log
+    out recorded it; ``web.ended_sessions``). An ended session is exactly no
+    session: there is no third answer for a caller to forget to handle.
+
+    Every reader of the session cookie comes through here: the session guard
+    (``web.guard``), ``require_web_session`` and the role dependencies built
+    on it, and the pages that render for anyone but read a session when there
+    is one (the home page, sign-in's shortcut, the acceptance page). A new
+    reader that decodes the cookie itself would accept an ended session; the
+    test that greps for ``decode_session`` callers is there to say so.
+
+    Async because the lookup may be a database read: it runs on a worker
+    thread, so the event loop never waits on it. A lookup that fails raises —
+    "cannot tell whether this session ended" is never read as "it did not".
     """
 
     value = request.cookies.get(SESSION_COOKIE)
     if not value:
         return None
-    return _surface(request).codec.decode_session(value)
+    state = request.scope.setdefault("state", {})
+    remembered = state.get(_SESSION_STATE_KEY)
+    if remembered is not None and remembered[0] == value:
+        return remembered[1]
+    surface = _surface(request)
+    session = surface.codec.decode_session(value)
+    if session is not None and await _has_ended(surface, session.sid):
+        logger.info("web_session_ended_refused", extra={"user": session.user})
+        session = None
+    state[_SESSION_STATE_KEY] = (value, session)
+    return session
+
+
+async def _has_ended(surface: WebSurface, sid: str) -> bool:
+    try:
+        return await run_in_threadpool(surface.ended_sessions.has_ended, sid)
+    except Exception as exc:
+        raise WebSessionUndecidable(f"the ended-session lookup failed: {type(exc).__name__}") from exc
 
 
 def _next_path(request: Request) -> str:
@@ -115,10 +166,10 @@ def _next_path(request: Request) -> str:
     return path
 
 
-def require_web_session(request: Request) -> WebSession:
-    """Dependency: a valid web session, or a redirect through sign-in."""
+async def require_web_session(request: Request) -> WebSession:
+    """Dependency: a live web session, or a redirect through sign-in."""
 
-    session = get_web_session(request)
+    session = await get_web_session(request)
     if session is None:
         raise WebAuthRequired(_next_path(request))
     return session

@@ -26,6 +26,7 @@ from .config import (
     build_cog_publish_store,
     build_cog_registry_serving,
     build_connector_store,
+    build_ended_web_sessions,
     build_frames_store,
     build_group_store,
     build_history_store,
@@ -883,7 +884,7 @@ def make_app(config: BaseConfig) -> FastAPI:
         # scaffolding the invitation pages build on. Its routes authenticate
         # themselves with the web session cookie — the protection map must
         # leave /web public, which the precondition check above enforced.
-        web_surface = build_web_surface(config)
+        web_surface = build_web_surface(config, ended_sessions=build_ended_web_sessions(config, postgres_pools))
         app.state.web_surface = web_surface
         web.register_exception_handlers(app)
         # The invitation-acceptance page (issue #90) rides on that surface as

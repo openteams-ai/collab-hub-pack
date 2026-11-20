@@ -28,6 +28,7 @@ from ..frames.org_source import (
     org_source_resolves_membership,
 )
 from ..path_protection import resolve_access
+from .ended_sessions import EndedWebSessions, InMemoryEndedWebSessions
 from .oidc import invalid_realm_url_reason, realm_endpoints, realm_logout_endpoint
 from .oidc import logout_url as oidc_logout_url
 from .session import SessionCodec, WebSession
@@ -40,6 +41,14 @@ that realm once should not have to name it twice."""
 LANDING_PATH = "/web"
 SIGNIN_PATH = "/web/signin"
 CALLBACK_PATH = "/web/oidc/callback"
+BACKCHANNEL_LOGOUT_PATH = "/web/oidc/backchannel-logout"
+"""Where Keycloak tells the Hub a realm session ended (OpenID Back-Channel Logout 1.0).
+
+Called server to server, by the realm, never by a browser: it holds no session
+and no CSRF token, so it is in :data:`PUBLIC_WEB_PATHS`, and the logout token
+it carries is its whole authentication (``web.oidc.verify_logout_token``).
+Registered on the ``collab-web`` client as ``backchannel.logout.url``
+(openteams-ai/subscription-manager-pack#79)."""
 SIGNOUT_PATH = "/web/signout"
 SIGNED_OUT_PATH = "/web/signed-out"
 
@@ -387,6 +396,7 @@ PUBLIC_WEB_PATHS = frozenset(
     {
         SIGNIN_PATH,
         CALLBACK_PATH,
+        BACKCHANNEL_LOGOUT_PATH,
         SIGNED_OUT_PATH,
         STYLE_ASSET_PATH,
         WEB_LOGO_PATH,
@@ -404,7 +414,11 @@ PUBLIC_WEB_PATHS = frozenset(
 
 Each earns it: sign-in and the callback are how a session comes into
 existence, the signed-out confirmation is shown to a browser that no longer
-has one, and the stylesheet is a startup constant containing nothing. Every
+has one, and the stylesheet is a startup constant containing nothing.
+:data:`BACKCHANNEL_LOGOUT_PATH` is the one ``POST`` here: its caller is
+Keycloak, server to server, which holds no session and no CSRF token, and
+what authenticates it is the realm-signed logout token in its body, verified
+as strictly as an ID token. All it can do is end a session. Every
 other route under a guarded prefix — including every route a later issue
 adds — inherits the router's session dependency and is authenticated by
 default. Enforced twice on purpose: by the router default, and by a test that
@@ -552,6 +566,11 @@ class WebSurface:
     codec: SessionCodec
     session_lifetime_seconds: int
     public_base_url: str
+    ended_sessions: EndedWebSessions
+    """Realm sessions that have ended (``web.ended_sessions``).
+
+    Required, with no default: a surface that could be built without one would
+    accept every ended session, and nothing would say so."""
     account_page_url: str = ""
     """The external account page the signed-in navigation links to; empty = no link."""
     desktop_download_url: str = ""
@@ -569,9 +588,9 @@ class WebSurface:
         if self.session_lifetime_seconds > WEB_SESSION_LIFETIME_CEILING_SECONDS:
             raise ValueError(
                 f"web session lifetime {self.session_lifetime_seconds}s exceeds the"
-                f" {WEB_SESSION_LIFETIME_CEILING_SECONDS}s ceiling: the session cookie is"
-                " stateless and cannot be revoked before it expires, so this bound is the"
-                " documented exposure window and may be lowered, never raised"
+                f" {WEB_SESSION_LIFETIME_CEILING_SECONDS}s ceiling: a session cookie whose"
+                " realm session never ends keeps verifying until it expires, so this bound"
+                " is the documented exposure window and may be lowered, never raised"
             )
 
     def session_max_age(self) -> int:
@@ -624,11 +643,16 @@ class WebSurface:
         return int(time.time())
 
 
-def build_web_surface(config: BaseConfig) -> WebSurface:
+def build_web_surface(config: BaseConfig, *, ended_sessions: EndedWebSessions | None = None) -> WebSurface:
     """Construct the surface from validated configuration.
 
     Call :func:`enforce_web_surface_preconditions` first; this function
     assumes the configuration already passed it.
+
+    ``ended_sessions`` is what ``make_app`` builds from the shared database
+    (``config.build_ended_web_sessions``). Without one, the store is in memory:
+    a caller with no app (a test of the surface's own methods) has no replicas
+    to share it with.
     """
 
     web = config.web
@@ -645,6 +669,11 @@ def build_web_surface(config: BaseConfig) -> WebSurface:
         codec=SessionCodec(web.session_secret),
         session_lifetime_seconds=web.session_lifetime_seconds,
         public_base_url=web.public_base_url.strip(),
+        ended_sessions=(
+            ended_sessions
+            if ended_sessions is not None
+            else InMemoryEndedWebSessions(clamped_session_lifetime(web.session_lifetime_seconds))
+        ),
         account_page_url=web.account_page_url,
         desktop_download_url=web.desktop_download_url,
         docs_url=web.docs_url,
@@ -768,6 +797,9 @@ def enforce_web_surface_preconditions(config: BaseConfig) -> None:
         LANDING_PATH,
         SIGNIN_PATH,
         CALLBACK_PATH,
+        # Keycloak's back-channel logout carries a logout token, not an API
+        # credential; refused by the map, no logout would ever reach the Hub.
+        BACKCHANNEL_LOGOUT_PATH,
         SIGNOUT_PATH,
         SIGNED_OUT_PATH,
         STYLE_ASSET_PATH,

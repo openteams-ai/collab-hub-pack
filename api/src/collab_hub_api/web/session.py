@@ -2,19 +2,25 @@
 
 Design decisions, stated once:
 
-* **Stateless and signed, not a server-side session table.** The cookie's
-  payload is JSON, HMAC-SHA256 signed with the deployment's
-  ``web.session_secret``, so any replica can verify it with no shared store
-  and no schema change (the ``collab_`` migrations are another issue's merge
-  hot spot). The trade this buys is documented rather than hidden: the server
-  cannot revoke an individual session before it expires — sign-out deletes
-  the browser's copy, and a copy captured before sign-out keeps verifying
-  until ``exp``. That is acceptable *here* because the cookie asserts only
-  identity: every authorization decision (operator, org owner) is re-resolved
-  from the server's own stores on each request (``web.authz``), so revoking a
-  role locks the holder out immediately, valid session or not. The absolute
-  lifetime is deliberately short (``web.session_lifetime_seconds``, default
-  eight hours) and there is no sliding renewal.
+* **Signed, not a server-side session table.** The cookie's payload is JSON,
+  HMAC-SHA256 signed with the deployment's ``web.session_secret``, so any
+  replica can verify it with no per-session row. Every authorization decision
+  (operator, org owner) is re-resolved from the server's own stores on each
+  request (``web.authz``), so revoking a role locks the holder out
+  immediately, valid session or not. The absolute lifetime is deliberately
+  short (``web.session_lifetime_seconds``, default eight hours) and there is
+  no sliding renewal.
+
+* **Ended with the realm session.** The payload carries ``sid``, the Keycloak
+  (realm) session the sign-in belonged to, taken from the verified ID token;
+  sign-in refuses a token without one. When that realm session ends, wherever
+  it ends (this surface's Log out, the Billing page's, an admin in Keycloak),
+  Keycloak's back-channel logout names the ``sid`` and the surface records it
+  in ``web.ended_sessions``, which every replica reads. A cookie whose ``sid``
+  has ended is no session at all, copies captured before the logout included
+  (openteams-ai/subscription-manager-pack#79). That check is not in this codec: the codec only
+  verifies, and :func:`~.authz.get_web_session` is the one place that decides
+  "a live session".
 
 * **The CSRF secret lives inside the session payload.** The cookie is
   HttpOnly, so page script (and any injected script) cannot read it; pages
@@ -51,7 +57,9 @@ from fastapi import Response
 SESSION_COOKIE = "__Host-nexus_web_session"
 TRANSIENT_COOKIE = "__Host-nexus_web_oidc"
 
-SESSION_PURPOSE = "nexus-web-session-v1"
+SESSION_PURPOSE = "nexus-web-session-v2"
+"""v2 added ``sid`` (openteams-ai/subscription-manager-pack#79). A v1 cookie names no realm session a logout
+could end, so it no longer verifies and its holder signs in once more."""
 TRANSIENT_PURPOSE = "nexus-web-oidc-v1"
 
 TRANSIENT_LIFETIME_SECONDS = 600
@@ -165,6 +173,13 @@ class WebSession:
     csrf: str
     issued_at: int
     expires_at: int
+    sid: str
+    """The realm (Keycloak SSO) session this sign-in belonged to: the ID token's ``sid``.
+
+    A back-channel logout names it when the realm session ends, and from then
+    on this session is no session (``web.ended_sessions``). Never used for
+    identity or authorization.
+    """
     email_verified: bool = False
     """Whether the IdP asserted this session's ``email`` is verified.
 
@@ -279,6 +294,7 @@ class SessionCodec:
             SESSION_PURPOSE,
             {
                 "sub": session.user,
+                "sid": session.sid,
                 "name": session.name,
                 "email": session.email,
                 "email_verified": session.email_verified,
@@ -295,7 +311,8 @@ class SessionCodec:
             return None
         user = data.get("sub")
         csrf = data.get("csrf")
-        if not isinstance(user, str) or not user or not isinstance(csrf, str) or not csrf:
+        sid = data.get("sid")
+        if not all(isinstance(field, str) and field for field in (user, csrf, sid)):
             return None
         name = data.get("name")
         email = data.get("email")
@@ -307,6 +324,7 @@ class SessionCodec:
             csrf=csrf,
             issued_at=data["iat"],
             expires_at=data["exp"],
+            sid=sid,
             # `is True`, not truthiness, and for the same reason the claims
             # reader does it (frames.auth.display_identity_from_claims): the
             # string "false" is truthy, and a payload shape this decoder did

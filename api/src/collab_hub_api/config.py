@@ -260,11 +260,12 @@ class SecurityConfig(BaseModel):
 WEB_SESSION_LIFETIME_CEILING_SECONDS = 8 * 3600
 """Hard ceiling on a web session's absolute lifetime, and its default.
 
-Not a suggestion: the session cookie is stateless and cannot be revoked
-server-side before it expires, so this number *is* the window in which a
-cookie captured before sign-out keeps asserting its holder's identity. The
-documented risk argument rests on it, so the configuration may lower it and
-may not raise it.
+Not a suggestion: the session cookie is signed, not stored, and the server
+ends one early only when its realm session ends (a back-channel logout, or
+this surface's own Log out; ``web.ended_sessions``). A cookie whose realm
+session lives on keeps asserting its holder's identity until it expires, so
+this number *is* that window. The documented risk argument rests on it, so
+the configuration may lower it and may not raise it.
 """
 
 WEB_SESSION_SECRET_MIN_LENGTH = 32
@@ -1655,6 +1656,26 @@ def build_org_store(config: BaseConfig, pools: PostgresPools) -> OrgStore:
     if url:
         return PostgresOrgStore(pools.database(url))
     return UnavailableOrgStore()
+
+
+def build_ended_web_sessions(config: BaseConfig, pools: PostgresPools):
+    """Where the web surface records ended realm sessions (openteams-ai/subscription-manager-pack#79).
+
+    The shared frames.postgres when there is one, so a back-channel logout any
+    replica hears reaches every replica; the table is ``collab_`` migration 18,
+    so there is no ``auto_migrate`` argument here. Without a database, in
+    memory: one replica, which is development, and the logout reaches the
+    process that heard it. Rows are pruned past the session lifetime, the
+    longest any cookie naming them can live.
+    """
+
+    from .web.ended_sessions import InMemoryEndedWebSessions, PostgresEndedWebSessions
+
+    lifetime = config.web.session_lifetime_seconds
+    url = config.frames.postgres.url
+    if url:
+        return PostgresEndedWebSessions(pools.database(url), lifetime)
+    return InMemoryEndedWebSessions(lifetime)
 
 
 def build_cog_catalog_store(config: BaseConfig, pools: PostgresPools) -> CogCatalogStore:

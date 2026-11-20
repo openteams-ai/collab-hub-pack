@@ -20,7 +20,7 @@ import posixpath
 import secrets
 from collections.abc import Sequence
 from pathlib import Path
-from urllib.parse import unquote, urlencode, urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -29,7 +29,7 @@ from starlette.concurrency import run_in_threadpool
 
 from ..frames.auth import display_identity_from_claims, user_from_claims
 from ..path_protection import request_path
-from ..web import oidc
+from ..web import forms, oidc
 from ..web.authz import (
     WebAuthorizationUnavailable,
     WebAuthRequired,
@@ -57,7 +57,7 @@ from ..web.pages import (
     signing_out_page,
 )
 from ..web.privacy_statement import privacy_statement_page
-from ..web.request_limits import connection_close_headers
+from ..web.request_limits import bounded_body, connection_close_headers, declares_oversize
 from ..web.session import (
     TRANSIENT_COOKIE,
     TRANSIENT_LIFETIME_SECONDS,
@@ -71,6 +71,7 @@ from ..web.session import (
 from ..web.surface import (
     ACCOUNT_PATH,
     ADMIN_INVITATIONS_PATH,
+    BACKCHANNEL_LOGOUT_PATH,
     BILLING_PATH,
     CALLBACK_PATH,
     DATA_STATEMENT_PATH,
@@ -109,7 +110,7 @@ rather than render a broken image on the sign-in page.
 MAX_NEXT_LENGTH = 2000
 
 
-FLOW_PATHS = (SIGNIN_PATH, CALLBACK_PATH)
+FLOW_PATHS = (SIGNIN_PATH, CALLBACK_PATH, BACKCHANNEL_LOGOUT_PATH)
 """Routes that are steps *through* the sign-in flow, never destinations of it.
 
 A ``next`` naming one of these is refused. The sign-in route is the one that
@@ -121,7 +122,18 @@ only when the person closes the tab.
 The callback is listed with it because it is the same category and costs one
 entry — landing there without a transient cookie renders the fixed
 sign-in-failed page, which terminates but is nobody's intended destination.
+The back-channel logout is Keycloak's, answers ``POST`` only, and is nobody's
+destination either.
 """
+
+BACKCHANNEL_LOGOUT_MAX_BYTES = 16384
+"""The most of a back-channel logout body this surface reads, counted as it arrives.
+
+A logout token is a signed JWT of a handful of claims, about a kilobyte; this
+leaves room for a realm with a long issuer URL or a larger key and still keeps
+an anonymous ``POST`` from making the server buffer much. Larger than the 4 KiB
+the management forms get (``web.forms.MAX_FORM_BYTES``) because the token is
+not this surface's to size."""
 
 SIGNIN_HOP_PARAM = "hop"
 """Marks a sign-in that has already been moved to ``web.public_base_url``'s host.
@@ -487,7 +499,7 @@ def make_router(
                 },
             )
             return _redirect(public_signin)
-        if not renew and get_web_session(request) is not None:
+        if not renew and await get_web_session(request) is not None:
             return _redirect(f"{_root_path(request)}{next_path}")
         state = oidc.generate_state()
         nonce = oidc.generate_nonce()
@@ -605,6 +617,10 @@ def make_router(
             # Kept for sign-out only: the realm ends its session without a
             # confirmation screen when shown the ID token it issued (#335).
             id_token=token_response["id_token"],
+            # The realm session this sign-in belongs to; verify_id_token has
+            # refused a token without one. A back-channel logout naming it
+            # ends this session (openteams-ai/subscription-manager-pack#79).
+            sid=claims["sid"],
             csrf=secrets.token_urlsafe(32),
             issued_at=now,
             expires_at=now + lifetime,
@@ -687,10 +703,14 @@ def make_router(
     async def signout(request: Request, session: WebSession = Depends(require_csrf)) -> Response:
         """End the session on this browser, and the realm session behind it.
 
-        The cookie is stateless, so this deletes the browser's copy; it cannot
-        recall copies made before this moment (see ``web.session``). Authority
-        does not ride the cookie — roles are checked per request — so the
-        exposure of a pre-sign-out copy is identity, bounded by ``exp``.
+        The session's ``sid`` is recorded as ended first, on every replica
+        (``web.ended_sessions``), so the cookie — and any copy of it made
+        before this moment — stops working now, even if the browser never
+        reaches Keycloak. The realm's logout then ends the realm session, and
+        its back-channel logout ends the session everywhere else it was used
+        (the Billing page). A store that cannot record it is logged and does
+        not stop the sign-out: the browser still goes to the realm, whose
+        back-channel call records it then.
 
         Deleting the cookie alone left the realm session alive, so the next
         "Log in" came straight back without a password and sign-out looked
@@ -702,6 +722,10 @@ def make_router(
         and navigates there itself.
         """
 
+        try:
+            await run_in_threadpool(surface.ended_sessions.end, session.sid)
+        except Exception:
+            logger.exception("web_signout_end_session_failed", extra={"user": session.user})
         next_param = request.query_params.get("next")
         next_path = sanitize_next_path(next_param) if next_param else None
         logout = surface.logout_url(request, session, next_path=next_path)
@@ -713,6 +737,67 @@ def make_router(
             response = page_response(signing_out_page(logout_url=logout, root_path=_root_path(request)))
         clear_session_cookie(response)
         return response
+
+    @public_router.post(BACKCHANNEL_LOGOUT_PATH)
+    async def backchannel_logout(request: Request) -> Response:
+        """Keycloak, server to server, when a realm session ends (Back-Channel Logout 1.0).
+
+        Wherever the realm session ended — this surface's Log out, the Billing
+        page's, an admin in Keycloak — its ``sid`` is recorded as
+        ended, and every web session cookie minted for it stops working on
+        every replica (openteams-ai/subscription-manager-pack#79).
+
+        No session and no CSRF token: the caller is the realm, not a browser,
+        and the realm-signed logout token in the body is the whole of its
+        authentication (``oidc.verify_logout_token``). The body is a form with
+        exactly one ``logout_token``, read under
+        :data:`BACKCHANNEL_LOGOUT_MAX_BYTES` by counting.
+
+        200 once the ``sid`` is recorded; 400 with an empty body for anything
+        else, as the specification asks — including a store that could not
+        record it, which Keycloak then reports as a failed logout. Both carry
+        ``Cache-Control: no-store``. The log line names a fixed reason and
+        never anything from the token.
+        """
+
+        def refused(reason: str, *, body_consumed: bool = True) -> Response:
+            logger.warning("web_backchannel_logout_refused", extra={"reason": reason})
+            return Response(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                headers={"Cache-Control": "no-store", **connection_close_headers(body_consumed=body_consumed)},
+            )
+
+        if forms.media_type(request) != forms.FORM_CONTENT_TYPE:
+            return refused("not a form", body_consumed=False)
+        if declares_oversize(request, max_bytes=BACKCHANNEL_LOGOUT_MAX_BYTES):
+            return refused("body too large", body_consumed=False)
+        raw = await bounded_body(request, max_bytes=BACKCHANNEL_LOGOUT_MAX_BYTES)
+        if raw is None:
+            return refused("body too large", body_consumed=False)
+        try:
+            fields = parse_qsl(raw.decode("ascii"), keep_blank_values=True)
+        except (UnicodeDecodeError, ValueError):
+            return refused("body is not a form")
+        tokens = [value for name, value in fields if name == "logout_token"]
+        if len(tokens) != 1 or not tokens[0]:
+            return refused("not exactly one logout_token")
+        try:
+            sid = await run_in_threadpool(
+                oidc.verify_logout_token,
+                tokens[0],
+                jwks_url=surface.jwks_url,
+                issuer=surface.issuer_url,
+                client_id=surface.client_id,
+            )
+        except oidc.OidcFlowError as exc:
+            return refused(str(exc))
+        try:
+            await run_in_threadpool(surface.ended_sessions.end, sid)
+        except Exception:
+            logger.exception("web_backchannel_logout_store_failed")
+            return refused("the ended session could not be recorded")
+        logger.info("web_backchannel_logout", extra={"outcome": "session_ended"})
+        return Response(status_code=status.HTTP_200_OK, headers={"Cache-Control": "no-store"})
 
     @public_router.get(SIGNED_OUT_PATH)
     async def signed_out(request: Request) -> Response:
@@ -733,7 +818,7 @@ def make_router(
         on the path's PUBLIC_WEB_PATHS entry."""
 
         return page_response(
-            home_page(surface=surface, session=get_web_session(request), root_path=_root_path(request)),
+            home_page(surface=surface, session=await get_web_session(request), root_path=_root_path(request)),
             path=HOME_PATH,
         )
 

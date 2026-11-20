@@ -288,6 +288,19 @@ What makes it possible:
   for an ended session exactly as for a missing one. A lookup that fails is
   never read as "still signed in": guarded paths answer 503, as for an
   undecidable role.
+- **An unfinished logout is finished at sign-in.** If the person leaves
+  Keycloak's "Do you want to log out?" page without confirming, the realm
+  session lives on while its `sid` is already recorded as ended. The next
+  sign-in comes back into that realm session, so instead of issuing a cookie
+  that every page would refuse (and loop through sign-in), the callback sends
+  the browser to the realm's logout with the ID token it was just given, which
+  Keycloak honours without asking. If the store cannot answer, the callback
+  answers 503 and issues no session.
+- **The Hub's own Log out records its `sid` first**, so a copy of the cookie
+  stops working even if the browser never reaches Keycloak. If the store
+  cannot record it, that is logged at error (`web_signout_end_session_failed`)
+  and the sign-out still clears this browser's cookie and goes to the realm,
+  but a copy made before then keeps working until it expires.
 
 ### Registering the back-channel URL on `collab-web`
 

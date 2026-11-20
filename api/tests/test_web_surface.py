@@ -995,6 +995,10 @@ async def test_signing_out_from_the_account_page_and_in_again_lands_on_home(tmp_
         token = re.search(r'name="csrf_token" value="([^"]+)"', account).group(1)
         signout = await client.post("/web/signout", data={"csrf_token": token})
         _endpoint, params = realm_logout_target(signout)
+        # The realm ends its session, so the next sign-in is a new realm
+        # session; signing back into the ended one is a different case
+        # (test_web_backchannel_logout, the unfinished logout).
+        idp.sid = "realm-session-after-logout"
         # The realm returns the browser here; follow it as the browser would.
         signed_out = await client.get(params["post_logout_redirect_uri"])
         again = html.unescape(re.search(r'<a href="([^"]+)">Sign in again</a>', signed_out.text).group(1))

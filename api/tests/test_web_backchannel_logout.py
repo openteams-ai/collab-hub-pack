@@ -277,6 +277,47 @@ async def test_signing_in_again_after_a_backchannel_logout_works(tmp_path, idp):
         await client.__aexit__(None, None, None)
 
 
+async def test_a_sign_in_back_into_a_logged_out_realm_session_finishes_its_logout(tmp_path, idp):
+    """The person left Keycloak's logout confirmation, so the realm session lives on.
+
+    Issuing a cookie for its ended sid would be refused on the next page, sent
+    to sign in, and passed straight back by Keycloak: a loop. The callback
+    finishes the logout instead, with the ID token it was just given.
+    """
+
+    app = make_web_app(tmp_path, idp)
+    client = await signed_in_client(app, idp)
+    try:
+        async with web_client(app) as keycloak:
+            assert (await backchannel(keycloak, logout_token(idp))).status_code == 200
+        client.cookies.delete(SESSION_COOKIE)
+        response = await sign_in(client, idp)  # same idp.sid: the realm session never ended
+        assert response.status_code == 303
+        location = response.headers["location"]
+        assert location.startswith(f"{idp.issuer}/protocol/openid-connect/logout?")
+        assert "id_token_hint=" in location
+        assert SESSION_COOKIE not in client.cookies
+    finally:
+        await client.__aexit__(None, None, None)
+
+
+async def test_a_sign_in_that_cannot_tell_whether_its_session_ended_is_a_503(tmp_path, idp):
+    app = make_web_app(tmp_path, idp)
+
+    class _Down:
+        def end(self, sid):
+            raise RuntimeError("database down")
+
+        def has_ended(self, sid):
+            raise RuntimeError("database down")
+
+    object.__setattr__(app.state.web_surface, "ended_sessions", _Down())
+    async with web_client(app) as client:
+        response = await sign_in(client, idp)
+        assert response.status_code == 503
+        assert SESSION_COOKIE not in client.cookies
+
+
 async def test_a_repeated_logout_for_the_same_sid_is_still_a_200(tmp_path, idp):
     app = make_web_app(tmp_path, idp)
     async with web_client(app) as keycloak:

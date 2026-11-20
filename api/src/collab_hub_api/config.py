@@ -1670,8 +1670,11 @@ def build_ended_web_sessions(config: BaseConfig, pools: PostgresPools):
     """
 
     from .web.ended_sessions import InMemoryEndedWebSessions, PostgresEndedWebSessions
+    from .web.surface import clamped_session_lifetime
 
-    lifetime = config.web.session_lifetime_seconds
+    # The lifetime the cookies are minted with, so no row is pruned while a
+    # cookie naming it can still verify.
+    lifetime = clamped_session_lifetime(config.web.session_lifetime_seconds)
     url = config.frames.postgres.url
     if url:
         return PostgresEndedWebSessions(pools.database(url), lifetime)

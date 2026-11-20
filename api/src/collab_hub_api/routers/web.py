@@ -34,6 +34,7 @@ from ..web.authz import (
     WebAuthorizationUnavailable,
     WebAuthRequired,
     WebForbidden,
+    WebSessionUndecidable,
     get_web_session,
     require_csrf,
     require_web_session,
@@ -625,6 +626,23 @@ def make_router(
             issued_at=now,
             expires_at=now + lifetime,
         )
+        # A sign-in can come back into a realm session that has already been
+        # logged out here: the person left Keycloak's "Do you want to log
+        # out?" page without confirming, so the realm session lived on while
+        # its back-channel logout (or this surface's Log out) recorded the sid.
+        # A cookie for it would be refused on the next page, which sends the
+        # browser to sign in, which Keycloak passes straight back here: a loop.
+        # Finish that logout instead, with the ID token just issued, so
+        # Keycloak ends the realm session without asking.
+        try:
+            ended = await run_in_threadpool(surface.ended_sessions.has_ended, session.sid)
+        except Exception as exc:
+            raise WebSessionUndecidable(f"the ended-session lookup failed: {type(exc).__name__}") from exc
+        if ended:
+            logger.info("web_sign_in_into_ended_session", extra={"user": user})
+            response = _redirect(surface.logout_url(request, session, next_path=None))
+            clear_transient_cookie(response)
+            return response
         next_path = sanitize_next_path(str(transient.get("next", "")))
         response = _redirect(f"{_root_path(request)}{next_path}")
         clear_transient_cookie(response)
@@ -708,9 +726,10 @@ def make_router(
         before this moment — stops working now, even if the browser never
         reaches Keycloak. The realm's logout then ends the realm session, and
         its back-channel logout ends the session everywhere else it was used
-        (the Billing page). A store that cannot record it is logged and does
-        not stop the sign-out: the browser still goes to the realm, whose
-        back-channel call records it then.
+        (the Billing page). A store that cannot record it is logged at error
+        and does not stop the sign-out: this browser's cookie is still
+        deleted and the browser still goes to the realm, but a copy of the
+        cookie made before this moment keeps working until it expires.
 
         Deleting the cookie alone left the realm session alive, so the next
         "Log in" came straight back without a password and sign-out looked

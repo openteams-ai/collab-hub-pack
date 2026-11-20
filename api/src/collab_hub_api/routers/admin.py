@@ -182,7 +182,7 @@ the operator API pages properly for anyone who needs more.
 
 @requires_platform_role(PLATFORM_ROLE_OPERATOR)
 def issue_invitation(
-    auth: AuthContext, service: InvitationService, *, email: str
+    auth: AuthContext, service: InvitationService, *, email: str, confirmed_existing_account: bool = False
 ) -> IssuedInvitation | LiveInvitationExists:
     """Issue one org-creating invitation, recorded as ``invitation.send``.
 
@@ -204,9 +204,14 @@ def issue_invitation(
     unconditionally, so an address can hold two live invitations if one came
     from the API. Unifying the two would change the semantics of a merged,
     shipped endpoint the desktop is built against; #93 owns re-send policy.
+
+    ``confirmed_existing_account`` is the admin panel's "Send anyway" (#348),
+    passed through to the audit row. This page never sets it.
     """
 
-    return service.create_unless_live(auth, email=email, org_id=None)
+    return service.create_unless_live(
+        auth, email=email, org_id=None, confirmed_existing_account=confirmed_existing_account
+    )
 
 
 @requires_platform_role(PLATFORM_ROLE_OPERATOR)

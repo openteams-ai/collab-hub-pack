@@ -253,15 +253,27 @@ async def test_connectors_are_listed_without_any_secret_reaching_the_browser(tmp
 
 
 class StubDirectory:
-    """Enough of the directory protocol for the users endpoint."""
+    """Enough of the directory protocol for the users endpoint and the
+    existing-account check on issuing."""
 
-    def __init__(self, users):
+    def __init__(self, users, *, failure: Exception | None = None):
         self._users = users
         self.queries: list[str | None] = []
+        self.exact: list[str] = []
+        self.failure = failure
 
     def search_users(self, query=None, *, limit=50, first=0):
         self.queries.append(query)
         return self._users[first : first + limit]
+
+    def find_provisioned_account(self, email):
+        from collab_hub_api.user_directory import ProvisionedAccountRecord
+
+        self.exact.append(email)
+        if self.failure is not None:
+            raise self.failure
+        matches = [user for user in self._users if user.email == email]
+        return ProvisionedAccountRecord(id=matches[0].id, email=email) if matches else None
 
 
 @pytest.mark.asyncio
@@ -424,11 +436,40 @@ async def test_a_membership_change_with_the_csrf_token_reaches_the_service(tmp_p
 
 
 class StubInvitations:
-    """The invitation service seam, as the panel's endpoints use it."""
+    """The invitation service seam, as the panel's endpoints use it.
 
-    def __init__(self):
+    ``live`` and ``accepted_at`` are what :meth:`address_history` reports for
+    any address: whether it holds a live invitation, and when an earlier one to
+    it was accepted.
+    """
+
+    def __init__(self, *, live: bool = False, accepted_at=None):
         self.created: list[str] = []
         self.revoked: list[str] = []
+        self.history_asked: list[str] = []
+        self.live = live
+        self.accepted_at = accepted_at
+
+    def address_history(self, email):
+        from datetime import timedelta
+
+        from collab_hub_api.frames.invitations import AddressHistory, Invitation
+
+        self.history_asked.append(email)
+        accepted = None
+        if self.accepted_at is not None:
+            accepted = Invitation(
+                id="inv-accepted",
+                email=email,
+                org_id=None,
+                status="accepted",
+                created_at=self.accepted_at - timedelta(hours=1),
+                created_by="u-1",
+                expires_at=self.accepted_at + timedelta(hours=47),
+                accepted_at=self.accepted_at,
+                accepted_by="u-9",
+            )
+        return AddressHistory(live=self.live, last_accepted=accepted)
 
     def list_all(self, *, limit, offset):
         from datetime import datetime, timedelta, timezone
@@ -565,13 +606,19 @@ async def test_the_session_reports_the_running_version(tmp_path, idp: _StubIdp):
 
 
 class IssuingInvitations(StubInvitations):
-    """Adds the issue and revoke halves of the service seam."""
+    """Adds the issue and revoke halves of the service seam.
 
-    def __init__(self, *, live_exists: bool = False):
-        super().__init__()
+    ``confirmations`` records the ``confirmed_existing_account`` each issue
+    carried, which is what reaches the audit row.
+    """
+
+    def __init__(self, *, live_exists: bool = False, accepted_at=None):
+        super().__init__(live=live_exists, accepted_at=accepted_at)
         self.live_exists = live_exists
+        self.confirmations: list[bool] = []
 
-    def create_unless_live(self, auth, *, email, org_id):
+    def create_unless_live(self, auth, *, email, org_id, confirmed_existing_account=False):
+        self.confirmations.append(confirmed_existing_account)
         from datetime import datetime, timedelta, timezone
 
         from collab_hub_api.frames.credentials import InvitationSecret
@@ -619,10 +666,13 @@ class RecordingDelivery:
         return DeliveryOutcome(status=self.status, error_code=None)
 
 
-async def issue(client, email, csrf):
+async def issue(client, email, csrf, *, confirm_existing_account: bool | None = None):
+    body: dict = {"email": email}
+    if confirm_existing_account is not None:
+        body["confirm_existing_account"] = confirm_existing_account
     return await client.post(
         "/admin/api/invitations",
-        json={"email": email},
+        json=body,
         headers={"X-CSRF-Token": csrf},
     )
 
@@ -720,6 +770,316 @@ async def test_the_panel_can_revoke_an_invitation(tmp_path, idp: _StubIdp):
 
     assert response.status_code == 200
     assert service.revoked == ["inv-1"]
+
+
+# --- Warning before inviting an address that has been here before (#348) -----
+
+ACCEPTED_IN_AUGUST = "2026-08-15T14:03:00+00:00"
+
+
+def accepted_in_august():
+    from datetime import datetime
+
+    return datetime.fromisoformat(ACCEPTED_IN_AUGUST)
+
+
+def directory_with(*emails):
+    """A directory holding one account for each address given."""
+
+    from collab_hub_api.user_directory import UserDirectoryUser
+
+    return StubDirectory(
+        [UserDirectoryUser(id=f"u-{n}", username=f"user{n}", email=email) for n, email in enumerate(emails)]
+    )
+
+
+async def issuing_operator(app, idp, client, *, service, delivery, directory=None):
+    """Sign in as an operator, wire the seams, and return the CSRF token.
+
+    With no ``directory`` the app keeps the one it was built with, which is
+    the disabled one: it cannot answer, so the account check cannot run.
+    """
+
+    csrf = await operator_client(app, idp, client)
+    app.state.invitation_service = service
+    app.state.invitation_email_delivery = delivery
+    if directory is not None:
+        app.state.user_directory_client = directory
+    return csrf
+
+
+@pytest.mark.asyncio
+async def test_an_address_with_an_account_is_warned_about_and_nothing_is_sent(tmp_path, idp: _StubIdp):
+    """The case from the public hub: the invitee registers, and is told their
+    email already exists. The operator hears it first, and nothing goes out."""
+
+    app = build_app(tmp_path, idp)
+    service = IssuingInvitations()
+    delivery = RecordingDelivery()
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await issuing_operator(
+            app, idp, client, service=service, delivery=delivery, directory=directory_with("bob@example.com")
+        )
+        response = await issue(client, "bob@example.com", csrf)
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "outcome": "existing_account",
+        "email": "bob@example.com",
+        "account": True,
+        "member": False,
+        "accepted_at": None,
+    }
+    assert service.created == []
+    assert delivery.sent == []
+
+
+@pytest.mark.asyncio
+async def test_an_address_that_accepted_before_is_warned_about_with_the_date(tmp_path, idp: _StubIdp):
+    """With no directory to ask, the earlier acceptance is all that is known,
+    and the account is reported as unknown -- not as absent."""
+
+    app = build_app(tmp_path, idp)
+    service = IssuingInvitations(accepted_at=accepted_in_august())
+    delivery = RecordingDelivery()
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await issuing_operator(app, idp, client, service=service, delivery=delivery)
+        response = await issue(client, "bob@example.com", csrf)
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "outcome": "existing_account",
+        "email": "bob@example.com",
+        "account": None,
+        "member": None,
+        "accepted_at": ACCEPTED_IN_AUGUST,
+    }
+    assert service.created == []
+    assert delivery.sent == []
+
+
+@pytest.mark.asyncio
+async def test_send_anyway_issues_exactly_as_before_and_carries_the_confirmation(tmp_path, idp: _StubIdp):
+    """The confirmed request is an ordinary issue, plus the flag that reaches
+    the audit row. It does not ask again: the operator has already been told."""
+
+    app = build_app(tmp_path, idp)
+    service = IssuingInvitations(accepted_at=accepted_in_august())
+    delivery = RecordingDelivery()
+    directory = directory_with("bob@example.com")
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await issuing_operator(app, idp, client, service=service, delivery=delivery, directory=directory)
+        warned = await issue(client, "bob@example.com", csrf)
+        confirmed = await issue(client, "bob@example.com", csrf, confirm_existing_account=True)
+
+    assert warned.status_code == 409
+    assert confirmed.status_code == 201
+    assert confirmed.json() == {"outcome": "sent", "email": "bob@example.com"}
+    assert service.created == ["bob@example.com"]
+    assert delivery.sent == ["bob@example.com"]
+    assert service.confirmations == [True]
+    assert service.history_asked == ["bob@example.com"]
+    assert directory.exact == ["bob@example.com"]
+    assert "s3cret-not-real" not in confirmed.text
+
+
+@pytest.mark.asyncio
+async def test_a_new_address_is_sent_at_once(tmp_path, idp: _StubIdp):
+    app = build_app(tmp_path, idp)
+    service = IssuingInvitations()
+    delivery = RecordingDelivery()
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await issuing_operator(
+            app, idp, client, service=service, delivery=delivery, directory=directory_with("carol@example.com")
+        )
+        response = await issue(client, "bob@example.com", csrf)
+
+    assert response.status_code == 201
+    assert response.json() == {"outcome": "sent", "email": "bob@example.com"}
+    assert service.confirmations == [False]
+    assert delivery.sent == ["bob@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_the_check_ignores_case_and_surrounding_spaces(tmp_path, idp: _StubIdp):
+    """Both lookups see the folded address issuance would store, which is the
+    form the identity provider holds every account's email in."""
+
+    app = build_app(tmp_path, idp)
+    service = IssuingInvitations()
+    directory = directory_with("bob@example.com")
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await issuing_operator(
+            app, idp, client, service=service, delivery=RecordingDelivery(), directory=directory
+        )
+        response = await issue(client, "  Bob@Example.COM ", csrf)
+
+    assert response.status_code == 409
+    assert response.json()["email"] == "bob@example.com"
+    assert service.history_asked == ["bob@example.com"]
+    assert directory.exact == ["bob@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_a_live_invitation_is_refused_before_any_warning(tmp_path, idp: _StubIdp):
+    """Warning first would have the operator confirm a send that is then
+    refused anyway. The live-invitation rule is unchanged and answers first."""
+
+    app = build_app(tmp_path, idp)
+    service = IssuingInvitations(live_exists=True, accepted_at=accepted_in_august())
+    delivery = RecordingDelivery()
+    directory = directory_with("bob@example.com")
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await issuing_operator(app, idp, client, service=service, delivery=delivery, directory=directory)
+        response = await issue(client, "bob@example.com", csrf)
+
+    assert response.status_code == 409
+    assert response.json()["outcome"] == "already_live"
+    assert directory.exact == []
+    assert delivery.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_directory_that_cannot_answer_does_not_block_and_the_response_says_so(tmp_path, idp: _StubIdp):
+    from collab_hub_api.user_directory import UserDirectoryUnavailableError
+
+    app = build_app(tmp_path, idp)
+    service = IssuingInvitations()
+    delivery = RecordingDelivery()
+    directory = StubDirectory([], failure=UserDirectoryUnavailableError("Keycloak user directory request failed"))
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await issuing_operator(app, idp, client, service=service, delivery=delivery, directory=directory)
+        response = await issue(client, "bob@example.com", csrf)
+
+    assert response.status_code == 201
+    assert response.json() == {"outcome": "sent", "email": "bob@example.com", "account_check": "unavailable"}
+    assert delivery.sent == ["bob@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_two_accounts_for_one_address_still_count_as_an_account(tmp_path, idp: _StubIdp):
+    from collab_hub_api.user_directory import AmbiguousAccountError
+
+    app = build_app(tmp_path, idp)
+    service = IssuingInvitations()
+    directory = StubDirectory([], failure=AmbiguousAccountError("Keycloak returned 2 accounts for one exact address"))
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await issuing_operator(
+            app, idp, client, service=service, delivery=RecordingDelivery(), directory=directory
+        )
+        response = await issue(client, "bob@example.com", csrf)
+
+    assert response.status_code == 409
+    assert response.json()["account"] is True
+    assert response.json()["member"] is None
+    assert service.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arrange", "member"),
+    [
+        ("no_membership", False),
+        ("active_membership", True),
+        ("removed_membership", True),
+        ("identity_not_pinned", None),
+        ("org_store_unavailable", None),
+        ("account_without_an_id", None),
+    ],
+)
+async def test_the_warning_says_whether_the_account_already_has_an_organization(
+    tmp_path, idp: _StubIdp, monkeypatch, arrange, member
+):
+    """Acceptance refuses any login with a membership row, active or removed,
+    so that row decides whether sending can help. An account without one is who
+    an invitation is for: somebody who registered and whose invitation lapsed.
+
+    Unknown stays unknown. Membership rows are keyed on the session principal,
+    which is the identity provider's account id only under the ``sub`` pin, and
+    the lookup needs a working organization store and an account id to look up.
+    """
+
+    from collab_hub_api.frames.orgs import MEMBERSHIP_REMOVED, OrgsUnavailableError
+    from collab_hub_api.user_directory import UserDirectoryUser
+
+    app = build_app(tmp_path, idp)
+    service = IssuingInvitations()
+    account_id = "" if arrange == "account_without_an_id" else "u-bob"
+    directory = StubDirectory([UserDirectoryUser(id=account_id, username="bob", email="bob@example.com")])
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await issuing_operator(
+            app, idp, client, service=service, delivery=RecordingDelivery(), directory=directory
+        )
+        store = app.state.org_store
+        if arrange == "active_membership":
+            store.set_membership("u-bob", "org-a")
+        elif arrange == "removed_membership":
+            store.set_membership("u-bob", "org-a", status=MEMBERSHIP_REMOVED)
+        elif arrange == "identity_not_pinned":
+            app.state.web_identity_pinned_to_sub = False
+        elif arrange == "org_store_unavailable":
+            # Only the invitee's lookup fails: the operator's own requests
+            # resolve their principal through this same method.
+            original = store.get_membership
+
+            def failing(user_id):
+                if user_id == "u-bob":
+                    raise OrgsUnavailableError("no organization backend")
+                return original(user_id)
+
+            monkeypatch.setattr(store, "get_membership", failing)
+        response = await issue(client, "bob@example.com", csrf)
+
+    assert response.status_code == 409
+    assert response.json()["account"] is True
+    assert response.json()["member"] is member
+    assert service.created == []
+
+
+@pytest.mark.asyncio
+async def test_send_anyway_still_refuses_a_live_invitation(tmp_path, idp: _StubIdp):
+    """The confirmation skips the existing-account check and nothing else."""
+
+    app = build_app(tmp_path, idp)
+    service = IssuingInvitations(live_exists=True)
+    delivery = RecordingDelivery()
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await issuing_operator(app, idp, client, service=service, delivery=delivery)
+        response = await issue(client, "bob@example.com", csrf, confirm_existing_account=True)
+
+    assert response.status_code == 409
+    assert response.json()["outcome"] == "already_live"
+    assert service.confirmations == [True]
+    assert delivery.sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("address", ["bob@", "@example.com", "bob", "bob smith@example.com", "bob@exa mple.com"])
+async def test_an_address_issuance_would_refuse_is_invalid_not_a_server_error(tmp_path, idp: _StubIdp, address):
+    """The route used to check only for an "@" in a sensible place, so an
+    address the service then refused reached the action and became a 500."""
+
+    app = build_app(tmp_path, idp)
+    service = IssuingInvitations()
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await issuing_operator(app, idp, client, service=service, delivery=RecordingDelivery())
+        response = await issue(client, address, csrf)
+
+    assert response.status_code == 400
+    assert response.json()["outcome"] == "invalid_email"
+    assert service.history_asked == []
+    assert service.created == []
 
 
 class RecordingRoleAdmin:
@@ -1095,6 +1455,9 @@ async def test_invitations_report_an_unavailable_service(tmp_path, idp: _StubIdp
         def list_all(self, **kwargs):
             raise InvitationsUnavailableError("no database")
 
+        def address_history(self, *a, **k):
+            raise InvitationsUnavailableError("no database")
+
         def create_unless_live(self, *a, **k):
             raise InvitationsUnavailableError("no database")
 
@@ -1109,6 +1472,10 @@ async def test_invitations_report_an_unavailable_service(tmp_path, idp: _StubIdp
         app.state.invitation_email_delivery = RecordingDelivery()
         listing = await client.get("/admin/api/invitations")
         issued = await issue(client, "bob@example.com", csrf)
+        # The confirmed request skips the existing-account read, so it meets
+        # the missing database at the issue itself.
+        confirmed = await issue(client, "bob@example.com", csrf, confirm_existing_account=True)
 
     assert listing.status_code == 503
     assert issued.status_code == 503 and issued.json()["outcome"] == "unavailable"
+    assert confirmed.status_code == 503 and confirmed.json()["outcome"] == "unavailable"

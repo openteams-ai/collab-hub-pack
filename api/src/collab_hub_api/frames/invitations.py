@@ -217,6 +217,7 @@ import hashlib
 import hmac
 import logging
 import secrets
+import string
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -515,6 +516,26 @@ class LiveInvitationExists:
     """
 
     existing: Invitation
+
+
+@dataclass(frozen=True)
+class AddressHistory:
+    """What the invitation record already says about one address (#348).
+
+    Read by the admin panel before it issues anything, to warn an operator
+    who is about to invite somebody who has been here before. It is advisory
+    and decides nothing: the refusal of a second live token is still the
+    locked check inside :meth:`PostgresInvitationService.create_unless_live`.
+
+    ``live`` is here so that refusal can answer first. Without it, an address
+    holding both a live invitation and an account would be warned about, and
+    then refused once the operator had confirmed past the warning -- a
+    question whose answer could not have mattered.
+    """
+
+    live: bool
+    last_accepted: Invitation | None
+    """The most recently accepted invitation to this address, if there is one."""
 
 
 @dataclass(frozen=True)
@@ -972,6 +993,9 @@ class UnavailableInvitationService:
     def list_all(self, *args, **kwargs) -> InvitationPage:
         raise self._unavailable()
 
+    def address_history(self, *args, **kwargs) -> AddressHistory:
+        raise self._unavailable()
+
     def get(self, *args, **kwargs) -> Invitation | None:
         raise self._unavailable()
 
@@ -1015,6 +1039,15 @@ _COLUMNS = (
     "accepted_at, accepted_by, accepted_org_id, revoked_at, revoked_by"
 )
 """Named once so a SELECT and a RETURNING can never drift apart."""
+
+_SQL_FOLD = (string.ascii_uppercase, string.ascii_lowercase)
+"""The two ``translate()`` arguments that fold a stored address in SQL.
+
+:func:`ascii_folded_bytes` spelled for the database: ``A``-``Z`` onto
+``a``-``z`` and nothing else. Not ``lower()``, which follows the database's
+locale -- under a Turkish one it lowers ``I`` to a dotless ``ı`` -- and would
+make the stored side of a comparison fold differently from the side issuance
+folded in Python."""
 
 
 class PostgresInvitationService:
@@ -1188,6 +1221,43 @@ class PostgresInvitationService:
             has_more=len(rows) > limit,
         )
 
+    def address_history(self, email: str) -> AddressHistory:
+        """Whether *email* holds a live invitation, and the last one it accepted.
+
+        Ordinary pooled reads, outside any transaction: the answer feeds a
+        warning and decides nothing, so it has nothing to be atomic with.
+
+        *email* is folded the way issuance folds it (:func:`validate_invited_email`),
+        and the two halves compare it differently on purpose:
+
+        - ``live`` uses the predicate :meth:`create_unless_live` locks on, so
+          when nothing changes in between, this answer and that refusal agree.
+        - the acceptance lookup folds the **stored** address too (see
+          :data:`_SQL_FOLD`). Live invitations last 48 hours, so every one was
+          stored folded; an accepted row can be older than that rule and keep
+          the capitals its issuer typed.
+
+        Raises :class:`ValueError` for an address issuance would refuse.
+        """
+
+        invited = validate_invited_email(email)
+        with self._db.connection() as conn:
+            live = conn.execute(
+                "SELECT 1 AS present FROM collab_invitations"
+                " WHERE email = %s AND status = %s AND expires_at > clock_timestamp() LIMIT 1",
+                (invited, STATUS_PENDING),
+            ).fetchone()
+            accepted = conn.execute(
+                f"SELECT {_COLUMNS} FROM collab_invitations"
+                " WHERE status = %s AND translate(email, %s, %s) = %s"
+                " ORDER BY accepted_at DESC NULLS LAST, id LIMIT 1",
+                (STATUS_ACCEPTED, *_SQL_FOLD, invited),
+            ).fetchone()
+        return AddressHistory(
+            live=live is not None,
+            last_accepted=_invitation(accepted) if accepted is not None else None,
+        )
+
     # --- Issue --------------------------------------------------------------
 
     def create(self, ctx: AuthContext, *, email: str, org_id: str | None) -> IssuedInvitation:
@@ -1255,7 +1325,12 @@ class PostgresInvitationService:
         return IssuedInvitation(invitation=invitation, raw_secret=minted.raw)
 
     def create_unless_live(
-        self, ctx: AuthContext, *, email: str, org_id: str | None
+        self,
+        ctx: AuthContext,
+        *,
+        email: str,
+        org_id: str | None,
+        confirmed_existing_account: bool = False,
     ) -> IssuedInvitation | LiveInvitationExists:
         """Issue one invitation **unless** this address already holds a live one.
 
@@ -1279,17 +1354,32 @@ class PostgresInvitationService:
         See the module docstring for why this is a separate method, why the
         address comparison is exact, and why the advisory lock is load-bearing
         rather than belt-and-braces.
+
+        ``confirmed_existing_account`` is the admin panel's "Send anyway"
+        (#348). It is recorded in the ``invitation.send`` row's ``detail`` as
+        what it is -- the request's claim that the operator confirmed past the
+        existing-account warning, which the panel sends only after showing that
+        warning -- and changes nothing else: the same live check runs and the
+        same invitation is minted. The key is written only when true, so every
+        other row keeps the shape it has always had.
         """
 
         _refuse_org_creation_under_single_org(org_id)
-        return _retrying(lambda: self._create_unless_live_once(ctx, email=email, org_id=org_id))
+        return _retrying(
+            lambda: self._create_unless_live_once(
+                ctx, email=email, org_id=org_id, confirmed_existing_account=confirmed_existing_account
+            )
+        )
 
     def _create_unless_live_once(
-        self, ctx: AuthContext, *, email: str, org_id: str | None
+        self, ctx: AuthContext, *, email: str, org_id: str | None, confirmed_existing_account: bool
     ) -> IssuedInvitation | LiveInvitationExists:
         invited = validate_invited_email(email)
         invitation_id = uuid4().hex
         minted = mint_invitation_secret()
+        detail = {"creates_organization": org_id is None, "ttl_hours": INVITATION_TTL // timedelta(hours=1)}
+        if confirmed_existing_account:
+            detail["confirmed_existing_account"] = True
         try:
             with audited(
                 self._db,
@@ -1299,7 +1389,7 @@ class PostgresInvitationService:
                 target_id=invitation_id,
                 target_label=invited,
                 org_id=org_id,
-                detail={"creates_organization": org_id is None, "ttl_hours": INVITATION_TTL // timedelta(hours=1)},
+                detail=detail,
             ) as event:
                 # First statement in the transaction, before anything reads the
                 # table: a concurrent issuance for the same address blocks here

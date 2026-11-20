@@ -977,8 +977,49 @@ deliberate line: the rule exists for a human retrying after an ambiguous send,
 and unifying the paths would change the semantics of a shipped endpoint the
 desktop is built against. Re-send policy, including rotation, is #93.
 
-Matching is **exact**, like every other address comparison here (Gate B):
-`Alice@example.com` and `alice@example.com` are two addresses.
+Matching folds ASCII case and nothing else, like every other address
+comparison here: `Alice@example.com` and `alice@example.com` are one address,
+and `alice+tag@example.com` is another.
+
+### The admin panel warns before inviting an address that has been here before
+
+The admin panel issues through `POST /admin/api/invitations`, the same
+in-process call this page makes. Before issuing, it checks the address against
+the identity provider's accounts and against earlier invitations to that
+address that were accepted ([#348]). Either match answers
+`409 {"outcome": "existing_account", "account": …, "member": …, "accepted_at": …}`,
+and nothing is issued, sent, or recorded. Such a person signs in rather than
+registers. The panel shows the warning with **Cancel** and **Send anyway**.
+
+- **`member` says whether sending can help.** Acceptance refuses any login
+  that already has an organization here, including one it was removed from, so
+  for such an account a new invitation cannot be accepted. An account with no
+  organization is exactly who an invitation is for (somebody who registered and
+  whose invitation lapsed), and the panel says so and labels the button
+  **Send this invitation**. `member` is `null` when it cannot be known: no single
+  account was found, or the identity is not pinned to `sub`, since membership
+  rows are keyed on the principal.
+- **Send anyway** repeats the request with `confirm_existing_account: true`.
+  It issues and sends exactly as an unwarned request does, and its
+  `invitation.send` row carries `"confirmed_existing_account": true` in
+  `detail`. The key records the request's own claim; the panel sends it only
+  after showing the warning. No other row carries it.
+- **The live-invitation rule answers first.** An address holding a live
+  invitation is refused as `already_live` with no warning: the warning would
+  ask the operator to confirm a send that is then refused anyway.
+- **Matching** ignores surrounding spaces and folds ASCII case, as issuance
+  does. An accepted row stored before addresses were folded is compared folded
+  too.
+- **A directory that cannot answer does not block issuing.** The account is
+  then unknown rather than absent: an earlier acceptance still warns, and a
+  send that goes out carries `"account_check": "unavailable"`, so the panel can
+  tell the operator nobody asked.
+- **Scope: the panel only.** This page and the `/v1` routes issue without the
+  warning. The owner page (`/web/org/invitations`) is out of scope too: telling
+  an organization owner whether an address has an account on the deployment
+  would disclose it to someone who is not an operator.
+
+[#348]: https://github.com/openteams-ai/collab-hub-pack/issues/348
 
 ### The invitation email is the secret's only route off this page
 

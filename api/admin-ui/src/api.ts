@@ -12,20 +12,16 @@ export type Resource<T> =
   | { state: "forbidden" }
   /** The session ran out while the panel was open; signing in again fixes it. */
   | { state: "signed-out" }
-  /** The request was understood and declined, and the server said why. */
-  | { state: "refused"; reason: string }
+  /**
+   * The request was understood and declined, and the server said why. A
+   * declined write also keeps the rest of what the server said in `body`: the
+   * existing-account warning names what it found, and the panel shows it.
+   */
+  | { state: "refused"; reason: string; body?: Record<string, unknown> }
   | { state: "unavailable"; reason: string }
   | { state: "upstream-error"; reason: string }
   | { state: "error" };
 
-/**
- * The server's own word for what happened.
- *
- * Reads `outcome` before `error`: endpoints that can decline for several
- * distinct reasons name them in `outcome`, and flattening those to a generic
- * failure would lose the difference between "that address already has a live
- * invitation" and "the hub is broken".
- */
 /** Raised on `window` when any call finds the session gone, so the panel as a
  * whole says so once, and no screen reports it as a failure. */
 export const SIGNED_OUT_EVENT = "collab-admin:signed-out";
@@ -35,14 +31,33 @@ function signedOut(): { state: "signed-out" } {
   return { state: "signed-out" };
 }
 
-async function reason(response: Response): Promise<string> {
+/** The JSON object a response carries, or an empty one if it carries none. */
+async function said(response: Response): Promise<Record<string, unknown>> {
   try {
-    const body = (await response.json()) as { outcome?: unknown; error?: unknown };
-    if (typeof body.outcome === "string") return body.outcome;
-    return typeof body.error === "string" ? body.error : "unknown";
+    const body: unknown = await response.json();
+    return typeof body === "object" && body !== null && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
   } catch {
-    return "unknown";
+    return {};
   }
+}
+
+/**
+ * The server's own word for what happened.
+ *
+ * Reads `outcome` before `error`: endpoints that can decline for several
+ * distinct reasons name them in `outcome`, and flattening those to a generic
+ * failure would lose the difference between "that address already has a live
+ * invitation" and "the hub is broken".
+ */
+function word(body: Record<string, unknown>): string {
+  if (typeof body.outcome === "string") return body.outcome;
+  return typeof body.error === "string" ? body.error : "unknown";
+}
+
+async function reason(response: Response): Promise<string> {
+  return word(await said(response));
 }
 
 export async function getJson<T>(path: string, fetchImpl: typeof fetch = fetch): Promise<Resource<T>> {
@@ -106,7 +121,8 @@ export async function postJson(
   if (response.status === 503) return { state: "unavailable", reason: await reason(response) };
   if (response.status === 502) return { state: "upstream-error", reason: await reason(response) };
   if (response.status === 400 || response.status === 409) {
-    return { state: "refused", reason: await reason(response) };
+    const body = await said(response);
+    return { state: "refused", reason: word(body), body };
   }
   if (!response.ok) return { state: "error" };
   // A success can still carry news -- an invitation created whose email did

@@ -57,6 +57,7 @@ from collab_hub_api.frames.invitation_email import (
     DeliveryOutcome,
 )
 from collab_hub_api.frames.invitations import (
+    AddressHistory,
     Invitation,
     InvitationAlreadyUsedError,
     InvitationNotFoundError,
@@ -222,9 +223,16 @@ class FakeInvitationService:
         self.plain_create_calls.append({"email": email, "org_id": org_id})
         raise AssertionError("the operator page must call create_unless_live, not create")
 
-    def create_unless_live(self, ctx, *, email, org_id):
+    def create_unless_live(self, ctx, *, email, org_id, confirmed_existing_account=False):
         self._guard()
-        self.issue_calls.append({"actor": ctx.user, "email": email, "org_id": org_id})
+        self.issue_calls.append(
+            {
+                "actor": ctx.user,
+                "email": email,
+                "org_id": org_id,
+                "confirmed_existing_account": confirmed_existing_account,
+            }
+        )
         if self.issue_result is not None:
             return self.issue_result
         invitation = an_invitation(email=email, org_id=org_id)
@@ -525,7 +533,11 @@ async def test_issuing_creates_an_org_creating_invitation_and_nothing_else(tmp_p
         await signed_in(client, idp)
         response = await issue(client)
     assert response.status_code == 201
-    assert service.issue_calls == [{"actor": OPERATOR_SUB, "email": INVITEE, "org_id": None}]
+    # `confirmed_existing_account` is the admin panel's "Send anyway" (#348);
+    # this page has no warning to confirm past, so it never sets it.
+    assert service.issue_calls == [
+        {"actor": OPERATOR_SUB, "email": INVITEE, "org_id": None, "confirmed_existing_account": False}
+    ]
     # The plain `create` would have skipped the one-live-token rule.
     assert service.plain_create_calls == []
 
@@ -1570,6 +1582,151 @@ def test_live_a_case_variant_is_the_same_address_for_the_live_check(live_db):
         service.create_unless_live(context, email="bob+tag@example.com", org_id=None),
         IssuedInvitation,
     )
+
+
+# --- What the admin panel's existing-account warning reads (#348) ------------
+
+ACCEPTED_IN_AUGUST = datetime(2026, 8, 15, 14, 3, tzinfo=timezone.utc)
+
+
+def _accept_by_hand(live_db, invitation_id: str, when: datetime) -> None:
+    """Mark one invitation accepted at a chosen time, as the retired-invitation
+    test above does: these tests are about what a later read finds, not about
+    the acceptance transaction, which has its own suite."""
+
+    with live_db.connection() as conn:
+        conn.execute(
+            "UPDATE collab_invitations SET status = 'accepted', accepted_at = %s, accepted_by = 'someone'"
+            " WHERE id = %s",
+            (when, invitation_id),
+        )
+
+
+def _insert_accepted(live_db, *, invitation_id: str, email: str, when: datetime) -> None:
+    """An accepted row written directly, so its stored address can be one that
+    issuance today would never store."""
+
+    with live_db.connection() as conn:
+        conn.execute(
+            "INSERT INTO collab_invitations"
+            " (id, email, token_hash, status, created_by, expires_at, accepted_at, accepted_by)"
+            " VALUES (%s, %s, %s, 'accepted', %s, %s, %s, 'someone')",
+            (invitation_id, email, f"hash-{invitation_id}", OPERATOR_SUB, when + timedelta(hours=47), when),
+        )
+
+
+@live_postgres
+def test_live_address_history_reports_a_live_invitation_and_the_last_acceptance(live_db):
+    service = _live_service(live_db)
+    context = _context(PLATFORM_ROLE_OPERATOR)
+    assert service.address_history(INVITEE) == AddressHistory(live=False, last_accepted=None)
+
+    first = service.create_unless_live(context, email=INVITEE, org_id=None)
+    assert service.address_history(INVITEE) == AddressHistory(live=True, last_accepted=None)
+
+    _accept_by_hand(live_db, first.invitation.id, ACCEPTED_IN_AUGUST)
+    history = service.address_history(INVITEE)
+    assert history.live is False
+    assert history.last_accepted.id == first.invitation.id
+    assert history.last_accepted.accepted_at == ACCEPTED_IN_AUGUST
+
+    # The newest acceptance is the one reported, whatever order rows were issued in.
+    second = service.create_unless_live(context, email=INVITEE, org_id=None)
+    _accept_by_hand(live_db, second.invitation.id, ACCEPTED_IN_AUGUST + timedelta(days=17))
+    assert service.address_history(INVITEE).last_accepted.id == second.invitation.id
+
+    # One address's history says nothing about another's.
+    assert service.address_history("carol@example.com") == AddressHistory(live=False, last_accepted=None)
+
+
+@live_postgres
+def test_live_a_lapsed_or_revoked_invitation_is_not_live_and_not_an_acceptance(live_db):
+    service = _live_service(live_db)
+    context = _context(PLATFORM_ROLE_OPERATOR)
+    lapsed = service.create_unless_live(context, email=INVITEE, org_id=None)
+    with live_db.connection() as conn:
+        conn.execute(
+            "UPDATE collab_invitations SET expires_at = now() - interval '1 second' WHERE id = %s",
+            (lapsed.invitation.id,),
+        )
+    revoked = service.create_unless_live(context, email=INVITEE, org_id=None)
+    service.revoke(context, revoked.invitation.id)
+
+    assert service.address_history(INVITEE) == AddressHistory(live=False, last_accepted=None)
+
+
+@live_postgres
+def test_live_an_acceptance_stored_with_capitals_is_still_found(live_db):
+    """Issuance stores the folded address today, but an accepted row can be
+    older than that rule. The lookup folds the stored side too -- case only."""
+
+    service = _live_service(live_db)
+    _insert_accepted(live_db, invitation_id="inv-legacy", email="Bob@Example.COM", when=ACCEPTED_IN_AUGUST)
+
+    assert service.address_history("bob@example.com").last_accepted.id == "inv-legacy"
+    assert service.address_history("BOB@example.com").last_accepted.id == "inv-legacy"
+    assert service.address_history("bob+tag@example.com").last_accepted is None
+
+
+@live_postgres
+def test_live_a_confirmed_send_is_recorded_on_its_audit_row(live_db):
+    """ "Send anyway" leaves a trace an incident can query; an ordinary send's
+    row keeps exactly the shape it always had."""
+
+    service = _live_service(live_db)
+    context = _context(PLATFORM_ROLE_OPERATOR)
+    service.create_unless_live(context, email=INVITEE, org_id=None, confirmed_existing_account=True)
+    service.create_unless_live(context, email="carol@example.com", org_id=None)
+
+    with live_db.connection() as conn:
+        rows = conn.execute(
+            "SELECT target_label, detail FROM collab_audit_events WHERE action = 'invitation.send' ORDER BY id"
+        ).fetchall()
+
+    assert [row["target_label"] for row in rows] == [INVITEE, "carol@example.com"]
+    assert rows[0]["detail"]["confirmed_existing_account"] is True
+    assert set(rows[1]["detail"]) == {"creates_organization", "ttl_hours"}
+
+
+@live_postgres
+async def test_live_the_panel_warns_then_sends_anyway_on_real_rows(live_app, idp, live_db):
+    """The chain end to end through the admin panel's API: an address that
+    accepted in August is warned about, the warning writes and sends nothing,
+    and the confirmed send is the one audited, carrying the confirmation."""
+
+    _insert_accepted(live_db, invitation_id="inv-august", email=INVITEE, when=ACCEPTED_IN_AUGUST)
+
+    async with web_client(live_app) as operator:
+        await sign_in(operator, idp, next_path="/web")
+        csrf = (await operator.get("/admin/api/session")).json()["csrf_token"]
+        warned = await operator.post(
+            "/admin/api/invitations",
+            json={"email": " Bob@Example.com "},
+            headers={"X-CSRF-Token": csrf},
+        )
+        with live_db.connection() as conn:
+            events_after_warning = conn.execute("SELECT count(*) AS n FROM collab_audit_events").fetchone()["n"]
+            invitations_after_warning = conn.execute("SELECT count(*) AS n FROM collab_invitations").fetchone()["n"]
+        confirmed = await operator.post(
+            "/admin/api/invitations",
+            json={"email": INVITEE, "confirm_existing_account": True},
+            headers={"X-CSRF-Token": csrf},
+        )
+
+    assert warned.status_code == 409
+    assert warned.json()["outcome"] == "existing_account"
+    assert warned.json()["accepted_at"].startswith("2026-08-15")
+    assert events_after_warning == 0
+    assert invitations_after_warning == 1, "only the August row: the warning issued nothing"
+
+    assert confirmed.status_code == 201
+    assert confirmed.json()["outcome"] == "sent"
+    assert len(live_app.state.invitation_email_delivery.calls) == 1
+    with live_db.connection() as conn:
+        sends = conn.execute(
+            "SELECT actor, detail FROM collab_audit_events WHERE action = 'invitation.send'"
+        ).fetchall()
+    assert [(row["actor"], row["detail"].get("confirmed_existing_account")) for row in sends] == [(OPERATOR_SUB, True)]
 
 
 def test_the_lock_key_is_a_signed_32_bit_integer():

@@ -510,6 +510,7 @@ def test_the_page_markup_carries_no_token_and_builds_no_url_from_one():
         csrf="csrf-value",
         issued_at=now,
         expires_at=now + 600,
+        sid="realm-session-1",
         email_verified=True,
     )
     document = acceptance_page(root_path="/nexus", session=session)
@@ -1026,6 +1027,7 @@ async def test_a_session_minted_before_the_field_existed_is_unverified(tmp_path,
         SESSION_PURPOSE,
         {
             "sub": "subject-alice",
+            "sid": "realm-session-1",
             "name": "Alice",
             "email": INVITEE_EMAIL,
             "csrf": "legacy-csrf",
@@ -1051,12 +1053,13 @@ def test_the_session_round_trips_the_flag_and_refuses_a_string():
         csrf="c",
         issued_at=now,
         expires_at=now + 60,
+        sid="realm-session-1",
         email_verified=True,
     )
     assert codec.decode_session(codec.encode_session(session)) == session
     stringly = codec.encode(
         SESSION_PURPOSE,
-        {"sub": "u", "csrf": "c", "email_verified": "true", "iat": now, "exp": now + 60},
+        {"sub": "u", "sid": "s", "csrf": "c", "email_verified": "true", "iat": now, "exp": now + 60},
     )
     assert codec.decode_session(stringly).email_verified is False
 
@@ -1126,6 +1129,7 @@ def _age_session(client: AsyncClient, seconds: int) -> None:
         SESSION_PURPOSE,
         {
             "sub": session.user,
+            "sid": session.sid,
             "name": session.name,
             "email": session.email,
             "email_verified": session.email_verified,
@@ -1284,6 +1288,7 @@ def test_the_documented_worst_case_accounts_for_replica_skew():
         csrf="c",
         issued_at=minted_at + CLOCK_SKEW_SECONDS,  # the replica's clock ran fast
         expires_at=now + 3600,
+        sid="realm-session-1",
         email_verified=True,
     )
     assert verified_claims_are_current(skewed, now=now)
@@ -1301,6 +1306,7 @@ def test_a_future_dated_session_is_not_fresh_forever():
         csrf="c",
         issued_at=now + 10_000,
         expires_at=now + 20_000,
+        sid="realm-session-1",
         email_verified=True,
     )
     assert verified_claims_are_current(session, now=now)

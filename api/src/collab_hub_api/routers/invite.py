@@ -342,7 +342,7 @@ def make_routers(*, memberships_enabled: bool, require_verified_email: bool) -> 
         """
 
         root_path = (request.scope.get("root_path") or "").rstrip("/")
-        session = get_web_session(request)
+        session = await get_web_session(request)
         return page_response(
             acceptance_page(
                 root_path=root_path,

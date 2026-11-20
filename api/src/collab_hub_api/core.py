@@ -26,6 +26,7 @@ from .config import (
     build_cog_publish_store,
     build_cog_registry_serving,
     build_connector_store,
+    build_ended_web_sessions,
     build_frames_store,
     build_group_store,
     build_history_store,
@@ -363,9 +364,13 @@ def make_app(config: BaseConfig) -> FastAPI:
                 " organization store: set the shared frames.postgres URL (or"
                 " frames.orgs.backend=memory for local development)."
             )
+    if org_source_resolves_membership() or config.web.enabled:
         # And the schema behind it must be new enough to serve (issue #96).
-        # This is the first consumer of the collab_ tables, so it is the first
-        # build that a version skew can actually break.
+        # Membership is the first consumer of the collab_ tables; the web
+        # surface is another once it runs on frames.postgres (its ended
+        # sessions, collab_ version 18), and without this an autoMigrate:false
+        # deployment behind on the schema 503s every sign-in instead of failing
+        # its rollout. A no-op without frames.postgres.url.
         preflight_collab_schema(config, postgres_pools)
     single_org = single_org_declaration()
     if single_org is not None:
@@ -883,7 +888,7 @@ def make_app(config: BaseConfig) -> FastAPI:
         # scaffolding the invitation pages build on. Its routes authenticate
         # themselves with the web session cookie — the protection map must
         # leave /web public, which the precondition check above enforced.
-        web_surface = build_web_surface(config)
+        web_surface = build_web_surface(config, ended_sessions=build_ended_web_sessions(config, postgres_pools))
         app.state.web_surface = web_surface
         web.register_exception_handlers(app)
         # The invitation-acceptance page (issue #90) rides on that surface as

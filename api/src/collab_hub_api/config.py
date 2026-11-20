@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import sys
@@ -260,11 +261,12 @@ class SecurityConfig(BaseModel):
 WEB_SESSION_LIFETIME_CEILING_SECONDS = 8 * 3600
 """Hard ceiling on a web session's absolute lifetime, and its default.
 
-Not a suggestion: the session cookie is stateless and cannot be revoked
-server-side before it expires, so this number *is* the window in which a
-cookie captured before sign-out keeps asserting its holder's identity. The
-documented risk argument rests on it, so the configuration may lower it and
-may not raise it.
+Not a suggestion: the session cookie is signed, not stored, and the server
+ends one early only when its realm session ends (a back-channel logout, or
+this surface's own Log out; ``web.ended_sessions``). A cookie whose realm
+session lives on keeps asserting its holder's identity until it expires, so
+this number *is* that window. The documented risk argument rests on it, so
+the configuration may lower it and may not raise it.
 """
 
 WEB_SESSION_SECRET_MIN_LENGTH = 32
@@ -1657,6 +1659,39 @@ def build_org_store(config: BaseConfig, pools: PostgresPools) -> OrgStore:
     return UnavailableOrgStore()
 
 
+def build_ended_web_sessions(config: BaseConfig, pools: PostgresPools):
+    """Where the web surface records ended realm sessions (openteams-ai/subscription-manager-pack#79).
+
+    The shared frames.postgres when there is one, so a back-channel logout any
+    replica hears reaches every replica; the table is ``collab_`` migration 18,
+    so there is no ``auto_migrate`` argument here. Without a database, in
+    memory: one replica, which is development, and the logout reaches the
+    process that heard it. Rows are pruned past the session lifetime, the
+    longest any cookie naming them can live.
+    """
+
+    from .web.ended_sessions import InMemoryEndedWebSessions, PostgresEndedWebSessions
+    from .web.surface import clamped_session_lifetime
+
+    # The lifetime the cookies are minted with, so no row is pruned while a
+    # cookie naming it can still verify.
+    lifetime = clamped_session_lifetime(config.web.session_lifetime_seconds)
+    url = config.frames.postgres.url
+    if url:
+        return PostgresEndedWebSessions(pools.database(url), lifetime)
+    # A warning, not a refusal: one replica without a database is a real
+    # development setup, and it works. Said at startup because on more than
+    # one replica it does not, and nothing else would say so.
+    logging.getLogger("frames_server.web").warning(
+        "web_ended_sessions_in_memory",
+        extra={
+            "reason": "frames.postgres.url is not set, so a logout reaches only the replica"
+            " that heard it; run one replica, or set frames.postgres.url"
+        },
+    )
+    return InMemoryEndedWebSessions(lifetime)
+
+
 def build_cog_catalog_store(config: BaseConfig, pools: PostgresPools) -> CogCatalogStore:
     """The Cog catalog (issue #84): the shared frames.postgres, else a store that refuses (503).
 
@@ -2042,8 +2077,9 @@ def preflight_collab_schema(config: BaseConfig, pools: PostgresPools) -> int | N
     tables a version check has nothing to protect, and once something does, the
     alternative to checking is a ``relation does not exist`` traceback from
     whichever authenticated request touched them first. Called by ``make_app``
-    only when membership resolution is on, and only when a shared Postgres URL
-    is configured — with neither, no ``collab_`` table is ever read.
+    when membership resolution is on or the web surface is (its ended sessions
+    are ``collab_`` version 18), and only when a shared Postgres URL is
+    configured — without one, no ``collab_`` table is ever read.
 
     Returns the applied version, ``None`` when the database was unreachable
     (not fatal, see :func:`~.frames.collab_schema.check_collab_schema_version`),

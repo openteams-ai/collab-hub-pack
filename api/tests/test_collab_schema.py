@@ -46,6 +46,7 @@ from collab_hub_api.frames.collab_schema import (  # noqa: E402
 )
 
 COLLAB_TABLES = (
+    "collab_web_ended_sessions",
     "collab_claims",
     "collab_track_runs",
     "collab_connector_state",
@@ -460,7 +461,7 @@ def test_migration_creates_the_cog_publishing_schema():
         "org_id text",
     ):
         assert name not in earlier, name
-    assert LATEST_COLLAB_SCHEMA_VERSION == 17
+    assert LATEST_COLLAB_SCHEMA_VERSION == 18
 
 
 def test_migration_creates_the_source_activity_table():
@@ -501,6 +502,27 @@ def test_migration_creates_the_claims_table():
         statement for version, statements in COLLAB_SCHEMA_MIGRATIONS if version < 17 for statement in statements
     )
     assert "collab_claims" not in earlier
+
+
+def test_migration_creates_the_ended_web_sessions_table():
+    server = FakeServer()
+
+    run_collab_schema_migrations(FakeDatabase(server))
+
+    (ended,) = server.ddl_for("collab_web_ended_sessions")
+    # One row per ended realm session (openteams-ai/subscription-manager-pack#79), pruned by age.
+    assert "sid text PRIMARY KEY" in ended and "ended_at timestamptz NOT NULL" in ended
+    assert (
+        "CREATE INDEX IF NOT EXISTS collab_web_ended_sessions_ended_at ON collab_web_ended_sessions (ended_at)"
+        in " ".join(server.statements)
+    )
+    # Appended as version 18: nothing earlier mentions it, and it alters nothing that exists.
+    statements = dict(COLLAB_SCHEMA_MIGRATIONS)[18]
+    assert all("ALTER" not in statement and "DROP" not in statement for statement in statements)
+    earlier = " ".join(
+        statement for version, statements in COLLAB_SCHEMA_MIGRATIONS if version < 18 for statement in statements
+    )
+    assert "collab_web_ended_sessions" not in earlier
 
 
 def test_rerunning_the_migration_applies_nothing():
@@ -550,6 +572,7 @@ PINNED_CHECKSUMS = {
     15: "94c87d3dc97dfc138ea1ee78bdb067ba114163995f4ef27d44398a930690d84d",
     16: "b2140ce96b42c4e7e9daabbac44b8ee6828d3ce9b39cccd37ca7f818747ca33f",
     17: "b128d44c95c0c2719207bd1bdd880bd3dcce3777663ced40a1c58767b31929c4",
+    18: "26d2060c0a71dadd374677fa80dd04cddc223528ab095914cd6c80ec1e3cfeb1",
 }
 
 

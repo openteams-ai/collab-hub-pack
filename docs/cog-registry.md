@@ -568,10 +568,11 @@ All three need an ordinary Hub sign-in and answer 404
   and to a pull token; the backing registry has never heard of it.
 
 **What "the Hub session ends" means here.** The credential records the `sid`
-of the session it was exchanged from, but the Hub has no channel to learn
-that a Keycloak session ended (no introspection call, no back-channel
-logout), and none was added for this. What bounds a credential after
-sign-out is therefore: the client revoking it, by id (clients are expected
+of the session it was exchanged from, but nothing revokes it when that
+Keycloak session ends: there is no introspection call, and the Hub's
+back-channel logout ([web-surface.md](web-surface.md#back-channel-logout-ending-the-web-session-when-the-realm-session-ends))
+ends only web session cookies, not registry credentials. What bounds a
+credential after sign-out is therefore: the client revoking it, by id (clients are expected
 to revoke each credential they hold when they are done with it and at
 sign-out, and not to rely on the revoke-all route), and its lifetime,
 fifteen minutes by default.

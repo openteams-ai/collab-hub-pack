@@ -92,17 +92,37 @@ class SharePointUpstreamError(RuntimeError):
         status_code: int | None = None,
         message: str = "",
         retry_after: str = "",
+        error_type: str = "",
     ) -> None:
         self.operation = operation
         self.status_code = status_code
         self.message = message
         self.retry_after = retry_after
+        # HTTP client error class when the request failed without a usable
+        # response; such failures are already logged by ``_transport_failure``.
+        self.error_type = error_type
         detail = f"SharePoint {operation} failed"
         if status_code is not None:
             detail = f"{detail} with HTTP {status_code}"
         if message:
             detail = f"{detail}: {message}"
         super().__init__(detail)
+
+
+def _transport_failure(exc: httpx.HTTPError, *, operation: str) -> SharePointUpstreamError:
+    """Log and wrap an HTTP client failure that produced no usable response.
+
+    Only the exception class is kept. Raw httpx messages can carry provider
+    URLs (including a pre-authenticated download link) or credentials. The
+    "transport error" label is loose -- ``httpx.HTTPError`` also covers
+    non-transport failures such as ``DecodingError`` -- so the class name is
+    what identifies the failure.
+    """
+    error_type = type(exc).__name__
+    logger.info("sharepoint_graph_transport_error operation=%s error_type=%s", operation, error_type)
+    return SharePointUpstreamError(
+        operation=operation, message=f"transport error ({error_type})", error_type=error_type
+    )
 
 
 class SharePointSearchError(ValueError):
@@ -364,10 +384,7 @@ class SharePointClient:
                     params=params,
                 )
         except httpx.HTTPError as exc:
-            # Raw transport messages can contain provider URLs or credentials.
-            error_type = type(exc).__name__
-            logger.info("sharepoint_graph_transport_error operation=%s error_type=%s", operation, error_type)
-            raise SharePointUpstreamError(operation=operation, message=f"transport error ({error_type})") from exc
+            raise _transport_failure(exc, operation=operation) from exc
         _raise_for_graph_status(response, operation=operation)
         try:
             payload = response.json()
@@ -399,25 +416,30 @@ class SharePointClient:
         url = httpx.URL(self.api_base_url + path).copy_merge_params(params or {})
         headers: dict[str, str] = {"Authorization": f"Bearer {self.access_token}"}
         timeout = httpx.Timeout(self.download_timeout_seconds)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-            for _hop in range(_MAX_REDIRECTS + 1):
-                async with client.stream("GET", url, headers=headers) as response:
-                    if response.is_redirect and response.headers.get("Location"):
-                        next_url = response.url.join(response.headers["Location"])
-                        if next_url.scheme != "https" and not self._same_origin_as_api(next_url):
-                            raise SharePointUpstreamError(
-                                operation=operation, message="download redirected to a non-https location"
-                            )
-                        url = next_url
-                        headers = {}
-                        continue
-                    if response.status_code >= 400:
-                        await response.aread()
-                        if operation == "convert" and response.status_code in {400, 404, 415, 422}:
-                            reason = _graph_error_message(response) or "unsupported source format"
-                            raise SharePointUnsupportedItem(f"Microsoft could not convert this file to PDF ({reason}).")
-                        _raise_for_graph_status(response, operation=operation)
-                    return await read_capped(response, max_bytes)
+        try:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+                for _hop in range(_MAX_REDIRECTS + 1):
+                    async with client.stream("GET", url, headers=headers) as response:
+                        if response.is_redirect and response.headers.get("Location"):
+                            next_url = response.url.join(response.headers["Location"])
+                            if next_url.scheme != "https" and not self._same_origin_as_api(next_url):
+                                raise SharePointUpstreamError(
+                                    operation=operation, message="download redirected to a non-https location"
+                                )
+                            url = next_url
+                            headers = {}
+                            continue
+                        if response.status_code >= 400:
+                            await response.aread()
+                            if operation == "convert" and response.status_code in {400, 404, 415, 422}:
+                                reason = _graph_error_message(response) or "unsupported source format"
+                                raise SharePointUnsupportedItem(
+                                    f"Microsoft could not convert this file to PDF ({reason})."
+                                )
+                            _raise_for_graph_status(response, operation=operation)
+                        return await read_capped(response, max_bytes)
+        except httpx.HTTPError as exc:
+            raise _transport_failure(exc, operation=operation) from exc
         raise SharePointUpstreamError(operation=operation, message="too many download redirects")
 
     def _same_origin_as_api(self, url: httpx.URL) -> bool:

@@ -1086,10 +1086,12 @@ async def search_sharepoint(
     except SharePointSearchError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     except SharePointUpstreamError as exc:
-        logger.info(
-            "sharepoint_search_upstream_error",
-            extra={"operation": exc.operation, "status_code": exc.status_code},
-        )
+        # The client already logged a failure that never got a response.
+        if not exc.error_type:
+            logger.info(
+                "sharepoint_search_upstream_error",
+                extra={"operation": exc.operation, "status_code": exc.status_code},
+            )
         _raise_sharepoint_upstream(exc)
     except httpx.HTTPError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "SharePoint search failed") from exc
@@ -1119,10 +1121,12 @@ async def read_sharepoint_item(
             headers={"Retry-After": str(exc.retry_after_seconds)},
         ) from exc
     except SharePointUpstreamError as exc:
-        logger.info(
-            "sharepoint_item_read_upstream_error",
-            extra={"operation": exc.operation, "status_code": exc.status_code},
-        )
+        # The client already logged a failure that never got a response.
+        if not exc.error_type:
+            logger.info(
+                "sharepoint_item_read_upstream_error",
+                extra={"operation": exc.operation, "status_code": exc.status_code},
+            )
         _raise_sharepoint_upstream(exc, not_found_detail=_SHAREPOINT_NOT_FOUND_DETAIL)
     except httpx.HTTPError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "SharePoint item read failed") from exc
@@ -1331,6 +1335,8 @@ async def _sharepoint_status(request: Request, config: ConnectorsConfig) -> Shar
         state = "reconnect_required" if exc.status_code in {401, 403} else "unavailable"
         return SharePointStatus(connected=False, state=state, scopes=[], detail=str(exc))
     except httpx.HTTPError:
+        # Defensive: the client wraps HTTP client errors itself, so this is
+        # reached only if a future probe bypasses that wrapping.
         return SharePointStatus(
             connected=False,
             state="unavailable",

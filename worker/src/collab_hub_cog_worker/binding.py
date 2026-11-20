@@ -1,10 +1,13 @@
 """The binding: the model a worker was bound to, and its limits, as the hub delivered them.
 
-The run controller delivers a Cog's model as ``COLLAB_MODEL_*`` variables in the
-worker's environment (the hub's ``models:`` block), or as a file named by
-``COLLAB_BINDING_FILE`` in the format the Cog's own ``resolve`` later fills in.
-A worker reads either; its adapter gets one ``Binding``. The key stays in the
-worker: ``record()`` is the part an envelope carries, and it never holds it.
+The run controller delivers an installed Cog's binding as a file named by
+``COLLAB_BINDING_FILE``: the record its own ``resolve`` produced, with the
+binding's id, the model's endpoint, id and limits, the harness it resolved
+to, and its key by reference (``auth_ref``: ``env:NAME``, the variable the
+controller put the key in). A development controller running a package by
+name delivers the model as ``COLLAB_MODEL_*`` variables instead. A worker
+reads either; its adapter gets one ``Binding``. The key stays in the worker:
+``record()`` is the part an envelope carries, and it never holds it.
 """
 
 from __future__ import annotations
@@ -39,17 +42,27 @@ class Binding:
     """The model's context window in tokens, when the hub knows it: what a harness reserves headroom from."""
     max_output_tokens: int | None = None
     resolved_from: str = "environment"
+    id: str | None = None
+    """The binding record's id, when the hub delivered one: what every step event names."""
+    harness: Mapping[str, object] | None = None
+    """The harness Cog the binding resolved to, by reference, when the Cog requires one."""
 
     @property
     def bound(self) -> bool:
         """Whether a model was delivered at all."""
-        return bool(self.base_url or self.model or self.provider != OPENAI_COMPATIBLE)
+        return bool(self.base_url or self.model or self.provider != OPENAI_COMPATIBLE or self.harness)
 
     def record(self) -> dict[str, object]:
         """The binding as an envelope carries it: identity and limits, no secret."""
-        return {"provider": self.provider, "endpoint": self.base_url, "model": self.model,
-                "context_window": self.context_window, "max_output_tokens": self.max_output_tokens,
-                "resolved_from": self.resolved_from}
+        record: dict[str, object] = {
+            "provider": self.provider, "endpoint": self.base_url, "model": self.model,
+            "context_window": self.context_window, "max_output_tokens": self.max_output_tokens,
+            "resolved_from": self.resolved_from}
+        if self.id is not None:
+            record["id"] = self.id
+        if self.harness is not None:
+            record["harness"] = dict(self.harness)
+        return record
 
 
 def load(environ: Mapping[str, str] | None = None) -> Binding:
@@ -86,13 +99,16 @@ def _from_file(path: Path, environ: Mapping[str, str]) -> Binding:
         if not auth_ref.startswith("env:") or not environ.get(auth_ref[4:]):
             raise WorkerError("binding-invalid", f"auth_ref {auth_ref!r} names no variable that is set")
         key = environ[auth_ref[4:]]
+    harness = document.get("harness")
+    binding_id = document.get("id")
     return Binding(
         provider=str(document.get("provider") or OPENAI_COMPATIBLE),
         base_url=document.get("endpoint") or document.get("base_url") or None,
         model=document.get("model") or None, api_key=key or None,
         context_window=_limit(document.get("context_window"), "context_window"),
         max_output_tokens=_limit(document.get("max_output_tokens"), "max_output_tokens"),
-        resolved_from=f"file:{path}",
+        resolved_from=f"file:{path}", id=str(binding_id) if isinstance(binding_id, str) else None,
+        harness=dict(harness) if isinstance(harness, Mapping) else None,
     )
 
 

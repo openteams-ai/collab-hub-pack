@@ -1,0 +1,73 @@
+name: Publish Cogs
+
+# Publishes every Cog under cogs/ as an OCI artifact to the registry the hub's catalog indexes, from a tag
+# (cogs-<version>, or a collab-hub-<version> release tag), or by hand. The artifact is what `nebi publish`
+# produces for the same files: one layer per file, titled by its path, the pixi media types for the manifest
+# and the lock, and the execution package's publisher is what pushes it (`python -m
+# collab_hub_execution.artifacts publish`), so a hub installs it by its pinned digest
+# (POST /v1/cogs/installs) and materializes it in a worker pod from the artifact. Uses the built-in
+# GITHUB_TOKEN against GHCR; no external registry credential.
+
+on:
+  push:
+    tags:
+      - "cogs-*"
+      - "collab-hub-*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The tag to publish the Cogs under (defaults to the short sha)"
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io
+      REPOSITORY_ROOT: ${{ github.repository }}/cogs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # `pixi lock` resolves PyPI dependencies in this checkout: the workflow's token stays out of .git/config.
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version-file: .github/uv.toml
+
+      - name: Install pixi
+        uses: prefix-dev/setup-pixi@9936258fee697aff89b3fed6ca1f80a382ef694e # v0.11.3
+        with:
+          pixi-version: v0.84.1
+          run-install: false
+
+      - name: Publish each Cog under cogs/
+        working-directory: execution
+        env:
+          # The registry credential the publisher presents to GHCR's token endpoint: the workflow's token.
+          COLLAB_REGISTRY_CREDENTIAL: ${{ github.actor }}:${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="${TAG:-${GITHUB_SHA::7}}"
+          tag="${tag#cogs-}"
+          for cog in ../cogs/*/; do
+            name="$(basename "$cog")"
+            [ -f "$cog/pixi.toml" ] && [ -f "$cog/COG.md" ] || { echo "skipping $name: not a Cog package"; continue; }
+            staged="$(mktemp -d)"
+            cp -R "$cog"/. "$staged"/
+            rm -rf "$staged/.pixi"
+            # A Cog in this repository pins the worker SDK by path (../../worker), which an artifact cannot
+            # carry: the published package pins the SDK at this commit instead (decision 12 of the plan), and
+            # is locked again so its lock, the key of every hub's environment cache, names that environment.
+            sed -i -E "s#collab-hub-cog-worker = \{ path = \"[^\"]+\" \}#collab-hub-cog-worker = { git = \"https://github.com/${GITHUB_REPOSITORY}\", rev = \"${GITHUB_SHA}\", subdirectory = \"worker\" }#" "$staged/pixi.toml"
+            pixi lock --manifest-path "$staged/pixi.toml"
+            reference="$(uv run --quiet python -m collab_hub_execution.artifacts publish "$staged" \
+              "$REGISTRY/$REPOSITORY_ROOT/$name:$tag")"
+            echo "published $name as $reference" | tee -a "$GITHUB_STEP_SUMMARY"
+          done

@@ -48,6 +48,14 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create", "delete"]
+  {{- /* An uninstall evicts the Cog's package from the shared artifact cache (worker.cacheClaim) through a pod
+  of this namespace that mounts the claim and runs the puller's `evict`, since the claim is of this namespace
+  and the controller's pod is not: the controller creates that pod, reads its phase, and deletes it. */}}
+  {{- if $controller.worker.cacheClaim }}
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "delete"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

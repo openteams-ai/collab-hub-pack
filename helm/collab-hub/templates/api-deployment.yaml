@@ -57,11 +57,15 @@ spec:
           {{- end }}
           env:
             {{- include "collab-hub.api-container-env" (dict "top" . "indexer" false) | nindent 12 }}
-            {{- if $controller.enabled }}
-            # The Cogs the run API may launch: the packages the image ships, which the controller runs; and
-            # where their workers run, which every answer about a run names.
+            {{- if $sidecar }}
+            # At the local location, the Cogs the run API may launch by name: the packages the image ships,
+            # which the controller in this pod runs. At the remote location a run names an installed Cog
+            # (POST /v1/cogs/installs), pulled from its artifact, and the API is given no package directory.
             - name: COLLAB_HUB_API__RUNS__PACKAGES
               value: "/opt/collab-hub/cogs"
+            {{- end }}
+            {{- if $controller.enabled }}
+            # Where a run's workers run, which every answer about a run names.
             - name: COLLAB_HUB_API__RUNS__LOCATION
               value: {{ $controller.location | quote }}
             {{- end }}

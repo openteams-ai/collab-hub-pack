@@ -41,18 +41,22 @@ def select_executor(
 
     ``local`` takes ``packages``, the directories Cog packages are found under,
     ``allow``, the names that may be run from them (every package when omitted),
-    and ``work_dir``, where each run's worker output goes. Further settings are
-    the executor's own (``environment``, ``pixi``, ``deliver``,
-    ``ready_timeout``).
+    and ``work_dir``, where each run's worker output goes and, under it, the
+    cache a published Cog is pulled into. Further settings are the executor's
+    own (``environment``, ``pixi``, ``deliver``, ``ready_timeout``,
+    ``registry``).
 
     ``remote`` takes ``image``, the image a worker pod runs (the hub's own,
-    which ships the Cog packages under ``packages_root``), ``namespace``, and
+    which ships pixi and the artifact puller), ``namespace``, and
     ``allow_ingress_from``, the labels of the pods that may reach a worker's
     ``/invoke`` (the run controller's), or ``insecure_skip_network_policy``;
-    ``packages`` and ``work_dir`` mean nothing to it, since a pod runs from
-    the image and writes on volumes of its own. Its pods' ``resources``,
-    ``security_context`` and the ``cache_size_limit`` and ``tmp_size_limit`` of
-    their volumes have defaults a Pod Security ``restricted`` namespace admits.
+    ``packages`` and ``work_dir`` mean nothing to it, since a pod pulls its
+    Cog from the artifact and writes on volumes of its own. Its pods'
+    ``resources``, ``security_context`` and the ``cache_size_limit`` and
+    ``tmp_size_limit`` of their volumes have defaults a Pod Security
+    ``restricted`` namespace admits; ``cache_claim`` makes the cache a shared
+    claim, and ``registry_credential`` and ``registry_plain_http`` are what the
+    pull reaches the registry with.
     """
     if location == "local":
         from .local import LocalProcessCogExecutor
@@ -60,7 +64,8 @@ def select_executor(
 
         if work_dir is None:
             raise ValueError("the 'local' location needs a work_dir: where each run's worker output goes")
-        settings.pop("image", None)
+        for remote_only in ("image", "cache_claim", "registry_credential", "registry_plain_http"):
+            settings.pop(remote_only, None)
         return LocalProcessCogExecutor(source=DirectoryPackageSource(packages, allow), work_dir=work_dir, **settings)
     if location == "remote":
         from ..kubernetes import KubernetesCogExecutor
@@ -69,7 +74,7 @@ def select_executor(
         if not image:
             raise ValueError("the 'remote' location needs an image: the one a worker pod runs, which ships the "
                              "Cog packages")
-        for local_only in ("environment", "pixi", "grace"):
+        for local_only in ("environment", "pixi", "grace", "registry", "artifact_cache"):
             settings.pop(local_only, None)
         return KubernetesCogExecutor(runner_image=image, **settings)
     if location in _NOT_YET:

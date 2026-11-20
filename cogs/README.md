@@ -8,11 +8,12 @@ A harness Cog wraps an agent harness, so the hub can launch it, hold a session w
 
 ## Running one
 
-The run controller finds packages here by name (`make -C dev controller` reads this directory), so `collab-hub cog launch hermes --entry session` launches the Hermes Cog. [`examples/cog-local`](../examples/cog-local/README.md) does it end to end; `make toad` there leaves you chatting with Hermes in Toad.
+A development controller finds packages here by name (`make -C dev controller` reads this directory), so `collab-hub cog launch hermes --entry session` launches the Hermes Cog. [`examples/cog-local`](../examples/cog-local/README.md) does it end to end; `make toad` there leaves you chatting with Hermes in Toad. A deployed hub runs a Cog from its published artifact: `publish-cogs.yaml` publishes each Cog here to the registry the catalog indexes (pinning the worker SDK at the commit, since an artifact cannot carry a path dependency), `collab-hub cog install openteams/hermes --wait` pins it by digest and the controller fetches, binds and checks it, and `cog launch <reference> --entry ask` runs it in a pod of its own ([runs.md](../docs/cog-execution/runs.md#installing-a-cog-and-running-it-once)).
 
 ## Conventions
 
 - **A package of its own.** `pixi.toml` pins the harness and declares the `serve` task, and `pixi.lock` pins its environment; the controller refuses a package without its lock. The harness never shares the hub's environment. A Cog in this repository pins the SDK by path (`collab-hub-cog-worker = { path = "../../worker" }`); one outside it pins a commit of this repository (`#subdirectory=worker`).
-- **Its model comes from the controller.** The SDK reads the binding the controller delivered (`COLLAB_MODEL_*`), and the Cog hands the harness that model alone: no other key, and no credentials of the machine's own.
+- **Its model comes from the controller.** The SDK reads the binding the controller delivered (the binding file an installed Cog's own `resolve` produced, or `COLLAB_MODEL_*` for a package run by name), and the Cog hands the harness that model alone: no other key, and no credentials of the machine's own.
+- **A card, for the catalog.** `COG.md` and `[tool.cog]` in `pixi.toml` declare what the Cog is (`kind: harness`, what it `provides` and `requires`, its entry points), so the catalog indexes it and the hub installs it by digest. The SDK answers `resolve` and `check`; the Cog declares them as lifecycle interfaces and adds no code for them.
 - **Only what is the harness's own is in the Cog.** The seam, sessions, turns, Frames, the binding's limits and the envelope are the SDK's; a Cog here holds the harness's command, its home and configuration for the run, and its environment.
 - **Tested without the harness, and with it.** Each Cog's tests run its worker against the fake ACP agent (`dev/fake-agent/`) in the execution suite, and the harness itself where its environment is installed.

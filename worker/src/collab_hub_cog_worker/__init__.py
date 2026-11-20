@@ -9,12 +9,13 @@ from .adapter import HarnessAdapter
 from .adapters import AcpHarnessAdapter, OpenAICompatAdapter
 from .binding import Binding
 from .binding import load as load_binding
+from .claims import ClaimClient, ClaimUnavailable
 from .envelope import ERROR_CODES, Cancelled, Problem, WorkerError, envelope
 from .seam import Harness, Worker
 from .task import Context, Frame, Interaction, Prompt, Signal, Task, Usage
 
 __all__ = [
-    "ERROR_CODES", "AcpHarnessAdapter", "Binding", "Cancelled", "Context", "Frame", "Harness", "HarnessAdapter",
-    "Interaction", "OpenAICompatAdapter", "Problem", "Prompt", "Signal", "Task", "Usage", "Worker", "WorkerError",
-    "envelope", "load_binding",
+    "ERROR_CODES", "AcpHarnessAdapter", "Binding", "Cancelled", "ClaimClient", "ClaimUnavailable", "Context",
+    "Frame", "Harness", "HarnessAdapter", "Interaction", "OpenAICompatAdapter", "Problem", "Prompt", "Signal",
+    "Task", "Usage", "Worker", "WorkerError", "envelope", "load_binding",
 ]

@@ -317,9 +317,12 @@ run-retry: ## Ask for an ended run to run again (RUN=run-...)
 # controller records the runs it left unfinished `interrupted`. HEALTH_PORT serves /healthz and
 # /readyz. Each Cog gets the model the models block binds it to (`make models`). No limit on how
 # long an interaction takes: a Cog holding a session stays in one for as long as someone talks to it.
+# Each worker is told where the hub is (HUB_URL, `make api` by default), so it reserves and commits
+# its step's keyed claim there (/v1/claims) with its run token, and never acts twice.
 CONTROLLER_ID ?= dev
 ENVIRONMENT   ?= pixi
 HEALTH_PORT   ?=
+HUB_URL       ?= $(API_URL)
 MODELS        ?= $(LOCAL)/models.toml
 controller: models | $(LOCAL)/frames ## The run controller: picks up what /v1/runs and `make submit` record (TRACK, CONTROLLER_ID)
 	@[ "$(ENVIRONMENT)" = host ] || command -v pixi >/dev/null || { \
@@ -327,7 +330,8 @@ controller: models | $(LOCAL)/frames ## The run controller: picks up what /v1/ru
 	cd $(ROOT)/execution && uv run --quiet $(TRACK_EXTRA) python -m collab_hub_execution.controller \
 		--track $(TRACK) --id $(CONTROLLER_ID) $(foreach dir,$(subst :, ,$(COGS)),--packages $(dir)) \
 		--work-dir $(LOCAL)/runs --backend $(BACKEND) --location local --environment $(ENVIRONMENT) \
-		--interaction-timeout 0 --models $(MODELS) $(if $(HEALTH_PORT),--health-port $(HEALTH_PORT))
+		--interaction-timeout 0 --models $(MODELS) --hub-url $(HUB_URL) \
+		$(if $(HEALTH_PORT),--health-port $(HEALTH_PORT))
 
 # The hub's models block, from COLLAB_MODEL_* (below): the one model the Hermes Cog is bound to. The
 # key is never written here: the block names the variable it is in, which the controller reads.

@@ -33,7 +33,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
 import pytest_asyncio
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 
 # #88's live stub IdP and sign-in helpers, reused for the same reason #90
 # reused them: this page has to work on the surface as built.
@@ -1189,7 +1189,8 @@ async def test_a_forged_host_cannot_choose_where_the_surface_points(tmp_path, id
     """
 
     app, _, delivery = build_app(tmp_path, idp, web={"public_base_url": "https://collab.example.com"})
-    async with web_client(app) as client:
+    # Signed in on the configured host, as a browser must be; only the POST's Host is forged.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://collab.example.com") as client:
         await signed_in(client, idp)
         page = await client.get(ADMIN_INVITATIONS_PATH)
         response = await client.post(

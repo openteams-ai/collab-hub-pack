@@ -51,6 +51,8 @@ class Stub:
     frames: set[str] = field(default_factory=set)  # the Frame ids a step may name
     events: dict[str, list[tuple[str, dict]]] = field(default_factory=dict)  # run id -> (type, payload) streamed
     decisions: list[tuple[str, str, dict]] = field(default_factory=list)  # (run, step, decision) recorded
+    reconciled: list[tuple[str, str, dict]] = field(default_factory=list)  # (run, step, body) recorded
+    operator: bool = True  # whether the signed-in user holds the operator platform role
     drop_stream_after: int | None = None  # cut the event stream once, after this many events
     retry_taken_after: int | None = None  # end the stream this many times before a controller takes a retry
     stream_progress: dict[str, list[str]] = field(default_factory=dict)  # statuses reached while a client streams
@@ -301,6 +303,18 @@ class Stub:
                         "details": {"escalation": run.get("escalation")}}})
                 run["decision"] = {"escalation": body["escalation"], "outcome": body["outcome"], "actor": user}
                 return httpx.Response(202, json=run)
+            if action == "reconcile":
+                if not self.operator:
+                    return httpx.Response(403, json={"error": {"code": "forbidden", "message": "Forbidden"}})
+                body = json.loads(request.content)
+                step = body.pop("step")
+                if run.get("error") != "outcome-unknown":
+                    return httpx.Response(409, json={"error": {
+                        "code": "run_not_reconcilable", "message": f"Run {run_id} has nothing to reconcile on "
+                        f"step {step}: run {run_id!r} did not end on an unknown outcome of step {step!r}; "
+                        f"nothing to reconcile", "details": {"status": run["status"], "step": step}}})
+                self.reconciled.append((run_id, step, body))
+                return httpx.Response(200, json=run)
             if action == "retry":
                 if not run["ended"] or run["status"] in ("COMPLETED", "REJECTED", "CANCELLED"):
                     return httpx.Response(409, json={"error": {

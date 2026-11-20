@@ -201,16 +201,19 @@ class McpAuthMiddleware(BaseHTTPMiddleware):
 logger = logging.getLogger("frames_server.core")
 
 
-def _self_authenticating_paths(*, registry_serving: bool, membership_api: bool) -> Callable[[str], bool] | None:
-    """The paths whose routes authenticate every request themselves, or ``None`` for none."""
+def _self_authenticating_paths(*, registry_serving: bool, membership_api: bool) -> Callable[[str], bool]:
+    """The paths whose routes authenticate every request themselves.
 
-    predicates = []
+    The claim routes (/v1/claims) are always among them: they authenticate
+    every request with a worker's run token, which the hub's bearer auth would
+    refuse before they could.
+    """
+
+    predicates: list[Callable[[str], bool]] = [runs_router.claims_path]
     if registry_serving:
         predicates.append(registry.registry_path)
     if membership_api:
         predicates.append(membership.membership_api_path)
-    if not predicates:
-        return None
     return lambda path: any(predicate(path) for predicate in predicates)
 
 
@@ -620,9 +623,10 @@ def make_app(config: BaseConfig) -> FastAPI:
         # endpoint; this middleware's refusal would pre-empt it with the Hub
         # API's envelope. Not a map entry, so no operator rule can undo it.
         #
-        # The membership API (issue #270) likewise authenticates every request
-        # itself: its callers are add-on services, which have no membership of
-        # their own and would be refused `no_organization` by the people check.
+        # The claim routes (/v1/claims) authenticate every request with a
+        # worker's run token, and the membership API (issue #270) with an
+        # add-on's service token: its callers have no membership of their own
+        # and would be refused `no_organization` by the people check.
         self_authenticating=_self_authenticating_paths(
             registry_serving=cog_registry_serving is not None,
             membership_api=membership_api_authenticator is not None,
@@ -863,6 +867,8 @@ def make_app(config: BaseConfig) -> FastAPI:
         # /v2/ there and nowhere else. Absent unless cogs.serve.enabled.
         app.include_router(registry.router)
     app.include_router(runs_router.router, prefix="/v1")
+    # The keyed claim, for workers, authorized by the run token (docs/cog-execution/op-cog-seam.md).
+    app.include_router(runs_router.claims_router, prefix="/v1")
     # Who is calling, and how the collab-hub CLI signs in. /auth/cli is public:
     # the hardened map lists it, since a client asks it before it holds a token.
     app.include_router(identity.router, prefix="/v1")

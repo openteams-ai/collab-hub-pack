@@ -15,6 +15,7 @@ import os
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from urllib.parse import urlencode
 
 from fastapi import Request
 from fastapi.routing import APIRoute
@@ -27,8 +28,9 @@ from ..frames.org_source import (
     org_source_resolves_membership,
 )
 from ..path_protection import resolve_access
-from .oidc import invalid_realm_url_reason, realm_endpoints
-from .session import SessionCodec
+from .oidc import invalid_realm_url_reason, realm_endpoints, realm_logout_endpoint
+from .oidc import logout_url as oidc_logout_url
+from .session import SessionCodec, WebSession
 
 BEARER_ISSUER_ENV = "FRAMES_BEARER_ISSUER"
 """Fallback source for the realm URL, read at startup: the web client lives in
@@ -198,6 +200,13 @@ nothing from the request, with nothing to act on.
 """
 
 HOME_PATH = "/web/home"
+
+DEFAULT_SIGNIN_TARGET = HOME_PATH
+"""Where a sign-in with no (or no acceptable) ``next`` lands (#335).
+
+The home page, not the operations overview at :data:`LANDING_PATH`: that page
+is for operators, who reach it by its link, and landing everyone else there
+after "Sign in again" looked like sign-in had gone somewhere wrong."""
 """The Collab Hub home page: where a person arriving at the hub's address
 lands, signed in or not. The copy and layout live in :mod:`.home`.
 
@@ -551,6 +560,8 @@ class WebSurface:
     """The home page's docs link; empty = no link."""
     hub_domain: str = ""
     """The domain the home page's links are built from; empty = the issuer's host without ``keycloak.``."""
+    web_client: bool = False
+    """Whether the hub runs the web client; off (the default) = the pages render no links into it."""
 
     def __post_init__(self) -> None:
         if self.session_lifetime_seconds <= 0:
@@ -588,6 +599,27 @@ class WebSurface:
         base = self.public_base_url or str(request.base_url)
         return f"{base.rstrip('/')}{CALLBACK_PATH}"
 
+    def logout_url(self, request: Request, session: WebSession, *, next_path: str | None) -> str:
+        """Where sign-out sends the browser to end the realm session (#335).
+
+        Keycloak returns the browser to ``post_logout_redirect_uri``, which it
+        checks against the client's registered list just as it checks
+        ``redirect_uri``, so the base comes from the same place
+        :meth:`redirect_uri`'s does. ``next_path`` is one sign-in's allowlist
+        already accepted; the signed-out page re-checks it anyway.
+        """
+
+        base = (self.public_base_url or str(request.base_url)).rstrip("/")
+        landing = f"{base}{SIGNED_OUT_PATH}"
+        if next_path and next_path != DEFAULT_SIGNIN_TARGET:
+            landing += f"?{urlencode({'next': next_path})}"
+        return oidc_logout_url(
+            logout_endpoint=realm_logout_endpoint(self.issuer_url),
+            client_id=self.client_id,
+            post_logout_redirect_uri=landing,
+            id_token_hint=session.id_token,
+        )
+
     def now(self) -> int:
         return int(time.time())
 
@@ -617,6 +649,7 @@ def build_web_surface(config: BaseConfig) -> WebSurface:
         desktop_download_url=web.desktop_download_url,
         docs_url=web.docs_url,
         hub_domain=web.hub_domain,
+        web_client=web.web_client,
     )
 
 

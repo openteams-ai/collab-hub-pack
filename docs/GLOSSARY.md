@@ -212,14 +212,25 @@ so a committed claim answers instead of the work running again. (ADR-0002 D2;
 
 **Keyed claim.** How a step executed again within the same attempt avoids
 repeating a side effect: each interaction carries an idempotency key for its
-step attempt, the first writer of a key records its envelope, and a later
-invocation with that key gets the envelope back instead of acting again. An
-attempt lasts until its outcome is on the Track, so the claim covers a
-durable backend resuming after a crash, and a retry of a run interrupted
-before that step's outcome was recorded. A step whose failure was recorded
-runs again on retry, as a new attempt with a new key. Not a lease: it does
-not decide who runs a step, only that one attempt acts once. (ADR-0002 D1;
-issue #1.)
+step attempt; the worker *reserves* the key on the hub before it acts and
+*commits* its envelope after, and a later invocation with that key gets the
+envelope back instead of acting again. A key reserved by a worker that was
+lost before committing leaves the step *outcome-unknown*: nothing acts on it
+again, and a person reconciles it. An attempt lasts until its outcome is on
+the Track, so the claim covers a durable backend resuming after a crash, and a
+retry of a run interrupted before that step's outcome was recorded. A step
+whose failure was recorded runs again on retry, as a new attempt with a new
+key. Not a lease: it does not decide who runs a step, only that one attempt
+acts once. The hub serves it to workers as `/v1/claims`, authorized by the run
+token ([the seam](cog-execution/op-cog-seam.md#the-keyed-claim)). (ADR-0002
+D1; issue #1.)
+
+**Outcome-unknown.** The state of a step attempt whose worker reserved its key
+and was lost before committing its result: its side effect may have happened.
+The step fails with that code, the run API refuses to retry the run, and a
+platform operator settles what the worker did and records it
+(`collab-hub run reconcile`, the `outcome_reconciled` event on the Track);
+the run is then retried as a new attempt. ([states](cog-execution/states.md).)
 
 **Lifecycle runner.** The one component that runs a Cog's lifecycle —
 resolve, materialize, interact, read the envelope, Guards, Gate, idle or
@@ -343,6 +354,6 @@ the run machine. Each state is described in
 [`worker/`](../worker/README.md), that implements the worker side of the seam
 once — `/invoke` returning an envelope, the health probe, sessions and turns,
 the binding with the model's limits, the step's Frames, cancellation, usage,
-and the `/invoke` authentication hook; the keyed claim's client joins it with
-the claim — and hands each interaction to a harness adapter. A Cog may use it;
+the `/invoke` authentication hook and the keyed claim's client — and hands
+each interaction to a harness adapter. A Cog may use it;
 the hub requires only the seam and never imports the SDK. (ADR-0002 D5.)

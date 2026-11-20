@@ -16,6 +16,7 @@ from collab_hub_execution import (
     ResultEnvelope,
     RunBudget,
     RunState,
+    intents,
 )
 from collab_hub_execution.envelope import CODE_FOR_STATUS, STATUS_FOR_CODE
 from collab_hub_execution.kubernetes import _KubernetesWorker
@@ -126,7 +127,25 @@ def test_to_dict_round_trips_through_parse():
 
 def test_every_documented_code_has_a_status_and_every_status_a_code():
     assert set(STATUS_FOR_CODE) == ERROR_CODES
-    assert set(STATUS_FOR_CODE.values()) == set(CODE_FOR_STATUS)
+    # A bare status names a code only where the status alone says enough: never 409, whose code, outcome-unknown,
+    # no retry runs again on its own, so only an envelope that says so records it.
+    assert set(CODE_FOR_STATUS) == set(STATUS_FOR_CODE.values()) - {409}
+    assert STATUS_FOR_CODE["outcome-unknown"] == 409
+
+
+def test_the_hub_and_the_worker_sdk_write_and_read_one_status_table():
+    # The hub never imports the SDK (test_worker_sdk_boundary.py); the two tables are held equal here instead.
+    import importlib
+    import sys
+    from pathlib import Path
+
+    sdk = Path(__file__).resolve().parents[2] / "worker" / "src"
+    sys.path.insert(0, str(sdk))
+    try:
+        written = importlib.import_module("collab_hub_cog_worker.envelope")
+    finally:
+        sys.path.remove(str(sdk))
+    assert written.STATUS_FOR_CODE == STATUS_FOR_CODE and written.ERROR_CODES == ERROR_CODES
 
 
 # --- the engine's reading ----------------------------------------------------
@@ -179,6 +198,11 @@ def test_each_error_code_fails_the_step_and_keeps_the_code(code):
     assert failed.payload["step"] == "s0"
     # the failed call's spending is on the Track, and counts on retry
     assert events(track, "env", "interaction_usage")[-1].payload["usage"] == {"tokens": 7}
+    if code == "outcome-unknown":
+        # The one failure a retry never runs again on its own: a person settles what the lost worker did first.
+        with pytest.raises(ValueError, match="reconciled explicitly"):
+            engine.retry("env")
+        intents.reconcile_outcome(track, "env", step="s0", actor="ops")
     assert engine.retry("env") is RunState.COMPLETED
     assert engine.budget_tracker(track.replay("env")).tokens == 8
 
@@ -272,6 +296,18 @@ def test_http_error_status_without_an_envelope_body_still_names_the_failure(stat
     envelope = worker.interact("run", "x")
     assert not envelope.ok and envelope.error.code == CODE_FOR_STATUS[status]
     assert envelope.usage is None  # unknown, so a budgeted run fails as UsageUnavailable
+
+
+def test_a_bare_409_fails_the_step_as_a_transport_error_and_only_an_envelope_records_outcome_unknown():
+    # A worker that is not on the SDK, or a proxy, may answer 409 for reasons of its own: without an envelope
+    # saying outcome-unknown, the step fails by the exception's name, and a retry runs it again.
+    worker = http_worker(lambda _: httpx.Response(409, text="conflict"))
+    with pytest.raises(httpx.HTTPStatusError):
+        worker.interact("run", "x")
+    said_so = http_worker(lambda _: httpx.Response(409, json=ResultEnvelope.failure(
+        "outcome-unknown", "reserved by a lost worker").to_dict()))
+    envelope = said_so.interact("run", "x")
+    assert not envelope.ok and envelope.error.code == "outcome-unknown"
 
 
 def test_http_error_status_with_an_ok_envelope_is_a_contradiction():

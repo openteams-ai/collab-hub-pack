@@ -20,7 +20,7 @@ import posixpath
 import secrets
 from collections.abc import Sequence
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlencode, urlsplit
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -54,6 +54,7 @@ from ..web.pages import (
     render_page,
     sign_in_failed_page,
     signed_out_page,
+    signing_out_page,
 )
 from ..web.privacy_statement import privacy_statement_page
 from ..web.request_limits import connection_close_headers
@@ -73,6 +74,7 @@ from ..web.surface import (
     BILLING_PATH,
     CALLBACK_PATH,
     DATA_STATEMENT_PATH,
+    DEFAULT_SIGNIN_TARGET,
     HOME_ASSETS,
     HOME_MARK_PATH,
     HOME_PATH,
@@ -119,6 +121,14 @@ only when the person closes the tab.
 The callback is listed with it because it is the same category and costs one
 entry — landing there without a transient cookie renders the fixed
 sign-in-failed page, which terminates but is nobody's intended destination.
+"""
+
+SIGNIN_HOP_PARAM = "hop"
+"""Marks a sign-in that has already been moved to ``web.public_base_url``'s host.
+
+A deployment whose proxy rewrites the Host header would otherwise send the
+browser to the public host forever: the app never sees that host arrive. The
+marker allows one move; a second arrival with it starts the flow where it is.
 """
 
 
@@ -180,21 +190,21 @@ def sanitize_next_path(value: str | None) -> str:
 
     Anything else — absolute URLs, scheme-relative ``//host`` forms,
     backslash variants browsers normalize into them, control characters, and
-    the flow's own routes — falls back to the overview page. This is the whole
+    the flow's own routes — falls back to the home page (``DEFAULT_SIGNIN_TARGET``). This is the whole
     open-redirect surface of the flow, so the rule is an allowlist of shape,
     not a denylist of known-bad prefixes.
     """
 
     if not value or len(value) > MAX_NEXT_LENGTH:
-        return LANDING_PATH
+        return DEFAULT_SIGNIN_TARGET
     if not value.startswith("/") or value.startswith("//"):
-        return LANDING_PATH
+        return DEFAULT_SIGNIN_TARGET
     if "\\" in value or ":" in value.split("?", 1)[0]:
-        return LANDING_PATH
+        return DEFAULT_SIGNIN_TARGET
     if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
-        return LANDING_PATH
+        return DEFAULT_SIGNIN_TARGET
     if _targets_flow_route(value):
-        return LANDING_PATH
+        return DEFAULT_SIGNIN_TARGET
     return value
 
 
@@ -390,6 +400,37 @@ def make_router(
         clear_transient_cookie(response)
         return response
 
+    def _signin_on_public_host(request: Request, next_path: str, *, renew: bool, register: bool) -> str | None:
+        """Where to send a sign-in started on a host other than ``web.public_base_url``'s, if anywhere.
+
+        The transient cookie is ``__Host-``: the browser sends it only to the
+        host that set it. Keycloak returns the person to ``redirect_uri``, which
+        is on ``public_base_url``'s host. A sign-in started on any other host
+        that serves these pages (an alias, or a link from another service
+        naming one) sets the cookie where the callback will never see it, and
+        always ends on the failure page. Moving the browser first makes the
+        cookie and the callback share a host.
+
+        Hosts are compared by name only, as cookies are: a port does not
+        separate them. ``None`` when no public origin is configured (the
+        redirect URI then comes from this request, so they already match), when
+        the request is already on that host, or when it was already moved once.
+        """
+
+        base = surface.public_base_url
+        if not base or request.query_params.get(SIGNIN_HOP_PARAM) == "1":
+            return None
+        public_host = (urlsplit(base).hostname or "").lower()
+        if (request.url.hostname or "").lower() == public_host:
+            return None
+        query = {"next": next_path}
+        if renew:
+            query["renew"] = "1"
+        if register:
+            query["register"] = "1"
+        query[SIGNIN_HOP_PARAM] = "1"
+        return f"{base.rstrip('/')}{SIGNIN_PATH}?{urlencode(query)}"
+
     @public_router.get(SIGNIN_PATH)
     async def signin(request: Request) -> Response:
         """Start the authorization-code flow (or skip it, if already signed in).
@@ -417,11 +458,35 @@ def make_router(
         which IdP screen appears first and skips nothing — an existing
         session still short-circuits it, and the code exchange, state, nonce
         and PKCE are identical.
+
+        When ``web.public_base_url`` is set and this request arrived on another
+        host, the flow does not start here: the browser is first moved to the
+        same sign-in on the public host (see ``_signin_on_public_host``), which
+        is the only host whose callback can read the transient cookie. That
+        move runs before the signed-in shortcut, so a session on the alias
+        cannot keep the person there. ``?hop=1`` marks a request that was
+        already moved and stops a loop behind a proxy that rewrites Host. Set
+        by hand (or kept in a bookmark) it skips the move and gives back the
+        behaviour from before the move existed, which needs nothing to undo.
         """
 
         next_path = sanitize_next_path(request.query_params.get("next"))
         renew = request.query_params.get("renew") == "1"
         register = request.query_params.get("register") == "1"
+        # Before the signed-in shortcut: a person signed in on the public host
+        # has no session on an alias, and is signed in once they arrive there.
+        public_signin = _signin_on_public_host(request, next_path, renew=renew, register=register)
+        if public_signin is not None:
+            # Both hosts: an alias and a proxy that rewrites Host look alike
+            # from in here, and these are what tell an operator which it is.
+            logger.info(
+                "web_sign_in_moved_to_public_host",
+                extra={
+                    "request_host": request.url.hostname,
+                    "public_host": urlsplit(surface.public_base_url).hostname,
+                },
+            )
+            return _redirect(public_signin)
         if not renew and get_web_session(request) is not None:
             return _redirect(f"{_root_path(request)}{next_path}")
         state = oidc.generate_state()
@@ -537,6 +602,9 @@ def make_router(
             # claims reader has already reduced anything that is not boolean
             # true to False.
             email_verified=display.email_verified,
+            # Kept for sign-out only: the realm ends its session without a
+            # confirmation screen when shown the ID token it issued (#335).
+            id_token=token_response["id_token"],
             csrf=secrets.token_urlsafe(32),
             issued_at=now,
             expires_at=now + lifetime,
@@ -616,29 +684,46 @@ def make_router(
         return _redirect(target)
 
     @router.post(SIGNOUT_PATH)
-    async def signout(request: Request, _session: WebSession = Depends(require_csrf)) -> Response:
-        """End the session on this browser.
+    async def signout(request: Request, session: WebSession = Depends(require_csrf)) -> Response:
+        """End the session on this browser, and the realm session behind it.
 
         The cookie is stateless, so this deletes the browser's copy; it cannot
         recall copies made before this moment (see ``web.session``). Authority
         does not ride the cookie — roles are checked per request — so the
         exposure of a pre-sign-out copy is identity, bounded by ``exp``.
+
+        Deleting the cookie alone left the realm session alive, so the next
+        "Log in" came straight back without a password and sign-out looked
+        broken (#335). The browser is therefore sent on to the realm's logout,
+        which returns it to the signed-out page. ``next`` rides the query
+        string, not the form, so the body is read once, by ``require_csrf``,
+        under its bound. A caller that asks for JSON (the admin panel's
+        ``fetch``, which cannot follow anyone to the realm) is told the URL
+        and navigates there itself.
         """
 
-        response = _redirect(f"{_root_path(request)}{SIGNED_OUT_PATH}")
+        next_param = request.query_params.get("next")
+        next_path = sanitize_next_path(next_param) if next_param else None
+        logout = surface.logout_url(request, session, next_path=next_path)
+        if "application/json" in request.headers.get("accept", ""):
+            response: Response = JSONResponse(
+                {"location": logout}, headers={**SECURITY_HEADERS, "Cache-Control": "no-store"}
+            )
+        else:
+            response = page_response(signing_out_page(logout_url=logout, root_path=_root_path(request)))
         clear_session_cookie(response)
         return response
 
     @public_router.get(SIGNED_OUT_PATH)
     async def signed_out(request: Request) -> Response:
         # The same allowlist the sign-in redirect applies, so the link can only
-        # ever carry a target sign-in would accept. The overview is sign-in's
-        # own default, so it is left off the link.
+        # ever carry a target sign-in would accept. The home page is sign-in's
+        # own default (DEFAULT_SIGNIN_TARGET), so it is left off the link.
         next_path = sanitize_next_path(request.query_params.get("next"))
         return page_response(
             signed_out_page(
                 root_path=_root_path(request),
-                next_path=None if next_path == LANDING_PATH else next_path,
+                next_path=None if next_path == DEFAULT_SIGNIN_TARGET else next_path,
             )
         )
 

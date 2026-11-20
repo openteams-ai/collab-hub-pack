@@ -377,6 +377,17 @@ class WebConfig(BaseModel):
     """Where the home page's "Docs" link points. Empty renders no link. Same
     rules as ``account_page_url``."""
 
+    web_client: bool = False
+    """Whether this hub runs the Collab web client at ``collab.<hub_domain>``.
+
+    Off (the default) renders no link into it, so a hub where nothing answers
+    at ``collab.<domain>``, such as the public one, shows no dead links
+    (issue #332). On, the home and account pages link to it: "Collab" and
+    "Frames" in the navigation and sidebar, "Open Collab", and "Manage your
+    Frames". Turn it on only where the web client actually runs. The desktop
+    download, docs and API docs links are unaffected either way.
+    """
+
     hub_domain: str = ""
     """The domain the home page builds its links from: the web client at
     ``collab.<domain>`` and Frames at ``frames.<domain>``.

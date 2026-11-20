@@ -1181,6 +1181,10 @@
           "description": "Domain the home page builds its links from; empty takes the issuer's host without keycloak. A bare host name.",
           "pattern": "^$|^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$"
         },
+        "webClient": {
+          "type": "boolean",
+          "description": "Whether the hub runs the Collab web client at collab.<hubDomain>; false (default) shows no link into it."
+        },
         "desktopDownloadUrl": {
           "type": "string",
           "description": "The home page's desktop download link; empty renders none. Same shape as accountPageUrl.",

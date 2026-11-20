@@ -12,6 +12,17 @@ A session entry point holds its ``/invoke`` open and answers turns, each one
 an interaction with the harness, until a farewell or until the run is
 terminated and this process with it. The worker knows nothing of where it
 runs: a process on the controller's host and a pod serve the same seam.
+
+Every task carries an idempotency key, and the worker honours it through the
+keyed claim (``claims.py``): it reserves the key on the hub before an entry
+point acts and commits the envelope after, so an invocation replayed after a
+crash or a retry never acts twice. An envelope is committed when the entry
+point was called: it answered, failed on its own, or was cancelled while it
+ran, since the agent may have acted before the cancellation reached it. When
+nothing acted, because the task was refused before the entry point was called
+(no such entry point, a session already held, a harness that could not start
+or was cancelled while starting), the key is released instead, and a replay
+runs the step. A worker given no hub (``COLLAB_HUB_URL``) claims nothing.
 """
 
 from __future__ import annotations
@@ -29,7 +40,9 @@ from typing import Any
 
 from . import binding as bindings
 from .adapter import HarnessAdapter
-from .envelope import Cancelled, Problem, Stopwatch, WorkerError, envelope, status_for
+from .claims import ClaimClient, ClaimUnavailable
+from .claims import log as claim_log
+from .envelope import Cancelled, Problem, Stopwatch, WorkerError, envelope, status_for, status_of
 from .limits import check_fits
 from .task import Context, Frame, Interaction, Prompt, Signal, Task, Usage, frames_from
 
@@ -109,20 +122,25 @@ class Worker:
     ``harness`` makes the Cog's adapter from the ``Context`` the worker starts
     it with (the binding among it); ``None`` for a Cog whose entry points need
     no harness. ``authenticate`` replaces the run-token check on ``/invoke`` and
-    ``/turn``; the default admits the bearer of ``COLLAB_RUN_TOKEN``.
+    ``/turn``; the default admits the bearer of ``COLLAB_RUN_TOKEN``. ``claims``
+    is the keyed claim's client, made from ``COLLAB_HUB_URL`` and the run token
+    unless given; with none, the worker acts on every invocation.
     """
 
     def __init__(self, cog: str | None = None, version: str = "0.1.0", *,
                  harness: Callable[[Context], HarnessAdapter] | None = None,
                  environ: Mapping[str, str] | None = None, authenticate: Authenticate | None = None,
                  session_start_timeout: float = 300.0, turn_grace: float = 1.0,
-                 farewells: tuple[str, ...] = FAREWELLS, work_dir: str | None = None) -> None:
+                 farewells: tuple[str, ...] = FAREWELLS, work_dir: str | None = None,
+                 claims: ClaimClient | None = None) -> None:
         self.environ = os.environ if environ is None else environ
         self.cog = cog or self.environ.get(COG_ENV, "cog")
         self.version = version
         self.run_id = self.environ.get(RUN_ENV, "")
         self.make_harness = harness
         self.authenticate = authenticate or self._run_token_check
+        self.claims = claims or ClaimClient.from_environment(self.environ)
+        """The keyed claim's client, or ``None`` for a worker given no hub to claim against."""
         self.session_start_timeout = session_start_timeout
         """How long a turn waits for a session that is opening: a harness's first start can take a while."""
         self.turn_grace = turn_grace
@@ -210,9 +228,66 @@ class Worker:
 
     def invoke(self, entry_point: Any, input: Any = None, idempotency_key: Any = None, frames: Any = None,
                signal: Any = None) -> tuple[int, dict[str, Any]]:
-        """``POST /invoke`` in process: the HTTP status and the envelope."""
+        """``POST /invoke`` in process: the HTTP status and the envelope, under the task's keyed claim.
+
+        With a hub to claim against and a key on the task, the key is reserved
+        before the entry point acts: a key committed already is answered with
+        its envelope, and one reserved by a worker that was lost before
+        committing fails the step ``outcome-unknown``, so nothing acts twice. A
+        hub that cannot be reached for the reservation fails the step
+        ``hub-unavailable`` before anything acts. The envelope is committed
+        after, when the entry point was called, a cancellation out of it
+        included; when nothing acted, the key is released instead, so a replay
+        runs the step. A commit or a release the
+        hub does not take is logged, and the envelope answered all the same,
+        since the controller records it.
+        """
+        key = idempotency_key if isinstance(idempotency_key, str) and idempotency_key and self.claims else None
+        if key:
+            answered = self._reserve(entry_point, key)
+            if answered is not None:
+                return answered
+        status, answer, acted = self._invoke(entry_point, input, idempotency_key, frames, signal)
+        if key:
+            try:
+                if acted:
+                    self.claims.commit(key, answer)
+                else:
+                    self.claims.release(key)
+                    claim_log(f"{key}: released; nothing acted, so a replay runs the step")
+            except ClaimUnavailable as exc:
+                what = "committed" if acted else "released"
+                claim_log(f"{key}: the key could not be {what}, and the envelope is answered all the same: {exc}")
+        return status, answer
+
+    def _reserve(self, entry_point: Any, key: str) -> tuple[int, dict[str, Any]] | None:
+        """Reserve the key; the answer to give instead of acting, or ``None`` when this worker is to act."""
+        name = entry_point if isinstance(entry_point, str) else None
+        try:
+            claim = self.claims.reserve(key)
+        except ClaimUnavailable as exc:
+            error = WorkerError("hub-unavailable", f"the key {key} could not be reserved, so nothing acted: {exc}")
+            return status_for(error), self._envelope(name, None, Stopwatch(), error=error)
+        if claim.yours:
+            return None
+        if claim.state == "committed" and isinstance(claim.envelope, Mapping):
+            claim_log(f"{key}: committed already; answering with its envelope, and acting on nothing")
+            committed = dict(claim.envelope)
+            return status_of(committed), committed
+        error = WorkerError("outcome-unknown", f"the key {key} is {claim.state}: it was reserved by a worker that "
+                                               f"never committed its result, so its side effect may have happened "
+                                               f"and nothing acts on it again until a person reconciles it")
+        return status_for(error), self._envelope(name, None, Stopwatch(), error=error)
+
+    def _invoke(self, entry_point: Any, input: Any, idempotency_key: Any, frames: Any,
+                signal: Any) -> tuple[int, dict[str, Any], bool]:
+        """The status and the envelope, and whether the step acted: the entry point was called, and answered,
+        failed on its own or was cancelled while it ran. False when the task was refused before the entry point
+        was called, the harness being cancelled while it started included; the claim is released, not
+        committed, then."""
         clock = Stopwatch()
         harness: Harness | None = None
+        acted = False
         try:
             task = Task(entry_point=str(entry_point or ""), input=input, idempotency_key=idempotency_key,
                         frames=frames_from(frames), signal=signal)
@@ -224,18 +299,21 @@ class Worker:
                                                    f"it has {', '.join(self.entry_points) or 'none'}")
             if self.make_harness is not None:
                 harness = self._start_harness(task.frames)
+            acted = True
             payload = fn(task, harness)  # type: ignore[arg-type]
             if isinstance(payload, Interaction):
                 payload = {"answer": payload.text}
-            return 200, self._envelope(task.entry_point, harness, clock, payload=payload)
+            return 200, self._envelope(task.entry_point, harness, clock, payload=payload), True
         except WorkerError as error:
-            return status_for(error), self._envelope(entry_point, harness, clock, error=error)
+            return status_for(error), self._envelope(entry_point, harness, clock, error=error), acted
         except Cancelled:
+            # Cancelled while the harness started: nothing acted. Cancelled out of the entry point, mid-prompt:
+            # the agent may have run its tools already, so the step acted, and the failure is committed.
             error = WorkerError("model-call-failed", "the interaction was cancelled before it answered")
-            return status_for(error), self._envelope(entry_point, harness, clock, error=error)
+            return status_for(error), self._envelope(entry_point, harness, clock, error=error), acted
         except Exception as exc:  # noqa: BLE001 - the seam's contract: every /invoke is answered with an envelope
             error = self._unexpected(exc)
-            return status_for(error), self._envelope(entry_point, harness, clock, error=error)
+            return status_for(error), self._envelope(entry_point, harness, clock, error=error), acted
         finally:
             if harness is not None:
                 self._close(harness)
@@ -254,17 +332,20 @@ class Worker:
                         binding=binding.record() if binding is not None and binding.bound else None,
                         usage=harness.usage.report() if harness else None, timing=clock.timing())
 
-    def _hold_session(self, task: Task, clock: Stopwatch) -> tuple[int, dict[str, Any]]:
+    def _hold_session(self, task: Task, clock: Stopwatch) -> tuple[int, dict[str, Any], bool]:
+        """Hold the session until it ends; the step acted once the session opened, turns or none."""
         with self._session_lock:
             if self._session is not None and not self._session.ended.is_set():
                 raise WorkerError("invalid-input", f"{self.cog} already holds a session; one at a time")
             session = self._session = _Session(self._sessions[task.entry_point])
         harness = None
+        acted = False
         try:
             try:
                 harness = session.harness = self._start_harness(task.frames)
             finally:
                 session.opened.set()  # a turn waiting on the session is answered now: by it, or by its absence
+            acted = True
             # Until a farewell, or until the harness is gone: a session whose harness can never answer
             # again ends, failed, rather than holding the run open. A terminated run stops this process.
             while not session.ended.wait(1):
@@ -276,14 +357,14 @@ class Worker:
                 code = getattr(getattr(harness.adapter, "process", None), "returncode", None)
                 raise WorkerError("model-call-failed", f"{harness.name} exited (code {code}) during the session, "
                                                        f"after {session.turns} turns")
-            return 200, self._envelope(task.entry_point, harness, clock, payload={"turns": session.turns})
+            return 200, self._envelope(task.entry_point, harness, clock, payload={"turns": session.turns}), True
         except (WorkerError, Cancelled) as failure:
             error = failure if isinstance(failure, WorkerError) else \
                 WorkerError("model-call-failed", "the session was stopped before it opened")
-            return status_for(error), self._envelope(task.entry_point, harness, clock, error=error)
+            return status_for(error), self._envelope(task.entry_point, harness, clock, error=error), acted
         except Exception as exc:  # noqa: BLE001 - every /invoke is answered with an envelope
             error = self._unexpected(exc)
-            return status_for(error), self._envelope(task.entry_point, harness, clock, error=error)
+            return status_for(error), self._envelope(task.entry_point, harness, clock, error=error), acted
         finally:
             session.ended.set()  # however it ended, the worker holds no session now, and can open another
             if harness is not None:

@@ -72,6 +72,7 @@ than dead-ending a signed-in operator.
 | `COLLAB_HUB_API__WEB__ADMIN_GROUP` | Identity-provider group whose members hold the operator role, reconciled at each sign-in from the ID token's `groups` claim. Matches with or without a leading slash. Empty (default) turns sync off. Needs a groups mapper on the client so the ID token carries the claim; see [frames-operations.md](frames-operations.md#where-operator-rows-come-from-source-and-sign-in-sync). |
 | `COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL` | Optional. An external account page (plan, usage, invoices) the signed-in navigation links to as "Billing". Empty (default) renders no link. Same https/loopback rule as the issuer, plus a real host, a valid port, no credentials and no control characters, checked at startup. Chart value `web.accountPageUrl`. See [the account link](#the-account-link-an-optional-extension-point). |
 | `COLLAB_HUB_API__WEB__HUB_DOMAIN` | Optional. The domain [the home page](#the-home-page-webhome) builds its links from (the web client and its Frames page at `collab.<domain>`, the API docs at `frames.<domain>`). Empty (default) takes the issuer's host without its leading `keycloak.`. A bare host name, checked at startup. Chart value `home.hubDomain`. |
+| `COLLAB_HUB_API__WEB__WEB_CLIENT` | Optional, default `false`. Whether this hub runs the Collab web client at `collab.<domain>`. Off renders no link into it; `true` adds "Collab" and "Frames" in the navigation and sidebar, "Open Collab" and "Manage your Frames" on the home and account pages. Set it only where the web client runs. The download, docs and API docs links are unaffected. Chart value `home.webClient`. |
 | `COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL` | Optional. The home page's desktop download link. Empty renders none. Same rules as `ACCOUNT_PAGE_URL`. Chart value `home.desktopDownloadUrl`. |
 | `COLLAB_HUB_API__WEB__DOCS_URL` | Optional. The home page's docs link. Empty renders none. Same rules as `ACCOUNT_PAGE_URL`. Chart value `home.docsUrl`. |
 
@@ -114,6 +115,19 @@ The redirect URI registered on the Keycloak client must be exactly
 `<public_base_url>/web/oidc/callback`. Keycloak compares it verbatim, so a
 client registered against any other path fails at the *first* sign-in with
 `Invalid parameter: redirect_uri` — before the surface's own code runs.
+
+When `public_base_url` is set, a sign-in started on any other host that serves
+these pages (an alias, or another service's link naming one) is first sent to
+`<public_base_url>/web/signin`, keeping `next`, `renew` and `register`. The
+flow's transient cookie is `__Host-`, so the browser returns it only to the
+host that set it, and the callback is on `public_base_url`'s host: a sign-in
+begun elsewhere could never complete. Hosts are compared by name, as cookies
+are. The move carries `hop=1` and happens at most once, so a proxy that
+rewrites the Host header gets one extra redirect, not a loop. A link or
+bookmark that already carries `hop=1` skips the move and behaves as sign-in did
+before it existed. Each move logs `web_sign_in_moved_to_public_host` with
+`request_host` and `public_host`, which tells an alias apart from a proxy
+rewriting Host.
 
 ### The identity pin, and why operator pages depend on it
 
@@ -319,10 +333,10 @@ a protection the middleware does not itself enforce.
 | Route | What |
 |---|---|
 | `GET /web` | Signed-in overview; redirects to sign-in when there is no session. |
-| `GET /web/signin?next=&renew=` | Starts the code flow. `next` accepts only app-relative paths that are not the flow's own routes — anything else falls back to `/web` (no open redirect, and no self-referential loop). `renew=1` runs the flow even with a valid session, which is how the acceptance page obtains current claims. |
+| `GET /web/signin?next=&renew=` | Starts the code flow. `next` accepts only app-relative paths that are not the flow's own routes — anything else, and a missing `next`, falls back to `/web/home` (no open redirect, and no self-referential loop; the operations overview at `/web` is reached by its link, not as a default). `renew=1` runs the flow even with a valid session, which is how the acceptance page obtains current claims. |
 | `GET /web/oidc/callback` | Finishes the flow, mints the session. Every failure renders one fixed page; nothing from the request or the IdP response is echoed. |
-| `POST /web/signout` | CSRF-protected; clears the session cookie. |
-| `GET /web/signed-out` | Confirmation page. |
+| `POST /web/signout?next=` | CSRF-protected; clears the session cookie and ends the realm session too: it answers with a page that forwards the browser to the realm's RP-initiated logout (`id_token_hint` from the session, `client_id`, and `post_logout_redirect_uri` = `<public base>/web/signed-out`, carrying a safe `next`). A page rather than a redirect because `form-action 'self'` applies to every hop of a form's redirect chain. Asked for JSON (`Accept: application/json`, the admin panel's `fetch`), it answers `{"location": …}` instead. The realm client must list `<public base>/web/signed-out*` under its valid post-logout redirect URIs (`post.logout.redirect.uris`), or every sign-out ends on Keycloak's "Invalid redirect uri" page. |
+| `GET /web/signed-out?next=` | Confirmation page; where the realm returns the browser after sign-out. "Sign in again" carries a safe `next`, or lands on `/web/home` without one. |
 | `GET /web/app.css` | The shared stylesheet (documents keep `style-src 'self'`). |
 | `GET /web/collab-logo.png` | The product wordmark the server-rendered pages show (documents allow `img-src 'self'`). **Anonymous**, like the stylesheet: the sign-in and acceptance pages show it before anybody has a session. |
 | `GET /web/home` | [The Collab Hub home page](#the-home-page-webhome). **Anonymous**: signed out it offers sign-in and sign-up; signed in it shows who is signed in, the sign-out form and the hub's links. |
@@ -636,11 +650,14 @@ still kept:
 ### The home page (`/web/home`)
 
 What a person sees at the hub's address. Signed out: Sign in and Sign up
-(`/web/signin?register=1`), both returning to the page. Signed in: the
+(`/web/signin?register=1`), both returning to the page, and the desktop
+download when one is configured, which needs no account. Signed in: the
 person's name, Sign out, and one click to each of the web client
 (`https://collab.<domain>/`), Frames (`https://collab.<domain>/frames`), the desktop
 download and docs (when configured) and the hub's own account page
-(`/web/account`). That page is a dashboard with a sidebar whose Billing
+(`/web/account`). The web client and Frames links appear only with
+`web.web_client` on; off (the default), they are left out everywhere, on this
+page and the account page, and the desktop download is the main action. That page is a dashboard with a sidebar whose Billing
 entry links straight to `web.account_page_url`; with no account page set
 there is no Billing entry. `/web/account/billing` forwards to the account
 page when one is set and is not found otherwise.

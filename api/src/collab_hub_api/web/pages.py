@@ -296,6 +296,7 @@ def render_page(
     identity_label: str | None = None,
     csrf_token: str | None = None,
     account_url: str | None = None,
+    refresh_url: str | None = None,
 ) -> str:
     """Render one page of the surface into a complete document.
 
@@ -315,8 +316,15 @@ def render_page(
     from configuration through :func:`~.surface.account_page_url`, never from
     the request. The account dashboard's sidebar (``home._dashboard``) links
     to the same page under the same rule: signed in, and the value set.
+
+    ``refresh_url`` sends the browser on at once with a meta refresh. It is
+    for the sign-out page only (:func:`signing_out_page`), which must leave
+    for the realm without a redirect; see there for why.
     """
 
+    refresh = ""
+    if refresh_url:
+        refresh = f'<meta http-equiv="refresh" content="0;url={html.escape(refresh_url)}">\n'
     footer = ""
     if identity_label is not None and csrf_token is not None:
         account = ""
@@ -340,7 +348,7 @@ def render_page(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <meta name="robots" content="noindex, nofollow">
-<title>{html.escape(title)}</title>
+{refresh}<title>{html.escape(title)}</title>
 <link rel="stylesheet" href="{html.escape(root_path)}{STYLE_PATH}">
 </head>
 <body>
@@ -452,6 +460,29 @@ def authorization_unavailable_page(*, root_path: str = "") -> str:
             f'<p><a href="{html.escape(root_path)}/web">Back to overview</a></p>'
         ),
         root_path=root_path,
+    )
+
+
+def signing_out_page(*, logout_url: str, root_path: str = "") -> str:
+    """The answer to ``POST /web/signout``: on to the realm's logout (#335).
+
+    A page with a meta refresh rather than a 303, on purpose. Every page that
+    carries the sign-out form has ``form-action 'self'``, and browsers apply
+    ``form-action`` to each hop of a form submission's redirect chain, so a
+    303 to the realm is blocked and the person is left where they were. A
+    meta refresh is a new navigation, outside that chain. The link is for a
+    browser that does not follow the refresh.
+    """
+
+    return render_page(
+        title="Signing you out",
+        body=(
+            "<h1>Signing you out</h1>"
+            "<p>Ending your session with your organization's sign-in service.</p>"
+            f'<p><a href="{html.escape(logout_url)}">Continue</a></p>'
+        ),
+        root_path=root_path,
+        refresh_url=logout_url,
     )
 
 

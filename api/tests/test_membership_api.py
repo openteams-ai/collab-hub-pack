@@ -541,9 +541,11 @@ def test_path_predicates_are_segment_aware():
     assert membership_api_path("/v1/membership")
     assert membership_api_path("/v1/membership/organizations")
     assert not membership_api_path("/v1/membershipx")
-    assert _self_authenticating_paths(registry_serving=False, membership_api=False) is None
+    neither = _self_authenticating_paths(registry_serving=False, membership_api=False)
+    assert neither("/v1/claims") and not neither("/v2/") and not neither("/v1/membership")
     both = _self_authenticating_paths(registry_serving=True, membership_api=True)
-    assert both("/v2/") and both("/v1/membership/organizations") and not both("/v1/frames")
+    assert both("/v2/") and both("/v1/membership/organizations") and both("/v1/claims")
+    assert not both("/v1/frames")
 
 
 # --------------------------------------------------------------------------

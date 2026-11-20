@@ -54,9 +54,18 @@ never the Cog's.
 
 **`error`** — `null`, or `{code, detail}`. Codes: `binding-invalid`,
 `invalid-input`, `model-unavailable`, `model-call-failed`,
-`model-response-malformed`, `context-exhausted`. When set, `ok` is `false`.
-Over HTTP, the status maps 4xx/5xx accordingly: 422 for `invalid-input` and
-`context-exhausted`, 502 for an upstream fault, 503 for unavailable/binding.
+`model-response-malformed`, `context-exhausted`, `outcome-unknown`,
+`hub-unavailable`. When set, `ok` is `false`. Over HTTP, the status maps
+4xx/5xx accordingly: 422 for `invalid-input` and `context-exhausted`, 409 for
+`outcome-unknown`, 502 for an upstream fault, 503 for unavailable/binding and
+for a hub the worker could not reach.
+
+`outcome-unknown` and `hub-unavailable` are the keyed claim's
+([the seam](op-cog-seam.md#the-keyed-claim)): the task's idempotency key was
+reserved by a worker that was lost before it committed its result, so its side
+effect may have happened and nothing acts on it again until a person reconciles
+it; or the hub could not be reached to reserve the key, so nothing acted and the
+step may be retried.
 
 `context-exhausted` is the input that did not fit: the prompt and the step's
 Frames could not fit the bound model's context window, even after the
@@ -103,11 +112,12 @@ As the hub's worker client implements it (`collab_hub_execution.kubernetes`):
 | Status | Body | The hub reads |
 |---|---|---|
 | 200 | an envelope, `ok` true or false | the envelope |
+| 409 | an envelope with `error.code: outcome-unknown` | the envelope's code |
 | 422 | an envelope with `error.code: invalid-input` or `context-exhausted` | the envelope's code |
 | 502 | an envelope with `model-call-failed` or `model-response-malformed` | the envelope's code |
-| 503 | an envelope with `model-unavailable` or `binding-invalid` | the envelope's code |
+| 503 | an envelope with `model-unavailable`, `binding-invalid` or `hub-unavailable` | the envelope's code |
 | 422 / 502 / 503 | not an envelope — a proxy's error page, a worker that died mid-answer | an error envelope with the status's own code: `invalid-input`, `model-call-failed`, `model-unavailable` |
-| anything else | — | a transport error; the step fails by the exception's name, not a code |
+| 409 without an envelope, anything else | — | a transport error; the step fails by the exception's name, not a code, and may be retried. Only an envelope that says `outcome-unknown` records it, since that code is the one no retry runs again on its own |
 
 A 200 whose body is not an envelope, and an error status carrying `ok: true`,
 are invalid answers (`EnvelopeInvalid`) and fail the step as such. The `usage`

@@ -33,6 +33,7 @@ from ..frames.auth import TokenDecodeError, decode_verified_jwt
 AUTHORIZE_ENDPOINT = "/protocol/openid-connect/auth"
 TOKEN_ENDPOINT = "/protocol/openid-connect/token"
 JWKS_ENDPOINT = "/protocol/openid-connect/certs"
+LOGOUT_ENDPOINT = "/protocol/openid-connect/logout"
 
 TOKEN_REQUEST_TIMEOUT_SECONDS = 10.0
 """Socket timeout for the code exchange. Sign-in is interactive: a person is
@@ -213,6 +214,37 @@ def realm_endpoints(issuer_url: str) -> tuple[str, str, str]:
         f"{realm}{TOKEN_ENDPOINT}",
         f"{realm}{JWKS_ENDPOINT}",
     )
+
+
+def realm_logout_endpoint(issuer_url: str) -> str:
+    """The realm's RP-initiated logout endpoint for a validated realm URL.
+
+    Derived the way :func:`realm_endpoints` derives the others, and kept out
+    of that tuple so its callers do not change shape.
+    """
+
+    return f"{issuer_url.rstrip('/')}{LOGOUT_ENDPOINT}"
+
+
+def logout_url(
+    *,
+    logout_endpoint: str,
+    client_id: str,
+    post_logout_redirect_uri: str,
+    id_token_hint: str | None,
+) -> str:
+    """The URL that ends the person's realm session (OIDC RP-Initiated Logout).
+
+    ``client_id`` always rides along: Keycloak needs it to check
+    ``post_logout_redirect_uri`` against the client's registered list when
+    there is no hint, and accepts it alongside one. ``id_token_hint`` is what
+    lets Keycloak skip its "Do you want to log out?" screen.
+    """
+
+    params = {"client_id": client_id, "post_logout_redirect_uri": post_logout_redirect_uri}
+    if id_token_hint:
+        params["id_token_hint"] = id_token_hint
+    return f"{logout_endpoint}?{urlencode(params)}"
 
 
 def generate_state() -> str:

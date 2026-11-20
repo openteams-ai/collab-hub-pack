@@ -1875,6 +1875,7 @@ def test_the_unavailable_service_refuses_every_operation():
         lambda: service.create(OPERATOR_CTX, email=INVITED_EMAIL, org_id=None),
         lambda: service.list_all(limit=50),
         lambda: service.list_for_org(ORG, limit=50),
+        lambda: service.address_history(INVITED_EMAIL),
         lambda: service.get("inv-1"),
         lambda: service.revoke(OPERATOR_CTX, "inv-1"),
         lambda: service.accept(

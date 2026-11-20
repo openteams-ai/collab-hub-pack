@@ -75,6 +75,26 @@ describe("postJson", () => {
   it("treats a success with no body as ok with nothing to read", async () => {
     expect(await postJson("x", {}, "csrf", answering(204))).toEqual({ state: "ok", data: null });
   });
+
+  it("keeps the rest of what a refusal said, not just its word", async () => {
+    // The existing-account warning is a 409 whose body says what was found;
+    // the panel words the warning from it, so it cannot be dropped here.
+    const warning = { outcome: "existing_account", account: true, accepted_at: "2026-08-15T14:03:00+00:00" };
+
+    expect(await postJson("api/invitations", {}, "csrf", answering(409, warning))).toEqual({
+      state: "refused",
+      reason: "existing_account",
+      body: warning,
+    });
+  });
+
+  it("refuses with an empty body when the refusal carried no JSON object", async () => {
+    expect(await postJson("api/invitations", {}, "csrf", answering(400, ["not", "an", "object"]))).toEqual({
+      state: "refused",
+      reason: "unknown",
+      body: {},
+    });
+  });
 });
 
 describe("an expired session", () => {

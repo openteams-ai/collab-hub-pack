@@ -50,11 +50,13 @@ from ..frames.invitations import (
     InvitationsUnavailableError,
     LiveInvitationExists,
     effective_status,
+    validate_invited_email,
 )
 from ..frames.model_catalog import ModelCatalogError
+from ..frames.orgs import OrgsUnavailableError
 from ..frames.platform_role_admin import PlatformRoleChangeRefused
 from ..frames.usage import UsageStore, UsageUnavailableError
-from ..user_directory import UserDirectoryClient, UserDirectoryUnavailableError
+from ..user_directory import AmbiguousAccountError, UserDirectoryClient, UserDirectoryUnavailableError
 from ..web.authz import require_csrf, require_operator, resolve_platform_role
 from ..web.operator import operator_context
 from ..web.session import WebSession
@@ -98,6 +100,58 @@ def _running_version() -> str:
         return "unknown"
 
 
+def _account_standing(
+    request: Request, directory: UserDirectoryClient, address: str
+) -> tuple[bool | None, bool | None]:
+    """Whether *address* has an account, and whether that account has an organization here.
+
+    Either answer is ``None`` when it cannot be known, which is not "no", and
+    the caller must not treat it as one:
+
+    - the account is unknown when no directory is configured, or it did not
+      answer;
+    - the organization is unknown unless exactly one account was found **and**
+      the session principal is pinned to ``sub``. Membership rows are keyed on
+      the principal, and only under that pin is it the identity provider's
+      account id. Under the legacy precedence it is a renameable name, and
+      looking the id up would report "no organization" for everybody.
+
+    "Has an organization" means any membership row, active or removed, because
+    that is what acceptance refuses (``AlreadyInOrganizationError``): such an
+    account can sign in but cannot accept another invitation. An account with no
+    row is exactly who an invitation is for -- somebody who registered and whose
+    invitation lapsed before they accepted it -- and the panel words its warning
+    accordingly.
+
+    ``find_provisioned_account`` because it is the directory's one exact-address
+    lookup; ``search_users`` is an infix match across names and addresses, so a
+    hit there is not evidence about this address. The provisioning markers it
+    returns are not consulted: nothing pre-creates invitee accounts at issuance
+    today, so an account found here is somebody's own. If that workflow is ever
+    wired in, an account it created and the invitee never finished will count
+    here too, and this is the place to tell the two apart.
+    """
+
+    try:
+        record = directory.find_provisioned_account(address)
+    except AmbiguousAccountError:
+        # Two accounts for one address needs a human in the realm, but it is
+        # certainly not "no account". Which of the two would sign in is exactly
+        # what cannot be said, so the organization stays unknown.
+        return True, None
+    except UserDirectoryUnavailableError:
+        return None, None
+    if record is None:
+        return False, None
+    if not record.id or not getattr(request.app.state, "web_identity_pinned_to_sub", False):
+        return True, None
+    try:
+        membership = request.app.state.org_store.get_membership(record.id)
+    except OrgsUnavailableError:
+        return True, None
+    return True, membership is not None
+
+
 class InvitationRequest(BaseModel):
     """One address to invite.
 
@@ -106,6 +160,11 @@ class InvitationRequest(BaseModel):
     """
 
     email: str = Field(min_length=3, max_length=320)
+    confirm_existing_account: bool = False
+    """The operator's "Send anyway": issue even though this address already
+    has an account. Skips the existing-account check and is recorded on the
+    audit row as the request's own claim -- the panel sends it only after
+    showing the warning. It never skips the live-invitation check."""
 
 
 class ConnectorSwitch(BaseModel):
@@ -221,6 +280,7 @@ def make_router() -> APIRouter:
         actor: Annotated[object, Depends(operator_context)],
         service: Annotated[InvitationService, Depends(get_invitation_service)],
         delivery: Annotated[object, Depends(get_invitation_email_delivery)],
+        directory: Annotated[UserDirectoryClient, Depends(get_user_directory_client)],
         _csrf: Annotated[object, Depends(require_csrf)],
     ):
         """Invite one address, and send them the link.
@@ -239,14 +299,61 @@ def make_router() -> APIRouter:
         cannot be rolled back. The residual risk runs the other way -- a
         committed invitation whose email failed -- which is why the outcome is
         reported rather than flattened into success.
+
+        **An address that has been here before is warned about first** (#348).
+        Unless the request carries ``confirm_existing_account``, an address the
+        identity provider holds an account for, or one that accepted an
+        invitation before, gets ``409 existing_account`` and nothing is issued
+        or sent. Such a person signs in rather than registers. Whether a new
+        invitation helps them depends on their account: acceptance refuses one
+        that already has an organization here, even one it was removed from,
+        while one with no organization is exactly who an invitation is for. The
+        response says which, where that can be known (``member``). The operator
+        then cancels or confirms, and a confirmed request issues exactly as an
+        unwarned one does, with the confirmation on its audit row.
+
+        A directory that cannot answer does not block issuing -- the check is a
+        warning, not a gate -- but the response then says the account check did
+        not run, so silence is never read as "no account".
         """
 
-        address = body.email.strip()
-        if "@" not in address or address.startswith("@") or address.endswith("@"):
+        # Validated here, as the server-rendered page does: an address the
+        # service would refuse is the operator's typo (400), not a 500 from
+        # inside the action, and the checks below see the folded form that
+        # issuance stores.
+        try:
+            address = validate_invited_email(body.email.strip())
+        except ValueError:
             return JSONResponse({"outcome": "invalid_email"}, status_code=400)
 
+        account_unchecked = False
+        if not body.confirm_existing_account:
+            try:
+                history = service.address_history(address)
+            except InvitationsUnavailableError:
+                return JSONResponse({"outcome": "unavailable"}, status_code=503)
+            # A live invitation is refused below whatever this would say, so
+            # that refusal answers first.
+            if not history.live:
+                account, member = _account_standing(request, directory, address)
+                accepted_at = history.last_accepted.accepted_at if history.last_accepted else None
+                if account or history.last_accepted is not None:
+                    return JSONResponse(
+                        {
+                            "outcome": "existing_account",
+                            "email": address,
+                            "account": account,
+                            "member": member,
+                            "accepted_at": accepted_at.isoformat() if accepted_at else None,
+                        },
+                        status_code=409,
+                    )
+                account_unchecked = account is None
+
         try:
-            outcome = issue_invitation(actor, service, email=address)
+            outcome = issue_invitation(
+                actor, service, email=address, confirmed_existing_account=body.confirm_existing_account
+            )
         except InvitationsUnavailableError:
             return JSONResponse({"outcome": "unavailable"}, status_code=503)
 
@@ -275,7 +382,10 @@ def make_router() -> APIRouter:
             "admin_api_invitation_issued",
             extra={"invitation_id": invitation.id, "delivery_status": delivered.status},
         )
-        return JSONResponse({"outcome": result, "email": invitation.email}, status_code=201)
+        issued = {"outcome": result, "email": invitation.email}
+        if account_unchecked:
+            issued["account_check"] = "unavailable"
+        return JSONResponse(issued, status_code=201)
 
     @router.post("/invitations/{invitation_id}/revoke")
     def admin_revoke_invitation(

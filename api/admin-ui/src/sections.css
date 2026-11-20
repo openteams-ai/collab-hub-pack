@@ -194,6 +194,19 @@ button.primary:disabled {
 
 .good { color: var(--accent); }
 
+/* The existing-account warning: nothing has been sent yet, and the operator
+   chooses. Ruled in the warning colour so it reads as a question to answer,
+   not as the outcome of a send. */
+.invite-warning {
+  max-width: 34rem;
+  margin: 0.75rem 0 1rem;
+  padding: 0.25rem 0 0.25rem 0.85rem;
+  border-left: 3px solid var(--warn);
+}
+.main .invite-warning p { margin: 0 0 0.5rem; }
+.main .invite-warning p:first-child { color: var(--ink); }
+.invite-warning .invite-row { align-items: center; margin-top: 0.75rem; }
+
 /* A label people can read only with a screen reader. The control beside it is
    understandable on sight; the name is for anyone who cannot see the row. */
 .visually-hidden {

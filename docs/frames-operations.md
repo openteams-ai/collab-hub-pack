@@ -1138,11 +1138,28 @@ locked, so a check-then-insert would let two simultaneous issuances (a
 double-submitted form) both read "none" and both insert. It is transaction
 scoped, so it is released by the transaction ending, on commit or rollback.
 
-Matching is exact, like every other address comparison here (Gate B):
-`Alice@example.com` and `alice@example.com` can each hold a live invitation.
+Matching folds ASCII case and nothing else, like every other address
+comparison here: `Alice@example.com` and `alice@example.com` are one address
+and cannot each hold a live invitation, while `alice+tag@example.com` is
+another address.
 
 If you see contention on advisory locks in `pg_locks` with `classid = 18766`,
 that is this rule; it is held for the duration of one issuance only.
+
+#### Sends that went past the existing-account warning
+
+The admin panel warns before inviting an address that already has an account,
+or that accepted an invitation before, and the operator can send anyway (issue
+#348). A request that carried that confirmation records it in its
+`invitation.send` row as `confirmed_existing_account`. The key is the request's
+own claim, and the panel sends it only after showing the warning:
+
+```sql
+SELECT at, actor_label, target_label FROM collab_audit_events
+WHERE action = 'invitation.send'
+  AND detail @> '{"confirmed_existing_account": true}'
+ORDER BY at DESC;
+```
 
 #### What bounds abuse on this path (nothing, yet)
 

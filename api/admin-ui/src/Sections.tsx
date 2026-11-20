@@ -3,9 +3,10 @@ import { useState } from "react";
 
 import { ConnectorIcon, ModelIcon } from "./BrandIcon";
 import { postJson } from "./api";
-import { invitationNotice } from "./invitations";
+import { existingAccount, existingAccountWarning, invitationNotice } from "./invitations";
 import { Pager, useDebounced, usePages } from "./paging";
 import type { Resource } from "./api";
+import type { ExistingAccount } from "./invitations";
 import { useResource } from "./useResource";
 
 /** Every failure this panel can show, in words an operator can act on. */
@@ -545,20 +546,36 @@ export function Invitations({ csrfToken }: { csrfToken: string }) {
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ text: string; bad: boolean } | null>(null);
+  // The existing-account warning, and the address it is about. Nothing has
+  // been sent while it is showing; the operator cancels or sends anyway.
+  const [warning, setWarning] = useState<{ address: string; found: ExistingAccount } | null>(null);
+
+  /** Issue one invitation. `confirmed` is the operator's "Send anyway". */
+  async function issue(address: string, confirmed: boolean) {
+    setBusy(true);
+    setNotice(null);
+    setWarning(null);
+    const result = await postJson(
+      "api/invitations",
+      confirmed ? { email: address, confirm_existing_account: true } : { email: address },
+      csrfToken,
+    );
+    setBusy(false);
+
+    const found = existingAccount(result);
+    if (found) {
+      setWarning({ address, found });
+      return;
+    }
+    if (result.state === "ok") setEmail("");
+    setNotice(invitationNotice(result));
+    setReload((n) => n + 1);
+  }
 
   async function send(event: React.FormEvent) {
     event.preventDefault();
     const address = email.trim();
-    if (!address) return;
-
-    setBusy(true);
-    setNotice(null);
-    const result = await postJson("api/invitations", { email: address }, csrfToken);
-    setBusy(false);
-
-    if (result.state === "ok") setEmail("");
-    setNotice(invitationNotice(result));
-    setReload((n) => n + 1);
+    if (address) await issue(address, false);
   }
 
   async function revoke(invitation: InvitationRow) {
@@ -576,7 +593,7 @@ export function Invitations({ csrfToken }: { csrfToken: string }) {
     <>
       <p>
         Invite someone to this deployment. Accepting creates their organization with them as its
-        owner.
+        owner. If the address already has an account here, you are asked before anything is sent.
       </p>
 
       <form className="invite" onSubmit={send}>
@@ -588,7 +605,11 @@ export function Invitations({ csrfToken }: { csrfToken: string }) {
             autoComplete="off"
             placeholder="person@example.com"
             value={email}
-            onChange={(event) => setEmail(event.target.value)}
+            onChange={(event) => {
+              setEmail(event.target.value);
+              // A warning about one address says nothing about the next one.
+              setWarning(null);
+            }}
             disabled={busy}
           />
           <button type="submit" className="primary" disabled={busy || !email.trim()}>
@@ -597,12 +618,50 @@ export function Invitations({ csrfToken }: { csrfToken: string }) {
         </div>
       </form>
 
+      {warning && (
+        <ExistingAccountWarning
+          warning={warning}
+          busy={busy}
+          onCancel={() => setWarning(null)}
+          onSend={issue}
+        />
+      )}
+
       {notice && <p className={notice.bad ? "bad" : "good"}>{notice.text}</p>}
 
       <h3>Issued invitations</h3>
       <InvitationList resource={resource} busy={busy} onRevoke={revoke} />
       {resource?.state === "ok" && <Pager pages={pages} next={resource.data.next_offset} />}
     </>
+  );
+}
+
+/** The existing-account warning: what was found, and Cancel or send. Nothing has been sent while it shows. */
+function ExistingAccountWarning({
+  warning,
+  busy,
+  onCancel,
+  onSend,
+}: {
+  warning: { address: string; found: ExistingAccount };
+  busy: boolean;
+  onCancel: () => void;
+  onSend: (address: string, confirmed: boolean) => void;
+}) {
+  const { found, consequence, send } = existingAccountWarning(warning.found);
+  return (
+    <div className="invite-warning" role="alert">
+      <p>{found}</p>
+      <p>{consequence}</p>
+      <div className="invite-row">
+        <button type="button" className="link" disabled={busy} onClick={onCancel}>
+          Cancel
+        </button>
+        <button type="button" className="primary" disabled={busy} onClick={() => onSend(warning.address, true)}>
+          {send}
+        </button>
+      </div>
+    </div>
   );
 }
 

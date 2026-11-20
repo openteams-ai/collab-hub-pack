@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
@@ -12,6 +14,31 @@ DM_TYPES = ["im", "mpim"]
 MAX_LIST_PAGE_SIZE = 200
 MAX_LIST_PAGES = 5
 MAX_CHANNEL_AUTHORIZATION_PAGES = 25
+# Search results only show the first 500 characters of each message.
+# The full message can still be fetched with a read.
+SEARCH_SNIPPET_CHARS = 500
+
+# Default read size budget, matching SlackReadRequest/SlackThreadReadRequest.
+DEFAULT_READ_BUDGET_CHARS = 12_000
+
+# Prefix marking a cursor as our own read-budget continuation point (a Slack
+# message ts) rather than Slack's opaque pagination cursor. A channel read that
+# had a lower time bound carries it too, as "ts:<resume ts>:<oldest>", so the
+# next page stays inside the requested window.
+_BUDGET_CURSOR_PREFIX = "ts:"
+
+# Slack's own cursor only records a position, not the time window. When a channel
+# read has a lower time bound, its Slack cursor is wrapped as
+# "slack:<oldest>:<slack cursor>" so the bound survives that page too.
+_WINDOWED_SLACK_CURSOR_PREFIX = "slack:"
+
+# A Slack message timestamp ("1790000000.000100"), and a time-window bound, which
+# can be shorter (a pre-2001 date) or "0.000000". Our own cursors are only
+# recognised when they have these shapes. The request models reject anything else
+# with a 422; a direct client call sends it to Slack unchanged, which rejects it,
+# instead of crashing or restarting the read.
+_SLACK_TS = re.compile(r"\d{10,}\.\d{3,}")
+_SLACK_BOUND = re.compile(r"\d+\.\d+")
 
 # ``auth.test`` errors that mean the brokered token is not a usable Slack Web API
 # user token -- e.g. Keycloak brokered an OpenID sign-in/identity token instead of an
@@ -138,6 +165,7 @@ class SlackClient:
         oldest: str = "",
         latest: str = "",
         cursor: str = "",
+        max_chars: int = DEFAULT_READ_BUDGET_CHARS,
     ) -> tuple[list[SlackMessage], bool, str]:
         await self._require_channel(channel_id)
         params = {
@@ -149,10 +177,32 @@ class SlackClient:
             params["oldest"] = oldest
         if latest:
             params["latest"] = latest
-        if cursor:
+        budget = _decode_budget_cursor(cursor)
+        windowed = _decode_windowed_slack_cursor(cursor)
+        window_oldest = ""
+        if budget is not None:
+            budget_ts, window_oldest = budget
+            # A budget cursor picks up where the last page's budget stopped:
+            # everything at or before that ts, i.e. the next (older) page. If the
+            # caller also sent its own latest, keep whichever is older.
+            params["latest"] = min(budget_ts, latest, key=float) if latest else budget_ts
+        elif windowed is not None:
+            slack_cursor, window_oldest = windowed
+            params["cursor"] = slack_cursor
+        elif cursor:
             params["cursor"] = cursor
+        # Keep the original lower time bound (from oldest, days_back or
+        # since_date) so later pages don't drift outside the window.
+        if window_oldest and not oldest:
+            params["oldest"] = window_oldest
         payload = await self._get_json("/conversations.history", params=params, operation="conversation read")
-        return _messages_page(payload, channel_id)
+        messages, has_more, next_cursor = _messages_page(payload)
+        window = params.get("oldest", "")
+        messages, has_more, next_cursor = _apply_read_budget(messages, has_more, next_cursor, max_chars, oldest=window)
+        if window and next_cursor and not next_cursor.startswith(_BUDGET_CURSOR_PREFIX):
+            # Slack's cursor would lose the window, so carry it along.
+            next_cursor = _encode_windowed_slack_cursor(next_cursor, window)
+        return messages, has_more, next_cursor
 
     async def read_thread(
         self,
@@ -161,6 +211,7 @@ class SlackClient:
         message_ts: str,
         limit: int,
         cursor: str = "",
+        max_chars: int = DEFAULT_READ_BUDGET_CHARS,
     ) -> tuple[list[SlackMessage], bool, str]:
         await self._require_channel(channel_id)
         params = {
@@ -169,10 +220,25 @@ class SlackClient:
             "limit": str(limit),
             "inclusive": "true",
         }
-        if cursor:
+        budget = _decode_budget_cursor(cursor)
+        budget_ts = budget[0] if budget is not None else None
+        if budget_ts is not None:
+            # Threads are read oldest-first, so the budget cursor drops the
+            # already-read older messages and continues from where we stopped.
+            params["oldest"] = budget_ts
+        elif cursor:
             params["cursor"] = cursor
         payload = await self._get_json("/conversations.replies", params=params, operation="thread read")
-        return _messages_page(payload, channel_id)
+        messages, has_more, next_cursor = _messages_page(payload)
+        if cursor:
+            # Slack can put the thread's first message (thread_ts == ts) at the top
+            # of every page. Past the first page it was already returned, so drop
+            # it whichever cursor got us here.
+            messages = [message for message in messages if not (message.thread_ts and message.ts == message.thread_ts)]
+        if budget_ts is not None:
+            # Also drop anything older than where the budget cursor resumes.
+            messages = [message for message in messages if float(message.ts) >= float(budget_ts)]
+        return _apply_read_budget(messages, has_more, next_cursor, max_chars)
 
     async def _require_channel(self, channel_id: str) -> None:
         try:
@@ -288,16 +354,71 @@ class SlackClient:
         return payload
 
 
-def _messages_page(payload: dict, channel_id: str) -> tuple[list[SlackMessage], bool, str]:
+def _messages_page(payload: dict) -> tuple[list[SlackMessage], bool, str]:
     messages = payload.get("messages", [])
     if not isinstance(messages, list):
         messages = []
     next_cursor = payload.get("response_metadata", {}).get("next_cursor", "") or ""
     return (
-        [_message(item, channel_id) for item in messages],
+        [_message(item) for item in messages],
         bool(payload.get("has_more", False)),
         next_cursor,
     )
+
+
+def _apply_read_budget(
+    messages: list[SlackMessage],
+    has_more: bool,
+    next_cursor: str,
+    max_chars: int,
+    oldest: str = "",
+) -> tuple[list[SlackMessage], bool, str]:
+    """Stop adding messages once their text would go over ``max_chars``.
+
+    Never cuts a message, and always keeps the first one even if it alone is
+    over budget. Stopping early takes precedence over Slack's own pagination:
+    the cursor points at the first message left out, so the next call picks up
+    exactly there. ``oldest`` is the read's lower time bound, if any; it rides
+    along in the cursor so the next page keeps it.
+    """
+    kept: list[SlackMessage] = []
+    total = 0
+    for message in messages:
+        size = len(message.text)
+        if kept and total + size > max_chars:
+            return kept, True, _encode_budget_cursor(message.ts, oldest)
+        kept.append(message)
+        total += size
+    return kept, has_more, next_cursor
+
+
+def _encode_budget_cursor(ts: str, oldest: str = "") -> str:
+    cursor = f"{_BUDGET_CURSOR_PREFIX}{ts}"
+    return f"{cursor}:{oldest}" if oldest else cursor
+
+
+def _decode_budget_cursor(cursor: str) -> tuple[str, str] | None:
+    """Return (resume ts, lower time bound or "") for a budget cursor, else None."""
+    if not cursor.startswith(_BUDGET_CURSOR_PREFIX):
+        return None
+    ts, _, oldest = cursor[len(_BUDGET_CURSOR_PREFIX) :].partition(":")
+    if not _SLACK_TS.fullmatch(ts) or (oldest and not _SLACK_BOUND.fullmatch(oldest)):
+        return None
+    return ts, oldest
+
+
+def _encode_windowed_slack_cursor(slack_cursor: str, oldest: str) -> str:
+    return f"{_WINDOWED_SLACK_CURSOR_PREFIX}{oldest}:{slack_cursor}"
+
+
+def _decode_windowed_slack_cursor(cursor: str) -> tuple[str, str] | None:
+    """Return (Slack cursor, lower time bound) for a windowed Slack cursor, else None."""
+    if not cursor.startswith(_WINDOWED_SLACK_CURSOR_PREFIX):
+        return None
+    oldest, _, slack_cursor = cursor[len(_WINDOWED_SLACK_CURSOR_PREFIX) :].partition(":")
+    if not _SLACK_BOUND.fullmatch(oldest) or not slack_cursor:
+        return None
+    return slack_cursor, oldest
 
 
 def _encode_channel_cursor(phase: str, upstream_cursor: str) -> str:
@@ -331,9 +452,8 @@ def _dm_name(item: dict) -> str:
     return ""
 
 
-def _message(item: dict, channel_id: str) -> SlackMessage:
+def _message(item: dict) -> SlackMessage:
     return SlackMessage(
-        channel_id=channel_id,
         ts=str(item.get("ts", "")),
         user_id=str(item.get("user") or item.get("bot_id") or ""),
         text=sanitize_slack_text(str(item.get("text", "") or "")),
@@ -342,8 +462,17 @@ def _message(item: dict, channel_id: str) -> SlackMessage:
     )
 
 
+def _snippet(text: str, limit: int) -> tuple[str, bool]:
+    """Cut the text down to `limit` characters and say whether anything was cut."""
+    if len(text) <= limit:
+        return text, False
+    return text[:limit].rstrip() + "…", True
+
+
 def _search_hit(item: dict) -> SlackSearchHit:
     channel = item.get("channel") or {}
+    # Clean the text first, then shorten it, so we never cut a Slack link in half.
+    text, truncated = _snippet(sanitize_slack_text(str(item.get("text", "") or "")), SEARCH_SNIPPET_CHARS)
     return SlackSearchHit(
         channel_id=str(channel.get("id", "") or ""),
         channel_name=str(channel.get("name", "") or ""),
@@ -352,8 +481,17 @@ def _search_hit(item: dict) -> SlackSearchHit:
         ts=str(item.get("ts", "")),
         user_id=str(item.get("user", "") or ""),
         author_name=str(item.get("username", "") or ""),
-        text=sanitize_slack_text(str(item.get("text", "") or "")),
+        text=text,
+        truncated=truncated,
+        thread_ts=str(item.get("thread_ts", "") or "") or _permalink_thread_ts(item),
     )
+
+
+def _permalink_thread_ts(item: dict) -> str:
+    """Slack search matches may only carry a reply's thread in its permalink."""
+    # The permalink itself is never sent to the model (see SlackSearchHit).
+    thread_ts = parse_qs(urlsplit(str(item.get("permalink", "") or "")).query).get("thread_ts", [""])[0]
+    return thread_ts if _SLACK_TS.fullmatch(thread_ts) else ""
 
 
 def _raise_for_slack_status(response: httpx.Response, *, operation: str) -> None:

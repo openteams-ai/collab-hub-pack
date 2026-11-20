@@ -71,11 +71,12 @@ async def smoke_slack_connector(base_url: str, *, bearer_token: str | None) -> N
         assert len(read_payload["messages"]) == 2
         assert read_payload["messages"][1]["text"] == "Do we have healthcare kickoff notes?"
         assert "fake-slack-access-token" not in read.text
-        # Link sanitization (apollo-desktop#365): the source message embeds a Slack
-        # link entity and a plain URL; the connector must return link-free text.
-        assert read_payload["messages"][0]["text"] == "Kickoff notes in the kickoff doc; mirror at [link]"
-        assert "http://" not in read.text
-        assert "https://" not in read.text
+        # The source message embeds a Slack link entity and a plain URL; the
+        # connector must keep both exact http(s) targets (#143).
+        assert read_payload["messages"][0]["text"] == (
+            "Kickoff notes in the kickoff doc (https://intranet.test/kickoff); mirror at https://example.test/raw"
+        )
+        assert read_payload["content_trust"] == "external_untrusted"
         assert "next_cursor" in read_payload
 
 

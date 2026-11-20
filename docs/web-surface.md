@@ -192,10 +192,12 @@ elsewhere" shape as `web_platform_role_source_missing`.
   before it no longer verifies and its holder signs in once more. Sign-in
   refuses an ID token with no `sid`.
 - **Ended with the realm session.** When the realm session is logged out —
-  the Hub's Log out, the Billing page's, an admin in Keycloak — Keycloak's [back-channel logout](#back-channel-logout-ending-the-web-session-when-the-realm-session-ends)
+  the Hub's Log out, the Billing page's, an admin ending that one session in
+  Keycloak — Keycloak's [back-channel logout](#back-channel-logout-ending-the-web-session-when-the-realm-session-ends)
   names its `sid`, the Hub records it as ended, and every copy of every
   cookie minted for that `sid` stops working, on every replica. An ended
-  session is treated exactly like no session.
+  session is treated exactly like no session. Not every admin sign-out is
+  covered; see [the limits](#what-back-channel-logout-does-not-cover).
 - **Sign-out** records the session's own `sid` as ended first, so the cookie
   — and any copy of it captured before sign-out — is dead even if the
   browser never reaches Keycloak; then it deletes the browser's cookie and
@@ -257,29 +259,37 @@ What makes it possible:
 - **Keycloak calls `POST /web/oidc/backchannel-logout`** when a realm session
   that `collab-web` took part in is logged out, wherever that happened: the
   Hub's Log out (RP-initiated, with `id_token_hint`), the Billing page's Log
-  out, or an admin ending the session or logging the user out. A realm session
+  out, or an admin ending that one session in the console. A realm session
   that only times out is not a logout, and the cookie's own `exp` bounds that
-  case. The
+  case. Admin sign-outs of many sessions at once are only partly covered; see
+  [the limits](#what-back-channel-logout-does-not-cover). The
   body is `application/x-www-form-urlencoded` with exactly one `logout_token`,
   read under a 16 KiB cap by counting (`BACKCHANNEL_LOGOUT_MAX_BYTES`).
 - **The logout token is verified like the ID token** (`web.oidc.verify_logout_token`,
-  through the same `frames.auth` JWKS client): `alg` RS256, signed by a realm
-  key, `iss` the realm, `aud` this client (`collab-web` — a token minted for
+  through the same `frames.auth` JWKS client): `alg` one of the algorithms
+  the ID token is accepted with (`frames.auth.ACCEPTED_JWT_ALGORITHMS`, RS256
+  and ES256; one constant, so the two cannot drift), signed by a realm key, `iss` the realm, `aud` this client (`collab-web` — a token minted for
   the Billing page's client ends nothing here), `iat` present and no older
   than ten minutes, `exp` checked when present, `events` holding
   `http://schemas.openid.net/event/backchannel-logout` as an object, **no**
   `nonce` (so an ID token can never pass as a logout token), and a non-empty
   `sid`. 200 with `Cache-Control: no-store` once the `sid` is recorded; 400
   with an empty body for anything else — a bad token, a malformed request, a
-  store that could not record it — logged as `web_backchannel_logout_refused`
-  with a fixed `reason`, never anything from the token.
+  store that could not record it — logged at INFO (the endpoint is public, so
+  anyone can cause one) as `web_backchannel_logout_refused` with a fixed
+  `reason`, never anything from the token. A store failure is also logged at
+  error, as `web_backchannel_logout_store_failed`.
 - **Ended sessions are rows `(sid, ended_at)`** in `collab_web_ended_sessions`
   (`collab_` migration 18) on the shared `frames.postgres`, so the replica
   Keycloak happened to reach records it for all of them. Each new row prunes
   the ones older than the session lifetime, the longest any cookie naming
   them can live. **Without a database the store is in memory**, which reaches
   only the replica that heard the logout: right for one replica in
-  development, wrong anywhere else.
+  development, wrong anywhere else. Startup logs a warning,
+  `web_ended_sessions_in_memory`, when the web surface runs that way. With a
+  database, the [startup schema preflight](frames-operations.md#startup-version-preflight)
+  covers the table, so an `autoMigrate: false` deployment behind on the
+  schema fails its rollout rather than answering every sign-in with a 503.
 - **One place decides "a live session":** `web.authz.get_web_session`. The
   session guard, `require_web_session` (and the operator and owner
   dependencies built on it, the admin panel's API among them) and the pages
@@ -287,7 +297,7 @@ What makes it possible:
   sign-in's shortcut, the acceptance page) all ask it, and it answers `None`
   for an ended session exactly as for a missing one. A lookup that fails is
   never read as "still signed in": guarded paths answer 503, as for an
-  undecidable role.
+  undecidable role. Log out is the one exception (below).
 - **An unfinished logout is finished at sign-in.** If the person leaves
   Keycloak's "Do you want to log out?" page without confirming, the realm
   session lives on while its `sid` is already recorded as ended. The next
@@ -301,6 +311,13 @@ What makes it possible:
   cannot record it, that is logged at error (`web_signout_end_session_failed`)
   and the sign-out still clears this browser's cookie and goes to the realm,
   but a copy made before then keeps working until it expires.
+- **Log out works while the store is down.** It is the one reader of the
+  cookie that does not ask whether its session has ended
+  (`web.authz.signed_session_for_signout`, used by the guard at
+  `/web/signout` and by the route): the signature and expiry are checked as
+  everywhere, and so is the CSRF token, but ending an ended or undecidable
+  session is always safe, and asking would turn a database outage into a Log
+  out that answers 503, keeps the cookie, and never reaches the realm.
 
 ### Registering the back-channel URL on `collab-web`
 
@@ -330,10 +347,23 @@ but end a session, so it needs no other authentication.
 Keycloak calls only the clients that took part in the realm session, so the
 Hub hears about sessions in which someone signed in to its web pages.
 
-What this does not cover: the Cog registry's credentials record the `sid` of
-the session they were exchanged from but are not revoked by this endpoint
-(see [the Cog registry](cog-registry.md)); they are bounded by their own
-revocation and lifetime.
+### What back-channel logout does not cover
+
+- **An admin signing a person out of all their sessions at once.** On
+  Keycloak 26.5 that sends **one** back-channel call, naming one `sid`, for
+  however many sessions the person had. The Hub ends that one; its sessions for the
+  person's other realm sessions keep working until their cookies expire.
+- **The realm-wide sign-out** (`logout-all`) sends **no** back-channel calls. Every Hub session lasts until
+  its cookie expires.
+- **A realm session that only times out** is not a logout; the cookie's own
+  `exp` bounds it.
+- **The Cog registry's credentials** record the `sid` of the session they were
+  exchanged from but are not revoked by this endpoint (see
+  [the Cog registry](cog-registry.md)); they are bounded by their own
+  revocation and lifetime.
+
+In each case the web session cookie's absolute lifetime
+(`web.session_lifetime_seconds`, eight hours by default) is the bound.
 
 [openteams-ai/subscription-manager-pack#79]: https://github.com/openteams-ai/subscription-manager-pack/issues/79
 

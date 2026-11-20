@@ -405,6 +405,10 @@ shared `frames.postgres.url`, migrated by the same
   a retry of the interrupted run resumes that key, and must find it. A row
   left `outcome_unknown` is the record that a person reconciled nothing, and
   stays until its attempt's `step_failed` is thirty days old.
+- `collab_web_ended_sessions` (version 18) — realm sessions that have ended,
+  `(sid, ended_at)`, so a web session cookie minted for one stops working on
+  every replica ([web surface](web-surface.md#back-channel-logout-ending-the-web-session-when-the-realm-session-ends)).
+  Each new row prunes the rows older than the web session lifetime.
 
 Unlike the `frames_server_` tables, these are created by a single **versioned,
 lock-guarded runner**. One transaction takes
@@ -445,7 +449,7 @@ and records what it applied — lock, DDL, and bookkeeping commit together.
 #### Startup version preflight
 
 A deployment that reads these tables (`frames.auth.orgSource=membership` or
-`single`)
+`single`, or the web surface on, which reads `collab_web_ended_sessions`)
 checks the recorded schema version at startup, before serving. Without it,
 `autoMigrate: false` against a database nobody migrated installs cleanly, starts
 cleanly, and then fails with `relation "collab_org_members" does not exist` —

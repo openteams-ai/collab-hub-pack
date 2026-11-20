@@ -149,49 +149,73 @@ def switched_off_connectors(request: Request) -> frozenset[str]:
         return frozenset()
 
 
+_ROUTE_PROVIDERS = {descriptor.id: descriptor.provider for descriptor in CATALOG}
+"""The switch each connector route answers to, keyed by its path segment.
+
+``google`` covers ``google-drive``, ``gmail`` and ``google-calendar``. A
+connector with no switch maps to a key that is never in the disabled set.
+"""
+
+
+def _route_switch(request: Request) -> str | None:
+    """The switch that governs the route serving *request*, if any.
+
+    Read from the matched route's path template rather than the URL, so a
+    path parameter can never be mistaken for a connector, and the list route
+    (``/connectors`` itself) governs none.
+    """
+
+    path = getattr(request.scope.get("route"), "path", "")
+    _, found, rest = path.partition("/connectors/")
+    if not found:
+        return None
+    return _ROUTE_PROVIDERS.get(rest.split("/", 1)[0])
+
+
 def get_connectors_config(
     request: Request,
     disabled: frozenset[str] = Depends(switched_off_connectors),
+    _auth=Depends(get_auth_context),
 ) -> ConnectorsConfig:
     """This deployment's connector configuration, minus anything switched off.
 
     The switch is applied here rather than in each handler because every
     connector route already takes this dependency: one place to enforce, and no
-    route that can forget. A disabled connector arrives with its credentials
-    blanked, so it reads as unconfigured to code that already handles that --
-    see :mod:`..frames.connector_state`.
+    route that can forget.
+
+    A route of a switched-off connector -- status, search, read, list, any of
+    them -- answers 404 ``The <connector> connector is switched off on this
+    hub``. Blanked credentials alone would make status read ``not_connected``,
+    which a client renders as something the user can connect, and make search
+    and read refuse with "not configured", which sends an operator looking for
+    configuration that is not missing. A connector that was simply never
+    configured keeps answering as before. Authentication comes first, so which
+    connectors are off is not told to someone who has not signed in.
+
+    The list route governs no single connector; it gets the configuration with
+    the disabled connectors' credentials blanked, so it leaves them out -- see
+    :mod:`..frames.connector_state`.
     """
 
-    return apply_disabled(request.app.state.connectors_config, disabled)
-
-
-def _offered(connector: str):
-    """Answer 404 on a status route whose connector is switched off.
-
-    Blanked credentials alone make status read ``not_connected``, which a
-    client renders as something the user can connect -- and here they cannot.
-    A 404 says what is true: this hub does not offer the connector. It is
-    limited to a connector that was explicitly switched off; one that was
-    simply never configured keeps answering ``not_connected`` as before.
-    """
-
-    def dependency(
-        _auth=Depends(get_auth_context),
-        disabled: frozenset[str] = Depends(switched_off_connectors),
-    ) -> None:
-        if connector in disabled:
+    switch = _route_switch(request)
+    if switch is not None and switch in disabled:
+        route_path = request.scope["route"].path
+        if route_path.endswith("/status"):
             # The access log shows a 404 on a route that plainly exists; the
             # response body tells it apart from a path nothing serves, and so
             # does this line when debug logging is on. At debug, because
             # clients poll status: a switched-off provider would otherwise add
             # a line per connector, per user, per refresh.
-            logger.debug("connector_status_switched_off", extra={"connector": connector})
-            raise HTTPException(
-                status.HTTP_404_NOT_FOUND,
-                f"The {connector} connector is switched off on this hub",
-            )
-
-    return Depends(dependency)
+            logger.debug("connector_status_switched_off", extra={"connector": switch})
+        else:
+            # Search and read are not polled; a caller reaching one has skipped
+            # status (an agent, a Cog), and the operator may want to know.
+            logger.info("connector_route_switched_off", extra={"connector": switch, "route": route_path})
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            f"The {switch} connector is switched off on this hub",
+        )
+    return apply_disabled(request.app.state.connectors_config, disabled)
 
 
 @router.get("", response_model=list[ConnectorListing])
@@ -257,7 +281,7 @@ async def _listed_status(
         )
 
 
-@router.get("/google-drive/status", response_model=GoogleDriveStatus, dependencies=[_offered("google")])
+@router.get("/google-drive/status", response_model=GoogleDriveStatus)
 async def google_drive_status(
     request: Request,
     _auth=Depends(get_auth_context),
@@ -323,7 +347,7 @@ async def read_google_drive_file(
     return DriveReadResponse(file=file, text=text, truncated=truncated)
 
 
-@router.get("/gmail/status", response_model=GmailStatus, dependencies=[_offered("google")])
+@router.get("/gmail/status", response_model=GmailStatus)
 async def gmail_status(
     request: Request,
     _auth=Depends(get_auth_context),
@@ -392,7 +416,7 @@ async def read_gmail_message(
     )
 
 
-@router.get("/google-calendar/status", response_model=GoogleCalendarStatus, dependencies=[_offered("google")])
+@router.get("/google-calendar/status", response_model=GoogleCalendarStatus)
 async def google_calendar_status(
     request: Request,
     _auth=Depends(get_auth_context),
@@ -462,7 +486,7 @@ async def read_google_calendar_event(
     return CalendarReadResponse(event=event, truncated=truncated)
 
 
-@router.get("/slack/status", response_model=SlackStatus, dependencies=[_offered("slack")])
+@router.get("/slack/status", response_model=SlackStatus)
 async def slack_status(
     request: Request,
     _auth=Depends(get_auth_context),
@@ -605,7 +629,7 @@ async def read_slack_thread(
     )
 
 
-@router.get("/github/status", response_model=GitHubStatus, dependencies=[_offered("github")])
+@router.get("/github/status", response_model=GitHubStatus)
 async def github_status(
     request: Request,
     _auth=Depends(get_auth_context),

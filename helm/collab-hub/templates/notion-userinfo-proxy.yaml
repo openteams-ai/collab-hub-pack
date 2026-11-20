@@ -1,0 +1,180 @@
+{{- /* Notion userinfo proxy, for the Keycloak `notion` identity provider
+(docs/notion-connector.md). Off by default; a hub turns it on with
+connectors.notion.userinfoProxy.enabled and its Keycloak host.
+
+Keycloak's generic oauth2 broker cannot call Notion's /v1/users/me directly,
+so the `notion` provider's userInfoUrl points at
+https://<userinfoProxy.host>/notion-userinfo and this route forwards it to
+api.notion.com with three Notion quirks fixed on the way:
+
+1. Every Notion endpoint requires a Notion-Version header (400
+   missing_version without it), and the broker cannot send custom headers.
+   The RequestHeaderModifier adds it, using connectors.notion.notionVersion so
+   the proxy and the connector never disagree.
+2. The broker POSTs to the userinfo endpoint, but /v1/users/me is GET-only
+   (POST => 400 invalid_request_url). The Lua filter rewrites the method.
+3. Notion validates the request URL from X-Forwarded-Host and answers 400
+   invalid_request_url when it names a foreign host. Envoy appends XFH whenever
+   a route-level host rewrite runs, and RequestHeaderModifier `remove` runs
+   BEFORE that append, so neither can strip it. The host rewrite therefore
+   happens in Lua (a Lua-set :authority does not trigger the append). That
+   makes Envoy re-match the route against the new authority, which is why
+   api.notion.com is in the route's hostnames. Do NOT replace the Lua host
+   rewrite with an HTTPRouteFilter urlRewrite.hostname: that brings quirk 3
+   back.
+
+All three were confirmed live on 2026-09-14 against the Dev hub, from a
+hand-written copy of these objects (openteams-ai/nexus.internal.openteams.app#53)
+that this template renders the same way. A hub moving to this template removes
+its hand-written copy in the same change: two HTTPRoutes claiming the same host
+and path leave which one serves it to the gateway.
+
+The route only forwards to Notion's "who am I" endpoint with whatever bearer
+the caller sends; it holds no credential of its own.
+
+Envoy Gateway only: Backend, BackendTLSPolicy and EnvoyExtensionPolicy are its
+CRDs (plus Gateway API's), and the Backend kind also needs
+`extensionApis.enableBackend: true` in the Envoy Gateway config, which a render
+cannot see. A cluster without the CRDs fails the render rather than shipping a
+proxy that silently never routes: Notion links would then fail at the userinfo
+step with nothing in the manifest to say why. An offline `helm template` needs
+`--api-versions` for gateway.envoyproxy.io/v1alpha1/Backend,
+gateway.envoyproxy.io/v1alpha1/EnvoyExtensionPolicy and
+gateway.networking.k8s.io/v1alpha3/BackendTLSPolicy (or v1).
+
+The route only works on a listener that admits both its hostnames: the
+Keycloak host, and api.notion.com for the re-match in quirk 3. A listener with
+no hostname (the Nebari gateway's `https`) admits both. One restricted to a
+hostname or wildcard drops api.notion.com, and a dedicated listener for the
+Keycloak host takes that host's traffic from the generic one; neither is
+visible to a render. See docs/notion-connector.md. */ -}}
+{{- $proxy := .Values.connectors.notion.userinfoProxy }}
+{{- if $proxy.enabled }}
+{{- if not $proxy.host }}
+{{- fail "connectors.notion.userinfoProxy.enabled=true needs connectors.notion.userinfoProxy.host: the public host of this hub's Keycloak (for example keycloak.example.com), the same host the `notion` identity provider's userInfoUrl names." }}
+{{- end }}
+{{- if not $proxy.parentRefs }}
+{{- fail "connectors.notion.userinfoProxy.parentRefs is required when the proxy is enabled: an HTTPRoute with no parent Gateway routes nothing." }}
+{{- end }}
+{{- if not (.Capabilities.APIVersions.Has "gateway.envoyproxy.io/v1alpha1/Backend") }}
+{{- fail "connectors.notion.userinfoProxy: this cluster has no gateway.envoyproxy.io/v1alpha1 Backend, so the Notion userinfo proxy cannot route to api.notion.com. It needs Envoy Gateway's CRDs with extensionApis.enableBackend: true; see docs/notion-connector.md." }}
+{{- end }}
+{{- if not (.Capabilities.APIVersions.Has "gateway.envoyproxy.io/v1alpha1/EnvoyExtensionPolicy") }}
+{{- fail "connectors.notion.userinfoProxy: this cluster has no gateway.envoyproxy.io/v1alpha1 EnvoyExtensionPolicy, so the Notion userinfo proxy cannot rewrite the request Notion requires. It needs Envoy Gateway's CRDs; see docs/notion-connector.md." }}
+{{- end }}
+{{- /* BackendTLSPolicy went GA (v1) in Gateway API 1.4; older installs only
+serve v1alpha3 (experimental channel). Prefer v1 when the cluster has it. */}}
+{{- $tlsPolicyVersion := "" }}
+{{- if .Capabilities.APIVersions.Has "gateway.networking.k8s.io/v1/BackendTLSPolicy" }}
+{{- $tlsPolicyVersion = "gateway.networking.k8s.io/v1" }}
+{{- else if .Capabilities.APIVersions.Has "gateway.networking.k8s.io/v1alpha3/BackendTLSPolicy" }}
+{{- $tlsPolicyVersion = "gateway.networking.k8s.io/v1alpha3" }}
+{{- else }}
+{{- fail "connectors.notion.userinfoProxy: this cluster serves no BackendTLSPolicy (gateway.networking.k8s.io v1 or v1alpha3), so the proxy could not use TLS to api.notion.com. Install Gateway API 1.4+, or its experimental channel; see docs/notion-connector.md." }}
+{{- end }}
+{{- $component := "notion-userinfo" }}
+{{- $name := include "collab-hub.component-name" (dict "top" . "component" $component) }}
+{{- $namespace := $proxy.namespace | default .Release.Namespace }}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+spec:
+  type: Endpoints
+  endpoints:
+    - fqdn:
+        hostname: api.notion.com
+        port: 443
+---
+apiVersion: {{ $tlsPolicyVersion }}
+kind: BackendTLSPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.envoyproxy.io
+      kind: Backend
+      name: {{ $name }}
+  validation:
+    wellKnownCACertificates: System
+    hostname: api.notion.com
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyExtensionPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ $name }}
+  lua:
+    - type: Inline
+      inline: |
+        function envoy_on_request(request_handle)
+          local headers = request_handle:headers()
+          headers:replace(":method", "GET")
+          -- Host rewrite lives here, not in the route: see quirk 3 in the
+          -- chart template's header comment (X-Forwarded-Host).
+          headers:replace(":authority", "api.notion.com")
+        end
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $name }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "collab-hub.labels" (dict "top" . "component" $component) | nindent 4 }}
+spec:
+  parentRefs:
+    {{- range $proxy.parentRefs }}
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ .name | quote }}
+      {{- with .namespace }}
+      namespace: {{ . | quote }}
+      {{- end }}
+      {{- with .sectionName }}
+      sectionName: {{ . | quote }}
+      {{- end }}
+      {{- with .port }}
+      port: {{ . }}
+      {{- end }}
+    {{- end }}
+  hostnames:
+    - {{ $proxy.host | quote }}
+    - api.notion.com
+  rules:
+    - matches:
+        - path:
+            type: Exact
+            value: /notion-userinfo
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            set:
+              - name: Notion-Version
+                value: {{ .Values.connectors.notion.notionVersion | quote }}
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /v1/users/me
+      backendRefs:
+        - group: gateway.envoyproxy.io
+          kind: Backend
+          name: {{ $name }}
+          {{- /* The default weight, written out so the rendered route matches the
+          stored one and ArgoCD does not report drift (as in home-root-host.yaml). */}}
+          weight: 1
+{{- end }}

@@ -192,6 +192,45 @@ def _subject_problems(subject: str) -> list[str]:
     return problems
 
 
+def _required_placeholder_problems(body: str) -> list[str]:
+    """The required placeholders that would be missing from a sent message.
+
+    Checked on the body as it is *sent*, under both settings of
+    ``require_verified_email``, not on the text as typed: a placeholder that
+    sits only inside ``[IF VERIFIED EMAIL REQUIRED]`` vanishes when that
+    setting is off, and the message would go out with no link in it. A
+    conditional that does not resolve is reported by the render check, so it
+    is skipped here.
+    """
+
+    from ..web.onboarding_email import _resolve_conditionals
+
+    missing: list[str] = []
+    conditional_only: list[str] = []
+    for placeholder in required_placeholders():
+        if placeholder not in body:
+            missing.append(placeholder)
+            continue
+        for setting in (True, False):
+            try:
+                resolved = _resolve_conditionals(body, require_verified_email=setting, source="invitation template")
+            except ValueError:
+                break
+            if placeholder not in resolved:
+                conditional_only.append(placeholder)
+                break
+    problems = []
+    if missing:
+        problems.append("The message must include " + ", ".join(missing) + ".")
+    if conditional_only:
+        problems.append(
+            ", ".join(conditional_only)
+            + f" must also appear outside {CONDITIONAL_START} … {CONDITIONAL_END}, or some invitations would go"
+            " out without it."
+        )
+    return problems
+
+
 def template_problems(
     subject: str,
     body: str,
@@ -212,12 +251,14 @@ def template_problems(
     if not body.strip():
         problems.append("The message is empty.")
         return problems
+    # Measured after normalizing, because that is the text the store keeps: a
+    # body at the limit without a trailing newline would otherwise pass here
+    # and fail the store's own bound.
+    body = normalize_body(body)
     if len(body) > MAX_BODY_CHARS:
         problems.append(f"The message is longer than {MAX_BODY_CHARS} characters.")
         return problems
-    missing = [placeholder for placeholder in required_placeholders() if placeholder not in body]
-    if missing:
-        problems.append("The message must include " + ", ".join(missing) + ".")
+    problems.extend(_required_placeholder_problems(body))
     # Rendered even when something above is already wrong, so the operator
     # hears about an unknown placeholder in the same answer as a missing one
     # rather than one fix at a time. A missing required placeholder does not
@@ -242,7 +283,7 @@ def template_problems(
                 expires_at=datetime(2000, 1, 1, tzinfo=timezone.utc),
                 app_instructions=instructions,
                 require_verified_email=setting,
-                template_body=normalize_body(body),
+                template_body=body,
             )
         except ValueError as exc:
             # Unknown placeholders were caught above, so what is left is a
@@ -359,7 +400,7 @@ class PostgresInvitationTemplateStore:
         subject = subject.strip()
         if _subject_problems(subject) or len(body) > MAX_BODY_CHARS:
             raise ValueError("invitation template is out of bounds")
-        if any(placeholder not in body for placeholder in required_placeholders()):
+        if _required_placeholder_problems(body):
             raise ValueError("invitation template is missing a required placeholder")
         label = ctx.display.email or ctx.display.name
         with audited(
@@ -393,28 +434,37 @@ class PostgresInvitationTemplateStore:
         """Go back to the built-in copy, recorded as ``invitation_template.reset``.
 
         Resetting a template that was never edited writes nothing, and no
-        audit row: like a repeated revoke, it is not an action.
+        audit row: like a repeated revoke, it is not an action. The delete and
+        the check that it deleted something are one statement inside the
+        audited transaction, so two concurrent resets record one reset, not
+        two.
         """
 
         _require_key(key)
-        with self._db.connection() as conn:
-            present = conn.execute(
-                "SELECT 1 AS present FROM collab_invitation_templates WHERE template = %s", (key,)
-            ).fetchone()
-        if present is None:
-            return default_template(key)
-        with audited(
-            self._db,
-            ctx,
-            AUDIT_ACTION_INVITATION_TEMPLATE_RESET,
-            target_type=AUDIT_TARGET_INVITATION_TEMPLATE,
-            target_id=key,
-            target_label=TEMPLATE_LABELS[key],
-            org_id=None,
-            detail={"template": key},
-        ) as event:
-            event.conn.execute("DELETE FROM collab_invitation_templates WHERE template = %s", (key,))
+        try:
+            with audited(
+                self._db,
+                ctx,
+                AUDIT_ACTION_INVITATION_TEMPLATE_RESET,
+                target_type=AUDIT_TARGET_INVITATION_TEMPLATE,
+                target_id=key,
+                target_label=TEMPLATE_LABELS[key],
+                org_id=None,
+                detail={"template": key},
+            ) as event:
+                deleted = event.conn.execute(
+                    "DELETE FROM collab_invitation_templates WHERE template = %s RETURNING template", (key,)
+                ).fetchone()
+                if deleted is None:
+                    # Raising rolls the audit row back with the (empty) delete.
+                    raise _NothingToReset
+        except _NothingToReset:
+            pass
         return default_template(key)
+
+
+class _NothingToReset(Exception):
+    """Abandons a reset that deleted nothing, so it records nothing."""
 
 
 def _from_row(row) -> InvitationTemplate:

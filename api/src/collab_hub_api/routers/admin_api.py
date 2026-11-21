@@ -67,6 +67,7 @@ from ..frames.invitations import (
     InvitationsUnavailableError,
     LiveInvitationExists,
     effective_status,
+    emails_match,
     validate_invited_email,
 )
 from ..frames.model_catalog import ModelCatalogError
@@ -146,6 +147,12 @@ def _invitee_account(request: Request, directory: UserDirectoryClient, address: 
         return None, None
     if record is None:
         return False, None
+    if not emails_match(address, record.email):
+        # The directory matched by its own notion of equal addresses, which can
+        # be wider than this hub's ASCII-only fold (a KELVIN SIGN, say). That
+        # account is not this address as far as acceptance is concerned, so
+        # nothing can be said about it here.
+        return None, None
     if not record.id or not getattr(request.app.state, "web_identity_pinned_to_sub", False):
         return True, None
     try:
@@ -495,6 +502,13 @@ def make_router() -> APIRouter:
             saved = templates.save(actor, key, subject=checked.subject, body=checked.body)
         except InvitationTemplatesUnavailableError:
             return JSONResponse({"outcome": "unavailable"}, status_code=503)
+        except ValueError:
+            # The store's own bounds, which the check above should already have
+            # enforced. A 400 rather than a 500 if the two ever disagree.
+            return JSONResponse(
+                {"outcome": "invalid_template", "problems": ["This email cannot be saved as it is."]},
+                status_code=400,
+            )
         logger.info("admin_api_invitation_template_saved", extra={"template": key})
         return {"outcome": "saved", "template": _template_json(saved)}
 

@@ -291,6 +291,11 @@ class ConfiguredInvitationEmailDelivery:
             )
             try:
                 message = render(subject=chosen.subject, template_body=chosen.body)
+                # Belt and braces for an edited template: the save-time check
+                # requires the link in every variant, but a message without it
+                # is useless to the invitee, so it is never what gets sent.
+                if chosen.customized and setup_url not in message.text_body.reveal():
+                    raise ValueError("edited invitation template rendered without the invitation link")
             except ValueError:
                 if not chosen.customized:
                     raise

@@ -1151,9 +1151,10 @@ async def test_the_listing_opens_on_outstanding_invitations_and_carries_tab_coun
 class AccountDirectory:
     """The directory's exact-address lookup, as the issue path uses it."""
 
-    def __init__(self, accounts=None, *, unavailable=False):
+    def __init__(self, accounts=None, *, unavailable=False, answers_as=None):
         self.accounts = accounts or {}
         self.unavailable = unavailable
+        self.answers_as = answers_as
         self.looked_up: list[str] = []
 
     def find_provisioned_account(self, email):
@@ -1163,7 +1164,7 @@ class AccountDirectory:
         if self.unavailable:
             raise UserDirectoryUnavailableError("directory down")
         account_id = self.accounts.get(email)
-        return ProvisionedAccountRecord(id=account_id, email=email) if account_id else None
+        return ProvisionedAccountRecord(id=account_id, email=self.answers_as or email) if account_id else None
 
 
 async def _issue_with(app, idp, client, directory, email="bob@example.com"):
@@ -1403,3 +1404,25 @@ async def test_a_template_can_be_reset_and_unknown_or_unsaveable_ones_say_why(tm
     assert store.reset_keys == ["existing_account"]
     assert unknown.status_code == 404
     assert unsaveable.status_code == 503 and unsaveable.json()["outcome"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_an_account_the_directory_matched_by_a_wider_rule_is_not_trusted(tmp_path, idp: _StubIdp):
+    """A KELVIN SIGN address is not ``bok@example.com`` to acceptance, so its membership says nothing."""
+
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        app.state.org_store.provision_member("kc-other", "org-x", "X", email="bo\u212a@example.com")
+        response, service, delivery = await _issue_with(
+            app,
+            idp,
+            client,
+            AccountDirectory({"bok@example.com": "kc-other"}, answers_as="bo\u212a@example.com"),
+            email="bok@example.com",
+        )
+
+    assert response.status_code == 201
+    assert response.json()["template"] == "new_account"
+    assert response.json()["account_check"] == "unavailable"
+    assert service.created == ["bok@example.com"] and delivery.templates == ["new_account"]

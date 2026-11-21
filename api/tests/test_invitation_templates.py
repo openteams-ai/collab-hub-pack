@@ -163,6 +163,30 @@ def test_brackets_in_the_deployments_app_instructions_do_not_fail_a_template():
     assert problems == []
 
 
+def test_a_required_placeholder_only_inside_the_conditional_is_refused():
+    """With verification off that span is dropped, and the email would carry no link."""
+
+    body = (
+        "Hello\n[IF VERIFIED EMAIL REQUIRED]\n[INVITATION LINK] [INVITEE EMAIL] [EXPIRY]\n[DATA STATEMENT]\n[END IF]\n"
+    )
+    problems = problems_for("Your invitation", body)
+    assert problems == [
+        "[INVITATION LINK], [INVITEE EMAIL], [EXPIRY], [DATA STATEMENT] must also appear outside"
+        " [IF VERIFIED EMAIL REQUIRED] … [END IF], or some invitations would go out without it."
+    ]
+
+
+def test_the_length_limit_is_measured_on_the_text_that_is_stored():
+    """A body at the limit with no trailing newline grows by one when normalized."""
+
+    from collab_hub_api.frames.invitation_templates import MAX_BODY_CHARS
+
+    core = "[INVITATION LINK] [INVITEE EMAIL] [EXPIRY] [DATA STATEMENT] "
+    body = core + "x" * (MAX_BODY_CHARS - len(core))
+    assert len(body) == MAX_BODY_CHARS and not body.endswith("\n")
+    assert problems_for("Your invitation", body) == [f"The message is longer than {MAX_BODY_CHARS} characters."]
+
+
 def test_line_endings_are_normalized():
     assert normalize_body("a\r\nb\rc\n\n\n") == "a\nb\nc\n"
 
@@ -322,6 +346,37 @@ def test_an_edit_that_stopped_rendering_sends_the_built_in_copy_instead(caplog):
     assert "invitation_template_unrenderable" in caplog.text
 
 
+def test_an_edited_template_that_renders_without_the_link_is_not_sent():
+    """Saved before the both-variants check existed, say: the built-in copy goes out instead."""
+
+    no_link = InvitationTemplate(
+        key=TEMPLATE_NEW_ACCOUNT,
+        subject="No link",
+        body="Hello\n[IF VERIFIED EMAIL REQUIRED]\n[INVITATION LINK] [INVITEE EMAIL] [EXPIRY]\n"
+        "[DATA STATEMENT]\n[END IF]\n",
+        customized=True,
+    )
+    provider = SesInvitationEmailProvider(
+        sender_address="no-reply@collab.example.test",
+        region="us-west-2",
+        configuration_set="collab-invitations",
+        client_factory=lambda _region, _config: client,
+    )
+    client = RecordingSesClient()
+    delivery = ConfiguredInvitationEmailDelivery(
+        provider,
+        accept_url="https://collab.example.test/invite/accept",
+        app_instructions=APP_INSTRUCTIONS,
+        require_verified_email=False,
+    )
+    delivery.attach_template_store(FixedStore({TEMPLATE_NEW_ACCOUNT: no_link}))
+    _send(delivery)
+
+    subject, body = _sent(client)
+    assert subject == SUBJECT
+    assert "#token=s3cret" in body
+
+
 def test_the_disabled_adapter_accepts_a_template_and_sends_nothing():
     delivery = DisabledInvitationEmailDelivery()
     delivery.attach_template_store(DefaultInvitationTemplateStore())
@@ -428,6 +483,35 @@ def test_saving_reading_and_resetting_a_template(live_db):
     assert {row["target_type"] for row in rows} == {"invitation_template"}
     assert {row["target_id"] for row in rows} == {TEMPLATE_EXISTING_ACCOUNT}
     assert all(row["detail"] == {"template": TEMPLATE_EXISTING_ACCOUNT} for row in rows)
+
+
+@live_postgres
+def test_concurrent_resets_record_one_reset(live_db):
+    """Both see the row; only the one that deletes it records anything."""
+
+    import threading
+
+    from collab_hub_api.frames.invitation_templates import PostgresInvitationTemplateStore
+
+    store = PostgresInvitationTemplateStore(live_db)
+    ctx = _operator_ctx()
+    store.save(
+        ctx, TEMPLATE_NEW_ACCOUNT, subject="Edited", body="[INVITATION LINK] [INVITEE EMAIL] [EXPIRY] [DATA STATEMENT]"
+    )
+
+    start = threading.Barrier(4)
+
+    def reset():
+        start.wait()
+        store.reset(ctx, TEMPLATE_NEW_ACCOUNT)
+
+    threads = [threading.Thread(target=reset) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert [row["action"] for row in _audit(live_db)] == ["invitation_template.update", "invitation_template.reset"]
 
 
 @live_postgres

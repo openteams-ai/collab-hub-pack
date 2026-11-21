@@ -49,6 +49,7 @@ COLLAB_TABLES = (
     "collab_claims",
     "collab_track_runs",
     "collab_connector_state",
+    "collab_invitation_templates",
     "collab_cog_registry_tokens",
     "collab_cog_registry_credentials",
     "collab_cog_manifest_blobs",
@@ -460,7 +461,22 @@ def test_migration_creates_the_cog_publishing_schema():
         "org_id text",
     ):
         assert name not in earlier, name
-    assert LATEST_COLLAB_SCHEMA_VERSION == 17
+    assert LATEST_COLLAB_SCHEMA_VERSION == 18
+
+
+def test_migration_18_creates_the_invitation_template_table_and_widens_the_audit_checks():
+    """#348: edited invitation emails, and the two actions that record editing them."""
+
+    statements = dict(COLLAB_SCHEMA_MIGRATIONS)[18]
+    ddl = "\n".join(statements)
+    assert "CREATE TABLE IF NOT EXISTS collab_invitation_templates" in ddl
+    assert "CHECK (template IN ('new_account', 'existing_account'))" in ddl
+    assert "'invitation_template.update'" in ddl and "'invitation_template.reset'" in ddl
+    assert "'invitation_template'))" in ddl
+    earlier = "\n".join(
+        statement for version, statements in COLLAB_SCHEMA_MIGRATIONS if version < 18 for statement in statements
+    )
+    assert "collab_invitation_templates" not in earlier
 
 
 def test_migration_creates_the_source_activity_table():
@@ -550,6 +566,7 @@ PINNED_CHECKSUMS = {
     15: "94c87d3dc97dfc138ea1ee78bdb067ba114163995f4ef27d44398a930690d84d",
     16: "b2140ce96b42c4e7e9daabbac44b8ee6828d3ce9b39cccd37ca7f818747ca33f",
     17: "b128d44c95c0c2719207bd1bdd880bd3dcce3777663ced40a1c58767b31929c4",
+    18: "761ea6906f00cf9e8245a22e535a827b65d7fd0f3d1cebe4e91d637cfefc2b23",
 }
 
 

@@ -37,6 +37,7 @@ from ..dependencies import (
     get_audit_log,
     get_invitation_email_delivery,
     get_invitation_service,
+    get_invitation_template_store,
     get_usage_store,
     get_user_directory_client,
 )
@@ -45,13 +46,31 @@ from ..frames.connector_state import CONNECTOR_KEYS
 from ..frames.connector_status import connector_statuses
 from ..frames.group_membership import GroupMembershipError
 from ..frames.invitation_email import DELIVERY_PROVIDER_ACCEPTED, DELIVERY_UNKNOWN
+from ..frames.invitation_templates import (
+    MAX_BODY_CHARS,
+    MAX_SUBJECT_CHARS,
+    TEMPLATE_EXISTING_ACCOUNT,
+    TEMPLATE_KEYS,
+    TEMPLATE_LABELS,
+    TEMPLATE_NEW_ACCOUNT,
+    InvitationTemplate,
+    InvitationTemplatesUnavailableError,
+    default_template,
+    optional_placeholders,
+    render_preview,
+    required_placeholders,
+    template_problems,
+)
 from ..frames.invitations import (
+    LISTING_OUTSTANDING,
     InvitationService,
     InvitationsUnavailableError,
     LiveInvitationExists,
     effective_status,
+    validate_invited_email,
 )
 from ..frames.model_catalog import ModelCatalogError
+from ..frames.orgs import OrgsUnavailableError
 from ..frames.platform_role_admin import PlatformRoleChangeRefused
 from ..frames.usage import UsageStore, UsageUnavailableError
 from ..user_directory import UserDirectoryClient, UserDirectoryUnavailableError
@@ -96,6 +115,71 @@ def _running_version() -> str:
         return version("collab-hub-api")
     except PackageNotFoundError:
         return "unknown"
+
+
+def _invitee_account(request: Request, directory: UserDirectoryClient, address: str) -> tuple[bool | None, bool | None]:
+    """Whether *address* has an account, and whether that account has an organization here (#348).
+
+    ``None`` means "could not be known", never "no":
+
+    - the account is unknown when no directory is configured, it did not
+      answer, or it holds two accounts for the address;
+    - the organization is unknown unless one account was found **and** the
+      session principal is pinned to ``sub``. Membership rows are keyed on the
+      principal, and only under that pin is it the identity provider's account
+      id; under the legacy precedence, looking the id up would say "no
+      organization" for everybody.
+
+    "Has an organization" is any membership row, active or removed, because
+    that is what acceptance refuses (``AlreadyInOrganizationError``). Such a
+    person can sign in, and no invitation can ever be redeemed for them.
+
+    ``find_provisioned_account`` because it is the directory's one exact-address
+    lookup; ``search_users`` is an infix match across names and addresses.
+    """
+
+    try:
+        record = directory.find_provisioned_account(address)
+    except UserDirectoryUnavailableError:
+        # Includes AmbiguousAccountError: two accounts for one address needs a
+        # human in the realm, and which of them would sign in cannot be said.
+        return None, None
+    if record is None:
+        return False, None
+    if not record.id or not getattr(request.app.state, "web_identity_pinned_to_sub", False):
+        return True, None
+    try:
+        membership = request.app.state.org_store.get_membership(record.id)
+    except OrgsUnavailableError:
+        return True, None
+    return True, membership is not None
+
+
+def _template_json(template: InvitationTemplate) -> dict:
+    default = default_template(template.key)
+    return {
+        "key": template.key,
+        "label": TEMPLATE_LABELS[template.key],
+        "subject": template.subject,
+        "body": template.body,
+        "customized": template.customized,
+        "updated_at": template.updated_at.isoformat() if template.updated_at else None,
+        "updated_by": template.updated_by_label or template.updated_by,
+        "default_subject": default.subject,
+        "default_body": default.body,
+    }
+
+
+class InvitationTemplateRequest(BaseModel):
+    """An operator's text for one template, to check, preview or save.
+
+    The field bounds are only a cap on what is read: twice the stored limits,
+    so that a template a little over them gets a worded answer from
+    :func:`template_problems` rather than a bare validation error.
+    """
+
+    subject: str = Field(max_length=MAX_SUBJECT_CHARS * 2)
+    body: str = Field(max_length=MAX_BODY_CHARS * 2)
 
 
 class InvitationRequest(BaseModel):
@@ -177,8 +261,19 @@ def make_router() -> APIRouter:
     def admin_invitations(
         service: Annotated[InvitationService, Depends(get_invitation_service)],
         offset: Annotated[int, Query(ge=0)] = 0,
+        status: Annotated[
+            Literal["outstanding", "accepted", "expired", "revoked", "all"], Query()
+        ] = LISTING_OUTSTANDING,
+        q: Annotated[str | None, Query(max_length=320)] = None,
     ):
-        """One page of every invitation on this deployment, newest first.
+        """One page of invitations on this deployment, newest first.
+
+        **Outstanding by default** (#348). On a busy hub the accepted and
+        lapsed invitations bury the handful an operator can still act on, so
+        the panel opens on those and offers the rest as tabs. ``status`` is one
+        of ``outstanding``, ``accepted``, ``expired``, ``revoked`` or ``all``;
+        ``q`` narrows to addresses containing it. ``counts`` labels the tabs,
+        for the same ``q``.
 
         The same listing the server-rendered page shows, read through the same
         service call, so the panel and that page cannot disagree about what
@@ -194,7 +289,8 @@ def make_router() -> APIRouter:
         """
 
         try:
-            page = service.list_all(limit=INVITATION_LISTING_LIMIT, offset=offset)
+            page = service.list_all(limit=INVITATION_LISTING_LIMIT, offset=offset, status=status, email_contains=q)
+            counts = service.status_counts(email_contains=q)
             now = service.server_now()
         except InvitationsUnavailableError:
             return JSONResponse({"error": "invitations_unavailable"}, status_code=503)
@@ -207,9 +303,13 @@ def make_router() -> APIRouter:
                     "status": effective_status(row, now),
                     "created_at": row.created_at.isoformat() if row.created_at else None,
                     "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+                    "accepted_at": row.accepted_at.isoformat() if row.accepted_at else None,
+                    "revoked_at": row.revoked_at.isoformat() if row.revoked_at else None,
                 }
                 for row in page.invitations
             ],
+            "status": status,
+            "counts": counts,
             "has_more": page.has_more,
             "next_offset": offset + len(page.invitations) if page.has_more else None,
         }
@@ -221,6 +321,7 @@ def make_router() -> APIRouter:
         actor: Annotated[object, Depends(operator_context)],
         service: Annotated[InvitationService, Depends(get_invitation_service)],
         delivery: Annotated[object, Depends(get_invitation_email_delivery)],
+        directory: Annotated[UserDirectoryClient, Depends(get_user_directory_client)],
         _csrf: Annotated[object, Depends(require_csrf)],
     ):
         """Invite one address, and send them the link.
@@ -239,11 +340,38 @@ def make_router() -> APIRouter:
         cannot be rolled back. The residual risk runs the other way -- a
         committed invitation whose email failed -- which is why the outcome is
         reported rather than flattened into success.
+
+        **Who already has an account decides what happens** (#348):
+
+        - an account that already belongs to an organization here (active or
+          removed) is refused with ``409 already_member`` and nothing is
+          issued. Acceptance would refuse that login, and Keycloak holds one
+          account per address, so the link could never be redeemed by anyone.
+          They can simply sign in;
+        - an account with no organization -- somebody who registered and never
+          accepted -- is sent the ``existing_account`` template, which tells
+          them to sign in rather than register. Registering again is what
+          failed for them with "email already exists";
+        - no account is sent the ``new_account`` template, as before.
+
+        A directory that cannot answer does not block issuing. The new-invitee
+        copy goes out and the response says the account check did not run
+        (``account_check: "unavailable"``), so silence is never read as "no
+        account".
         """
 
-        address = body.email.strip()
-        if "@" not in address or address.startswith("@") or address.endswith("@"):
+        # Validated here, as the server-rendered page does: an address the
+        # service would refuse is the operator's typo (400), and the account
+        # check below sees the folded form issuance stores.
+        try:
+            address = validate_invited_email(body.email.strip())
+        except ValueError:
             return JSONResponse({"outcome": "invalid_email"}, status_code=400)
+
+        has_account, is_member = _invitee_account(request, directory, address)
+        if is_member:
+            return JSONResponse({"outcome": "already_member", "email": address}, status_code=409)
+        template = TEMPLATE_EXISTING_ACCOUNT if has_account else TEMPLATE_NEW_ACCOUNT
 
         try:
             outcome = issue_invitation(actor, service, email=address)
@@ -263,6 +391,7 @@ def make_router() -> APIRouter:
             invitation_secret=outcome.raw_secret.reveal(),
             organization_name=None,
             expires_at=invitation.expires_at,
+            template=template,
         )
         if delivered.status == DELIVERY_PROVIDER_ACCEPTED:
             result = "sent"
@@ -275,7 +404,117 @@ def make_router() -> APIRouter:
             "admin_api_invitation_issued",
             extra={"invitation_id": invitation.id, "delivery_status": delivered.status},
         )
-        return JSONResponse({"outcome": result, "email": invitation.email}, status_code=201)
+        issued = {"outcome": result, "email": invitation.email, "template": template}
+        if has_account is None:
+            issued["account_check"] = "unavailable"
+        return JSONResponse(issued, status_code=201)
+
+    @router.get("/invitation-templates")
+    def admin_invitation_templates(
+        templates: Annotated[object, Depends(get_invitation_template_store)],
+    ):
+        """The invitation emails in force, with their built-in defaults (#348).
+
+        ``editable`` is false on a deployment with no database: the built-in
+        copy is shown, and saving is refused rather than kept until the next
+        restart.
+        """
+
+        try:
+            current = templates.list()
+        except Exception:  # noqa: BLE001 - a read failure shows as unavailable, not a 500
+            logger.warning("admin_api_invitation_templates_unreadable")
+            return JSONResponse({"error": "invitation_templates_unavailable"}, status_code=503)
+        return {
+            "templates": [_template_json(template) for template in current],
+            "required_placeholders": list(required_placeholders()),
+            "optional_placeholders": list(optional_placeholders()),
+            "editable": bool(getattr(templates, "available", False)),
+        }
+
+    def _checked(key: str, body: InvitationTemplateRequest, delivery) -> JSONResponse | InvitationTemplate:
+        """The submitted text as a template, or the answer explaining why it cannot be one."""
+
+        if key not in TEMPLATE_KEYS:
+            return JSONResponse({"outcome": "unknown_template"}, status_code=404)
+        subject = body.subject.strip()
+        problems = template_problems(
+            subject,
+            body.body,
+            app_instructions=getattr(delivery, "app_instructions", None),
+            require_verified_email=getattr(delivery, "require_verified_email", True),
+        )
+        if problems:
+            return JSONResponse({"outcome": "invalid_template", "problems": problems}, status_code=400)
+        return InvitationTemplate(key=key, subject=subject, body=body.body, customized=True)
+
+    @router.post("/invitation-templates/{key}/preview")
+    def admin_preview_invitation_template(
+        key: str,
+        body: InvitationTemplateRequest,
+        delivery: Annotated[object, Depends(get_invitation_email_delivery)],
+        _csrf: Annotated[object, Depends(require_csrf)],
+    ):
+        """The message as an invitee would get it, with sample values. Nothing is saved or sent.
+
+        A ``POST`` because it carries the unsaved text; it changes nothing.
+        The link in it carries a fake token, so a preview pasted somewhere
+        cannot be redeemed.
+        """
+
+        checked = _checked(key, body, delivery)
+        if isinstance(checked, JSONResponse):
+            return checked
+        subject, rendered = render_preview(
+            checked,
+            accept_url=getattr(delivery, "accept_url", None),
+            app_instructions=getattr(delivery, "app_instructions", None),
+            require_verified_email=getattr(delivery, "require_verified_email", True),
+        )
+        return {"subject": subject, "body": rendered}
+
+    @router.post("/invitation-templates/{key}")
+    def admin_save_invitation_template(
+        key: str,
+        body: InvitationTemplateRequest,
+        actor: Annotated[object, Depends(operator_context)],
+        delivery: Annotated[object, Depends(get_invitation_email_delivery)],
+        templates: Annotated[object, Depends(get_invitation_template_store)],
+        _csrf: Annotated[object, Depends(require_csrf)],
+    ):
+        """Save an operator's text for one template, audited as ``invitation_template.update``.
+
+        Checked first by rendering it the way the send path does, with this
+        deployment's settings: a template that saves is one that sends.
+        """
+
+        checked = _checked(key, body, delivery)
+        if isinstance(checked, JSONResponse):
+            return checked
+        try:
+            saved = templates.save(actor, key, subject=checked.subject, body=checked.body)
+        except InvitationTemplatesUnavailableError:
+            return JSONResponse({"outcome": "unavailable"}, status_code=503)
+        logger.info("admin_api_invitation_template_saved", extra={"template": key})
+        return {"outcome": "saved", "template": _template_json(saved)}
+
+    @router.post("/invitation-templates/{key}/reset")
+    def admin_reset_invitation_template(
+        key: str,
+        actor: Annotated[object, Depends(operator_context)],
+        templates: Annotated[object, Depends(get_invitation_template_store)],
+        _csrf: Annotated[object, Depends(require_csrf)],
+    ):
+        """Go back to the built-in copy, audited as ``invitation_template.reset``."""
+
+        if key not in TEMPLATE_KEYS:
+            return JSONResponse({"outcome": "unknown_template"}, status_code=404)
+        try:
+            restored = templates.reset(actor, key)
+        except InvitationTemplatesUnavailableError:
+            return JSONResponse({"outcome": "unavailable"}, status_code=503)
+        logger.info("admin_api_invitation_template_reset", extra={"template": key})
+        return {"outcome": "reset", "template": _template_json(restored)}
 
     @router.post("/invitations/{invitation_id}/revoke")
     def admin_revoke_invitation(

@@ -132,6 +132,13 @@ AUDIT_ACTION_SERVICE_ACCESS_REVOKE = "service_access.revoke"
 # this off" is asked with a runbook query after an incident.
 AUDIT_ACTION_CONNECTOR_ENABLE = "connector.enable"
 AUDIT_ACTION_CONNECTOR_DISABLE = "connector.disable"
+# Editing what invitees are told (#348). Two actions for the reason the pairs
+# above give: "who changed the invitation email" and "who put it back" are
+# separate questions after a bad message goes out. Widened the usual way:
+# constants here, membership below, and migration **v18** replacing the CHECK,
+# along with a new target type, since a template is none of the others.
+AUDIT_ACTION_INVITATION_TEMPLATE_UPDATE = "invitation_template.update"
+AUDIT_ACTION_INVITATION_TEMPLATE_RESET = "invitation_template.reset"
 
 AUDIT_ACTIONS = frozenset(
     {
@@ -148,10 +155,14 @@ AUDIT_ACTIONS = frozenset(
         AUDIT_ACTION_SERVICE_ACCESS_REVOKE,
         AUDIT_ACTION_CONNECTOR_ENABLE,
         AUDIT_ACTION_CONNECTOR_DISABLE,
+        AUDIT_ACTION_INVITATION_TEMPLATE_UPDATE,
+        AUDIT_ACTION_INVITATION_TEMPLATE_RESET,
     }
 )
 
-AUDIT_TARGET_TYPES = frozenset({"org", "user", "invitation", "connector"})
+AUDIT_TARGET_INVITATION_TEMPLATE = "invitation_template"
+
+AUDIT_TARGET_TYPES = frozenset({"org", "user", "invitation", "connector", AUDIT_TARGET_INVITATION_TEMPLATE})
 """The target vocabulary of this beta. Closed (and CHECK-constrained) for the
 same reason as the action set: rows are found by exact-match runbook queries."""
 

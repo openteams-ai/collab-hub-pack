@@ -265,6 +265,57 @@ STATUS_EXPIRED = "expired"
 INVITATION_STORED_STATUSES = frozenset({STATUS_PENDING, STATUS_ACCEPTED, STATUS_REVOKED})
 """Mirrors the CHECK constraint in migration v3; pinned together by a test."""
 
+LISTING_OUTSTANDING = "outstanding"
+"""Pending and not yet expired: the invitations an operator can still act on."""
+LISTING_ACCEPTED = STATUS_ACCEPTED
+LISTING_EXPIRED = STATUS_EXPIRED
+LISTING_REVOKED = STATUS_REVOKED
+LISTING_ALL = "all"
+
+LISTING_FILTERS = (LISTING_OUTSTANDING, LISTING_ACCEPTED, LISTING_EXPIRED, LISTING_REVOKED, LISTING_ALL)
+"""The views the operator listing can be narrowed to (#348), in tab order."""
+
+_ASCII_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_ASCII_LOWER = "abcdefghijklmnopqrstuvwxyz"
+
+
+def _email_filter(fragment: str | None) -> tuple[str, tuple]:
+    """A predicate matching addresses that contain *fragment*, ignoring ASCII case.
+
+    ``translate`` rather than ``lower()`` or ``ILIKE`` for the reason
+    :func:`ascii_folded_bytes` gives: those follow the database's locale, and
+    nothing else about an address here folds more than ASCII case. Rows issued
+    before #157 can still hold capitals, so the stored side is folded too.
+    ``strpos`` rather than ``LIKE`` so a ``%`` or ``_`` the operator types is a
+    character to find, not a wildcard.
+    """
+
+    if fragment is None or not fragment.strip():
+        return "", ()
+    folded = ascii_folded_bytes(fragment.strip()).decode("utf-8", "surrogatepass")
+    return "strpos(translate(email, %s, %s), %s) > 0", (_ASCII_UPPER, _ASCII_LOWER, folded)
+
+
+def _listing_filter(status: str, email_contains: str | None) -> tuple[str, tuple]:
+    if status not in LISTING_FILTERS:
+        raise ValueError(f"{status!r} is not an invitation listing filter")
+    clauses: list[str] = []
+    params: list = []
+    if status == LISTING_OUTSTANDING:
+        clauses.append("status = %s AND expires_at > clock_timestamp()")
+        params.append(STATUS_PENDING)
+    elif status == LISTING_EXPIRED:
+        clauses.append("status = %s AND expires_at <= clock_timestamp()")
+        params.append(STATUS_PENDING)
+    elif status in (LISTING_ACCEPTED, LISTING_REVOKED):
+        clauses.append("status = %s")
+        params.append(status)
+    email_where, email_params = _email_filter(email_contains)
+    if email_where:
+        clauses.append(email_where)
+        params.extend(email_params)
+    return ("WHERE " + " AND ".join(f"({clause})" for clause in clauses) if clauses else ""), tuple(params)
+
 
 # --- Terminal states --------------------------------------------------------
 #
@@ -972,6 +1023,9 @@ class UnavailableInvitationService:
     def list_all(self, *args, **kwargs) -> InvitationPage:
         raise self._unavailable()
 
+    def status_counts(self, *args, **kwargs) -> dict[str, int]:
+        raise self._unavailable()
+
     def get(self, *args, **kwargs) -> Invitation | None:
         raise self._unavailable()
 
@@ -1160,15 +1214,64 @@ class PostgresInvitationService:
             offset=offset,
         )
 
-    def list_all(self, *, limit: int, offset: int = 0) -> InvitationPage:
-        """One page of every invitation, newest first — the operator's view."""
+    def list_all(
+        self,
+        *,
+        limit: int,
+        offset: int = 0,
+        status: str = LISTING_ALL,
+        email_contains: str | None = None,
+    ) -> InvitationPage:
+        """One page of invitations, newest first — the operator's view.
 
+        ``status`` narrows to one *effective* state (#348): the admin panel
+        opens on the outstanding ones, because on a busy hub the accepted and
+        lapsed rows bury the few an operator can still act on. ``expired`` and
+        ``outstanding`` are told apart on the database's clock, the same way
+        :func:`effective_status` is, so a row cannot be listed under one and
+        shown as the other. ``email_contains`` matches a fragment of the
+        address, ignoring ASCII case (see :func:`_email_filter`).
+        """
+
+        where, params = _listing_filter(status, email_contains)
         return self._page(
-            f"SELECT {_COLUMNS} FROM collab_invitations {_PAGE_ORDER}",
-            (),
+            f"SELECT {_COLUMNS} FROM collab_invitations {where} {_PAGE_ORDER}",
+            params,
             limit=limit,
             offset=offset,
         )
+
+    def status_counts(self, *, email_contains: str | None = None) -> dict[str, int]:
+        """How many invitations are in each effective state, for the panel's tabs.
+
+        One statement, so the five numbers agree with one another. They are
+        read separately from the page they label and can be one off from it if
+        an invitation changes in between, which is acceptable for a count on a
+        tab and is why the listing itself still pages by ``has_more``.
+        """
+
+        email_where, email_params = _email_filter(email_contains)
+        with self._db.connection() as conn:
+            row = conn.execute(
+                f"""
+                SELECT
+                    count(*) FILTER (WHERE status = %s AND expires_at > clock_timestamp()) AS outstanding,
+                    count(*) FILTER (WHERE status = %s AND expires_at <= clock_timestamp()) AS expired,
+                    count(*) FILTER (WHERE status = %s) AS accepted,
+                    count(*) FILTER (WHERE status = %s) AS revoked,
+                    count(*) AS all_invitations
+                FROM collab_invitations
+                {"WHERE " + email_where if email_where else ""}
+                """,
+                (STATUS_PENDING, STATUS_PENDING, STATUS_ACCEPTED, STATUS_REVOKED, *email_params),
+            ).fetchone()
+        return {
+            LISTING_OUTSTANDING: row["outstanding"],
+            LISTING_ACCEPTED: row["accepted"],
+            LISTING_EXPIRED: row["expired"],
+            LISTING_REVOKED: row["revoked"],
+            LISTING_ALL: row["all_invitations"],
+        }
 
     def _page(self, sql: str, params: tuple, *, limit: int, offset: int) -> InvitationPage:
         """Run a bounded, deterministically ordered listing query.

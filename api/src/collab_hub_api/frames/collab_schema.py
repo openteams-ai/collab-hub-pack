@@ -1056,6 +1056,59 @@ COLLAB_SCHEMA_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             "CREATE INDEX IF NOT EXISTS collab_claims_updated ON collab_claims (updated_at)",
         ),
     ),
+    (
+        18,
+        (
+            # The invitation emails an operator has edited (issue #348).
+            #
+            # One row per template an operator has changed, and nothing else:
+            # absence means the built-in copy under `web/`, so a deployment
+            # that never opens the editor sends exactly what it did before. The
+            # key is a closed set, as the audit vocabulary is, because a row
+            # under a key nothing reads is a template nobody is ever sent.
+            # `updated_by` is the principal; the label is a display snapshot,
+            # as on the audit row.
+            """
+            CREATE TABLE IF NOT EXISTS collab_invitation_templates (
+                template         text PRIMARY KEY
+                                 CHECK (template IN ('new_account', 'existing_account')),
+                subject          text NOT NULL,
+                body             text NOT NULL,
+                updated_at       timestamptz NOT NULL DEFAULT now(),
+                updated_by       text NOT NULL,
+                updated_by_label text
+            )
+            """,
+            # Two more actions and a new target type, replacing the CHECKs
+            # version 10 installed, the same way it replaced version 7's.
+            """
+            ALTER TABLE collab_audit_events
+            DROP CONSTRAINT IF EXISTS collab_audit_events_action_check
+            """,
+            """
+            ALTER TABLE collab_audit_events
+            ADD CONSTRAINT collab_audit_events_action_check
+            CHECK (action IN ('invitation.send', 'invitation.redeem',
+                              'invitation.revoke', 'membership.create',
+                              'org.create', 'org.rename', 'operator.manual',
+                              'service_access.grant', 'service_access.revoke',
+                              'platform_role.grant', 'platform_role.revoke',
+                              'connector.enable', 'connector.disable',
+                              'invitation_template.update',
+                              'invitation_template.reset'))
+            """,
+            """
+            ALTER TABLE collab_audit_events
+            DROP CONSTRAINT IF EXISTS collab_audit_events_target_type_check
+            """,
+            """
+            ALTER TABLE collab_audit_events
+            ADD CONSTRAINT collab_audit_events_target_type_check
+            CHECK (target_type IN ('org', 'user', 'invitation', 'connector',
+                                   'invitation_template'))
+            """,
+        ),
+    ),
 )
 
 

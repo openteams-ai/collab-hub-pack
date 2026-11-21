@@ -1306,8 +1306,10 @@ def test_the_action_vocabulary_is_exactly_the_ratified_beta_set():
         "service_access.revoke",
         "connector.enable",
         "connector.disable",
+        "invitation_template.update",
+        "invitation_template.reset",
     }
-    assert AUDIT_TARGET_TYPES == {"org", "user", "invitation", "connector"}
+    assert AUDIT_TARGET_TYPES == {"org", "user", "invitation", "connector", "invitation_template"}
 
 
 def test_the_check_constraints_match_the_code_vocabulary_exactly():

@@ -18,11 +18,14 @@ from a human mailbox and breaks the moment the server sends the same words from
 an unattended one. So this renderer deliberately does **not** take the session
 identity — there is nothing per-operator in the output at all.
 
-**The copy lives in ``onboarding_email.txt``, beside this module, and nowhere
-else.** To change what invitees are told, edit that file: it is the text, not
-a copy of the text. This module only substitutes the parts that vary per
-invitation, and `docs/invitation-onboarding-email.md` explains *why* the copy
-says what it says without restating it.
+**The built-in copy lives in ``onboarding_email.txt``, beside this module**,
+with a second file for invitees who already have an account (#348). Since
+#348 an operator can replace either one from the admin panel; the edited text
+is stored in ``collab_invitation_templates`` (see
+:mod:`..frames.invitation_templates`) and passed in as ``template_body``, and
+these files are what a deployment sends until someone does, and what "reset to
+default" restores. This module only substitutes the parts that vary per
+invitation, whichever text it is given.
 
 Placeholders are ``[UPPER CASE IN BRACKETS]``, uniformly, and substitution is
 plain string replacement — no ``format`` or ``$`` templating, so a brace or a
@@ -57,6 +60,21 @@ from importlib.resources import files
 from .data_statement import DATA_STATEMENT_TEXT
 
 TEMPLATE_FILENAME = "onboarding_email.txt"
+
+EXISTING_ACCOUNT_TEMPLATE_FILENAME = "onboarding_email_existing_account.txt"
+"""The built-in copy for an invitee who already has an account (#348).
+
+Somebody who registered but never accepted an invitation has an account with
+no organization. An invitation is exactly what they need, but the default copy
+tells them to "Create your account", which fails for them with "email already
+exists". This copy tells them to sign in instead.
+
+It is a second *file* rather than a conditional in the first, which the
+:data:`CONDITIONAL_BLOCK` note argues against for good reason. The difference
+here is that the two messages are addressed to different people and diverge
+in their opening, their steps and their subject; operators edit each one
+separately in the admin panel (``frames.invitation_templates``), and these
+files are only what a deployment sends until someone does."""
 
 NAME_PLACEHOLDER = "[NAME]"
 """Left in the rendered text for the sender to replace. An invitation carries
@@ -164,7 +182,7 @@ pass it and this is unused.
 """
 
 
-def _load_template() -> tuple[str, str]:
+def _load_template(filename: str = TEMPLATE_FILENAME) -> tuple[str, str]:
     """The subject and body out of the template file.
 
     Read through ``importlib.resources`` rather than ``__file__`` so it
@@ -178,14 +196,14 @@ def _load_template() -> tuple[str, str]:
     different from the other fifty.
     """
 
-    text = files(__package__).joinpath(TEMPLATE_FILENAME).read_text(encoding="utf-8")
+    text = files(__package__).joinpath(filename).read_text(encoding="utf-8")
     first, _, body = text.partition("\n")
     if not first.startswith(SUBJECT_PREFIX):
-        raise ValueError(f"{TEMPLATE_FILENAME} must begin with a {SUBJECT_PREFIX!r} line")
+        raise ValueError(f"{filename} must begin with a {SUBJECT_PREFIX!r} line")
     return first[len(SUBJECT_PREFIX) :].strip(), body.lstrip("\n")
 
 
-def _resolve_conditionals(body: str, *, require_verified_email: bool) -> str:
+def _resolve_conditionals(body: str, *, require_verified_email: bool, source: str = TEMPLATE_FILENAME) -> str:
     r"""Keep or drop each conditional span, leaving no markers behind.
 
     The kept form is the block's own content, which carries its leading blank
@@ -223,7 +241,7 @@ def _resolve_conditionals(body: str, *, require_verified_email: bool) -> str:
         # reader see which it was.
         surviving = ", ".join(sorted(set(CONDITIONAL_MARKER.findall(resolved))))
         raise ValueError(
-            f"{TEMPLATE_FILENAME}: conditional markers survived resolution ({surviving}). Each"
+            f"{source}: conditional markers survived resolution ({surviving}). Each"
             " must begin its own line and be paired, and only [IF VERIFIED EMAIL REQUIRED] is"
             " understood -- a new condition needs teaching to CONDITIONAL_BLOCK, not just"
             " adding to the copy."
@@ -232,6 +250,27 @@ def _resolve_conditionals(body: str, *, require_verified_email: bool) -> str:
 
 
 SUBJECT, _BODY_TEMPLATE = _load_template()
+
+EXISTING_ACCOUNT_SUBJECT, EXISTING_ACCOUNT_BODY_TEMPLATE = _load_template(EXISTING_ACCOUNT_TEMPLATE_FILENAME)
+"""The built-in existing-account copy, unresolved: the form an operator edits.
+
+Resolved once here, both ways, purely as an import-time check -- the same
+"unrenderable copy stops the pod" property :data:`BODIES` gives the default
+copy. Rendering resolves it per message, like any edited template."""
+
+for _setting in (True, False):
+    _resolve_conditionals(
+        EXISTING_ACCOUNT_BODY_TEMPLATE,
+        require_verified_email=_setting,
+        source=EXISTING_ACCOUNT_TEMPLATE_FILENAME,
+    )
+del _setting
+
+DEFAULT_BODY_TEMPLATE = _BODY_TEMPLATE
+"""The built-in new-invitee copy, unresolved: the form an operator edits.
+
+Public because the admin panel shows it as the starting point and "reset to
+default" restores it; ``_BODY_TEMPLATE`` stays as the name the tests use."""
 
 BODIES: dict[bool, str] = {
     True: _resolve_conditionals(_BODY_TEMPLATE, require_verified_email=True),
@@ -285,6 +324,7 @@ def render_onboarding_email(
     name: str | None = None,
     app_instructions: str | None = None,
     require_verified_email: bool = True,
+    template_body: str | None = None,
 ) -> str:
     """The complete message body, personalised for one invitation.
 
@@ -329,7 +369,16 @@ def render_onboarding_email(
     if app_instructions is not None:
         substitutions.append((APP_INSTRUCTIONS_PLACEHOLDER, app_instructions))
 
-    body = BODIES[bool(require_verified_email)]
+    # `template_body` is an operator-edited (or the existing-account) template,
+    # resolved per message: it is not known at import, and resolving one body
+    # is a single regex pass. `None` keeps the import-time resolution of the
+    # default copy.
+    if template_body is None:
+        body = BODIES[bool(require_verified_email)]
+    else:
+        body = _resolve_conditionals(
+            template_body, require_verified_email=bool(require_verified_email), source="invitation template"
+        )
     for placeholder, value in substitutions:
         body = body.replace(placeholder, value)
     return body
@@ -343,6 +392,7 @@ def render_for_automated_delivery(
     app_instructions: str,
     name: str = AUTOMATED_GREETING_NAME,
     require_verified_email: bool = True,
+    template_body: str | None = None,
 ) -> str:
     """The body to **send**, with nothing left for a human to fill in (#93).
 
@@ -378,6 +428,7 @@ def render_for_automated_delivery(
         name=name,
         app_instructions=app_instructions,
         require_verified_email=require_verified_email,
+        template_body=template_body,
     )
     unresolved = sorted(set(UNRESOLVED_PLACEHOLDER.findall(body)))
     if unresolved:

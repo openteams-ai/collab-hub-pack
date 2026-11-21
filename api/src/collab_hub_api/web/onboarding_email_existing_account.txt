@@ -1,0 +1,62 @@
+Subject: Finish setting up your OpenTeams Collab account
+
+Hi [NAME],
+
+You already have an OpenTeams Collab account with this address, but
+setup is not finished: the account is not part of an organization yet.
+This invitation finishes it, in about two minutes.
+
+Your invitation link expires at [EXPIRY].
+If it lapses, tell us and we'll send a fresh one.
+
+1. OPEN YOUR INVITATION LINK
+
+   [INVITATION LINK]
+
+   The link carries a one-time code, so it has to be opened from the
+   link itself — a bookmark of the page it opens will not work.
+
+2. SIGN IN — DO NOT REGISTER AGAIN
+
+   Click "Already have an account? Sign in" and sign in with the
+   account you already have:
+
+   [INVITEE EMAIL]
+
+   Registering again with this address fails with "email already
+   exists". If you have forgotten your password, use "Forgot password?"
+   on the sign-in page.
+[IF VERIFIED EMAIL REQUIRED]
+
+   If you never verified the address, you will be sent an email asking
+   you to do that when you sign in. Click the link in it before
+   carrying on.
+[END IF]
+
+3. ACCEPT YOUR INVITATION
+
+   Click "Accept invitation." You should land on a page headed "You
+   are in."
+
+   In this beta a login belongs to exactly one organization and that
+   does not change later.
+
+4. INSTALL THE APP AND SIGN IN
+
+   [DESKTOP APP DOWNLOAD / INSTALL INSTRUCTIONS]
+
+   Sign in with the same account once step 3 is done — before that the
+   app can only show a "403 Forbidden" error.
+
+WHAT WE STORE
+
+[DATA STATEMENT]
+
+IF ANYTHING GOES WRONG
+
+Write to collab-support@openteams.com. This is an early beta and
+hearing what breaks is the point of this round — please do not assume a
+problem is your fault or not worth reporting.
+
+Thanks,
+The OpenTeams Collab team

@@ -48,10 +48,29 @@ describe("refusals carry the server's own word", () => {
     expect(await getJson("api/invitations", answering(409, { outcome: "already_live" }))).toEqual({
       state: "refused",
       reason: "already_live",
+      body: { outcome: "already_live" },
     });
     expect(await getJson("api/invitations", answering(400, { outcome: "invalid_email" }))).toEqual({
       state: "refused",
       reason: "invalid_email",
+      body: { outcome: "invalid_email" },
+    });
+  });
+
+  it("keeps the rest of a refusal's answer, for refusals that carry detail", async () => {
+    const problems = { outcome: "invalid_template", problems: ["The subject is empty."] };
+    expect(await postJson("api/invitation-templates/new_account", {}, "csrf", answering(400, problems))).toEqual({
+      state: "refused",
+      reason: "invalid_template",
+      body: problems,
+    });
+  });
+
+  it("reads a 404 on a write as a refusal with its reason", async () => {
+    expect(await postJson("api/invitation-templates/x", {}, "csrf", answering(404, { outcome: "unknown_template" }))).toEqual({
+      state: "refused",
+      reason: "unknown_template",
+      body: { outcome: "unknown_template" },
     });
   });
 

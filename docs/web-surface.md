@@ -977,8 +977,11 @@ deliberate line: the rule exists for a human retrying after an ambiguous send,
 and unifying the paths would change the semantics of a shipped endpoint the
 desktop is built against. Re-send policy, including rotation, is #93.
 
-Matching is **exact**, like every other address comparison here (Gate B):
-`Alice@example.com` and `alice@example.com` are two addresses.
+Matching folds **ASCII case and nothing else**, like every other address
+comparison here (the amendment on
+[#157](https://github.com/nebari-dev/nebari-nexus-pack/issues/157)): `Alice@example.com` and
+`alice@example.com` are one address, while plus-tags and dots still make
+different addresses.
 
 ### The invitation email is the secret's only route off this page
 

@@ -1380,7 +1380,7 @@ class PostgresInvitationService:
         See the module docstring for why that is the scope for this milestone.
 
         See the module docstring for why this is a separate method, why the
-        address comparison is exact, and why the advisory lock is load-bearing
+        address comparison folds ASCII case only, and why the advisory lock is load-bearing
         rather than belt-and-braces.
         """
 

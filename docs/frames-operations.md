@@ -1192,8 +1192,11 @@ locked, so a check-then-insert would let two simultaneous issuances (a
 double-submitted form) both read "none" and both insert. It is transaction
 scoped, so it is released by the transaction ending, on commit or rollback.
 
-Matching is exact, like every other address comparison here (Gate B):
-`Alice@example.com` and `alice@example.com` can each hold a live invitation.
+Matching folds ASCII case and nothing else, like every other address
+comparison here (see [The invited address must match
+exactly](#the-invited-address-must-match-exactly)): the address is stored
+lowered, so `Alice@example.com` and `alice@example.com` share one lock and one
+live invitation, while `a+tag@example.com` is still a different address.
 
 If you see contention on advisory locks in `pg_locks` with `classid = 18766`,
 that is this rule; it is held for the duration of one issuance only.

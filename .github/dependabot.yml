@@ -5,7 +5,7 @@
 # by hand with `pixi update`. The oras version and sha256 ARGs in
 # scripts/cog-serve-e2e/Dockerfile are bumped by hand too: Dependabot does not
 # read ARGs. Minor and patch version updates arrive grouped per ecosystem (one
-# PR per directory a week); majors and security updates come on their own, so
+# PR per directory a month); majors and security updates come on their own, so
 # each gets its own review.
 version: 2
 updates:
@@ -16,7 +16,7 @@ updates:
       - /execution
       - /worker
     schedule:
-      interval: weekly
+      interval: monthly
     commit-message:
       prefix: build
       include: scope
@@ -29,7 +29,7 @@ updates:
       - /api/admin-ui
       - /scripts/release/semantic-release
     schedule:
-      interval: weekly
+      interval: monthly
     commit-message:
       prefix: build
       include: scope
@@ -43,7 +43,7 @@ updates:
       - /scripts/cog-execution-e2e
       - /scripts/cog-serve-e2e
     schedule:
-      interval: weekly
+      interval: monthly
     commit-message:
       prefix: build
       include: scope
@@ -55,7 +55,7 @@ updates:
     directories:
       - /dev
     schedule:
-      interval: weekly
+      interval: monthly
     commit-message:
       prefix: build
       include: scope
@@ -66,7 +66,7 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     commit-message:
       prefix: ci
       include: scope

@@ -1729,6 +1729,51 @@ async def test_live_the_panel_warns_then_sends_anyway_on_real_rows(live_app, idp
     assert [(row["actor"], row["detail"].get("confirmed_existing_account")) for row in sends] == [(OPERATOR_SUB, True)]
 
 
+class _OneAccountDirectory:
+    """The directory seam holding exactly one account, for the live member test."""
+
+    def __init__(self, account_id: str, email: str):
+        self.account_id = account_id
+        self.email = email
+
+    def find_provisioned_account(self, email):
+        from collab_hub_api.user_directory import ProvisionedAccountRecord
+
+        return ProvisionedAccountRecord(id=self.account_id, email=email) if email == self.email else None
+
+
+@live_postgres
+async def test_live_the_panel_refuses_an_account_that_already_has_an_organization(live_app, idp, live_db):
+    """The member refusal on a real membership row, read through the real org
+    store: the account id the directory names is the principal the row is keyed
+    on, under the ``sub`` pin. Confirming does not get past it, and nothing is
+    written or sent."""
+
+    with live_db.connection() as conn:
+        conn.execute("INSERT INTO collab_orgs (id, created_by) VALUES ('org-bob', 'kc-bob')")
+        conn.execute(
+            "INSERT INTO collab_org_members (user_id, org_id, role, email) VALUES ('kc-bob', 'org-bob', 'owner', %s)",
+            (INVITEE,),
+        )
+    live_app.state.user_directory_client = _OneAccountDirectory("kc-bob", INVITEE)
+
+    async with web_client(live_app) as operator:
+        await sign_in(operator, idp, next_path="/web")
+        csrf = (await operator.get("/admin/api/session")).json()["csrf_token"]
+        refused = await operator.post(
+            "/admin/api/invitations",
+            json={"email": INVITEE, "confirm_existing_account": True},
+            headers={"X-CSRF-Token": csrf},
+        )
+
+    assert refused.status_code == 409
+    assert refused.json() == {"outcome": "already_member", "email": INVITEE}
+    with live_db.connection() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM collab_invitations").fetchone()["n"] == 0
+        assert conn.execute("SELECT count(*) AS n FROM collab_audit_events").fetchone()["n"] == 0
+    assert live_app.state.invitation_email_delivery.calls == []
+
+
 def test_the_lock_key_is_a_signed_32_bit_integer():
     """``pg_advisory_xact_lock(int, int)`` takes int4s; a value outside the
     range would raise from inside the audited transaction."""

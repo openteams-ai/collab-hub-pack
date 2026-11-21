@@ -162,9 +162,10 @@ class InvitationRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     confirm_existing_account: bool = False
     """The operator's "Send anyway": issue even though this address already
-    has an account. Skips the existing-account check and is recorded on the
+    has an account. Skips the existing-account warning and is recorded on the
     audit row as the request's own claim -- the panel sends it only after
-    showing the warning. It never skips the live-invitation check."""
+    showing the warning. It never skips the live-invitation refusal, nor the
+    refusal of an account that already has an organization here."""
 
 
 class ConnectorSwitch(BaseModel):
@@ -300,17 +301,22 @@ def make_router() -> APIRouter:
         committed invitation whose email failed -- which is why the outcome is
         reported rather than flattened into success.
 
-        **An address that has been here before is warned about first** (#348).
-        Unless the request carries ``confirm_existing_account``, an address the
-        identity provider holds an account for, or one that accepted an
-        invitation before, gets ``409 existing_account`` and nothing is issued
-        or sent. Such a person signs in rather than registers. Whether a new
-        invitation helps them depends on their account: acceptance refuses one
-        that already has an organization here, even one it was removed from,
-        while one with no organization is exactly who an invitation is for. The
-        response says which, where that can be known (``member``). The operator
-        then cancels or confirms, and a confirmed request issues exactly as an
-        unwarned one does, with the confirmation on its audit row.
+        **An address that has been here before is checked first** (#348).
+
+        - An account that already has an organization here, even one it was
+          removed from, gets ``409 already_member`` whether or not the request
+          is confirmed. Acceptance refuses such a login and the identity
+          provider holds one account per address, so the invitation could never
+          be redeemed; the person signs in instead.
+        - Otherwise, unless the request carries ``confirm_existing_account``, an
+          address the identity provider holds an account for, or one that
+          accepted an invitation before, gets ``409 existing_account`` and
+          nothing is issued or sent. ``member`` says whether the account is
+          known to have no organization -- somebody whose invitation lapsed
+          after they registered, exactly who an invitation is for -- or whether
+          that cannot be known. The operator then cancels or confirms, and a
+          confirmed request issues exactly as an unwarned one does, with the
+          confirmation on its audit row.
 
         A directory that cannot answer does not block issuing -- the check is a
         warning, not a gate -- but the response then says the account check did
@@ -327,15 +333,22 @@ def make_router() -> APIRouter:
             return JSONResponse({"outcome": "invalid_email"}, status_code=400)
 
         account_unchecked = False
-        if not body.confirm_existing_account:
-            try:
-                history = service.address_history(address)
-            except InvitationsUnavailableError:
-                return JSONResponse({"outcome": "unavailable"}, status_code=503)
-            # A live invitation is refused below whatever this would say, so
-            # that refusal answers first.
-            if not history.live:
-                account, member = _account_standing(request, directory, address)
+        try:
+            history = service.address_history(address)
+        except InvitationsUnavailableError:
+            return JSONResponse({"outcome": "unavailable"}, status_code=503)
+        # A live invitation is refused below whatever this would say, so that
+        # refusal answers first.
+        if not history.live:
+            account, member = _account_standing(request, directory, address)
+            # Refused outright, confirmed or not: acceptance turns down any login
+            # with a membership row, and the identity provider holds one account
+            # per address, so nobody could ever redeem this invitation. Only the
+            # cases that are unknown, or that an invitation can help, get the
+            # warning and its "Send anyway".
+            if member:
+                return JSONResponse({"outcome": "already_member", "email": address}, status_code=409)
+            if not body.confirm_existing_account:
                 accepted_at = history.last_accepted.accepted_at if history.last_accepted else None
                 if account or history.last_accepted is not None:
                     return JSONResponse(

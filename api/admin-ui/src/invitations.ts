@@ -8,6 +8,7 @@ const ISSUE_OUTCOMES: Record<string, string> = {
     "The invitation was created, but the email could not be sent. They will need the link another way.",
   already_live: "That address already has a live invitation, so a second one was not created.",
   existing_account: "This email already has an account, so nothing was sent.",
+  already_member: "Already a member here, so nothing was sent. They can sign in.",
   invalid_email: "That does not look like an email address.",
   unavailable: "This hub cannot issue invitations right now.",
 };
@@ -43,9 +44,10 @@ export interface ExistingAccount {
   /** The identity provider's answer, or `null` when it could not be asked. */
   account: boolean | null;
   /**
-   * Whether that account already has an organization here (active or removed),
-   * or `null` when that cannot be known. Acceptance refuses an account that has
-   * one, so this decides whether sending can help.
+   * `false` when that account is known to have no organization here, `null`
+   * when that cannot be known. An account known to have one never reaches the
+   * warning: the server refuses it outright (`already_member`), because
+   * acceptance would refuse that login.
    */
   member: boolean | null;
   /** The day an earlier invitation to this address was accepted, if one was. */
@@ -93,11 +95,7 @@ export function existingAccountWarning({ account, member, acceptedOn }: Existing
       send: "Send this invitation",
     };
   }
-  const consequence =
-    member === true
-      ? "That account already belongs to an organization here, so it cannot accept another invitation."
-      : CANNOT_ACCEPT;
-  return { found: foundText(account, acceptedOn), consequence, send: "Send anyway" };
+  return { found: foundText(account, acceptedOn), consequence: CANNOT_ACCEPT, send: "Send anyway" };
 }
 
 function foundText(account: boolean | null, acceptedOn: string | null): string {

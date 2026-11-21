@@ -863,7 +863,9 @@ async def test_an_address_that_accepted_before_is_warned_about_with_the_date(tmp
 @pytest.mark.asyncio
 async def test_send_anyway_issues_exactly_as_before_and_carries_the_confirmation(tmp_path, idp: _StubIdp):
     """The confirmed request is an ordinary issue, plus the flag that reaches
-    the audit row. It does not ask again: the operator has already been told."""
+    the audit row. It looks the address up again, but only so that an account
+    already in an organization is still refused; nothing else is re-asked of
+    the operator."""
 
     app = build_app(tmp_path, idp)
     service = IssuingInvitations(accepted_at=accepted_in_august())
@@ -881,8 +883,8 @@ async def test_send_anyway_issues_exactly_as_before_and_carries_the_confirmation
     assert service.created == ["bob@example.com"]
     assert delivery.sent == ["bob@example.com"]
     assert service.confirmations == [True]
-    assert service.history_asked == ["bob@example.com"]
-    assert directory.exact == ["bob@example.com"]
+    assert service.history_asked == ["bob@example.com", "bob@example.com"]
+    assert directory.exact == ["bob@example.com", "bob@example.com"]
     assert "s3cret-not-real" not in confirmed.text
 
 
@@ -983,66 +985,120 @@ async def test_two_accounts_for_one_address_still_count_as_an_account(tmp_path, 
     assert service.created == []
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("arrange", "member"),
-    [
-        ("no_membership", False),
-        ("active_membership", True),
-        ("removed_membership", True),
-        ("identity_not_pinned", None),
-        ("org_store_unavailable", None),
-        ("account_without_an_id", None),
-    ],
-)
-async def test_the_warning_says_whether_the_account_already_has_an_organization(
-    tmp_path, idp: _StubIdp, monkeypatch, arrange, member
-):
-    """Acceptance refuses any login with a membership row, active or removed,
-    so that row decides whether sending can help. An account without one is who
-    an invitation is for: somebody who registered and whose invitation lapsed.
+def bob_with_an_account(account_id: str = "u-bob"):
+    from collab_hub_api.user_directory import UserDirectoryUser
 
-    Unknown stays unknown. Membership rows are keyed on the session principal,
-    which is the identity provider's account id only under the ``sub`` pin, and
-    the lookup needs a working organization store and an account id to look up.
-    """
+    return StubDirectory([UserDirectoryUser(id=account_id, username="bob", email="bob@example.com")])
+
+
+def arrange_membership(app, monkeypatch, arrange: str) -> None:
+    """Put the invitee's account into one of the states the check tells apart."""
 
     from collab_hub_api.frames.orgs import MEMBERSHIP_REMOVED, OrgsUnavailableError
-    from collab_hub_api.user_directory import UserDirectoryUser
+
+    store = app.state.org_store
+    if arrange == "active_membership":
+        store.set_membership("u-bob", "org-a")
+    elif arrange == "removed_membership":
+        store.set_membership("u-bob", "org-a", status=MEMBERSHIP_REMOVED)
+    elif arrange == "identity_not_pinned":
+        app.state.web_identity_pinned_to_sub = False
+    elif arrange == "org_store_unavailable":
+        # Only the invitee's lookup fails: the operator's own requests resolve
+        # their principal through this same method.
+        original = store.get_membership
+
+        def failing(user_id):
+            if user_id == "u-bob":
+                raise OrgsUnavailableError("no organization backend")
+            return original(user_id)
+
+        monkeypatch.setattr(store, "get_membership", failing)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arrange", "outcome", "member"),
+    [
+        ("no_membership", "existing_account", False),
+        ("active_membership", "already_member", None),
+        ("removed_membership", "already_member", None),
+        ("identity_not_pinned", "existing_account", None),
+        ("org_store_unavailable", "existing_account", None),
+        ("account_without_an_id", "existing_account", None),
+    ],
+)
+async def test_an_account_in_an_organization_is_refused_and_the_rest_are_warned_about(
+    tmp_path, idp: _StubIdp, monkeypatch, arrange, outcome, member
+):
+    """Acceptance refuses any login with a membership row, active or removed,
+    and the identity provider holds one account per address, so an invitation to
+    such an account could never be redeemed: it is refused, not warned about.
+
+    Everything else is a warning with Send anyway. An account known to have no
+    organization is who an invitation is for -- somebody who registered and
+    whose invitation lapsed -- and unknown stays unknown: membership rows are
+    keyed on the session principal, which is the identity provider's account id
+    only under the ``sub`` pin, and the lookup needs a working organization
+    store and an account id to look up.
+    """
 
     app = build_app(tmp_path, idp)
     service = IssuingInvitations()
-    account_id = "" if arrange == "account_without_an_id" else "u-bob"
-    directory = StubDirectory([UserDirectoryUser(id=account_id, username="bob", email="bob@example.com")])
+    directory = bob_with_an_account("" if arrange == "account_without_an_id" else "u-bob")
 
     async with app.router.lifespan_context(app), web_client(app) as client:
         csrf = await issuing_operator(
             app, idp, client, service=service, delivery=RecordingDelivery(), directory=directory
         )
-        store = app.state.org_store
-        if arrange == "active_membership":
-            store.set_membership("u-bob", "org-a")
-        elif arrange == "removed_membership":
-            store.set_membership("u-bob", "org-a", status=MEMBERSHIP_REMOVED)
-        elif arrange == "identity_not_pinned":
-            app.state.web_identity_pinned_to_sub = False
-        elif arrange == "org_store_unavailable":
-            # Only the invitee's lookup fails: the operator's own requests
-            # resolve their principal through this same method.
-            original = store.get_membership
-
-            def failing(user_id):
-                if user_id == "u-bob":
-                    raise OrgsUnavailableError("no organization backend")
-                return original(user_id)
-
-            monkeypatch.setattr(store, "get_membership", failing)
+        arrange_membership(app, monkeypatch, arrange)
         response = await issue(client, "bob@example.com", csrf)
 
     assert response.status_code == 409
-    assert response.json()["account"] is True
-    assert response.json()["member"] is member
     assert service.created == []
+    if outcome == "already_member":
+        assert response.json() == {"outcome": "already_member", "email": "bob@example.com"}
+    else:
+        assert response.json()["outcome"] == "existing_account"
+        assert response.json()["account"] is True
+        assert response.json()["member"] is member
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arrange", "status", "outcome"),
+    [
+        ("active_membership", 409, "already_member"),
+        ("removed_membership", 409, "already_member"),
+        ("no_membership", 201, "sent"),
+        ("identity_not_pinned", 201, "sent"),
+    ],
+)
+async def test_send_anyway_cannot_talk_past_the_member_refusal(
+    tmp_path, idp: _StubIdp, monkeypatch, arrange, status, outcome
+):
+    """The confirmation skips the warning, not the refusal: a confirmed request
+    for an account already in an organization is refused all the same, and
+    nothing is issued. Where the account has no organization, or that cannot be
+    known, Send anyway sends."""
+
+    app = build_app(tmp_path, idp)
+    service = IssuingInvitations()
+    delivery = RecordingDelivery()
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await issuing_operator(
+            app, idp, client, service=service, delivery=delivery, directory=bob_with_an_account()
+        )
+        arrange_membership(app, monkeypatch, arrange)
+        response = await issue(client, "bob@example.com", csrf, confirm_existing_account=True)
+
+    assert response.status_code == status
+    assert response.json()["outcome"] == outcome
+    if outcome == "already_member":
+        assert service.created == [] and service.confirmations == [] and delivery.sent == []
+    else:
+        assert service.confirmations == [True] and delivery.sent == ["bob@example.com"]
 
 
 @pytest.mark.asyncio
@@ -1472,10 +1528,19 @@ async def test_invitations_report_an_unavailable_service(tmp_path, idp: _StubIdp
         app.state.invitation_email_delivery = RecordingDelivery()
         listing = await client.get("/admin/api/invitations")
         issued = await issue(client, "bob@example.com", csrf)
-        # The confirmed request skips the existing-account read, so it meets
-        # the missing database at the issue itself.
         confirmed = await issue(client, "bob@example.com", csrf, confirm_existing_account=True)
 
+        # And a database that answers the address read but is gone by the time
+        # of the issue itself.
+        class GoneAtIssue(Unavailable):
+            def address_history(self, *a, **k):
+                from collab_hub_api.frames.invitations import AddressHistory
+
+                return AddressHistory(live=False, last_accepted=None)
+
+        app.state.invitation_service = GoneAtIssue()
+        gone = await issue(client, "bob@example.com", csrf)
+
     assert listing.status_code == 503
-    assert issued.status_code == 503 and issued.json()["outcome"] == "unavailable"
-    assert confirmed.status_code == 503 and confirmed.json()["outcome"] == "unavailable"
+    for response in (issued, confirmed, gone):
+        assert response.status_code == 503 and response.json()["outcome"] == "unavailable"

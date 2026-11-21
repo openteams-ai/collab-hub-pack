@@ -981,29 +981,34 @@ Matching folds ASCII case and nothing else, like every other address
 comparison here: `Alice@example.com` and `alice@example.com` are one address,
 and `alice+tag@example.com` is another.
 
-### The admin panel warns before inviting an address that has been here before
+### The admin panel checks before inviting an address that has been here before
 
 The admin panel issues through `POST /admin/api/invitations`, the same
 in-process call this page makes. Before issuing, it checks the address against
-the identity provider's accounts and against earlier invitations to that
-address that were accepted ([#348]). Either match answers
-`409 {"outcome": "existing_account", "account": …, "member": …, "accepted_at": …}`,
-and nothing is issued, sent, or recorded. Such a person signs in rather than
-registers. The panel shows the warning with **Cancel** and **Send anyway**.
+the identity provider's accounts, their organization memberships, and earlier
+invitations to that address that were accepted ([#348]). Such a person signs in
+rather than registers.
 
-- **`member` says whether sending can help.** Acceptance refuses any login
-  that already has an organization here, including one it was removed from, so
-  for such an account a new invitation cannot be accepted. An account with no
-  organization is exactly who an invitation is for (somebody who registered and
-  whose invitation lapsed), and the panel says so and labels the button
-  **Send this invitation**. `member` is `null` when it cannot be known: no single
-  account was found, or the identity is not pinned to `sub`, since membership
-  rows are keyed on the principal.
+- **An account that already has an organization here is refused**
+  (`409 {"outcome": "already_member"}`), even when the request is confirmed.
+  Acceptance refuses any login with a membership row, including one removed
+  from its organization, and the identity provider holds one account per
+  address, so nobody could ever redeem that invitation.
+- **Anything else that matched gets a warning**:
+  `409 {"outcome": "existing_account", "account": …, "member": …, "accepted_at": …}`,
+  with nothing issued, sent, or recorded. The panel shows it with **Cancel**
+  and **Send anyway**. `member` is `false` for an account known to have no
+  organization, which is exactly who an invitation is for (somebody who
+  registered and whose invitation lapsed): the panel says so and labels the
+  button **Send this invitation**. It is `null` when that cannot be known: no
+  single account was found, or the identity is not pinned to `sub`, since
+  membership rows are keyed on the principal.
 - **Send anyway** repeats the request with `confirm_existing_account: true`.
-  It issues and sends exactly as an unwarned request does, and its
-  `invitation.send` row carries `"confirmed_existing_account": true` in
-  `detail`. The key records the request's own claim; the panel sends it only
-  after showing the warning. No other row carries it.
+  It skips the warning, never the refusals above or below, and otherwise
+  issues and sends exactly as an unwarned request does. Its `invitation.send`
+  row carries `"confirmed_existing_account": true` in `detail`. The key records
+  the request's own claim; the panel sends it only after showing the warning.
+  No other row carries it.
 - **The live-invitation rule answers first.** An address holding a live
   invitation is refused as `already_live` with no warning: the warning would
   ask the operator to confirm a send that is then refused anyway.

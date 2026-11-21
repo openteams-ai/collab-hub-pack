@@ -43,6 +43,13 @@ describe("invitationNotice", () => {
   it("says nothing extra when the account check ran", () => {
     expect(invitationNotice({ state: "ok", data: { outcome: "sent" } }).text).toBe("Invitation sent.");
   });
+
+  it("tells the operator a member can sign in, and that nothing was sent", () => {
+    expect(invitationNotice({ state: "refused", reason: "already_member" })).toEqual({
+      text: "Already a member here, so nothing was sent. They can sign in.",
+      bad: true,
+    });
+  });
 });
 
 describe("existingAccount", () => {
@@ -54,12 +61,12 @@ describe("existingAccount", () => {
         outcome: "existing_account",
         email: "bob@example.com",
         account: true,
-        member: true,
+        member: false,
         accepted_at: "2026-08-15T14:03:00+00:00",
       },
     });
 
-    expect(found).toEqual({ account: true, member: true, acceptedOn: "2026-08-15" });
+    expect(found).toEqual({ account: true, member: false, acceptedOn: "2026-08-15" });
   });
 
   it("keeps what the server could not know as unknown, not as no", () => {
@@ -81,12 +88,11 @@ describe("existingAccount", () => {
 
 describe("existingAccountWarning", () => {
   it("names the account and when the earlier invitation was accepted", () => {
-    const warning = existingAccountWarning({ account: true, member: true, acceptedOn: "2026-08-15" });
+    const warning = existingAccountWarning({ account: true, member: null, acceptedOn: "2026-08-15" });
 
     expect(warning.found).toBe(
       "This email already has an account (invitation accepted on 2026-08-15). They can sign in instead.",
     );
-    expect(warning.consequence).toMatch(/already belongs to an organization here, so it cannot accept/);
     expect(warning.send).toBe("Send anyway");
   });
 

@@ -782,13 +782,17 @@ const TEMPLATE_PURPOSES: Record<string, string> = {
 
 /** The two invitation emails, each editable, previewable and resettable (#348). */
 export function InvitationEmails({ csrfToken }: { csrfToken: string }) {
-  const [reload, setReload] = useState(0);
-  const resource = useResource<TemplateListing>("api/invitation-templates", reload);
+  const resource = useResource<TemplateListing>("api/invitation-templates");
+  // What a save or reset returned, by key. Applied over the listing instead
+  // of reloading it: a reload would remount every editor and throw away
+  // unsaved changes in the email that was not saved.
+  const [saved, setSaved] = useState<Record<string, TemplateRow>>({});
 
   if (resource === null) return <Loading subject="the invitation emails" />;
   if (resource.state !== "ok") return <Failure resource={resource} subject="the invitation emails" />;
 
-  const { templates, required_placeholders: required, optional_placeholders: optional, editable } = resource.data;
+  const { required_placeholders: required, optional_placeholders: optional, editable } = resource.data;
+  const templates = resource.data.templates.map((template) => saved[template.key] ?? template);
 
   return (
     <>
@@ -823,13 +827,13 @@ export function InvitationEmails({ csrfToken }: { csrfToken: string }) {
       )}
       {templates.map((template) => (
         <TemplateEditor
-          // Keyed on the saved text too, so a save or reset starts the editor
-          // again from what is now stored.
-          key={`${template.key}:${template.updated_at ?? "default"}:${reload}`}
+          // Keyed on what is stored, so a save or reset restarts only the
+          // editor it changed, from the stored text.
+          key={`${template.key}:${template.customized ? template.updated_at : "default"}`}
           template={template}
           editable={editable}
           csrfToken={csrfToken}
-          onChanged={() => setReload((n) => n + 1)}
+          onChanged={(changed) => setSaved((current) => ({ ...current, [changed.key]: changed }))}
         />
       ))}
     </>
@@ -845,7 +849,7 @@ function TemplateEditor({
   template: TemplateRow;
   editable: boolean;
   csrfToken: string;
-  onChanged: () => void;
+  onChanged: (template: TemplateRow) => void;
 }) {
   const [subject, setSubject] = useState(template.subject);
   const [body, setBody] = useState(template.body);
@@ -879,7 +883,8 @@ function TemplateEditor({
       setPreview(result.data as { subject: string; body: string });
       return;
     }
-    onChanged();
+    const changed = (result.data as { template?: TemplateRow } | null)?.template;
+    if (changed) onChanged(changed);
   }
 
   const fieldId = `template-${template.key}`;

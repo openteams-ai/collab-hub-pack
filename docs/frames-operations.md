@@ -661,8 +661,9 @@ in [#113](https://github.com/openteams-ai/collab-hub-pack/issues/113).
 
 #### Actions the admin panel and sign-in sync record
 
-Migrations 7, 9 and 10 widen the `action` CHECK constraint, and migration 10
-adds `connector` to the `target_type` constraint:
+Migrations 7, 9, 10 and 18 widen the `action` CHECK constraint. Migration 10
+adds `connector` to the `target_type` constraint, and migration 18 adds
+`invitation_template`:
 
 | Action | Migration | Written by | `target_type` / `target_id` | `detail` |
 | --- | --- | --- | --- | --- |
@@ -671,6 +672,8 @@ adds `connector` to the `target_type` constraint:
 | `service_access.revoke` | 9 | panel model access change | `user` / the person's `sub` | `{"group_path": ...}` |
 | `connector.enable` | 10 | panel connector switch | `connector` / `google`, `slack` or `github` | `{"enabled": true}` |
 | `connector.disable` | 10 | panel connector switch | `connector` / `google`, `slack` or `github` | `{"enabled": false}` |
+| `invitation_template.update` | 18 | panel invitation email editor | `invitation_template` / `new_account` or `existing_account` | `{"template": ...}` |
+| `invitation_template.reset` | 18 | panel invitation email editor | `invitation_template` / `new_account` or `existing_account` | `{"template": ...}` |
 
 All of them are hub-scoped (`org_id` is `NULL`). The panel also writes
 `service_access.grant` rows, whose shape differs from the acceptance path's;
@@ -858,6 +861,57 @@ To see what is switched off:
 SELECT connector, enabled, updated_at, updated_by
 FROM collab_connector_state
 ORDER BY connector;
+```
+
+### Invitation email templates (`collab_invitation_templates`)
+
+Migration version 18 adds `collab_invitation_templates`, one row per
+invitation email an operator has edited in the admin panel's **Invitation
+emails** section ([#348](https://github.com/openteams-ai/collab-hub-pack/issues/348)):
+
+| Column | Meaning |
+| --- | --- |
+| `template` | Primary key: `new_account` or `existing_account` (CHECK-constrained). |
+| `subject`, `body` | The operator's text. The body uses the same `[PLACEHOLDER]` slots as the built-in copy. |
+| `updated_at` | When it was last saved. |
+| `updated_by`, `updated_by_label` | The operator's `sub`, and their email as a display snapshot. |
+
+A template with no row sends the built-in copy: `web/onboarding_email.txt` for
+`new_account` and `web/onboarding_email_existing_account.txt` for
+`existing_account`. A deployment that never opens the editor sends exactly
+what it did before. **Reset to the built-in text** deletes the row.
+
+Which template an invitation gets is decided when the admin panel issues it,
+from an exact-address lookup in the user directory:
+
+| The address… | What happens |
+| --- | --- |
+| has no account | sent `new_account`: register, then accept |
+| has an account with no organization (registered, never accepted) | sent `existing_account`: sign in, do not register |
+| has an account that belongs to an organization here, active or removed | refused with `409 already_member`; nothing is issued or sent, because acceptance would refuse that login |
+| cannot be checked (no directory, directory down, two accounts for the address, or identity not pinned to `sub`) | sent `new_account`; the response carries `account_check: "unavailable"` |
+
+The owner invitation page and the `/v1` invitation API always send
+`new_account`, in its edited form if there is one. They do not look accounts
+up: telling an organization owner whether an address has an account on the
+deployment would leak information to a non-operator.
+
+Every save is checked by rendering the template the way the send path does,
+with this deployment's `app_instructions` and under both settings of
+`requireVerifiedEmail`, so a template that saves is one that sends. It must
+contain `[INVITATION LINK]`, `[INVITEE EMAIL]`, `[EXPIRY]` and
+`[DATA STATEMENT]`; it may use `[NAME]` and
+`[DESKTOP APP DOWNLOAD / INSTALL INSTRUCTIONS]`. If a saved template still
+fails to render at send time, the invitation goes out with the built-in copy
+for that key and the API logs `invitation_template_unrenderable`; if the table
+cannot be read, the same fallback logs `invitation_template_read_failed`.
+
+To see what has been edited:
+
+```sql
+SELECT template, subject, updated_at, updated_by_label
+FROM collab_invitation_templates
+ORDER BY template;
 ```
 
 ### Invitations
@@ -1138,8 +1192,11 @@ locked, so a check-then-insert would let two simultaneous issuances (a
 double-submitted form) both read "none" and both insert. It is transaction
 scoped, so it is released by the transaction ending, on commit or rollback.
 
-Matching is exact, like every other address comparison here (Gate B):
-`Alice@example.com` and `alice@example.com` can each hold a live invitation.
+Matching folds ASCII case and nothing else, like every other address
+comparison here (see [The invited address must match
+exactly](#the-invited-address-must-match-exactly)): the address is stored
+lowered, so `Alice@example.com` and `alice@example.com` share one lock and one
+live invitation, while `a+tag@example.com` is still a different address.
 
 If you see contention on advisory locks in `pg_locks` with `classid = 18766`,
 that is this rule; it is held for the duration of one issuance only.

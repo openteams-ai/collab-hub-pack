@@ -327,3 +327,83 @@ button.primary:disabled {
   background: none;
   border-color: var(--line);
 }
+
+/* The invitation list's views (#348): tabs by state, opening on Outstanding,
+   with the search beside them so both narrow the same table. */
+.listing-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.tabs { display: flex; flex-wrap: wrap; gap: 0.25rem; border-bottom: 1px solid var(--line); }
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font: inherit;
+  font-size: 0.9rem;
+  padding: 0.45rem 0.75rem;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  background: none;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.tab:hover { color: var(--ink); }
+.tab.current { color: var(--ink); border-bottom-color: var(--accent); }
+
+.tab-count {
+  font-size: 0.75rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+}
+
+.listing-search {
+  font: inherit;
+  min-width: 14rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+
+/* One invitation email: subject, message, and its actions. */
+.template-editor { margin-top: 1.5rem; }
+.template-editor label { display: block; font-size: 0.8rem; color: var(--ink-soft); margin: 0.9rem 0 0.35rem; }
+.template-purpose { margin: 0.25rem 0; }
+.template-meta { margin: 0; color: var(--ink-soft); font-size: 0.85rem; }
+
+.template-editor input,
+.template-editor textarea {
+  font: inherit;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+
+.template-editor textarea { font-size: 0.85rem; line-height: 1.45; resize: vertical; }
+.template-editor ul { margin: 0.25rem 0 0; }
+
+.template-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; margin-top: 0.9rem; }
+
+.template-preview {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+}
+
+.template-preview pre { white-space: pre-wrap; font-size: 0.85rem; margin: 0.5rem 0 0; }

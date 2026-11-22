@@ -1,9 +1,16 @@
 import { Activity, Building2, Users as UsersIcon, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ConnectorIcon, ModelIcon } from "./BrandIcon";
 import { postJson } from "./api";
-import { invitationNotice } from "./invitations";
+import {
+  INVITATION_TABS,
+  type InvitationTab,
+  emptyListText,
+  invitationNotice,
+  invitationsPath,
+  templateProblems,
+} from "./invitations";
 import { Pager, useDebounced, usePages } from "./paging";
 import type { Resource } from "./api";
 import { useResource } from "./useResource";
@@ -533,18 +540,66 @@ interface InvitationRow {
   status: string;
   created_at: string | null;
   expires_at: string | null;
+  accepted_at: string | null;
+  revoked_at: string | null;
+}
+
+interface InvitationListing {
+  invitations: InvitationRow[];
+  next_offset: number | null;
+  counts: Record<InvitationTab, number>;
+}
+
+/** The stored and derived states, as the panel names them. "pending" is an implementation word. */
+const STATE_LABELS: Record<string, string> = {
+  pending: "Outstanding",
+  accepted: "Accepted",
+  expired: "Expired",
+  revoked: "Revoked",
+};
+
+/** The date that matters for a row, which depends on where it ended up. */
+function closingDate(row: InvitationRow): string | null {
+  if (row.status === "accepted") return row.accepted_at;
+  if (row.status === "revoked") return row.revoked_at;
+  return row.expires_at;
+}
+
+const CLOSING_HEADERS: Record<InvitationTab, string> = {
+  outstanding: "Expires",
+  accepted: "Accepted",
+  expired: "Expired",
+  revoked: "Revoked",
+  all: "Expires or closed",
+};
+
+function when(iso: string | null): string {
+  return iso ? iso.replace("T", " ").slice(0, 16) : "—";
 }
 
 export function Invitations({ csrfToken }: { csrfToken: string }) {
   const [reload, setReload] = useState(0);
+  const [tab, setTab] = useState<InvitationTab>("outstanding");
+  const [query, setQuery] = useState("");
+  const searched = useDebounced(query.trim(), 300);
   const pages = usePages();
-  const resource = useResource<{ invitations: InvitationRow[]; next_offset: number | null }>(
-    pages.cursor === null ? "api/invitations" : `api/invitations?offset=${pages.cursor}`,
-    reload,
-  );
+  const resource = useResource<InvitationListing>(invitationsPath(tab, searched, pages.cursor), reload);
+  // The tab counts outlive the request that is loading the next page, so the
+  // tabs do not blank out every time the list reloads.
+  const counts = useRef<Record<InvitationTab, number> | null>(null);
+  if (resource?.state === "ok") counts.current = resource.data.counts;
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ text: string; bad: boolean } | null>(null);
+
+  // A new search starts from the first page; an old cursor would skip rows.
+  const { reset } = pages;
+  useEffect(() => reset(), [searched, reset]);
+
+  function choose(next: InvitationTab) {
+    setTab(next);
+    pages.reset();
+  }
 
   async function send(event: React.FormEvent) {
     event.preventDefault();
@@ -578,6 +633,12 @@ export function Invitations({ csrfToken }: { csrfToken: string }) {
         Invite someone to this deployment. Accepting creates their organization with them as its
         owner.
       </p>
+      <p>
+        If the address already has an account that never joined an organization, they are sent the
+        sign-in version of the email instead of the registration one. If it already belongs to an
+        organization here, nothing is sent: they can sign in as they are.{" "}
+        <a href="#invitation-emails">Edit the invitation emails</a>
+      </p>
 
       <form className="invite" onSubmit={send}>
         <label htmlFor="invite-email">Email address</label>
@@ -600,7 +661,36 @@ export function Invitations({ csrfToken }: { csrfToken: string }) {
       {notice && <p className={notice.bad ? "bad" : "good"}>{notice.text}</p>}
 
       <h3>Issued invitations</h3>
-      <InvitationList resource={resource} busy={busy} onRevoke={revoke} />
+      <div className="listing-tools">
+        <div className="tabs" role="tablist" aria-label="Invitations by state">
+          {INVITATION_TABS.map((entry) => (
+            <button
+              key={entry.status}
+              type="button"
+              role="tab"
+              aria-selected={entry.status === tab}
+              className={entry.status === tab ? "tab current" : "tab"}
+              onClick={() => choose(entry.status)}
+            >
+              {entry.label}
+              {counts.current && <span className="tab-count mono">{counts.current[entry.status]}</span>}
+            </button>
+          ))}
+        </div>
+        <label className="visually-hidden" htmlFor="invitation-search">
+          Search invitations by address
+        </label>
+        <input
+          id="invitation-search"
+          className="listing-search"
+          type="search"
+          autoComplete="off"
+          placeholder="Search by address"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </div>
+      <InvitationList resource={resource} tab={tab} query={searched} busy={busy} onRevoke={revoke} />
       {resource?.state === "ok" && <Pager pages={pages} next={resource.data.next_offset} />}
     </>
   );
@@ -608,10 +698,14 @@ export function Invitations({ csrfToken }: { csrfToken: string }) {
 
 function InvitationList({
   resource,
+  tab,
+  query,
   busy,
   onRevoke,
 }: {
-  resource: Resource<{ invitations: InvitationRow[]; next_offset: number | null }> | null;
+  resource: Resource<InvitationListing> | null;
+  tab: InvitationTab;
+  query: string;
   busy: boolean;
   onRevoke: (invitation: InvitationRow) => void;
 }) {
@@ -620,7 +714,7 @@ function InvitationList({
 
   const { invitations } = resource.data;
   if (invitations.length === 0) {
-    return <p className="empty">No invitations have been issued on this deployment yet.</p>;
+    return <p className="empty">{emptyListText(tab, query)}</p>;
   }
 
   return (
@@ -629,7 +723,8 @@ function InvitationList({
         <tr>
           <th>Invited</th>
           <th>State</th>
-          <th>Expires</th>
+          <th>Sent</th>
+          <th>{CLOSING_HEADERS[tab]}</th>
           <th />
         </tr>
       </thead>
@@ -637,8 +732,9 @@ function InvitationList({
         {invitations.map((invitation) => (
           <tr key={invitation.id}>
             <td>{invitation.email}</td>
-            <td>{invitation.status}</td>
-            <td className="mono">{invitation.expires_at?.slice(0, 10) ?? "—"}</td>
+            <td>{STATE_LABELS[invitation.status] ?? invitation.status}</td>
+            <td className="mono">{when(invitation.created_at)}</td>
+            <td className="mono">{when(closingDate(invitation))}</td>
             <td>
               {invitation.status === "pending" && (
                 <button
@@ -656,6 +752,224 @@ function InvitationList({
         ))}
       </tbody>
     </table>
+  );
+}
+
+interface TemplateRow {
+  key: string;
+  label: string;
+  subject: string;
+  body: string;
+  customized: boolean;
+  updated_at: string | null;
+  updated_by: string | null;
+  default_subject: string;
+  default_body: string;
+}
+
+interface TemplateListing {
+  templates: TemplateRow[];
+  required_placeholders: string[];
+  optional_placeholders: string[];
+  editable: boolean;
+}
+
+const TEMPLATE_PURPOSES: Record<string, string> = {
+  new_account: "Sent to an address with no account. It tells them to register, then accept.",
+  existing_account:
+    "Sent to an address that already has an account but has not joined an organization. It tells them to sign in, not register.",
+};
+
+/** The two invitation emails, each editable, previewable and resettable (#348). */
+export function InvitationEmails({ csrfToken }: { csrfToken: string }) {
+  const resource = useResource<TemplateListing>("api/invitation-templates");
+  // What a save or reset returned, by key. Applied over the listing instead
+  // of reloading it: a reload would remount every editor and throw away
+  // unsaved changes in the email that was not saved.
+  const [saved, setSaved] = useState<Record<string, TemplateRow>>({});
+
+  if (resource === null) return <Loading subject="the invitation emails" />;
+  if (resource.state !== "ok") return <Failure resource={resource} subject="the invitation emails" />;
+
+  const { required_placeholders: required, optional_placeholders: optional, editable } = resource.data;
+  const templates = resource.data.templates.map((template) => saved[template.key] ?? template);
+
+  return (
+    <>
+      <p>
+        What invitees are sent. The panel picks the email when you send an invitation, from whether the
+        address already has an account. Changes apply to the next invitation sent, and every save is in
+        the audit log.
+      </p>
+      <p>
+        Placeholders are filled in for each invitation. Every email must include{" "}
+        {required.map((placeholder, i) => (
+          <span key={placeholder}>
+            {i > 0 && ", "}
+            <code>{placeholder}</code>
+          </span>
+        ))}
+        . It may also use{" "}
+        {optional.map((placeholder, i) => (
+          <span key={placeholder}>
+            {i > 0 && " and "}
+            <code>{placeholder}</code>
+          </span>
+        ))}
+        . Lines between <code>[IF VERIFIED EMAIL REQUIRED]</code> and <code>[END IF]</code> are sent only
+        when this hub requires a verified address.
+      </p>
+      {!editable && (
+        <p className="bad">
+          This hub has no database to keep edited emails in, so it sends the built-in text and cannot
+          save changes.
+        </p>
+      )}
+      {templates.map((template) => (
+        <TemplateEditor
+          // Keyed on what is stored, so a save or reset restarts only the
+          // editor it changed, from the stored text.
+          key={`${template.key}:${template.customized ? template.updated_at : "default"}`}
+          template={template}
+          editable={editable}
+          csrfToken={csrfToken}
+          onChanged={(changed) => setSaved((current) => ({ ...current, [changed.key]: changed }))}
+        />
+      ))}
+    </>
+  );
+}
+
+function TemplateEditor({
+  template,
+  editable,
+  csrfToken,
+  onChanged,
+}: {
+  template: TemplateRow;
+  editable: boolean;
+  csrfToken: string;
+  onChanged: (template: TemplateRow) => void;
+}) {
+  const [subject, setSubject] = useState(template.subject);
+  const [body, setBody] = useState(template.body);
+  const [busy, setBusy] = useState(false);
+  const [problems, setProblems] = useState<string[] | null>(null);
+  const [notice, setNotice] = useState<{ text: string; bad: boolean } | null>(null);
+  const [preview, setPreview] = useState<{ subject: string; body: string } | null>(null);
+  const dirty = subject !== template.subject || body !== template.body;
+  const path = `api/invitation-templates/${encodeURIComponent(template.key)}`;
+
+  async function run(action: "preview" | "save" | "reset") {
+    setBusy(true);
+    setProblems(null);
+    setNotice(null);
+    const result =
+      action === "reset"
+        ? await postJson(`${path}/reset`, {}, csrfToken)
+        : await postJson(action === "preview" ? `${path}/preview` : path, { subject, body }, csrfToken);
+    setBusy(false);
+
+    const refusal = templateProblems(result);
+    if (refusal) {
+      setProblems(refusal);
+      return;
+    }
+    if (result.state !== "ok") {
+      setNotice({ text: "That did not go through. Nothing was changed.", bad: true });
+      return;
+    }
+    if (action === "preview") {
+      setPreview(result.data as { subject: string; body: string });
+      return;
+    }
+    const changed = (result.data as { template?: TemplateRow } | null)?.template;
+    if (changed) onChanged(changed);
+  }
+
+  const fieldId = `template-${template.key}`;
+  return (
+    <section className="panel template-editor">
+      <h3>{template.label}</h3>
+      <p className="template-purpose">{TEMPLATE_PURPOSES[template.key]}</p>
+      <p className="template-meta">
+        {template.customized
+          ? `Edited ${when(template.updated_at)}${template.updated_by ? ` by ${template.updated_by}` : ""}.`
+          : "The built-in text."}
+      </p>
+
+      <label htmlFor={`${fieldId}-subject`}>Subject</label>
+      <input
+        id={`${fieldId}-subject`}
+        type="text"
+        value={subject}
+        onChange={(event) => setSubject(event.target.value)}
+        disabled={busy || !editable}
+      />
+      <label htmlFor={`${fieldId}-body`}>Message</label>
+      <textarea
+        id={`${fieldId}-body`}
+        className="mono"
+        rows={22}
+        spellCheck
+        value={body}
+        onChange={(event) => setBody(event.target.value)}
+        disabled={busy || !editable}
+      />
+
+      {problems && (
+        <div className="bad" role="alert">
+          <p className="bad">This email cannot be used as it is{problems.length ? ":" : "."}</p>
+          <ul>
+            {problems.map((problem) => (
+              <li key={problem}>{problem}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {notice && <p className={notice.bad ? "bad" : "good"}>{notice.text}</p>}
+
+      <div className="template-actions">
+        <button type="button" className="primary" disabled={busy || !editable || !dirty} onClick={() => run("save")}>
+          Save
+        </button>
+        <button type="button" className="link" disabled={busy} onClick={() => run("preview")}>
+          Preview
+        </button>
+        {dirty && (
+          <button
+            type="button"
+            className="link"
+            disabled={busy}
+            onClick={() => {
+              setSubject(template.subject);
+              setBody(template.body);
+              setProblems(null);
+            }}
+          >
+            Discard changes
+          </button>
+        )}
+        {template.customized && (
+          <button type="button" className="link" disabled={busy || !editable} onClick={() => run("reset")}>
+            Reset to the built-in text
+          </button>
+        )}
+      </div>
+
+      {preview && (
+        <div className="template-preview">
+          <p>
+            Preview, with sample values. The link in it cannot be used.{" "}
+            <button type="button" className="link" onClick={() => setPreview(null)}>
+              Close
+            </button>
+          </p>
+          <p className="mono">Subject: {preview.subject}</p>
+          <pre>{preview.body}</pre>
+        </div>
+      )}
+    </section>
   );
 }
 

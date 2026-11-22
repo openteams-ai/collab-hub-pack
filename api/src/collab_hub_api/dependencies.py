@@ -86,6 +86,19 @@ def get_invitation_email_delivery(request: Request) -> InvitationEmailDelivery:
     return request.app.state.invitation_email_delivery
 
 
+def get_invitation_template_store(request: Request):
+    """Edited invitation templates (#348).
+
+    ``getattr`` with the read-only default: an app assembled without the
+    lifespan still sends the built-in copy and refuses edits, rather than
+    raising ``AttributeError`` from inside a route.
+    """
+
+    from .frames.invitation_templates import DefaultInvitationTemplateStore
+
+    return getattr(request.app.state, "invitation_template_store", DefaultInvitationTemplateStore())
+
+
 def get_service_access_granter(request: Request) -> ServiceAccessGranter:
     """The membership-writing seam (#180).
 

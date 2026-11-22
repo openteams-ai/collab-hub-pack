@@ -31,6 +31,7 @@ from .config import (
     build_history_store,
     build_invitation_email_delivery,
     build_invitation_service,
+    build_invitation_template_store,
     build_model_access,
     build_model_catalog,
     build_org_store,
@@ -306,6 +307,10 @@ def make_app(config: BaseConfig) -> FastAPI:
     group_store = build_group_store(config, postgres_pools)
     invitation_email_delivery = build_invitation_email_delivery(config)
     invitation_service = build_invitation_service(config, postgres_pools)
+    # #348: the wording an operator has edited. The delivery adapter reads the
+    # template to send from it, so every issuing path picks up an edit.
+    invitation_template_store = build_invitation_template_store(config, postgres_pools)
+    invitation_email_delivery.attach_template_store(invitation_template_store)
     # #180: what an accepted invitation grants, and what can grant it. The
     # granter is disabled until a deployment is given membership authority
     # (an internal issue); the group list is empty unless a
@@ -412,6 +417,7 @@ def make_app(config: BaseConfig) -> FastAPI:
             app.state.group_store = group_store
             app.state.invitation_email_delivery = invitation_email_delivery
             app.state.invitation_service = invitation_service
+            app.state.invitation_template_store = invitation_template_store
             app.state.platform_role_sync = platform_role_sync
             app.state.audit_log = audit_log
             app.state.platform_role_admin = platform_role_admin

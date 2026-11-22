@@ -429,8 +429,13 @@ class StubInvitations:
     def __init__(self):
         self.created: list[str] = []
         self.revoked: list[str] = []
+        self.listed: list[tuple[str, str | None]] = []
 
-    def list_all(self, *, limit, offset):
+    def status_counts(self, *, email_contains=None):
+        return {"outstanding": 1, "accepted": 0, "expired": 0, "revoked": 0, "all": 1}
+
+    def list_all(self, *, limit, offset, status="all", email_contains=None):
+        self.listed.append((status, email_contains))
         from datetime import datetime, timedelta, timezone
 
         from collab_hub_api.frames.invitations import Invitation
@@ -485,7 +490,7 @@ class ManyInvitations(StubInvitations):
         super().__init__()
         self.count = count
 
-    def list_all(self, *, limit, offset):
+    def list_all(self, *, limit, offset, status="all", email_contains=None):
         from datetime import datetime, timedelta, timezone
 
         from collab_hub_api.frames.invitations import Invitation, InvitationPage
@@ -611,11 +616,13 @@ class RecordingDelivery:
         status = DELIVERY_PROVIDER_ACCEPTED if status is None else status
         self.status = status
         self.sent: list[str] = []
+        self.templates: list[str] = []
 
-    def deliver(self, *, invitation_id, recipient, invitation_secret, organization_name, expires_at):
+    def deliver(self, *, invitation_id, recipient, invitation_secret, organization_name, expires_at, template):
         from collab_hub_api.frames.invitation_email import DeliveryOutcome
 
         self.sent.append(recipient)
+        self.templates.append(template)
         return DeliveryOutcome(status=self.status, error_code=None)
 
 
@@ -1112,3 +1119,310 @@ async def test_invitations_report_an_unavailable_service(tmp_path, idp: _StubIdp
 
     assert listing.status_code == 503
     assert issued.status_code == 503 and issued.json()["outcome"] == "unavailable"
+
+
+# ===========================================================================
+# #348: outstanding-first listing, the account check, and editable templates
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_the_listing_opens_on_outstanding_invitations_and_carries_tab_counts(tmp_path, idp: _StubIdp):
+    app = build_app(tmp_path, idp)
+    service = StubInvitations()
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        await operator_client(app, idp, client)
+        app.state.invitation_service = service
+        default = await client.get("/admin/api/invitations")
+        await client.get("/admin/api/invitations?status=accepted&q=bob")
+        refused = await client.get("/admin/api/invitations?status=pending")
+
+    assert default.status_code == 200
+    body = default.json()
+    assert body["status"] == "outstanding"
+    assert body["counts"] == {"outstanding": 1, "accepted": 0, "expired": 0, "revoked": 0, "all": 1}
+    assert {"accepted_at", "revoked_at"} <= set(body["invitations"][0])
+    assert service.listed == [("outstanding", None), ("accepted", "bob")]
+    # Stored statuses are not listing filters: "pending" includes the expired.
+    assert refused.status_code == 422
+
+
+class AccountDirectory:
+    """The directory's exact-address lookup, as the issue path uses it."""
+
+    def __init__(self, accounts=None, *, unavailable=False, answers_as=None):
+        self.accounts = accounts or {}
+        self.unavailable = unavailable
+        self.answers_as = answers_as
+        self.looked_up: list[str] = []
+
+    def find_provisioned_account(self, email):
+        from collab_hub_api.user_directory import ProvisionedAccountRecord, UserDirectoryUnavailableError
+
+        self.looked_up.append(email)
+        if self.unavailable:
+            raise UserDirectoryUnavailableError("directory down")
+        account_id = self.accounts.get(email)
+        return ProvisionedAccountRecord(id=account_id, email=self.answers_as or email) if account_id else None
+
+
+async def _issue_with(app, idp, client, directory, email="bob@example.com"):
+    service = IssuingInvitations()
+    delivery = RecordingDelivery()
+    csrf = await operator_client(app, idp, client)
+    app.state.invitation_service = service
+    app.state.invitation_email_delivery = delivery
+    app.state.user_directory_client = directory
+    response = await issue(client, email, csrf)
+    return response, service, delivery
+
+
+@pytest.mark.asyncio
+async def test_an_address_already_in_an_organization_is_refused_and_nothing_is_sent(tmp_path, idp: _StubIdp):
+    """Acceptance would refuse that login, so the link could never be redeemed by anyone."""
+
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        app.state.org_store.provision_member("kc-bob", "org-bob", "Bob's org", email="bob@example.com")
+        response, service, delivery = await _issue_with(
+            app, idp, client, AccountDirectory({"bob@example.com": "kc-bob"}), email="Bob@Example.com"
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"outcome": "already_member", "email": "bob@example.com"}
+    assert service.created == [] and delivery.sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_registered_address_with_no_organization_gets_the_sign_in_template(tmp_path, idp: _StubIdp):
+    """Somebody who registered and never accepted: the invitation is how they finish."""
+
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        response, service, delivery = await _issue_with(
+            app, idp, client, AccountDirectory({"bob@example.com": "kc-bob"})
+        )
+
+    assert response.status_code == 201
+    assert response.json()["template"] == "existing_account"
+    assert "account_check" not in response.json()
+    assert service.created == ["bob@example.com"]
+    assert delivery.templates == ["existing_account"]
+
+
+@pytest.mark.asyncio
+async def test_a_new_address_gets_the_new_invitee_template(tmp_path, idp: _StubIdp):
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        response, _, delivery = await _issue_with(app, idp, client, AccountDirectory())
+
+    assert response.status_code == 201
+    assert response.json()["template"] == "new_account"
+    assert delivery.templates == ["new_account"]
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_directory_does_not_block_issuing_but_says_so(tmp_path, idp: _StubIdp):
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        response, service, delivery = await _issue_with(app, idp, client, AccountDirectory(unavailable=True))
+
+    assert response.status_code == 201
+    assert response.json()["account_check"] == "unavailable"
+    assert response.json()["template"] == "new_account"
+    assert service.created == ["bob@example.com"] and delivery.templates == ["new_account"]
+
+
+@pytest.mark.asyncio
+async def test_an_account_whose_organization_cannot_be_known_is_not_refused(tmp_path, idp: _StubIdp, monkeypatch):
+    """Without the ``sub`` pin the account id is not the membership key, so "member" is unknown, not "yes"."""
+
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        app.state.org_store.provision_member("kc-bob", "org-bob", "Bob's org", email="bob@example.com")
+        app.state.web_identity_pinned_to_sub = False
+        response, _, delivery = await _issue_with(app, idp, client, AccountDirectory({"bob@example.com": "kc-bob"}))
+
+    assert response.status_code == 201
+    assert delivery.templates == ["existing_account"]
+
+
+class RecordingTemplates:
+    """The template store seam, as the editor's endpoints use it."""
+
+    available = True
+
+    def __init__(self, *, available=True):
+        from collab_hub_api.frames.invitation_templates import TEMPLATE_KEYS, default_template
+
+        self.available = available
+        self.templates = {key: default_template(key) for key in TEMPLATE_KEYS}
+        self.saved: list[tuple[str, str, str]] = []
+        self.reset_keys: list[str] = []
+
+    def list(self):
+        return list(self.templates.values())
+
+    def save(self, ctx, key, *, subject, body):
+        from collab_hub_api.frames.invitation_templates import (
+            InvitationTemplate,
+            InvitationTemplatesUnavailableError,
+        )
+
+        if not self.available:
+            raise InvitationTemplatesUnavailableError("no database")
+        self.saved.append((ctx.user, key, subject))
+        self.templates[key] = InvitationTemplate(key=key, subject=subject, body=body, customized=True)
+        return self.templates[key]
+
+    def reset(self, ctx, key):
+        from collab_hub_api.frames.invitation_templates import default_template
+
+        self.reset_keys.append(key)
+        self.templates[key] = default_template(key)
+        return self.templates[key]
+
+
+VALID_BODY = "Hi [NAME]\n[INVITATION LINK]\n[INVITEE EMAIL] by [EXPIRY]\n[DATA STATEMENT]\n"
+
+
+@pytest.mark.asyncio
+async def test_the_templates_are_listed_with_their_defaults_and_placeholders(tmp_path, idp: _StubIdp):
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        await operator_client(app, idp, client)
+        app.state.invitation_template_store = RecordingTemplates()
+        response = await client.get("/admin/api/invitation-templates")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [template["key"] for template in body["templates"]] == ["new_account", "existing_account"]
+    assert all(template["body"] == template["default_body"] for template in body["templates"])
+    assert body["required_placeholders"] == ["[INVITATION LINK]", "[INVITEE EMAIL]", "[EXPIRY]", "[DATA STATEMENT]"]
+    assert body["editable"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_template_is_checked_before_it_is_saved(tmp_path, idp: _StubIdp):
+    app = build_app(tmp_path, idp)
+    store = RecordingTemplates()
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await operator_client(app, idp, client)
+        app.state.invitation_template_store = store
+        bad = await client.post(
+            "/admin/api/invitation-templates/new_account",
+            json={"subject": "Hi", "body": "Just a link: [INVITATION LINK]\n"},
+            headers={"X-CSRF-Token": csrf},
+        )
+        good = await client.post(
+            "/admin/api/invitation-templates/existing_account",
+            json={"subject": " Finish signing up ", "body": VALID_BODY},
+            headers={"X-CSRF-Token": csrf},
+        )
+
+    assert bad.status_code == 400
+    assert bad.json()["outcome"] == "invalid_template"
+    assert any("[DATA STATEMENT]" in problem for problem in bad.json()["problems"])
+    assert good.status_code == 200
+    assert good.json()["template"]["customized"] is True
+    assert store.saved == [(idp.sub, "existing_account", "Finish signing up")]
+
+
+@pytest.mark.asyncio
+async def test_saving_a_template_needs_the_csrf_token_and_an_operator(tmp_path, idp: _StubIdp):
+    app = build_app(tmp_path, idp)
+    store = RecordingTemplates()
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        await sign_in(client, idp, next_path="/web")
+        app.state.invitation_template_store = store
+        not_operator = await client.get("/admin/api/invitation-templates")
+        grant_operator(app, idp.sub)
+        no_csrf = await client.post(
+            "/admin/api/invitation-templates/new_account", json={"subject": "Hi", "body": VALID_BODY}
+        )
+
+    assert not_operator.status_code == 403
+    assert no_csrf.status_code == 403
+    assert store.saved == []
+
+
+@pytest.mark.asyncio
+async def test_a_template_preview_renders_sample_values_and_saves_nothing(tmp_path, idp: _StubIdp):
+    app = build_app(tmp_path, idp)
+    store = RecordingTemplates()
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await operator_client(app, idp, client)
+        app.state.invitation_template_store = store
+        response = await client.post(
+            "/admin/api/invitation-templates/new_account/preview",
+            json={"subject": "Hi", "body": VALID_BODY},
+            headers={"X-CSRF-Token": csrf},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["subject"] == "Hi"
+    rendered = response.json()["body"]
+    assert "#token=preview-only-not-a-real-invitation" in rendered
+    assert "person@example.com" in rendered and "[" not in rendered
+    assert store.saved == []
+
+
+@pytest.mark.asyncio
+async def test_a_template_can_be_reset_and_unknown_or_unsaveable_ones_say_why(tmp_path, idp: _StubIdp):
+    app = build_app(tmp_path, idp)
+    store = RecordingTemplates()
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        csrf = await operator_client(app, idp, client)
+        app.state.invitation_template_store = store
+        reset = await client.post(
+            "/admin/api/invitation-templates/existing_account/reset", headers={"X-CSRF-Token": csrf}
+        )
+        unknown = await client.post(
+            "/admin/api/invitation-templates/welcome_back",
+            json={"subject": "Hi", "body": VALID_BODY},
+            headers={"X-CSRF-Token": csrf},
+        )
+        app.state.invitation_template_store = RecordingTemplates(available=False)
+        unsaveable = await client.post(
+            "/admin/api/invitation-templates/new_account",
+            json={"subject": "Hi", "body": VALID_BODY},
+            headers={"X-CSRF-Token": csrf},
+        )
+
+    assert reset.status_code == 200 and reset.json()["outcome"] == "reset"
+    assert store.reset_keys == ["existing_account"]
+    assert unknown.status_code == 404
+    assert unsaveable.status_code == 503 and unsaveable.json()["outcome"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_an_account_the_directory_matched_by_a_wider_rule_is_not_trusted(tmp_path, idp: _StubIdp):
+    """A KELVIN SIGN address is not ``bok@example.com`` to acceptance, so its membership says nothing."""
+
+    app = build_app(tmp_path, idp)
+
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        app.state.org_store.provision_member("kc-other", "org-x", "X", email="bo\u212a@example.com")
+        response, service, delivery = await _issue_with(
+            app,
+            idp,
+            client,
+            AccountDirectory({"bok@example.com": "kc-other"}, answers_as="bo\u212a@example.com"),
+            email="bok@example.com",
+        )
+
+    assert response.status_code == 201
+    assert response.json()["template"] == "new_account"
+    assert response.json()["account_check"] == "unavailable"
+    assert service.created == ["bok@example.com"] and delivery.templates == ["new_account"]

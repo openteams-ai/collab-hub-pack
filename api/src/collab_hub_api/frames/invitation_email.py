@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.errors import HeaderParseError
 from email.headerregistry import Address
+from functools import partial
 from typing import Any, Protocol
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -128,6 +129,17 @@ class DisabledInvitationEmailDelivery:
     rendering a live secret — a failed send is visible and recoverable, a
     needlessly rendered credential is neither."""
 
+    accept_url: str | None = None
+    app_instructions: str | None = None
+    require_verified_email: bool = True
+    """What a template preview renders with. Nothing is sent from here, so a
+    preview uses stand-ins for the parts only a configured adapter knows."""
+
+    def attach_template_store(self, store) -> None:
+        """Accepted and unused: nothing is sent, so no template is ever read."""
+
+        del store
+
     def deliver(
         self,
         *,
@@ -136,8 +148,9 @@ class DisabledInvitationEmailDelivery:
         invitation_secret: str,
         organization_name: str | None,
         expires_at: datetime,
+        template: str = "new_account",
     ) -> DeliveryOutcome:
-        del recipient, invitation_secret, organization_name, expires_at
+        del recipient, invitation_secret, organization_name, expires_at, template
         return _record_outcome(
             invitation_id,
             DeliveryOutcome(status=DELIVERY_FAILED, error_code="email_not_configured"),
@@ -174,6 +187,10 @@ class ConfiguredInvitationEmailDelivery:
         if not app_instructions.strip():
             raise ValueError("app_instructions is required when invitation email is enabled")
         self._app_instructions = app_instructions
+        # Where edited templates are read from (#348). Attached after
+        # construction because the store needs the database pool, which this
+        # adapter has no business holding; until then, the built-in copy.
+        self._template_store = None
         # Render one probe message now, for the same reason the check above
         # happens here: a deployment that enables invitation email and cannot
         # produce a message should fail where somebody is watching.
@@ -193,6 +210,23 @@ class ConfiguredInvitationEmailDelivery:
         # actual `app_instructions`, closes the class: anything that would make
         # a real send unrenderable makes construction raise instead.
         self._probe_render()
+
+    @property
+    def accept_url(self) -> str:
+        return self._accept_url
+
+    @property
+    def app_instructions(self) -> str:
+        return self._app_instructions
+
+    @property
+    def require_verified_email(self) -> bool:
+        return self._require_verified_email
+
+    def attach_template_store(self, store) -> None:
+        """Read the template to send from *store* (#348) rather than the built-in copy."""
+
+        self._template_store = store
 
     def _probe_render(self) -> None:
         """Render a throwaway message, to fail at startup rather than per send.
@@ -228,10 +262,26 @@ class ConfiguredInvitationEmailDelivery:
         invitation_secret: str,
         organization_name: str | None,
         expires_at: datetime,
+        template: str = "new_account",
     ) -> DeliveryOutcome:
+        """Render the invitation with the *template* in force, and send it.
+
+        *template* is a key from :mod:`.invitation_templates`; the text comes
+        from the attached store, so an operator's edit applies to the next
+        send. An edited template that no longer renders -- checked at save,
+        but the deployment's ``app_instructions`` can change afterwards -- is
+        logged and replaced by the built-in copy for that key, because the
+        invitation is already committed and a correct default message beats a
+        dropped one.
+        """
+
+        from .invitation_templates import default_template, template_for_sending
+
         try:
             setup_url = build_setup_url(self._accept_url, invitation_secret)
-            message = render_invitation_email(
+            chosen = template_for_sending(self._template_store, template)
+            render = partial(
+                render_invitation_email,
                 app_instructions=self._app_instructions,
                 recipient=recipient,
                 setup_url=setup_url,
@@ -239,6 +289,19 @@ class ConfiguredInvitationEmailDelivery:
                 expires_at=expires_at,
                 require_verified_email=self._require_verified_email,
             )
+            try:
+                message = render(subject=chosen.subject, template_body=chosen.body)
+                # Belt and braces for an edited template: the save-time check
+                # requires the link in every variant, but a message without it
+                # is useless to the invitee, so it is never what gets sent.
+                if chosen.customized and setup_url not in message.text_body.reveal():
+                    raise ValueError("edited invitation template rendered without the invitation link")
+            except ValueError:
+                if not chosen.customized:
+                    raise
+                logger.warning("invitation_template_unrenderable", extra={"template": template})
+                fallback = default_template(template)
+                message = render(subject=fallback.subject, template_body=fallback.body)
         except (TypeError, ValueError):
             # Validation failures are deterministic and happen before a
             # provider call. Never include their message: it may quote the
@@ -426,6 +489,8 @@ def render_invitation_email(
     expires_at: datetime,
     app_instructions: str,
     require_verified_email: bool = True,
+    subject: str | None = None,
+    template_body: str | None = None,
 ) -> InvitationEmailMessage:
     """Render the **approved onboarding copy** for one invitation (#93).
 
@@ -471,6 +536,10 @@ def render_invitation_email(
 
     from ..web.onboarding_email import SUBJECT, render_for_automated_delivery
 
+    # `subject`/`template_body` are the template in force (#348): an
+    # operator's edit, or the existing-account copy. Both `None` is the
+    # built-in default, exactly as before.
+
     recipient = validate_mailbox(recipient)
     setup_parts = urlsplit(setup_url)
     if setup_parts.query or not setup_parts.fragment.startswith("token="):
@@ -487,8 +556,9 @@ def render_invitation_email(
         expires_at=expires_at,
         app_instructions=app_instructions,
         require_verified_email=require_verified_email,
+        template_body=template_body,
     )
-    return InvitationEmailMessage(recipient=recipient, subject=SUBJECT, text_body=InvitationSecret(body))
+    return InvitationEmailMessage(recipient=recipient, subject=subject or SUBJECT, text_body=InvitationSecret(body))
 
 
 def _record_outcome(invitation_id: str, outcome: DeliveryOutcome) -> DeliveryOutcome:

@@ -3,6 +3,7 @@ import {
   ChartColumn,
   LayoutDashboard,
   Mail,
+  MailPen,
   Plug,
   ScrollText,
   Users as UsersIcon,
@@ -11,7 +12,7 @@ import { useState } from "react";
 
 import { SIGNED_OUT_EVENT } from "./api";
 import { Header } from "./Header";
-import { Audit, Connectors, Invitations, Models, Usage, Users } from "./Sections";
+import { Audit, Connectors, InvitationEmails, Invitations, Models, Usage, Users } from "./Sections";
 import { type SessionResult, loadSession } from "./session";
 import { type Theme, applyTheme, nextTheme, readTheme, storeTheme, systemPrefersDark } from "./theme";
 import { useEffect } from "react";
@@ -26,7 +27,15 @@ import { useEffect } from "react";
  * three lines instead of a dependency.
  */
 
-type SectionKey = "overview" | "models" | "users" | "connectors" | "invitations" | "usage" | "audit";
+type SectionKey =
+  | "overview"
+  | "models"
+  | "users"
+  | "connectors"
+  | "invitations"
+  | "invitation-emails"
+  | "usage"
+  | "audit";
 
 // Icons are decorative: every entry is labelled in words beside it, so they
 // carry `aria-hidden` and the label remains the accessible name.
@@ -36,6 +45,7 @@ const SECTIONS: { id: SectionKey; label: string; Icon: typeof LayoutDashboard }[
   { id: "users", label: "Users", Icon: UsersIcon },
   { id: "connectors", label: "Connectors", Icon: Plug },
   { id: "invitations", label: "Invitations", Icon: Mail },
+  { id: "invitation-emails", label: "Invitation emails", Icon: MailPen },
   { id: "usage", label: "Hub usage", Icon: ChartColumn },
   { id: "audit", label: "Audit log", Icon: ScrollText },
 ];
@@ -46,6 +56,7 @@ const TITLES: Record<SectionKey, string> = {
   users: "Users",
   connectors: "Connectors",
   invitations: "Invitations",
+  "invitation-emails": "Invitation emails",
   usage: "Hub usage",
   audit: "Audit log",
 };
@@ -155,6 +166,7 @@ export function App() {
           {section === "users" && <Users csrfToken={session.csrf_token} />}
           {section === "connectors" && <Connectors csrfToken={session.csrf_token} />}
         {section === "invitations" && <Invitations csrfToken={session.csrf_token} />}
+          {section === "invitation-emails" && <InvitationEmails csrfToken={session.csrf_token} />}
           {section === "usage" && <Usage />}
           {section === "audit" && <Audit />}
         </main>

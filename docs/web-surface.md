@@ -352,7 +352,7 @@ a protection the middleware does not itself enforce.
 | `GET /admin` | Redirects (308) to `/admin/`. The trailing slash matters: the panel's asset and API URLs are relative to the document. Session + `operator`. |
 | `GET /admin/` | The admin panel's document (`routers/admin_ui.py`), served from `web.admin_ui_dist`. Session + `operator`. Mounted only when that directory holds an `index.html`. |
 | `GET /admin/assets/*` | The panel's hashed bundle files. File names are checked against a strict pattern and must resolve inside the assets directory; anything else is 404. Session + `operator`. |
-| `/admin/api/*` | The panel's JSON API (`routers/admin_api.py`): session, models, model access, users and roles, connectors, usage, invitations and the audit log. Session + `operator`; every `POST` also needs the `X-CSRF-Token` header, whose value `GET /admin/api/session` returns. Refusals are JSON. |
+| `/admin/api/*` | The panel's JSON API (`routers/admin_api.py`): session, models, model access, users and roles, connectors, usage, invitations, invitation email templates and the audit log. `GET /admin/api/invitations` lists outstanding invitations unless `status` says otherwise (`outstanding`, `accepted`, `expired`, `revoked` or `all`), takes `q` to narrow by address, and returns per-state `counts`; `POST /admin/api/invitations` refuses an address that already belongs to an organization (`already_member`) and sends the sign-in email to one that has an account but no organization (see [invitation email templates](frames-operations.md#invitation-email-templates-collab_invitation_templates)). Session + `operator`; every `POST` also needs the `X-CSRF-Token` header, whose value `GET /admin/api/session` returns. Refusals are JSON. |
 | `GET /web/org/invitations` | The owner invitation page ([#142]). Session + org `owner`. |
 | `POST /web/org/invitations` | Issues one invitation into the caller's org and emails it. Refused (409) while the organization still carries the placeholder name ([#44]). Session + org `owner` + CSRF. |
 | `POST /web/org/invitations/revoke` | Revokes one of the caller's org's invitations. Session + org `owner` + CSRF. |
@@ -977,8 +977,11 @@ deliberate line: the rule exists for a human retrying after an ambiguous send,
 and unifying the paths would change the semantics of a shipped endpoint the
 desktop is built against. Re-send policy, including rotation, is #93.
 
-Matching is **exact**, like every other address comparison here (Gate B):
-`Alice@example.com` and `alice@example.com` are two addresses.
+Matching folds **ASCII case and nothing else**, like every other address
+comparison here (the amendment on
+[#157](https://github.com/nebari-dev/nebari-nexus-pack/issues/157)): `Alice@example.com` and
+`alice@example.com` are one address, while plus-tags and dots still make
+different addresses.
 
 ### The invitation email is the secret's only route off this page
 

@@ -1987,6 +1987,22 @@ def build_invitation_service(config: BaseConfig, pools: PostgresPools) -> Invita
     return UnavailableInvitationService()
 
 
+def build_invitation_template_store(config: BaseConfig, pools: PostgresPools):
+    """Edited invitation templates (#348), or the built-in copy with edits refused.
+
+    Same database as the invitation service: a deployment that can issue
+    invitations can keep their wording, and one that cannot has nothing to
+    word.
+    """
+
+    from .frames.invitation_templates import DefaultInvitationTemplateStore, PostgresInvitationTemplateStore
+
+    url = config.frames.postgres.url
+    if url:
+        return PostgresInvitationTemplateStore(pools.database(url))
+    return DefaultInvitationTemplateStore()
+
+
 def build_invitation_email_delivery(
     config: BaseConfig,
 ) -> ConfiguredInvitationEmailDelivery | DisabledInvitationEmailDelivery:

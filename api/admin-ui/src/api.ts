@@ -12,8 +12,12 @@ export type Resource<T> =
   | { state: "forbidden" }
   /** The session ran out while the panel was open; signing in again fixes it. */
   | { state: "signed-out" }
-  /** The request was understood and declined, and the server said why. */
-  | { state: "refused"; reason: string }
+  /**
+   * The request was understood and declined, and the server said why. `body`
+   * is the rest of the answer, for refusals that carry detail -- the problems
+   * with a template, say.
+   */
+  | { state: "refused"; reason: string; body?: Record<string, unknown> }
   | { state: "unavailable"; reason: string }
   | { state: "upstream-error"; reason: string }
   | { state: "error" };
@@ -35,14 +39,22 @@ function signedOut(): { state: "signed-out" } {
   return { state: "signed-out" };
 }
 
-async function reason(response: Response): Promise<string> {
+async function answer(response: Response): Promise<{ reason: string; body?: Record<string, unknown> }> {
   try {
-    const body = (await response.json()) as { outcome?: unknown; error?: unknown };
-    if (typeof body.outcome === "string") return body.outcome;
-    return typeof body.error === "string" ? body.error : "unknown";
+    const body = (await response.json()) as Record<string, unknown>;
+    if (typeof body.outcome === "string") return { reason: body.outcome, body };
+    return { reason: typeof body.error === "string" ? body.error : "unknown", body };
   } catch {
-    return "unknown";
+    return { reason: "unknown" };
   }
+}
+
+async function reason(response: Response): Promise<string> {
+  return (await answer(response)).reason;
+}
+
+async function refused(response: Response): Promise<{ state: "refused"; reason: string; body?: Record<string, unknown> }> {
+  return { state: "refused", ...(await answer(response)) };
 }
 
 export async function getJson<T>(path: string, fetchImpl: typeof fetch = fetch): Promise<Resource<T>> {
@@ -64,7 +76,7 @@ export async function getJson<T>(path: string, fetchImpl: typeof fetch = fetch):
   if (response.status === 503) return { state: "unavailable", reason: await reason(response) };
   if (response.status === 502) return { state: "upstream-error", reason: await reason(response) };
   if (response.status === 400 || response.status === 409) {
-    return { state: "refused", reason: await reason(response) };
+    return refused(response);
   }
   if (!response.ok) return { state: "error" };
 
@@ -105,8 +117,8 @@ export async function postJson(
   if (response.status === 403) return { state: "forbidden" };
   if (response.status === 503) return { state: "unavailable", reason: await reason(response) };
   if (response.status === 502) return { state: "upstream-error", reason: await reason(response) };
-  if (response.status === 400 || response.status === 409) {
-    return { state: "refused", reason: await reason(response) };
+  if (response.status === 400 || response.status === 404 || response.status === 409) {
+    return refused(response);
   }
   if (!response.ok) return { state: "error" };
   // A success can still carry news -- an invitation created whose email did

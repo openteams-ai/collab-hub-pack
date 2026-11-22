@@ -49,6 +49,7 @@ jobs:
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           version-file: .github/uv.toml
+          require-checksums: true
 
       # -p 3.14: the hub image's minor version, as a uv-managed build (see the
       # workflow's env), not whatever Python the runner happens to ship.
@@ -77,6 +78,7 @@ jobs:
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           version-file: .github/uv.toml
+          require-checksums: true
 
       - name: Test
         working-directory: execution

@@ -68,6 +68,7 @@ jobs:
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           version-file: .github/uv.toml
+          require-checksums: true
           enable-cache: true
           cache-dependency-glob: api/uv.lock
 
@@ -325,6 +326,7 @@ jobs:
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           version-file: .github/uv.toml
+          require-checksums: true
           enable-cache: true
           cache-dependency-glob: api/uv.lock
 

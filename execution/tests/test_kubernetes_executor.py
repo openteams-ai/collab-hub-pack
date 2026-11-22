@@ -14,6 +14,7 @@ from collab_hub_execution import (
     label_value,
     resource_name,
 )
+from collab_hub_execution.artifacts import NO_ORG_SCOPE, org_scope
 from collab_hub_execution.kubernetes import _KubernetesWorker
 
 
@@ -130,6 +131,8 @@ class FakeK8sApi:
         self.calls.append(("GET", path))
         ready = 1 if self._gets >= self._ready_after else 0
         self._gets += 1
+        if "/pods/" in path:  # an eviction pod: running until it has been read as often as a readiness wait
+            return FakeResponse(200, {"status": {"phase": "Succeeded" if ready else "Running"}})
         return FakeResponse(200, {"metadata": {"uid": f"uid-{path.rsplit('/', 1)[-1]}"},
                                   "status": {"readyReplicas": ready}})
 
@@ -423,3 +426,130 @@ def test_insecure_skip_creates_no_network_policy():
     api, http = FakeK8sApi(), FakeWorkerHttp()
     _executor(api, http).materialize("openteams/reviewer", "run-x")
     assert not any("networkpolicies" in path for _method, path in api.calls)
+
+
+# --- a Cog from its artifact: its package read-only, its lock's environment writable, evicted through a pod ---
+
+ARTIFACT = "hub.example.com/cogs/notes@sha256:" + "a" * 64
+LOCK = "sha256:" + "b" * 64
+
+
+class StubRegistry:
+    """Answers the artifact's manifest: a lock layer and a manifest layer, as the puller reads them."""
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def manifest(self, reference):
+        self.reads += 1
+        return {"layers": [
+            {"mediaType": "application/vnd.pixi.lock.v1+yaml", "digest": LOCK, "size": 10,
+             "annotations": {"org.opencontainers.image.title": "pixi.lock"}},
+            {"mediaType": "application/vnd.pixi.toml.v1+toml", "digest": "sha256:" + "c" * 64, "size": 10,
+             "annotations": {"org.opencontainers.image.title": "pixi.toml"}},
+        ]}
+
+
+def _artifact_executor(api, cache_claim=None, org_of=None):
+    return KubernetesCogExecutor(
+        runner_image="collab-hub/hub:test", namespace="cogs", api=api, worker_http=FakeWorkerHttp(), poll_interval=0,
+        insecure_skip_network_policy=True, cache_claim=cache_claim, registry=StubRegistry(), controller="ctl",
+        org_of=org_of,
+    )
+
+
+def _runner_and_pull(api, name_prefix=""):
+    deployments = [b for p, b in api.bodies if p.endswith("/deployments")
+                   and b["metadata"]["name"].startswith(name_prefix)]
+    pod = deployments[-1]["spec"]["template"]["spec"]
+    [pull] = pod["initContainers"]
+    [runner] = pod["containers"]
+    return pod, runner, pull
+
+
+def test_a_worker_from_an_artifact_mounts_its_package_read_only_and_its_locks_environment_alone():
+    api = FakeK8sApi()
+    ex = _artifact_executor(api, cache_claim="cog-cache", org_of=lambda cog, run_id: "acme")
+    scope = org_scope("acme")
+    worker = ex.materialize(ARTIFACT, "run-1", "ask:0")
+    assert worker.details["artifact"] == ARTIFACT and worker.details["lock_digest"] == LOCK
+    assert worker.details["scope"] == scope
+    assert ex.registry.reads == 1 and ex.lock_digest_of(ARTIFACT) == LOCK and ex.registry.reads == 1  # kept
+    pod, runner, pull = _runner_and_pull(api)
+    assert pull["command"][3:5] == ["materialize", ARTIFACT] and pull["command"][-2:] == ["--scope", scope]
+    assert runner["command"][3:5] == ["serve", ARTIFACT] and runner["command"][-2:] == ["--scope", scope]
+    assert [m["mountPath"] for m in pull["volumeMounts"] if m["name"] == "cache"] == ["/var/cache/collab-hub"]
+    cache_mounts = {m["subPath"]: m for m in runner["volumeMounts"] if m["name"] == "cache"}
+    package, environment = f"artifacts/packages/{scope}/{'a' * 64}", f"artifacts/envs/{scope}/{'b' * 64}"
+    assert set(cache_mounts) == {package, environment}
+    assert cache_mounts[package]["readOnly"] is True and not cache_mounts[environment].get("readOnly")
+    assert cache_mounts[package]["mountPath"] == f"/var/cache/collab-hub/{package}"
+    assert {v["name"]: v for v in pod["volumes"]}["cache"] == {"name": "cache",
+                                                              "persistentVolumeClaim": {"claimName": "cog-cache"}}
+    # A package of the image mounts the whole cache, which is then an emptyDir of its pod's own, never the claim
+    # every organization's workers share; so does a worker_command's.
+    deployment, _ = ex._manifests("openteams/reviewer", "run-1", "cog-reviewer-x")
+    [runner] = deployment["spec"]["template"]["spec"]["containers"]
+    assert [m["mountPath"] for m in runner["volumeMounts"] if m["name"] == "cache"] == ["/var/cache/collab-hub"]
+    cache = {v["name"]: v for v in deployment["spec"]["template"]["spec"]["volumes"]}["cache"]
+    assert "persistentVolumeClaim" not in cache and "emptyDir" in cache
+    ex.worker_command = ["python", "serve.py"]
+    deployment, _ = ex._manifests(ARTIFACT, "run-1", "cog-notes-x", lock_digest=LOCK)
+    cache = {v["name"]: v for v in deployment["spec"]["template"]["spec"]["volumes"]}["cache"]
+    assert "persistentVolumeClaim" not in cache and "emptyDir" in cache
+    ex.worker_command = None
+    with pytest.raises(ValueError, match="lock digest"):
+        ex._manifests(ARTIFACT, "run-1", "cog-notes-x")
+
+
+def test_two_organizations_with_the_same_lock_mount_writable_environments_of_their_own():
+    """A pixi.lock is public in any published artifact: a worker of another organization's install with the same
+    lock (or of the very same artifact) mounts a writable environment, and a package, of its own organization's."""
+    api = FakeK8sApi()
+    orgs = {"run-a": "org-a", "run-b": "org-b", "run-none": None}
+    ex = _artifact_executor(api, cache_claim="cog-cache", org_of=lambda cog, run_id: orgs[run_id])
+    writable, packages = {}, {}
+    for run_id in orgs:
+        ex.materialize(ARTIFACT, run_id, "ask:0")
+        _pod, runner, _pull = _runner_and_pull(api, resource_name(ARTIFACT, run_id, "ask:0"))
+        mounts = [m for m in runner["volumeMounts"] if m["name"] == "cache"]
+        [writable[run_id]] = [m["subPath"] for m in mounts if not m.get("readOnly")]
+        [packages[run_id]] = [m["subPath"] for m in mounts if m.get("readOnly")]
+    assert len(set(writable.values())) == 3 and len(set(packages.values())) == 3
+    assert writable["run-a"] == f"artifacts/envs/{org_scope('org-a')}/{'b' * 64}"
+    assert writable["run-none"] == f"artifacts/envs/{NO_ORG_SCOPE}/{'b' * 64}"
+    for one in writable.values():  # no writable directory of one organization is within another's
+        assert all(one == other or not (one + "/").startswith(other + "/") for other in writable.values())
+    # An organization that cannot be found is refused, not given the no-organization scope.
+    def unknown(cog, run_id):
+        raise LookupError("no such run")
+    with pytest.raises(LookupError):
+        _artifact_executor(FakeK8sApi(), cache_claim="cog-cache", org_of=unknown).materialize(ARTIFACT, "x", "a:0")
+    # On a shared claim, an executor given no way to find the organization makes no worker from an artifact.
+    unscoped = FakeK8sApi()
+    with pytest.raises(ValueError, match="no organization to scope it by"):
+        _artifact_executor(unscoped, cache_claim="cog-cache").materialize(ARTIFACT, "x", "a:0")
+    assert not [p for p, _ in unscoped.bodies if p.endswith("/deployments")]
+    # On a cache of the pod's own nothing is shared: the no-org scope.
+    own = FakeK8sApi()
+    assert _artifact_executor(own).materialize(ARTIFACT, "x", "a:0").details["scope"] == NO_ORG_SCOPE
+
+
+def test_an_eviction_runs_as_a_pod_of_the_workers_namespace_that_mounts_the_claim_and_is_deleted_after():
+    api = FakeK8sApi(ready_after=2)
+    ex = _artifact_executor(api, cache_claim="cog-cache")
+    assert ex.evict(ARTIFACT, "acme", keep_lock=True) is True
+    [(path, pod)] = [(p, b) for p, b in api.bodies if p.endswith("/pods")]
+    assert path == "/api/v1/namespaces/cogs/pods" and pod["metadata"]["name"].startswith("cog-evict-aaaaaaaaaaaa-")
+    [container] = pod["spec"]["containers"]
+    assert container["command"] == ["python", "-m", "collab_hub_execution.artifacts", "evict", ARTIFACT, "--cache",
+                                    "/var/cache/collab-hub/artifacts", "--scope", org_scope("acme"), "--keep-lock"]
+    assert pod["spec"]["restartPolicy"] == "Never" and pod["spec"]["automountServiceAccountToken"] is False
+    assert pod["spec"]["volumes"][0] == {"name": "cache", "persistentVolumeClaim": {"claimName": "cog-cache"}}
+    assert container["securityContext"]["runAsNonRoot"] is True
+    assert pod["metadata"]["labels"]["collab-hub/controller"] == "ctl"
+    name = pod["metadata"]["name"]
+    assert api.calls.count(("GET", f"/api/v1/namespaces/cogs/pods/{name}")) == 3  # polled until it succeeded
+    assert api.calls[-1] == ("DELETE", f"/api/v1/namespaces/cogs/pods/{name}")
+    # Without a claim there is nothing shared to evict: each pod's cache went with it.
+    assert _artifact_executor(FakeK8sApi()).evict(ARTIFACT, "acme") is False

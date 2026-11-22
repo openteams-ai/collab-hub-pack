@@ -579,11 +579,16 @@ async def test_openapi_documents_every_route_and_the_card_schema(api):
         # The exchange for the Hub's own registry surface (issue #179).
         "/v1/cogs/registry-credentials",
         "/v1/cogs/registry-credentials/{credential_id}",
+        # The installs (issue #105), served by the run service beside the catalog.
+        "/v1/cogs/installs",
+        "/v1/cogs/installs/{install_id}",
     }
     for path, item in paths.items():
         for method, operation in item.items():
             assert operation["summary"] and operation["description"], (method, path)
             assert "503" in operation["responses"], (method, path)
+    assert set(paths["/v1/cogs/installs"]) == {"post", "get"}
+    assert set(paths["/v1/cogs/installs/{install_id}"]) == {"get", "delete"}
     assert set(paths["/v1/cogs/registry-credentials"]) == {"post", "delete"}
     assert set(paths["/v1/cogs/registry-credentials/{credential_id}"]) == {"delete"}
     issued = spec["components"]["schemas"]["RegistryCredentialResponse"]

@@ -1,0 +1,36 @@
+# The fake Cog the kind E2E publishes and materializes by digest: a package whose `serve` task is the stdlib
+# worker beside it, in an environment of its own that pixi builds from the lock on the worker pod.
+[workspace]
+name = "e2e-echo"
+version = "0.1.0"
+description = "The kind E2E's fake Cog: echoes its input, reports its binding."
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64"]
+
+[tasks]
+serve = "python serve.py"
+
+[dependencies]
+python = "3.12.*"
+
+[tool.cog]
+schema = "openteams/cog-manifest [0.1]"
+id = "e2e/echo"
+kind = "context"
+
+[[tool.cog.requires]]
+capability = "model"
+locality = "any"
+
+[[tool.cog.interfaces]]
+name = "worker"
+kind = "http-json"
+task = "serve"
+audience = "lifecycle"
+default = true
+
+[[tool.cog.interfaces]]
+name = "run"
+kind = "http-json"
+task = "run"
+audience = "usage"

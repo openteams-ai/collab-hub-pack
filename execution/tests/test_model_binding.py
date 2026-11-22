@@ -1,14 +1,11 @@
+"""Model binding: the test double of a Cog's ``resolve`` over model Cogs, and the hub's ``models:`` block."""
+
 import re
 
 import pytest
+from resolver_double import CapabilityRequirement, ContextCog, DeclaredCapabilityResolver
 
-from collab_hub_execution import (
-    BindingResolutionError,
-    CapabilityRequirement,
-    ContextCog,
-    DeclaredCapabilityResolver,
-    ModelCog,
-)
+from collab_hub_execution import BindingResolutionError, ModelCog
 
 
 def test_context_binding_projects_selected_model_without_secret_value():
@@ -86,6 +83,7 @@ def test_each_cog_gets_its_own_model_and_no_other_and_the_key_is_read_when_a_wor
         "COLLAB_MODEL_PROVIDER": "openai-compatible", "COLLAB_MODEL_BASE_URL": "http://127.0.0.1:8090/v1",
         "COLLAB_MODEL_NAME": "fake-model", "COLLAB_MODEL_CONTEXT_WINDOW": "8192",
         "COLLAB_MODEL_MAX_OUTPUT_TOKENS": "1024"}
+    assert block.models["fake"].locality == "external"  # unless the block says where the model runs
     assert deliver("hermes", "r", "s:0") == {
         "COLLAB_MODEL_PROVIDER": "anthropic", "COLLAB_MODEL_NAME": "claude-opus-5-5", "COLLAB_MODEL_API_KEY": "k1"}
     assert deliver("echo", "r", "s:0") == {}  # a Cog bound to no model gets nothing
@@ -98,6 +96,8 @@ def test_each_cog_gets_its_own_model_and_no_other_and_the_key_is_read_when_a_wor
     ("[models.m]\nendpoint = 'http://x'\nmodel = 'x'\ncolour = 'blue'\n", "unknown keys"),
     ("[models.m]\nprovider = 'gemini'\n", "provider is one of"),
     ("[models.m]\nendpoint = 'http://x'\nmodel = 'x'\ncontext_window = 0\n", "positive integer"),
+    ("[models.m]\nendpoint = 'http://x'\nmodel = 'x'\nlocality = 'moon'\n", "locality is one of"),
+    ("[models.m]\nendpoint = 'http://x'\nmodel = 'x'\nauth_ref = 'sk-literal-key'\n", "never goes here"),
     ("[cogs]\nhermes = 'nope'\n", "which [models] does not name"),
     ("[agents]\n", "unknown tables"),
     ('models = "bad"\n', "[models] is a table"),
@@ -119,7 +119,7 @@ def test_a_key_that_cannot_be_found_is_refused_at_start_not_when_a_worker_needs_
     with pytest.raises(BindingResolutionError, match="not set"):
         block.check({})
     with pytest.raises(BindingResolutionError, match="env:NAME"):
-        _block(MODELS.replace("env:TEST_CLAUDE_KEY", "vault:claude")).check({"TEST_CLAUDE_KEY": "k"})
+        _block(MODELS.replace("env:TEST_CLAUDE_KEY", "vault:claude"))
     with pytest.raises(BindingResolutionError, match="needs an auth_ref"):
         _block(MODELS.replace('auth_ref = "env:TEST_CLAUDE_KEY"\n', "")).check({})
     block.check({"TEST_CLAUDE_KEY": "k"})

@@ -1,7 +1,10 @@
 """The Cog on a hub: an install, once per digest, from the registry to invokable.
 
-Install by digest (#106) keeps these states; only an ``INVOKABLE`` install is
-materialized (:meth:`CogInstall.require_invokable`).
+Install by digest (#105) moves through these states; only an ``INVOKABLE``
+install is materialized (:meth:`CogInstall.require_invokable`). An install
+asked for and removed before anything was fetched goes from ``PUBLISHED``
+to ``UNINSTALLED`` directly: there is nothing on the hub to remove, and the
+record of the ask ends honestly.
 """
 
 from __future__ import annotations
@@ -45,6 +48,10 @@ class Published(InstallState):
     @accepts("FETCHED")
     def fetch(self, install: CogInstall, **_: Any) -> Transition[CogInstall]:
         return move(install, InstallState.FETCHED, Record("install_fetched", {"reference": install.reference}))
+
+    @accepts("UNINSTALLED")
+    def uninstall(self, install: CogInstall, **_: Any) -> Transition[CogInstall]:
+        return _uninstall(install)
 
 
 class Fetched(InstallState):

@@ -51,6 +51,11 @@ class OpStep:
     gate: Gate = field(default_factory=Gate)
     frames: tuple[FrameRef, ...] = ()
     """The Frames the step is grounded in, placed beside its input in the task bundle."""
+    install: str | None = None
+    """The install the step runs, when ``cog`` is a pinned reference installed on the hub: whose binding the
+    worker is given."""
+    binding: str | None = None
+    """The id of that install's binding record, named on every event of the step."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +203,8 @@ def _serialize_op(op: OpDefinition) -> dict[str, Any]:
                 "digest": step.digest,
                 "gate": step.gate.to_dict(),
                 **({"frames": [_frame_dict(frame) for frame in step.frames]} if step.frames else {}),
+                **({"install": step.install} if step.install else {}),
+                **({"binding": step.binding} if step.binding else {}),
             }
             for step in op.steps
         ],
@@ -222,6 +229,8 @@ def _deserialize_op(value: dict[str, Any]) -> OpDefinition:
                 frames=tuple(FrameRef(id=f["id"], name=f.get("name") or f["id"], digest=f.get("digest", ""),
                                       ref=f["ref"], uri=f.get("uri"))
                              for f in step.get("frames") or ()),
+                install=step.get("install"),
+                binding=step.get("binding"),
             )
             for step in value["steps"]
         ),

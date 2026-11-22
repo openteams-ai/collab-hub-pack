@@ -77,7 +77,12 @@ Only what the environment cannot infer. Three items, additive:
   facts a rating derives from (locality, endpoint, provider, credential
   reference, retention terms). The **binding record** shows which rated
   satisfier met the constraint — the audit line that keeps a Gate
-  signature meaningful.
+  signature meaningful. The plug point is built:
+  `collab_hub_execution.binding.InventoryFilter`, which the installer
+  applies to the inventory with the install being bound (its reference, its
+  card) before the Cog's `resolve` sees it; `no_filter` is the only filter
+  there is, and a rating filter (#10) replaces it without touching
+  resolution, the record or delivery.
 - **Catalog card:** carries the declared level and intended sources, so the
   Op builder's picker checks compositions *statically* — authoring time,
   not run time, is when you learn step 3 routes confidential output to a
@@ -116,7 +121,8 @@ environment-owned.
 ## Sequencing
 
 Bind-time enforcement against a hand-maintained rating list comes first
-(#10); the catalog service replaces the list (#12); flow-time propagation
-and the downgrade rule follow (#13); egress restriction (#11) is what makes
-any of it enforceable rather than advisory. The rating scale itself is an
-open decision and should be settled before #10 is built.
+(#10), as an `InventoryFilter`; the catalog service replaces the list (#12);
+flow-time propagation and the downgrade rule follow (#13); egress
+restriction (#11) is what makes any of it enforceable rather than advisory.
+The rating scale itself is an open decision and should be settled before
+#10 is built.

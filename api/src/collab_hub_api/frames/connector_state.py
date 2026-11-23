@@ -16,12 +16,16 @@ How it is enforced
 :func:`apply_disabled` blanks the credential fields of a disabled connector
 before the request sees the configuration, through the one dependency every
 connector route already takes. A disabled connector is then indistinguishable,
-downstream, from one that was never configured -- which is a state those routes
-already refuse correctly. No route had to change, and no route can forget.
+downstream, from one that was never configured -- which is a state that code
+already handles correctly. No route had to change, and no route can forget.
 
-The status routes add one thing on top, in ``routers/connectors.py``: they
-answer 404 for a switched-off connector, because "not connected" would invite
-a user to connect something this hub is not offering.
+That same dependency, in ``routers/connectors.py``, also answers 404 on every
+route of a switched-off connector before its handler runs. Blanked credentials
+alone would make status read "not connected", which invites a user to connect
+something this hub is not offering, and make search and read refuse as "not
+configured", which sends an operator looking for configuration that is not
+missing. The list route governs no single connector and simply leaves the
+blanked ones out.
 
 The alternative was a check in each of the twenty-odd connector handlers, which
 is twenty-odd chances to miss one.

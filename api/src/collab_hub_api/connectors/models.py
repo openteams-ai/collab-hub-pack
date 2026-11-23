@@ -359,11 +359,10 @@ class SlackMessage(BaseModel):
     reply_count: int = 0
 
 
-# Search hits intentionally omit Slack permalinks, and every Slack ``text`` field
-# (here and on SlackMessage) is link-sanitized in slack_client via
-# connectors/slack_text.py: the Apollo chat renderer crashes on link-shaped text
-# anywhere in tool output (apollo-desktop#365), not just in a dedicated URL field.
-# The model needs channel_id + ts, not a URL, to follow up with a read.
+# Search hits intentionally omit Slack permalinks: the model needs channel_id + ts,
+# not a URL, to follow up with a read. Every Slack ``text`` field (here and on
+# SlackMessage) is rendered in slack_client via connectors/slack_text.py, which keeps
+# the exact target of http(s) links in the text and neutralizes every other scheme.
 class SlackSearchHit(BaseModel):
     channel_id: str
     channel_name: str = ""

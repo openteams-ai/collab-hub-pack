@@ -270,10 +270,15 @@ class CalendarReadRequest(BaseModel):
     max_chars: int = Field(default=12_000, ge=1, le=50_000)
 
 
-class CalendarAttendee(BaseModel):
+class CalendarAttendeePreview(BaseModel):
+    """The attendee shape search returns. The event read adds the role flags."""
+
     display_name: str = ""
     email: str = ""
     response_status: str = ""
+
+
+class CalendarAttendee(CalendarAttendeePreview):
     optional: bool = False
     organizer: bool = False
     self: bool = False
@@ -306,7 +311,26 @@ class CalendarEventMetadata(BaseModel):
             "populate both."
         ),
     )
-    attendee_details: list[CalendarAttendee] = Field(default_factory=list)
+    attendee_details: list[CalendarAttendee] = Field(
+        default_factory=list,
+        description="Every attendee in provider order.",
+    )
+    attendee_details_partial: bool = Field(
+        default=False,
+        description="True when attendee_details is a preview of the first attendees, not the full list.",
+    )
+    attendee_count: int = Field(default=0, description="Total attendees on the event, including any not listed.")
+    attendee_response_counts: dict[str, int] = Field(
+        default_factory=dict,
+        description="Attendee totals per response_status across the full list, including any not listed.",
+    )
+    self_response_status: str = Field(
+        default="",
+        description=(
+            "The connected user's own response_status, taken from the full attendee "
+            "list regardless of preview position. Empty when the user is not an attendee."
+        ),
+    )
     recurring_event_id: str = ""
     original_start: str = ""
     recurrence: list[str] = Field(default_factory=list)
@@ -314,8 +338,22 @@ class CalendarEventMetadata(BaseModel):
     event_type: str = "default"
 
 
+class CalendarSearchEvent(CalendarEventMetadata):
+    """A search hit. Read the event for every attendee and their role flags."""
+
+    attendee_details: list[CalendarAttendeePreview] = Field(
+        default_factory=list,
+        description=(
+            "The first attendees in provider order, without the optional, organizer and "
+            "self flags. When attendee_details_partial is true, the list is cut short. "
+            "Use the top-level organizer and self_response_status fields, and read the "
+            "event for the full attendee list, including who is optional."
+        ),
+    )
+
+
 class CalendarSearchResponse(UntrustedConnectorResponse):
-    events: list[CalendarEventMetadata]
+    events: list[CalendarSearchEvent]
     next_cursor: str = ""
 
 

@@ -72,7 +72,10 @@ RESPONSIVE_SECONDS = 1.0
 # locally, but up to ~2s on a slow, coverage-traced CI runner. A real
 # regression costs at least SATURATED_POOL_TIMEOUT_SECONDS (a request waiting out
 # the pool) or never finishes at all (a request waiting on the stalled
-# statement), so this sits between the two (see #356).
+# statement), so this sits between the two (see #356). "Never finishes" holds
+# only because stub_postgres_server ignores statement_timeout and cancel
+# requests; against a server that honors them, a request stuck on the
+# statement would return after about 2-4s and pass this limit.
 BURST_RESPONSIVE_SECONDS = 4.0
 
 
@@ -391,8 +394,7 @@ def test_saturated_pool_keeps_authenticated_and_mcp_traffic_responsive(tmp_path,
                 elapsed = time.monotonic() - started
 
         # No single request — HTTP or MCP — waited on the saturated pool, and
-        # the whole burst finished inside one pool timeout rather than one
-        # timeout per request.
+        # the whole burst finished well inside even one pool timeout.
         assert max(latencies) < BURST_RESPONSIVE_SECONDS
         assert elapsed < BURST_RESPONSIVE_SECONDS
         # The writes really were attempted and really did fail on the saturated

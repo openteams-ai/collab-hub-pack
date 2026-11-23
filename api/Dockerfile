@@ -68,7 +68,9 @@ RUN mkdir -p /opt/pixi && \
 ENV PIXI_HOME=/opt/pixi \
     PIXI_CACHE_DIR=/var/cache/collab-hub/pixi-cache
 
-USER nonroot
+# Numeric, not `nonroot`: Kubernetes cannot verify runAsNonRoot against a user name, and refuses to
+# start a worker pod that sets it without a runAsUser.
+USER 1000:1000
 
 WORKDIR /var/collab-hub-api
 COPY --from=builder --chown=nonroot:nonroot /var/collab-hub-api/.venv /var/collab-hub-api/.venv

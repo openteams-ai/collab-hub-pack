@@ -871,8 +871,13 @@ def make_router(
         """The Terms of Service (#95) is anonymous by design. The Keycloak
         acceptance step links here *before* it issues a token so people who
         have yet to accept can read the text. The argument lives on the path's
-        PUBLIC_WEB_PATHS entry."""
+        PUBLIC_WEB_PATHS entry.
 
+        A deployment that publishes its own Terms names them in
+        ``web.terms_url``, and this path forwards there instead."""
+
+        if surface.terms_url:
+            return _redirect(surface.terms_url, status_code=status.HTTP_302_FOUND)
         return page_response(
             terms_of_service_page(root_path=_root_path(request)),
             path=TERMS_PATH,
@@ -881,8 +886,11 @@ def make_router(
     @public_router.get(PRIVACY_PATH)
     async def privacy_statement(request: Request) -> Response:
         """The Privacy Statement (#95). Anonymous on the same argument as the
-        Terms of Service; the two are linked from the same consent line."""
+        Terms of Service; the two are linked from the same consent line.
+        Forwards to ``web.privacy_url`` when the deployment sets one."""
 
+        if surface.privacy_url:
+            return _redirect(surface.privacy_url, status_code=status.HTTP_302_FOUND)
         return page_response(
             privacy_statement_page(root_path=_root_path(request)),
             path=PRIVACY_PATH,

@@ -872,6 +872,14 @@ web:
   # (http only on loopback) with no credentials; the API applies the full rule
   # at startup. Becomes COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL on the API only.
   accountPageUrl: ""
+  # -- Where /web/terms and /web/privacy send the browser, for a deployment
+  # that publishes its own Terms of Service and Privacy Statement. Empty
+  # (default) serves the hub's built-in copy. Every link to those paths keeps
+  # working: the Keycloak terms-acceptance step, add-ons and the hub's pages.
+  # Same rules as accountPageUrl. Become COLLAB_HUB_API__WEB__TERMS_URL and
+  # COLLAB_HUB_API__WEB__PRIVACY_URL on the API only.
+  termsUrl: ""
+  privacyUrl: ""
 
 # The Collab Hub home page (/web/home): where its links point, and whether
 # the hub's root host answers with it. See docs/web-surface.md.

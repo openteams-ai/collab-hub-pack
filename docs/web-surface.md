@@ -479,8 +479,8 @@ a protection the middleware does not itself enforce.
 | `GET /web/home` | [The Collab Hub home page](#the-home-page-webhome). **Anonymous**: signed out it offers sign-in and sign-up; signed in it shows who is signed in, the sign-out form and the hub's links. |
 | `GET /web/home.css`, `GET /web/collab-mark.svg` | The home page's stylesheet and the Collab mark (its logo and tab icon). **Anonymous**, like the stylesheet above. |
 | `GET /web/data-statement` | The data statement ([#146]): what is stored, who can see it, and the address deletion requests go to. **Anonymous** — see below. The copy lives in `web/data_statement.py` and the acceptance page renders the same constant above its accept control. Links to the two documents below. |
-| `GET /web/terms` | The canonical Terms of Service ([#95]). **Anonymous** — see below. The copy lives in `web/terms_of_service.py` as one constant; placeholder until counsel replaces it. |
-| `GET /web/privacy` | The canonical Privacy Statement ([#95]). **Anonymous** — see below. The copy lives in `web/privacy_statement.py`, same shape. |
+| `GET /web/terms` | The canonical Terms of Service ([#95]). **Anonymous** — see below. The copy lives in `web/terms_of_service.py` as one constant; placeholder until counsel replaces it. A deployment that publishes its own Terms sets `web.terms_url` (chart: `web.termsUrl`), and this path redirects (302) there instead, so the Keycloak acceptance step and every other link to it keep working. |
+| `GET /web/privacy` | The canonical Privacy Statement ([#95]). **Anonymous** — see below. The copy lives in `web/privacy_statement.py`, same shape. Redirects to `web.privacy_url` (chart: `web.privacyUrl`) when that is set. |
 | `GET /invite/accept` | The acceptance page ([#90]). **Anonymous** — see below. |
 | `POST /invite/accept/redeem` | Redeems the token from a JSON body. Session + CSRF required. |
 | `GET /admin/invitations` | The operator invitation page ([#91]). Session + `operator`. |

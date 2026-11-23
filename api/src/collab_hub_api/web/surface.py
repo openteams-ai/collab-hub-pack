@@ -307,7 +307,9 @@ HOME_ASSETS = {
 page that uses them has no session."""
 
 TERMS_PATH = "/web/terms"
-"""The Terms of Service (#95). The copy lives in :mod:`.terms_of_service`.
+"""The Terms of Service (#95). The copy lives in :mod:`.terms_of_service`,
+unless ``web.terms_url`` names where the deployment publishes its own; then
+this path redirects there, so the links to it stay the same.
 
 In :data:`PUBLIC_WEB_PATHS` for the same reason as
 :data:`DATA_STATEMENT_PATH`. In addition, the deployment's Keycloak
@@ -577,6 +579,10 @@ class WebSurface:
     """The home page's desktop download link; empty = no link."""
     docs_url: str = ""
     """The home page's docs link; empty = no link."""
+    terms_url: str = ""
+    """Where :data:`TERMS_PATH` redirects; empty = serve the built-in copy."""
+    privacy_url: str = ""
+    """Where :data:`PRIVACY_PATH` redirects; empty = serve the built-in copy."""
     hub_domain: str = ""
     """The domain the home page's links are built from; empty = the issuer's host without ``keycloak.``."""
     web_client: bool = False
@@ -677,6 +683,8 @@ def build_web_surface(config: BaseConfig, *, ended_sessions: EndedWebSessions | 
         account_page_url=web.account_page_url,
         desktop_download_url=web.desktop_download_url,
         docs_url=web.docs_url,
+        terms_url=web.terms_url,
+        privacy_url=web.privacy_url,
         hub_domain=web.hub_domain,
         web_client=web.web_client,
     )

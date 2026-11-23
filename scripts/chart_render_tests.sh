@@ -59,6 +59,7 @@ check "serving on with routeTimeout off: no /v2 rule, no timeout" serve-httprout
 check "indexer on with its own resources: one Recreate replica, the API's env, the API does not sweep" indexer-resources $STATIC --set cogs.index.enabled=true --set cogs.indexer.resources.requests.memory=1Gi --set cogs.indexer.resources.limits.memory=2Gi
 check "feature flags: each entry renders as its variable" features --set features.cogs_ui=true --set features.new_thing=false
 check "account link: the API carries it, the indexer serves no pages" account-link-with-indexer $STATIC --set cogs.index.enabled=true --set web.accountPageUrl=https://billing.example.com/account
+check "legal links: the API carries them, the indexer serves no pages" legal-links-with-indexer $STATIC --set cogs.index.enabled=true --set web.termsUrl=https://example.com/terms/ --set web.privacyUrl=https://example.com/privacy/
 MEMBERSHIP='--set frames.auth.orgSource=membership --set frames.auth.identityClaim=sub --set frames.postgres.url=postgresql://db.example.com/hub --set frames.auth.bearer.jwksUrl=https://id.example.com/certs --set frames.auth.bearer.issuer=https://id.example.com'
 check "membership API off by default: no settings rendered" membership-api-off $MEMBERSHIP
 check "membership API on: client ids and audience reach the API, not the indexer" membership-api $STATIC $MEMBERSHIP --set cogs.index.enabled=true --set 'frames.membershipApi.clientIds={usage-control,subscription-manager}' --set frames.membershipApi.audience=collab-hub-membership

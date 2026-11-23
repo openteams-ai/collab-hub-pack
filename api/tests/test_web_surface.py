@@ -2775,6 +2775,51 @@ async def test_the_legal_documents_carry_the_surface_security_headers(tmp_path, 
             assert "script-src" not in policy
 
 
+PUBLISHED_TERMS = "https://example.com/docs/terms-of-service/"
+PUBLISHED_PRIVACY = "https://example.com/docs/privacy-policy/"
+
+
+async def test_the_legal_documents_redirect_where_the_deployment_publishes_them(tmp_path, idp):
+    """A deployment with its own published Terms and Privacy Statement names
+    them, and /web/terms and /web/privacy forward there. The paths stay the
+    same, so the Keycloak acceptance step and an add-on's checkout, which
+    link to them, reach the published text without changing. Anonymous, like
+    the built-in pages."""
+
+    app = make_web_app(tmp_path, idp, web={"terms_url": PUBLISHED_TERMS, "privacy_url": PUBLISHED_PRIVACY})
+    async with web_client(app) as client:
+        terms = await client.get(TERMS_PATH)
+        privacy = await client.get(PRIVACY_PATH)
+
+    assert terms.status_code == 302
+    assert terms.headers["location"] == PUBLISHED_TERMS
+    assert privacy.status_code == 302
+    assert privacy.headers["location"] == PUBLISHED_PRIVACY
+    for response in (terms, privacy):
+        assert "no-store" in response.headers["cache-control"]
+        assert response.headers["referrer-policy"] == "no-referrer"
+
+
+async def test_each_legal_document_redirects_only_when_its_own_url_is_set(tmp_path, idp):
+    app = make_web_app(tmp_path, idp, web={"terms_url": PUBLISHED_TERMS})
+    async with web_client(app) as client:
+        terms = await client.get(TERMS_PATH)
+        privacy = await client.get(PRIVACY_PATH)
+
+    assert terms.status_code == 302
+    assert privacy.status_code == 200
+    assert "Privacy Statement" in privacy.text
+
+
+@pytest.mark.parametrize("field", ["terms_url", "privacy_url"])
+@pytest.mark.parametrize("value", ["javascript:alert(1)", "http://example.com/terms", "https://user:pw@example.com/"])
+def test_a_legal_document_url_that_is_not_an_https_url_fails_the_rollout(tmp_path, idp, field, value):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match=field):
+        make_web_app(tmp_path, idp, web={field: value})
+
+
 def test_the_legal_document_paths_are_allowlisted() -> None:
     # Anonymity costs the reviewed line in the allowlist; `make_router`
     # refuses a public page route whose path is not in this set, so these two

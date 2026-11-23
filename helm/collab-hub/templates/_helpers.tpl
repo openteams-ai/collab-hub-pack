@@ -794,6 +794,14 @@ indexer carries too: a publish source needs it, and a sweep reads it.) */}}
 - name: COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL
   value: {{ . | quote }}
 {{- end }}
+{{- with .Values.web.termsUrl }}
+- name: COLLAB_HUB_API__WEB__TERMS_URL
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.web.privacyUrl }}
+- name: COLLAB_HUB_API__WEB__PRIVACY_URL
+  value: {{ . | quote }}
+{{- end }}
 {{- with .Values.home.hubDomain }}
 - name: COLLAB_HUB_API__WEB__HUB_DOMAIN
   value: {{ . | quote }}

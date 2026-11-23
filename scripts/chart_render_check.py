@@ -35,6 +35,8 @@ INDEX_VARS = (
 # The browser pages' settings render on the API only; the indexer serves no pages.
 WEB_PAGE_VARS = (
     "COLLAB_HUB_API__WEB__ACCOUNT_PAGE_URL",
+    "COLLAB_HUB_API__WEB__TERMS_URL",
+    "COLLAB_HUB_API__WEB__PRIVACY_URL",
     "COLLAB_HUB_API__WEB__HUB_DOMAIN",
     "COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL",
     "COLLAB_HUB_API__WEB__DOCS_URL",
@@ -302,6 +304,16 @@ def case_account_link_with_indexer(r: Rendered) -> None:
     assert r.value(name) == "https://billing.example.com/account", r.value(name)
     assert r.indexer is not None
     assert name not in r.indexer.env, sorted(r.indexer.env)
+
+
+def case_legal_links_with_indexer(r: Rendered) -> None:
+    # /web/terms and /web/privacy are pages, so only the API reads where they
+    # redirect; the indexer carries neither.
+    assert r.value("COLLAB_HUB_API__WEB__TERMS_URL") == "https://example.com/terms/"
+    assert r.value("COLLAB_HUB_API__WEB__PRIVACY_URL") == "https://example.com/privacy/"
+    assert r.indexer is not None
+    for name in ("COLLAB_HUB_API__WEB__TERMS_URL", "COLLAB_HUB_API__WEB__PRIVACY_URL"):
+        assert name not in r.indexer.env, sorted(r.indexer.env)
 
 
 MEMBERSHIP_API_PREFIX = "COLLAB_HUB_API__FRAMES__MEMBERSHIP_API__"
@@ -632,6 +644,7 @@ CASES = {
     "serve-off": case_serve_off,
     "serve-with-indexer": case_serve_with_indexer,
     "account-link-with-indexer": case_account_link_with_indexer,
+    "legal-links-with-indexer": case_legal_links_with_indexer,
     "publish-with-indexer": case_publish_with_indexer,
     "serve-nebariapp": case_serve_nebariapp,
     "serve-nebariapp-no-timeout": case_serve_nebariapp_no_timeout,

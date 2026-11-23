@@ -378,6 +378,18 @@ class WebConfig(BaseModel):
     docs_url: str = ""
     """Where the home page's "Docs" link points. Empty renders no link. Same
     rules as ``account_page_url``."""
+    terms_url: str = ""
+    """Where ``/web/terms`` sends the browser, if the deployment publishes its
+    Terms of Service elsewhere.
+
+    Empty (the default) serves the built-in copy in
+    :mod:`.web.terms_of_service`. Set, ``/web/terms`` redirects here, so every
+    link to it keeps working: the Keycloak terms-acceptance step, an add-on's
+    checkout, and this surface's own pages. Same rules as
+    ``account_page_url``."""
+    privacy_url: str = ""
+    """Where ``/web/privacy`` sends the browser; the Privacy Statement's
+    counterpart to ``terms_url``. Empty serves :mod:`.web.privacy_statement`."""
 
     web_client: bool = False
     """Whether this hub runs the Collab web client at ``collab.<hub_domain>``.
@@ -411,6 +423,8 @@ class WebConfig(BaseModel):
         "account_page_url",
         "desktop_download_url",
         "docs_url",
+        "terms_url",
+        "privacy_url",
         "hub_domain",
         mode="before",
     )
@@ -428,7 +442,7 @@ class WebConfig(BaseModel):
 
         return value.strip() if isinstance(value, str) else value
 
-    @field_validator("account_page_url", "desktop_download_url", "docs_url", mode="after")
+    @field_validator("account_page_url", "desktop_download_url", "docs_url", "terms_url", "privacy_url", mode="after")
     @classmethod
     def _check_link_url(cls, value: str, info: ValidationInfo) -> str:
         # Checked whether or not the surface is enabled: a value that cannot

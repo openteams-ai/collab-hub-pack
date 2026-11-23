@@ -657,6 +657,26 @@ connectors:
     notionVersion: "2022-06-28"
     # -- Timeout for broker and Notion API requests.
     requestTimeoutSeconds: 10
+    # Gateway route Keycloak's `notion` identity provider uses as its
+    # userInfoUrl (Notion has no standard userinfo endpoint). Envoy Gateway
+    # only. See templates/notion-userinfo-proxy.yaml and docs/notion-connector.md.
+    userinfoProxy:
+      # -- Render the proxy. Off by default; turn it on together with the
+      # `notion` identity provider in this hub's Keycloak.
+      enabled: false
+      # -- Public host of this hub's Keycloak, e.g. keycloak.example.com. The
+      # provider's userInfoUrl is then https://<host>/notion-userinfo.
+      # Required when enabled.
+      host: ""
+      # -- Namespace the proxy's objects are created in. Empty is the release
+      # namespace. Any namespace the gateway listener admits works.
+      namespace: ""
+      # -- Gateways the route attaches to: the gateway that serves the
+      # Keycloak host.
+      parentRefs:
+        - name: nebari-gateway
+          namespace: envoy-gateway-system
+          sectionName: https
   sharepoint:
     # -- Keycloak broker token endpoint for the linked Microsoft identity (IdP
     # alias `microsoft`). Normal hub users must also receive the broker client

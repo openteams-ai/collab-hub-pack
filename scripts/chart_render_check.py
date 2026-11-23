@@ -620,6 +620,84 @@ def case_run_controller_remote_existing_namespace(r: Rendered) -> None:
     assert role["rules"], role
 
 
+NOTION_PROXY_KINDS = ["Backend", "BackendTLSPolicy", "EnvoyExtensionPolicy", "HTTPRoute"]
+
+
+def notion_proxy(r: Rendered) -> dict[str, dict]:
+    docs = {
+        d["kind"]: d
+        for d in r.docs
+        if d.get("metadata", {}).get("labels", {}).get(COMPONENT_LABEL) == "notion-userinfo"
+    }
+    return docs
+
+
+def case_no_notion_proxy(r: Rendered) -> None:
+    # Off by default: a hub that never set up the `notion` identity provider
+    # gets no route to api.notion.com.
+    assert notion_proxy(r) == {}, sorted(notion_proxy(r))
+
+
+def case_notion_proxy(r: Rendered) -> None:
+    docs = notion_proxy(r)
+    assert sorted(docs) == NOTION_PROXY_KINDS, sorted(docs)
+    namespaces = {d["metadata"]["namespace"] for d in docs.values()}
+    assert namespaces == {"keycloak"}, namespaces
+    backend = docs["Backend"]["spec"]
+    assert backend["endpoints"] == [{"fqdn": {"hostname": "api.notion.com", "port": 443}}], backend
+    tls = docs["BackendTLSPolicy"]
+    assert tls["apiVersion"] == "gateway.networking.k8s.io/v1alpha3", tls["apiVersion"]
+    assert tls["spec"]["validation"] == {"wellKnownCACertificates": "System", "hostname": "api.notion.com"}
+    route = docs["HTTPRoute"]
+    name = route["metadata"]["name"]
+    assert route["spec"]["hostnames"] == ["keycloak.example.com", "api.notion.com"], route["spec"]["hostnames"]
+    assert route["spec"]["parentRefs"] == [
+        {
+            "group": "gateway.networking.k8s.io",
+            "kind": "Gateway",
+            "name": "nebari-gateway",
+            "namespace": "envoy-gateway-system",
+            "sectionName": "https",
+        }
+    ], route["spec"]["parentRefs"]
+    [rule] = route["spec"]["rules"]
+    assert rule["matches"] == [{"path": {"type": "Exact", "value": "/notion-userinfo"}}], rule["matches"]
+    filters = {f["type"]: f for f in rule["filters"]}
+    # The header the connector pins (connectors.notion.notionVersion), so the
+    # proxy and the connector cannot disagree.
+    # `set`, not `add`: a Notion-Version the caller already sent is replaced,
+    # never duplicated.
+    assert filters["RequestHeaderModifier"]["requestHeaderModifier"] == {
+        "set": [{"name": "Notion-Version", "value": "2021-08-16"}]
+    }, filters["RequestHeaderModifier"]
+    assert filters["URLRewrite"]["urlRewrite"]["path"] == {"type": "ReplaceFullPath", "replaceFullPath": "/v1/users/me"}
+    # The host rewrite must NOT be a route filter: Envoy would append
+    # X-Forwarded-Host and Notion refuses the request (template, quirk 3).
+    assert "hostname" not in filters["URLRewrite"]["urlRewrite"], filters["URLRewrite"]
+    # weight written out, as the API server stores it, so ArgoCD reports no drift.
+    assert rule["backendRefs"] == [
+        {"group": "gateway.envoyproxy.io", "kind": "Backend", "name": docs["Backend"]["metadata"]["name"], "weight": 1}
+    ], rule["backendRefs"]
+    policy = docs["EnvoyExtensionPolicy"]["spec"]
+    assert policy["targetRefs"] == [{"group": "gateway.networking.k8s.io", "kind": "HTTPRoute", "name": name}]
+    [lua] = policy["lua"]
+    assert 'headers:replace(":method", "GET")' in lua["inline"], lua
+    assert 'headers:replace(":authority", "api.notion.com")' in lua["inline"], lua
+
+
+def case_notion_proxy_port(r: Rendered) -> None:
+    # A parentRef may pin the listener by port, as the hub's other routes allow.
+    [ref] = notion_proxy(r)["HTTPRoute"]["spec"]["parentRefs"]
+    assert ref["port"] == 8443, ref
+
+
+def case_notion_proxy_tls_v1(r: Rendered) -> None:
+    # Gateway API 1.4+ serves BackendTLSPolicy at v1; the chart prefers it.
+    tls = notion_proxy(r).get("BackendTLSPolicy")
+    assert tls is not None, "no BackendTLSPolicy rendered"
+    assert tls["apiVersion"] == "gateway.networking.k8s.io/v1", tls["apiVersion"]
+
+
 CASES = {
     "membership-api": case_membership_api,
     "membership-api-off": case_membership_api_off,
@@ -628,6 +706,10 @@ CASES = {
     "root-host": case_root_host,
     "root-host-listener": case_root_host_listener,
     "no-root-host": case_no_root_host,
+    "no-notion-proxy": case_no_notion_proxy,
+    "notion-proxy": case_notion_proxy,
+    "notion-proxy-tls-v1": case_notion_proxy_tls_v1,
+    "notion-proxy-port": case_notion_proxy_port,
     "sharepoint": case_sharepoint,
     "serve-off": case_serve_off,
     "serve-with-indexer": case_serve_with_indexer,

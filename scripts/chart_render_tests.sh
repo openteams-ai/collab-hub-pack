@@ -71,6 +71,13 @@ check "root host on: / opens the home page, the browser pages go to the API" roo
 check "root host on another app's listener: its namespace and section, and a ReferenceGrant" root-host-listener $ROOT_HOST \
   --set home.rootHost.enabled=true --set home.rootHost.namespace=nebari-system --set home.rootHost.parentRefs[0].name=nebari-gateway \
   --set home.rootHost.parentRefs[0].namespace=envoy-gateway-system --set home.rootHost.parentRefs[0].sectionName=tls-landing
+NOTION_PROXY='--namespace nebari-nexus --set connectors.notion.userinfoProxy.enabled=true --set connectors.notion.userinfoProxy.host=keycloak.example.com --set connectors.notion.userinfoProxy.namespace=keycloak --set connectors.notion.notionVersion=2021-08-16'
+NOTION_CRDS='--api-versions gateway.envoyproxy.io/v1alpha1/Backend --api-versions gateway.envoyproxy.io/v1alpha1/EnvoyExtensionPolicy --api-versions gateway.networking.k8s.io/v1alpha3/BackendTLSPolicy'
+check "notion userinfo proxy off by default: no route to api.notion.com" no-notion-proxy
+check "notion userinfo proxy on: Backend, TLS, Lua rewrite and route, the connector's Notion-Version" notion-proxy $NOTION_PROXY $NOTION_CRDS
+check "notion userinfo proxy on Gateway API 1.4+: BackendTLSPolicy at v1" notion-proxy-tls-v1 $NOTION_PROXY $NOTION_CRDS --api-versions gateway.networking.k8s.io/v1/BackendTLSPolicy
+check "notion userinfo proxy: a parentRef can pin the listener port" notion-proxy-port $NOTION_PROXY $NOTION_CRDS \
+  --set connectors.notion.userinfoProxy.parentRefs[0].name=gw --set connectors.notion.userinfoProxy.parentRefs[0].port=8443
 refused() { # <label> <needle> <helm args...>: the chart must refuse to render, naming <needle>
   local label="$1" needle="$2" out
   shift 2
@@ -149,6 +156,20 @@ refused "root path: a missing leading slash is refused" "/server/rootPath" --set
 # Without Envoy Gateway the /v2 timeout policy cannot exist; the render says so
 # rather than leaving large pulls on the gateway's 15 s default.
 refused "serving on behind the Nebari gateway without Envoy Gateway's CRDs is refused, not left on the default timeout" "cogs.serve.routeTimeout" $STATIC $NEBARIAPP --set cogs.serve.enabled=true
+
+# The Notion proxy needs the Keycloak host it serves and Envoy Gateway's
+# Backend CRD; without either it would ship a route that never works.
+refused "notion userinfo proxy without a host is refused" "connectors.notion.userinfoProxy.host" --set connectors.notion.userinfoProxy.enabled=true $NOTION_CRDS
+refused "notion userinfo proxy without Envoy Gateway's Backend CRD is refused" "gateway.envoyproxy.io/v1alpha1 Backend" --set connectors.notion.userinfoProxy.enabled=true --set connectors.notion.userinfoProxy.host=keycloak.example.com
+refused "notion userinfo proxy: an unknown setting is refused" "bogus" --set connectors.notion.userinfoProxy.bogus=1
+refused "notion userinfo proxy with no parent gateway is refused" "connectors.notion.userinfoProxy.parentRefs" \
+  --set connectors.notion.userinfoProxy.enabled=true --set connectors.notion.userinfoProxy.host=keycloak.example.com --set-json 'connectors.notion.userinfoProxy.parentRefs=[]' $NOTION_CRDS
+refused "notion userinfo proxy without EnvoyExtensionPolicy is refused" "EnvoyExtensionPolicy" \
+  --set connectors.notion.userinfoProxy.enabled=true --set connectors.notion.userinfoProxy.host=keycloak.example.com \
+  --api-versions gateway.envoyproxy.io/v1alpha1/Backend --api-versions gateway.networking.k8s.io/v1alpha3/BackendTLSPolicy
+refused "notion userinfo proxy without any BackendTLSPolicy is refused" "BackendTLSPolicy" \
+  --set connectors.notion.userinfoProxy.enabled=true --set connectors.notion.userinfoProxy.host=keycloak.example.com \
+  --api-versions gateway.envoyproxy.io/v1alpha1/Backend --api-versions gateway.envoyproxy.io/v1alpha1/EnvoyExtensionPolicy
 
 # --- negative: every refused configuration, from one fixture ------------------
 # scripts/testdata/chart/cogs-negative-cases.yaml holds each refusal once, in

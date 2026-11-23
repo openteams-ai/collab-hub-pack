@@ -876,6 +876,9 @@ web:
   # that publishes its own Terms of Service and Privacy Statement. Empty
   # (default) serves the hub's built-in copy. Every link to those paths keeps
   # working: the Keycloak terms-acceptance step, add-ons and the hub's pages.
+  # Set both together, or the other document is still the built-in copy. The
+  # paths exist only while the web surface is enabled. Don't point either at
+  # the hub's own /web/terms or /web/privacy, which would redirect to itself.
   # Same rules as accountPageUrl. Become COLLAB_HUB_API__WEB__TERMS_URL and
   # COLLAB_HUB_API__WEB__PRIVACY_URL on the API only.
   termsUrl: ""

@@ -100,6 +100,11 @@ refused "account link: plain http to a remote host is refused" "/web/accountPage
 refused "account link: credentials are refused" "/web/accountPageUrl" --set web.accountPageUrl=https://user:pw@billing.example.com/
 refused "account link: javascript: is refused" "/web/accountPageUrl" --set web.accountPageUrl='javascript:alert(1)'
 refused "account link: a bare path is refused" "/web/accountPageUrl" --set web.accountPageUrl=/account
+for key in termsUrl privacyUrl; do
+  refused "legal link $key: plain http to a remote host is refused" "/web/$key" --set web.$key=http://example.com/terms
+  refused "legal link $key: credentials are refused" "/web/$key" --set web.$key=https://user:pw@example.com/
+  refused "legal link $key: javascript: is refused" "/web/$key" --set web.$key='javascript:alert(1)'
+done
 
 # The run controller beside the API (runs.controller): off by default, a second container when on.
 check "run controller off: one container, no Cog packages for the API" no-run-controller

@@ -79,6 +79,8 @@ than dead-ending a signed-in operator.
 | `COLLAB_HUB_API__WEB__WEB_CLIENT` | Optional, default `false`. Whether this hub runs the Collab web client at `collab.<domain>`. Off renders no link into it; `true` adds "Collab" and "Frames" in the navigation and sidebar, "Open Collab" and "Manage your Frames" on the home and account pages. Set it only where the web client runs. The download, docs and API docs links are unaffected. Chart value `home.webClient`. |
 | `COLLAB_HUB_API__WEB__DESKTOP_DOWNLOAD_URL` | Optional. The home page's desktop download link. Empty renders none. Same rules as `ACCOUNT_PAGE_URL`. Chart value `home.desktopDownloadUrl`. |
 | `COLLAB_HUB_API__WEB__DOCS_URL` | Optional. The home page's docs link. Empty renders none. Same rules as `ACCOUNT_PAGE_URL`. Chart value `home.docsUrl`. |
+| `COLLAB_HUB_API__WEB__TERMS_URL` | Optional. Where the deployment publishes its Terms of Service; `GET /web/terms` then redirects (302) there instead of serving the built-in copy, so the Keycloak acceptance step and every other link to it reach the published text. Empty (default) serves the built-in page. Same rules as `ACCOUNT_PAGE_URL`. Set it together with `PRIVACY_URL`, or the other document is still the built-in copy. Don't point it at the hub's own `/web/terms`: that redirects to itself. Chart value `web.termsUrl`. |
+| `COLLAB_HUB_API__WEB__PRIVACY_URL` | Optional. The Privacy Statement's counterpart to `TERMS_URL`, for `GET /web/privacy`. Chart value `web.privacyUrl`. |
 
 The realm's JWKS endpoint is derived from the issuer URL — there is no
 separate JWKS setting to point somewhere else.
@@ -86,7 +88,7 @@ separate JWKS setting to point somewhere else.
 ### Deploying it
 
 The chart's `web.*` block holds only what is safe in a rendered manifest
-(today, `web.accountPageUrl`). Enabling the surface goes through
+(today, `web.accountPageUrl`, `web.termsUrl` and `web.privacyUrl`). Enabling the surface goes through
 `api.deployment.extraEnv`, which is rendered verbatim and therefore accepts
 `valueFrom`. The client secret must arrive that way — never as a chart value,
 where it would land in a rendered manifest:

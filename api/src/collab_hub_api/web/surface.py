@@ -323,7 +323,9 @@ with nothing to act on.
 """
 
 PRIVACY_PATH = "/web/privacy"
-"""The Privacy Statement (#95). The copy lives in :mod:`.privacy_statement`.
+"""The Privacy Statement (#95). The copy lives in :mod:`.privacy_statement`,
+unless ``web.privacy_url`` names where the deployment publishes its own; then
+this path redirects there.
 
 Public on exactly the argument recorded on :data:`TERMS_PATH`; the two
 documents are linked from the same consent line and are reached by the same

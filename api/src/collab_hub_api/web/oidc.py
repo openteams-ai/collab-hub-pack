@@ -23,17 +23,30 @@ from __future__ import annotations
 
 import base64
 import secrets
+import time
 from hashlib import sha256
 from urllib.parse import urlencode, urlsplit
 
 import httpx
 
-from ..frames.auth import TokenDecodeError, decode_verified_jwt
+from ..frames.auth import ACCEPTED_JWT_ALGORITHMS, TokenDecodeError, decode_verified_jwt
 
 AUTHORIZE_ENDPOINT = "/protocol/openid-connect/auth"
 TOKEN_ENDPOINT = "/protocol/openid-connect/token"
 JWKS_ENDPOINT = "/protocol/openid-connect/certs"
 LOGOUT_ENDPOINT = "/protocol/openid-connect/logout"
+
+BACKCHANNEL_LOGOUT_EVENT = "http://schemas.openid.net/event/backchannel-logout"
+"""The ``events`` member that makes a JWT a logout token (Back-Channel Logout 1.0, 2.4)."""
+
+LOGOUT_TOKEN_MAX_AGE_SECONDS = 600
+"""A logout token issued longer ago than this is refused.
+
+The specification asks for the ``iat`` to be "recent" and leaves the bound to
+the relying party. Keycloak sends the token the moment the realm session ends,
+so ten minutes is generous for delivery and still keeps a captured token from
+being useful for long. Replaying one inside the window only ends a session
+that has already ended."""
 
 TOKEN_REQUEST_TIMEOUT_SECONDS = 10.0
 """Socket timeout for the code exchange. Sign-in is interactive: a person is
@@ -370,6 +383,9 @@ def verify_id_token(
       JWT that happens to carry our audience from minting a session.
     * ``nonce`` must equal the value this flow generated, binding the token to
       the browser that started the sign-in.
+    * ``sid`` must be a non-empty string: it is the realm session the web
+      session belongs to, and without it no back-channel logout could ever end
+      the session this token would mint (openteams-ai/subscription-manager-pack#79).
     """
 
     try:
@@ -397,4 +413,70 @@ def verify_id_token(
     # refusal, never an exception.
     if not isinstance(token_nonce, str) or not secrets.compare_digest(token_nonce.encode(), nonce.encode()):
         raise OidcFlowError("id_token nonce mismatch")
+    if not isinstance(claims.get("sid"), str) or not claims["sid"]:
+        raise OidcFlowError("id_token carries no sid")
     return claims
+
+
+def verify_logout_token(
+    logout_token: str,
+    *,
+    jwks_url: str,
+    issuer: str,
+    client_id: str,
+    now: float | None = None,
+) -> str:
+    """The ``sid`` a back-channel logout token ends, or raise :class:`OidcFlowError`.
+
+    OpenID Back-Channel Logout 1.0, section 2.6, with the same verifier the ID
+    token goes through (``frames.auth.decode_verified_jwt``: the realm's JWKS,
+    its caching and rotation, ``iss``, ``aud``, and ``exp`` when present):
+
+    * the header's ``alg`` must be one of
+      :data:`~..frames.auth.ACCEPTED_JWT_ALGORITHMS`, the same set the ID token
+      is verified with (one constant, so the two cannot drift), checked first
+      so the refusal names the reason;
+    * ``aud`` **is this client**, as for the ID token: a logout token Keycloak
+      minted for the Billing page's client must not end anything here;
+    * ``iat`` is required, and no older than
+      :data:`LOGOUT_TOKEN_MAX_AGE_SECONDS`;
+    * ``events`` must hold :data:`BACKCHANNEL_LOGOUT_EVENT` as a JSON object;
+    * ``nonce`` must be **absent**: the specification forbids it so an ID token
+      can never be passed off as a logout token;
+    * ``sid`` must be a non-empty string. The specification lets a token name
+      only a ``sub``; the client is configured to always send the session
+      (``backchannel.logout.session.required``), and the Hub's sessions are
+      ended by session, so a token without one ends nothing and is refused.
+
+    The message of the raised error is a fixed reason for a log line; nothing
+    from the token reaches it.
+    """
+
+    try:
+        import jwt
+
+        header = jwt.get_unverified_header(logout_token)
+    except Exception as exc:
+        raise OidcFlowError("logout token is not a JWT") from exc
+    if header.get("alg") not in ACCEPTED_JWT_ALGORITHMS:
+        raise OidcFlowError("logout token is not signed with an accepted algorithm")
+    try:
+        claims = decode_verified_jwt(logout_token, jwks_url=jwks_url, issuer=issuer, audience=client_id)
+    except TokenDecodeError as exc:
+        raise OidcFlowError("logout token failed verification") from exc
+    issued_at = claims.get("iat")
+    if isinstance(issued_at, bool) or not isinstance(issued_at, (int, float)):
+        raise OidcFlowError("logout token carries no iat")
+    if now is None:
+        now = time.time()
+    if issued_at < now - LOGOUT_TOKEN_MAX_AGE_SECONDS:
+        raise OidcFlowError("logout token is too old (iat)")
+    events = claims.get("events")
+    if not isinstance(events, dict) or not isinstance(events.get(BACKCHANNEL_LOGOUT_EVENT), dict):
+        raise OidcFlowError("logout token carries no back-channel logout event")
+    if "nonce" in claims:
+        raise OidcFlowError("logout token carries a nonce")
+    sid = claims.get("sid")
+    if not isinstance(sid, str) or not sid:
+        raise OidcFlowError("logout token names no sid")
+    return sid

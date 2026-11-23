@@ -81,3 +81,8 @@ addopts = "--cov=collab_hub_api --cov-report=term-missing --cov-report=xml"
 
 [tool.coverage.run]
 source = ["collab_hub_api"]
+# Python 3.14 already defaults to sys.monitoring; on 3.13 coverage otherwise
+# uses its far slower settrace tracer, which inflated the timing-sensitive
+# tests in test_postgres_pool.py (#356). sysmon on 3.13 can't measure branches,
+# which this config doesn't enable.
+core = "sysmon"

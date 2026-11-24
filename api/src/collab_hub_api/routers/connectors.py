@@ -1074,7 +1074,7 @@ async def search_sharepoint(
             until_date=body.until_date,
             time_zone=body.time_zone,
         )
-        hits, next_page_token, total = await client.search(
+        hits, next_page_token, total, incomplete = await client.search(
             query=body.query,
             limit=body.limit,
             lower=lower,
@@ -1095,7 +1095,9 @@ async def search_sharepoint(
         _raise_sharepoint_upstream(exc)
     except httpx.HTTPError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "SharePoint search failed") from exc
-    return SharePointSearchResponse(hits=hits, next_page_token=next_page_token, total=total)
+    return SharePointSearchResponse(
+        hits=hits, next_page_token=next_page_token, total=total, incomplete_results=incomplete
+    )
 
 
 @router.post("/sharepoint/drives/{drive_id}/items/{item_id}/read", response_model=SharePointReadResponse)

@@ -1056,6 +1056,25 @@ COLLAB_SCHEMA_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             "CREATE INDEX IF NOT EXISTS collab_claims_updated ON collab_claims (updated_at)",
         ),
     ),
+    (
+        18,
+        (
+            # Realm sessions that have ended (openteams-ai/subscription-manager-pack#79): Keycloak's
+            # back-channel logout names the realm session's `sid`, and the
+            # web surface refuses a session cookie minted for a `sid` here,
+            # on every replica (`web/ended_sessions.py`). The Hub's own Log
+            # out records its session here too. A row older than the web
+            # session lifetime cannot match a live cookie, so each logout
+            # deletes those.
+            """
+            CREATE TABLE IF NOT EXISTS collab_web_ended_sessions (
+                sid      text PRIMARY KEY,
+                ended_at timestamptz NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS collab_web_ended_sessions_ended_at ON collab_web_ended_sessions (ended_at)",
+        ),
+    ),
 )
 
 

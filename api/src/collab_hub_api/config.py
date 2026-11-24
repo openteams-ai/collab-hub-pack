@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import sys
@@ -260,11 +261,12 @@ class SecurityConfig(BaseModel):
 WEB_SESSION_LIFETIME_CEILING_SECONDS = 8 * 3600
 """Hard ceiling on a web session's absolute lifetime, and its default.
 
-Not a suggestion: the session cookie is stateless and cannot be revoked
-server-side before it expires, so this number *is* the window in which a
-cookie captured before sign-out keeps asserting its holder's identity. The
-documented risk argument rests on it, so the configuration may lower it and
-may not raise it.
+Not a suggestion: the session cookie is signed, not stored, and the server
+ends one early only when its realm session ends (a back-channel logout, or
+this surface's own Log out; ``web.ended_sessions``). A cookie whose realm
+session lives on keeps asserting its holder's identity until it expires, so
+this number *is* that window. The documented risk argument rests on it, so
+the configuration may lower it and may not raise it.
 """
 
 WEB_SESSION_SECRET_MIN_LENGTH = 32
@@ -784,6 +786,47 @@ class FramesInvitationsConfig(BaseModel):
     """
 
 
+class FramesMembershipApiConfig(BaseModel):
+    """Which add-on services may read organization membership (issue #270).
+
+    The service-to-service API under ``/v1/membership`` tells add-on services
+    (for example usage control and a subscription manager) who belongs to each
+    organization and who owns it. It is **off unless ``client_ids`` names at
+    least one client**: nothing is mounted and nothing changes for a deployment
+    that has not opted in.
+
+    Each entry is the identity-provider client id of one add-on's own
+    client-credentials client. A caller is accepted only with an access token
+    whose ``azp`` is one of these *and* which carries the same id in Keycloak's
+    ``client_id`` claim (``clientId`` before Keycloak 25) -- a claim only the
+    client-credentials grant sets, so a person signing in through the same
+    client is not taken for the service. See ``docs/membership-api.md``.
+    """
+
+    client_ids: list[str] = Field(default_factory=list)
+
+    audience: str = ""
+    """The audience a service token must carry, when set. Empty skips the
+    audience check (signature, issuer, token type and the client checks above
+    still apply); set it, with an audience mapper on each add-on client, so a
+    token minted for some other resource server is not accepted here."""
+
+    @model_validator(mode="after")
+    def _validate(self) -> "FramesMembershipApiConfig":
+        for client_id in self.client_ids:
+            if not client_id or client_id != client_id.strip() or any(c.isspace() for c in client_id):
+                raise ValueError(
+                    f"frames.membership_api.client_ids entry {client_id!r} is blank or contains whitespace: "
+                    "a client id is matched exactly against the token's azp"
+                )
+        duplicates = {c for c in self.client_ids if self.client_ids.count(c) > 1}
+        if duplicates:
+            raise ValueError(f"frames.membership_api.client_ids lists {sorted(duplicates)} more than once")
+        if self.audience != self.audience.strip():
+            raise ValueError("frames.membership_api.audience has surrounding whitespace")
+        return self
+
+
 class FramesConfig(BaseModel):
     storage_backend: str = "local"
     s3: FramesS3Config = Field(default_factory=FramesS3Config)
@@ -797,6 +840,7 @@ class FramesConfig(BaseModel):
     service_access: FramesServiceAccessConfig = Field(default_factory=FramesServiceAccessConfig)
     model_access: ModelAccessConfig = Field(default_factory=ModelAccessConfig)
     invitations: FramesInvitationsConfig = Field(default_factory=FramesInvitationsConfig)
+    membership_api: FramesMembershipApiConfig = Field(default_factory=FramesMembershipApiConfig)
     mcp_session_manager_enabled: bool = True
 
 
@@ -1615,6 +1659,39 @@ def build_org_store(config: BaseConfig, pools: PostgresPools) -> OrgStore:
     return UnavailableOrgStore()
 
 
+def build_ended_web_sessions(config: BaseConfig, pools: PostgresPools):
+    """Where the web surface records ended realm sessions (openteams-ai/subscription-manager-pack#79).
+
+    The shared frames.postgres when there is one, so a back-channel logout any
+    replica hears reaches every replica; the table is ``collab_`` migration 18,
+    so there is no ``auto_migrate`` argument here. Without a database, in
+    memory: one replica, which is development, and the logout reaches the
+    process that heard it. Rows are pruned past the session lifetime, the
+    longest any cookie naming them can live.
+    """
+
+    from .web.ended_sessions import InMemoryEndedWebSessions, PostgresEndedWebSessions
+    from .web.surface import clamped_session_lifetime
+
+    # The lifetime the cookies are minted with, so no row is pruned while a
+    # cookie naming it can still verify.
+    lifetime = clamped_session_lifetime(config.web.session_lifetime_seconds)
+    url = config.frames.postgres.url
+    if url:
+        return PostgresEndedWebSessions(pools.database(url), lifetime)
+    # A warning, not a refusal: one replica without a database is a real
+    # development setup, and it works. Said at startup because on more than
+    # one replica it does not, and nothing else would say so.
+    logging.getLogger("frames_server.web").warning(
+        "web_ended_sessions_in_memory",
+        extra={
+            "reason": "frames.postgres.url is not set, so a logout reaches only the replica"
+            " that heard it; run one replica, or set frames.postgres.url"
+        },
+    )
+    return InMemoryEndedWebSessions(lifetime)
+
+
 def build_cog_catalog_store(config: BaseConfig, pools: PostgresPools) -> CogCatalogStore:
     """The Cog catalog (issue #84): the shared frames.postgres, else a store that refuses (503).
 
@@ -2000,8 +2077,9 @@ def preflight_collab_schema(config: BaseConfig, pools: PostgresPools) -> int | N
     tables a version check has nothing to protect, and once something does, the
     alternative to checking is a ``relation does not exist`` traceback from
     whichever authenticated request touched them first. Called by ``make_app``
-    only when membership resolution is on, and only when a shared Postgres URL
-    is configured — with neither, no ``collab_`` table is ever read.
+    when membership resolution is on or the web surface is (its ended sessions
+    are ``collab_`` version 18), and only when a shared Postgres URL is
+    configured — without one, no ``collab_`` table is ever read.
 
     Returns the applied version, ``None`` when the database was unreachable
     (not fatal, see :func:`~.frames.collab_schema.check_collab_schema_version`),

@@ -49,10 +49,9 @@ from starlette.routing import get_route_path
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..frames.observability import REQUEST_COUNT, UNMATCHED_PATH_LABEL, access_logger
-from .authz import on_web_surface, signin_redirect_target
+from .authz import get_web_session, on_web_surface, signed_session_for_signout, signin_redirect_target
 from .pages import SECURITY_HEADERS, authorization_unavailable_page, page_response
-from .session import SESSION_COOKIE
-from .surface import PUBLIC_WEB_PATHS, WEB_SURFACE_PREFIXES, answers_json
+from .surface import PUBLIC_WEB_PATHS, SIGNOUT_PATH, WEB_SURFACE_PREFIXES, answers_json
 
 logger = logging.getLogger("frames_server.web")
 
@@ -87,7 +86,7 @@ class WebSessionGuardMiddleware:
             await self.app(scope, receive, send)
             return
 
-        session = _session_or_none(scope, path)
+        session = await _session_or_none(scope, path)
         if session is _UNAVAILABLE:
             if answers_json(path):
                 await _deny_json(scope, send, status_code=503, error="authorization is unavailable")
@@ -128,29 +127,37 @@ def _is_public(path: str) -> bool:
     return len(path) > 1 and path.endswith("/") and path[:-1] in PUBLIC_WEB_PATHS
 
 
-def _session_or_none(scope: Scope, path: str):
-    """Decode the request's session, or :data:`_UNAVAILABLE` if undecidable.
+async def _session_or_none(scope: Scope, path: str):
+    """The request's live session, or :data:`_UNAVAILABLE` if undecidable.
+
+    Decided by :func:`~.authz.get_web_session`, the same function every route
+    asks, so the guard and the pages cannot disagree about what a session is —
+    an ended realm session (openteams-ai/subscription-manager-pack#79) included.
 
     The undecidable case is its own answer rather than an exception, so the
     caller can serve the documented 503 instead of letting the failure escape
     into outer error handling as a 500 that renders no page of this surface.
     Both are refusals; only one matches what the docs promise, and only one is
     certain to carry no internals.
+
+    Log out (:data:`~.surface.SIGNOUT_PATH`, that exact path) is the one
+    exception: it needs a cookie whose signature checks out and nothing more
+    (:func:`~.authz.signed_session_for_signout`), so a down ended-session store
+    cannot stop anyone logging out. Its CSRF check still runs at the route.
     """
 
     surface = getattr(getattr(scope.get("app"), "state", None), "web_surface", None)
-    codec = getattr(surface, "codec", None)
-    if codec is None:
+    if getattr(surface, "codec", None) is None or getattr(surface, "ended_sessions", None) is None:
         logger.error("web_guard_surface_unavailable", extra={"path": path})
         return _UNAVAILABLE
     try:
-        cookie = Request(scope).cookies.get(SESSION_COOKIE)
-        if not cookie:
-            return None
-        return codec.decode_session(cookie)
+        if path == SIGNOUT_PATH:
+            return signed_session_for_signout(Request(scope))
+        return await get_web_session(Request(scope))
     except Exception:
         # decode_session answers None for every malformed cookie, so reaching
-        # here means the codec itself is broken. Never a pass-through.
+        # here means the codec is broken or the ended-session store could not
+        # answer (its database is down). Never a pass-through.
         logger.exception("web_guard_session_decode_failed", extra={"path": path})
         return _UNAVAILABLE
 

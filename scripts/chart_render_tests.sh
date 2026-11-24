@@ -59,6 +59,9 @@ check "serving on with routeTimeout off: no /v2 rule, no timeout" serve-httprout
 check "indexer on with its own resources: one Recreate replica, the API's env, the API does not sweep" indexer-resources $STATIC --set cogs.index.enabled=true --set cogs.indexer.resources.requests.memory=1Gi --set cogs.indexer.resources.limits.memory=2Gi
 check "feature flags: each entry renders as its variable" features --set features.cogs_ui=true --set features.new_thing=false
 check "account link: the API carries it, the indexer serves no pages" account-link-with-indexer $STATIC --set cogs.index.enabled=true --set web.accountPageUrl=https://billing.example.com/account
+MEMBERSHIP='--set frames.auth.orgSource=membership --set frames.auth.identityClaim=sub --set frames.postgres.url=postgresql://db.example.com/hub --set frames.auth.bearer.jwksUrl=https://id.example.com/certs --set frames.auth.bearer.issuer=https://id.example.com'
+check "membership API off by default: no settings rendered" membership-api-off $MEMBERSHIP
+check "membership API on: client ids and audience reach the API, not the indexer" membership-api $STATIC $MEMBERSHIP --set cogs.index.enabled=true --set 'frames.membershipApi.clientIds={usage-control,subscription-manager}' --set frames.membershipApi.audience=collab-hub-membership
 check "home page: its domain and links reach the API" home-page --set home.hubDomain=example.org \
   --set home.desktopDownloadUrl=https://downloads.example.com/collab --set home.docsUrl=https://docs.example.com/collab
 check "home page with the web client: the API is told so, the indexer is not" web-client $STATIC --set cogs.index.enabled=true --set home.webClient=true
@@ -80,6 +83,12 @@ refused() { # <label> <needle> <helm args...>: the chart must refuse to render, 
   fi
 }
 refused "feature flags: a non-boolean value is refused" "/features/cogs_ui" --set-string features.cogs_ui=maybe
+# The membership API (issue #270): the same preconditions make_app enforces, and the schema's shape.
+refused "membership API: refused under claims-sourced organizations" "frames.membershipApi.clientIds requires frames.auth.orgSource" --set 'frames.membershipApi.clientIds={usage-control}'
+refused "membership API: refused without a bearer JWKS URL" "requires frames.auth.bearer.jwksUrl" $MEMBERSHIP --set frames.auth.bearer.jwksUrl= --set 'frames.membershipApi.clientIds={usage-control}'
+refused "membership API: a client id with whitespace is refused" "/frames/membershipApi/clientIds/0" $MEMBERSHIP --set 'frames.membershipApi.clientIds={usage control}'
+refused "membership API: a repeated client id is refused" "/frames/membershipApi/clientIds" $MEMBERSHIP --set 'frames.membershipApi.clientIds={a,a}'
+refused "membership API: an unknown key is refused" "clientIdz" $MEMBERSHIP --set 'frames.membershipApi.clientIdz={a}'
 # The account link's coarse schema shape (docs/web-surface.md); the API's check
 # at startup is the authoritative one (api/tests/test_web_surface.py).
 refused "root host: refused without the root host's name" "home.rootHost needs home.hubDomain" \

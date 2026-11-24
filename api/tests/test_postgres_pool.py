@@ -58,11 +58,25 @@ from collab_hub_api.frames.usage import PostgresUsageStore  # noqa: E402
 UNREACHABLE_URL = "postgresql://nexus:secret@127.0.0.1:9/frames"
 POOL_TIMEOUT_SECONDS = 0.25
 # The wait a saturated pool would impose on callers without a best-effort
-# budget. Kept long on purpose: the saturation tests assert nothing waits it.
-SATURATED_POOL_TIMEOUT_SECONDS = 5.0
-# Generous ceiling for "did not wait for the pool timeout" assertions; the
-# real cost is BEST_EFFORT_TIMEOUT_SECONDS (50ms) plus scheduling noise.
+# budget. Kept long on purpose: the saturation tests assert nothing waits it,
+# so it must sit well above BURST_RESPONSIVE_SECONDS. It only bounds waits that
+# end early when the code is correct, so raising it costs nothing on a pass.
+SATURATED_POOL_TIMEOUT_SECONDS = 10.0
+# Generous ceiling for "did not wait for the pool timeout" assertions on a
+# single call; the real cost is BEST_EFFORT_TIMEOUT_SECONDS (50ms) plus
+# scheduling noise.
 RESPONSIVE_SECONDS = 1.0
+# Ceiling for the concurrent-burst assertions. TestClient runs every request on
+# one event loop, so each request in a burst finishes at about the same time as
+# the whole burst, and its latency measures runner CPU throughput: about 50ms
+# locally, but up to ~2s on a slow, coverage-traced CI runner. A real
+# regression costs at least SATURATED_POOL_TIMEOUT_SECONDS (a request waiting out
+# the pool) or never finishes at all (a request waiting on the stalled
+# statement), so this sits between the two (see #356). "Never finishes" holds
+# only because stub_postgres_server ignores statement_timeout and cancel
+# requests; against a server that honors them, a request stuck on the
+# statement would return after about 2-4s and pass this limit.
+BURST_RESPONSIVE_SECONDS = 4.0
 
 
 def _jwt(payload: dict) -> str:
@@ -380,10 +394,9 @@ def test_saturated_pool_keeps_authenticated_and_mcp_traffic_responsive(tmp_path,
                 elapsed = time.monotonic() - started
 
         # No single request — HTTP or MCP — waited on the saturated pool, and
-        # the whole burst finished inside one pool timeout rather than one
-        # timeout per request.
-        assert max(latencies) < RESPONSIVE_SECONDS
-        assert elapsed < SATURATED_POOL_TIMEOUT_SECONDS
+        # the whole burst finished well inside even one pool timeout.
+        assert max(latencies) < BURST_RESPONSIVE_SECONDS
+        assert elapsed < BURST_RESPONSIVE_SECONDS
         # The writes really were attempted and really did fail on the saturated
         # pool: this test would pass vacuously against a no-op usage store.
         app.state.usage_store._writer.wait_idle(timeout=SATURATED_POOL_TIMEOUT_SECONDS)
@@ -425,8 +438,8 @@ def test_stalled_server_delays_neither_authenticated_mcp_nor_unrelated_requests(
 
             # Nothing waited on the stalled statement — not the authenticated
             # requests that queued it, not MCP, not the unrelated ones.
-            assert max(latencies) < RESPONSIVE_SECONDS
-            assert elapsed < RESPONSIVE_SECONDS * 2
+            assert max(latencies) < BURST_RESPONSIVE_SECONDS
+            assert elapsed < BURST_RESPONSIVE_SECONDS
             # ...and the write really did reach the server and stall there, so
             # this is not passing because nothing was attempted.
             _wait_until(lambda: stub_postgres.statements_received >= 1)

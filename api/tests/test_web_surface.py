@@ -57,6 +57,7 @@ from collab_hub_api.web.authz import (
     verify_web_route_protection,
 )
 from collab_hub_api.web.data_statement import DATA_STATEMENT_CONTACT, DATA_STATEMENT_TEXT
+from collab_hub_api.web.ended_sessions import InMemoryEndedWebSessions
 from collab_hub_api.web.forms import MAX_FORM_BYTES
 from collab_hub_api.web.legal_documents import PLACEHOLDER_NOTICE
 from collab_hub_api.web.privacy_statement import (
@@ -74,6 +75,7 @@ from collab_hub_api.web.session import (
     WebSession,
 )
 from collab_hub_api.web.surface import (
+    BACKCHANNEL_LOGOUT_PATH,
     PRIVACY_PATH,
     PUBLIC_WEB_PATHS,
     TERMS_PATH,
@@ -127,14 +129,16 @@ class _StubIdp:
         self.signing_pem = REALM_KEY_PEM
         self.nonce: str | None = None
         self.sub = "subject-alice"
+        self.sid = "realm-session-1"
         self.minted: list[str] = []
+        self.extra_jwks: list[dict] = []
 
         idp = self
 
         class _Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 if self.path.endswith("/protocol/openid-connect/certs"):
-                    body = json.dumps({"keys": [REALM_KEY_JWK]}).encode()
+                    body = json.dumps({"keys": [REALM_KEY_JWK, *idp.extra_jwks]}).encode()
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(body)))
@@ -182,6 +186,7 @@ class _StubIdp:
             "azp": WEB_CLIENT_ID,
             "typ": "ID",
             "sub": self.sub,
+            "sid": self.sid,
             "preferred_username": "alice",
             "name": "Alice Example",
             "email": "alice@example.com",
@@ -290,6 +295,7 @@ def test_codec_round_trips_a_session():
         csrf="csrf-token",
         issued_at=now,
         expires_at=now + 60,
+        sid="realm-session-1",
     )
     decoded = codec.decode_session(codec.encode_session(session))
     assert decoded == session
@@ -896,7 +902,15 @@ async def test_a_session_minted_without_an_id_token_still_ends_the_realm_session
     now = int(time.time())
     old_cookie = codec.encode(
         SESSION_PURPOSE,
-        {"sub": "subject-alice", "name": None, "email": None, "csrf": "old-csrf", "iat": now, "exp": now + 600},
+        {
+            "sub": "subject-alice",
+            "sid": "realm-session-1",
+            "name": None,
+            "email": None,
+            "csrf": "old-csrf",
+            "iat": now,
+            "exp": now + 600,
+        },
     )
     async with web_client(app) as client:
         client.cookies.set(SESSION_COOKIE, old_cookie, domain="web.test", path="/")
@@ -982,6 +996,10 @@ async def test_signing_out_from_the_account_page_and_in_again_lands_on_home(tmp_
         token = re.search(r'name="csrf_token" value="([^"]+)"', account).group(1)
         signout = await client.post("/web/signout", data={"csrf_token": token})
         _endpoint, params = realm_logout_target(signout)
+        # The realm ends its session, so the next sign-in is a new realm
+        # session; signing back into the ended one is a different case
+        # (test_web_backchannel_logout, the unfinished logout).
+        idp.sid = "realm-session-after-logout"
         # The realm returns the browser here; follow it as the browser would.
         signed_out = await client.get(params["post_logout_redirect_uri"])
         again = html.unescape(re.search(r'<a href="([^"]+)">Sign in again</a>', signed_out.text).group(1))
@@ -1016,6 +1034,7 @@ def test_the_session_cookie_fits_at_every_id_token_size_up_to_the_limit():
             csrf="c" * 43,
             issued_at=now,
             expires_at=now + 60,
+            sid="realm-session-1",
             id_token="t" * length,
         )
         value = codec.encode_session(session)
@@ -1035,7 +1054,7 @@ def test_a_session_id_token_that_is_not_a_nonempty_string_decodes_to_none(idt):
     now = int(time.time())
     value = codec.encode(
         SESSION_PURPOSE,
-        {"sub": "subject-alice", "csrf": "x", "iat": now, "exp": now + 60, "idt": idt},
+        {"sub": "subject-alice", "sid": "realm-session-1", "csrf": "x", "iat": now, "exp": now + 60, "idt": idt},
     )
     decoded = codec.decode_session(value)
     assert decoded is not None
@@ -1064,6 +1083,7 @@ def test_codec_round_trips_a_session_with_its_id_token():
         csrf="csrf-token",
         issued_at=now,
         expires_at=now + 60,
+        sid="realm-session-1",
         id_token="header.payload.signature",
     )
     assert codec.decode_session(codec.encode_session(session)) == session
@@ -1633,7 +1653,15 @@ async def test_the_move_runs_before_the_signed_in_shortcut(tmp_path, idp):
     app = make_web_app(tmp_path, idp, web={"public_base_url": PUBLIC_BASE_URL})
     now = int(time.time())
     alias_session = SessionCodec(SESSION_SECRET).encode_session(
-        WebSession(user="subject-alice", name=None, email=None, csrf="c", issued_at=now, expires_at=now + 600)
+        WebSession(
+            user="subject-alice",
+            name=None,
+            email=None,
+            csrf="c",
+            issued_at=now,
+            expires_at=now + 600,
+            sid="realm-session-1",
+        )
     )
     async with public_host_client(app, "https://alias.example.com") as client:
         client.cookies.set(SESSION_COOKIE, alias_session, domain="alias.example.com", path="/")
@@ -1868,22 +1896,32 @@ def test_every_web_route_outside_the_allowlist_requires_a_session(tmp_path, idp)
         if route.path in PUBLIC_WEB_PATHS:
             continue
         checked += 1
-        dependency_calls = [d.call for d in route.dependant.dependencies]
-        assert require_web_session in dependency_calls, (
-            f"{route.path} is not in PUBLIC_WEB_PATHS and does not require a web session"
-        )
+        assert _requires_a_session(route), f"{route.path} is not in PUBLIC_WEB_PATHS and does not require a web session"
     assert checked, "expected at least one session-gated /web route"
+
+
+def _requires_a_session(route) -> bool:
+    """``require_web_session`` as a direct dependency, or, at ``/web/signout`` and
+    nowhere else, Log out's ``require_signout_csrf`` (a verified cookie without
+    the ended-session lookup, so Log out works while that store is down)."""
+
+    from collab_hub_api.web.authz import require_signout_csrf, require_signout_session
+    from collab_hub_api.web.surface import SIGNOUT_PATH
+
+    calls = [d.call for d in route.dependant.dependencies]
+    if require_web_session in calls:
+        return True
+    if route.path != SIGNOUT_PATH or require_signout_csrf not in calls:
+        return False
+    (csrf,) = [d for d in route.dependant.dependencies if d.call is require_signout_csrf]
+    return [d.call for d in csrf.dependencies] == [require_signout_session]
 
 
 def test_the_public_allowlist_is_exactly_what_is_registered_public(tmp_path, idp):
     # The other direction: nothing quietly public that the allowlist does not
     # name, and no stale allowlist entry that no longer exists.
     app = make_web_app(tmp_path, idp)
-    registered_public = {
-        route.path
-        for route in web_routes(app)
-        if require_web_session not in [d.call for d in route.dependant.dependencies]
-    }
+    registered_public = {route.path for route in web_routes(app) if not _requires_a_session(route)}
     assert registered_public == set(PUBLIC_WEB_PATHS)
 
 
@@ -2215,6 +2253,7 @@ def a_surface(**overrides) -> dict:
         "codec": SessionCodec(SESSION_SECRET),
         "session_lifetime_seconds": 3600,
         "public_base_url": "",
+        "ended_sessions": InMemoryEndedWebSessions(3600),
         **overrides,
     }
 
@@ -2803,6 +2842,10 @@ async def test_the_guard_leaves_the_public_allowlist_reachable(tmp_path, idp):
     async with web_client(app) as client:
         for path in sorted(PUBLIC_WEB_PATHS):
             response = await client.get(path)
+            if path == BACKCHANNEL_LOGOUT_PATH:
+                # Keycloak's server-to-server POST: reached, and not a GET.
+                assert response.status_code == 405, path
+                continue
             assert response.status_code in (200, 303, 400), path
             if response.status_code == 303:
                 # Only the callback bounces, and never back to sign-in.
@@ -3581,17 +3624,21 @@ def test_the_exemption_is_load_bearing_not_a_vacuous_pass(tmp_path, idp):
         verify_web_route_protection(app.routes)
 
 
-def test_signout_is_the_only_state_changing_route_and_it_is_gated(tmp_path, idp):
+def test_signout_and_the_backchannel_logout_are_the_only_state_changing_routes(tmp_path, idp):
     from collab_hub_api.web.authz import route_enforces_csrf, route_unsafe_methods
 
     app = make_web_app(tmp_path, idp)
-    mutating = [
-        route
+    mutating = {
+        route.path: route
         for route in app.routes
         if isinstance(route, APIRoute) and route.path.startswith("/web") and route_unsafe_methods(route)
-    ]
-    assert [route.path for route in mutating] == ["/web/signout"]
-    assert route_enforces_csrf(mutating[0])
+    }
+    assert sorted(mutating) == [BACKCHANNEL_LOGOUT_PATH, "/web/signout"]
+    assert route_enforces_csrf(mutating["/web/signout"])
+    # Keycloak's call carries neither a session nor a CSRF token: the logout
+    # token is its authentication, and all it can do is end a session.
+    assert BACKCHANNEL_LOGOUT_PATH in PUBLIC_WEB_PATHS
+    assert not route_enforces_csrf(mutating[BACKCHANNEL_LOGOUT_PATH])
 
 
 # --- second-reader finding 2: the guard covers three prefixes, the map check one --

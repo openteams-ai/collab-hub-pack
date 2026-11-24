@@ -130,11 +130,22 @@ npm ci --ignore-scripts && npm test          # the admin panel (Vitest)
 ```
 
 CI runs both: the `test` job runs pytest against a real Postgres service, and
-the `admin-ui` job runs `npm ci`, `npm audit` (through
-[`scripts/check_npm_audit.py`](scripts/check_npm_audit.py), which accepts only
-the advisories [`api/admin-ui/audit-allowlist.json`](api/admin-ui/audit-allowlist.json)
-lists, until each entry expires, and warns on an entry whose advisory is no
-longer reported), the typecheck, Vitest and the production build.
+the `admin-ui` job runs `npm ci`, the typecheck, Vitest and the production
+build.
+
+A separate workflow,
+[`security-npm.yaml`](.github/workflows/security-npm.yaml), runs `npm audit`
+on the committed lockfile of each npm project: the admin panel and the release
+tooling in
+[`scripts/release/semantic-release/`](scripts/release/semantic-release/). It
+runs on every PR, on pushes to `main`, and weekly. Each audit goes through
+[`scripts/security/check_npm_audit.py`](scripts/security/check_npm_audit.py),
+which fails on any advisory the project's `audit-allowlist.json`
+([admin panel](api/admin-ui/audit-allowlist.json),
+[release tooling](scripts/release/semantic-release/audit-allowlist.json))
+doesn't list, or lists with an expiry that has passed. It warns on an entry
+whose advisory is no longer reported. The release itself never audits, so an
+advisory in the release tooling fails PRs but never blocks a release.
 
 ## Documentation
 

@@ -1,0 +1,17 @@
+{
+  "$comment": "npm audit advisories CI accepts in the release tooling until each entry expires; checked by scripts/security/check_npm_audit.py in .github/workflows/security-npm.yaml. Add an entry only for an advisory with no usable fix whose code the release never runs, and remove it once a fix ships: the check warns on an entry no longer reported, and fails on one past its expiry. \"expires\": null means no expiry; the entry then lasts until it is removed, with a warning once its advisory is no longer reported. \"dev_only\" does not apply here: every package in this project is a production dependency of the tool.",
+  "allowlist": [
+    {
+      "id": "GHSA-3g3m-2fjr-6pw4",
+      "expires": null,
+      "reason": "glob is bundled inside npm, which only @semantic-release/npm pulls in. .releaserc.json does not load that plugin, so the code never runs, and no npm release yet bundles a fixed glob (>= 14.0.2).",
+      "tracking": "https://github.com/openteams-ai/collab-hub-pack/issues/324"
+    },
+    {
+      "id": "GHSA-g3hv-75wg-m249",
+      "expires": null,
+      "reason": "minimatch is bundled inside npm, which only @semantic-release/npm pulls in. .releaserc.json does not load that plugin, so the code never runs, and no npm release yet bundles a fixed minimatch (>= 11.0.1).",
+      "tracking": "https://github.com/openteams-ai/collab-hub-pack/issues/324"
+    }
+  ]
+}

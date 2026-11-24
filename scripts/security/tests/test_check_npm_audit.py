@@ -1,6 +1,6 @@
-"""Tests for scripts/check_npm_audit.py: that it refuses what it exists to refuse.
+"""Tests for scripts/security/check_npm_audit.py: that it refuses what it exists to refuse.
 
-    python3 -m unittest discover --start-directory scripts/tests --pattern test_check_npm_audit.py --verbose
+    python3 -m unittest discover --start-directory scripts/security/tests --pattern test_check_npm_audit.py --verbose
 
 Standard library only, like the check. The reports are synthetic, shaped like ``npm audit --json``
 (auditReportVersion 2) output for api/admin-ui's picomatch -> fdir -> tinyglobby -> vite chain.

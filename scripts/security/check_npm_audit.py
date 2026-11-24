@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Fail on any npm audit advisory that an unexpired allowlist entry does not cover.
 
-    python3 scripts/check_npm_audit.py DIRECTORY [--allowlist FILE] [--report FILE] [--level LEVEL]
+    python3 scripts/security/check_npm_audit.py DIRECTORY [--allowlist FILE] [--report FILE] [--level LEVEL]
 
-Runs ``npm audit --json`` in DIRECTORY (or reads a saved report with ``--report``) and checks each
-advisory at or above LEVEL (default ``low``, as ``npm audit --audit-level=low``) against
+Runs ``npm audit --json --package-lock-only`` in DIRECTORY (or reads a saved report with
+``--report``), which audits DIRECTORY/package-lock.json, not whatever is installed, so nothing
+needs to be installed and no dependency's code runs. It then checks each advisory at or above LEVEL (default ``low``, as ``npm audit --audit-level=low``) against
 DIRECTORY/audit-allowlist.json. It fails on:
 
 - an advisory at or above LEVEL whose GHSA ID no allowlist entry names;
@@ -142,8 +143,11 @@ def run_npm_audit(directory: Path) -> str:
     if npm is None:
         raise SystemExit("error: npm not found on PATH")
     # npm audit exits non-zero whenever it finds anything; the JSON on stdout is what counts, and
-    # parse_report refuses it if npm could not audit at all.
-    result = subprocess.run([npm, "audit", "--json"], cwd=directory, capture_output=True, text=True, check=False)
+    # parse_report refuses it if npm could not audit at all. --package-lock-only audits the committed
+    # lockfile, the same tree the dev_only check reads, even where node_modules is stale or absent.
+    result = subprocess.run(
+        [npm, "audit", "--json", "--package-lock-only"], cwd=directory, capture_output=True, text=True, check=False
+    )
     if not result.stdout.strip():
         raise SystemExit(f"error: npm audit printed no report (exit {result.returncode}):\n{result.stderr}")
     return result.stdout

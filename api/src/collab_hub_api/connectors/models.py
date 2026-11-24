@@ -853,9 +853,11 @@ class SharePointSearchRequest(BaseModel):
     # ``relevance`` is Graph's default ranking; ``modified`` is newest first, the
     # natural order for a daily digest ("what changed yesterday").
     sort: Literal["relevance", "modified"] = "relevance"
-    # Opaque continuation from a prior response's ``next_page_token``. It wraps
-    # Graph's ``from`` offset plus a fingerprint of (query, window, sort, limit);
-    # reusing it after changing any of those is a stale cursor and rejected with 422.
+    # Opaque continuation from a prior response's ``next_page_token``. A relevance
+    # token wraps Graph's ``from`` offset; a modified token wraps an offset into
+    # the Hub-sorted result set and also binds ``time_zone``. Either carries a
+    # fingerprint of (query, window, sort, limit); reusing it after changing any
+    # of those is a stale cursor and rejected with 422.
     page_token: str = Field(default="", max_length=256)
 
     @model_validator(mode="after")
@@ -907,9 +909,16 @@ class SharePointSearchHit(SharePointItemMetadata):
 class SharePointSearchResponse(UntrustedConnectorResponse):
     hits: list[SharePointSearchHit]
     next_page_token: str = ""
-    # Graph's estimate of matching items (before the Hub's OneDrive/window
-    # filtering), so a digest can say "12 files changed" without paging them all.
+    # Matching items, so a digest can say "12 files changed" without paging them
+    # all. Relevance order: Graph's estimate, before the Hub's OneDrive/window
+    # filtering. Modified order: the exact count after that filtering and
+    # de-duplication, or Graph's estimate when ``incomplete_results`` is set.
     total: int = 0
+    # Modified order only: Graph reported more matches than the one bounded
+    # response the Hub sorts (500), so ``hits`` are the newest of the matches
+    # received and may miss newer files. Narrowing the query or date window gives
+    # a complete newest-first list.
+    incomplete_results: bool = False
 
 
 class SharePointReadResponse(UntrustedConnectorResponse):

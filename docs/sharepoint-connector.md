@@ -129,6 +129,12 @@ desktop reaches them through the authenticated loopback proxy with no credential
 | POST | `/search` | Microsoft Search over `driveItem`s (files and folders in document libraries). `query` words are wrapped in their own KQL group; `days_back`/`since_date`/`until_date` (in `time_zone`) become a `LastModifiedTime` clause **and** are re-checked per hit. `sort` is `relevance` or `modified` (newest first). Offset paging via an opaque `page_token` bound to the search. |
 | POST | `/drives/{drive_id}/items/{item_id}/read` | Metadata plus bounded text of one file. Text files are read directly; PDFs are downloaded; Word/PowerPoint/Excel (and the other formats Graph converts) go through `/content?format=pdf`; text is extracted in the Hub. Folders, images, archives, oversized or image-only files return `unsupported: true` with a reason and the metadata. |
 
+Modification sorting retrieves one relevance result set of at most 500 raw matches, applies the same per-user and date-window filters, then sorts newest first before pagination. Equal timestamps use drive and item IDs as deterministic tie-breakers; missing timestamps sort last when no date window is supplied. Repeated drive/item IDs are returned once, retaining their newest metadata; distinct same-name items remain separate. This avoids Microsoft Graph's explicit sorting path silently omitting recently indexed files.
+
+When Graph reports more matches than that one response holds (`moreResultsAvailable`), the response still lists the newest of the matches it received, but sets `incomplete_results: true`: newer files may be missing, and `total` is Graph's estimate. Narrow the query or date window for a complete newest-first list. Otherwise `total` is the exact number of matches after filtering and de-duplication. In relevance order, `total` remains Graph's estimate before that filtering.
+
+Each chronological page repeats the bounded search, so a first-page digest costs one Graph search and every further page costs another. Concurrent source changes can shift offsets between pages; this is not a frozen snapshot. Modified-order page tokens also bind `time_zone`, and tokens issued before this change must be restarted. Relevance paging is unchanged.
+
 Error mapping: `409` not connected / reconnect, `422` bad id / stale or garbage
 `page_token` / bad params / Graph `400`, `404` item not visible (with guidance),
 `429` Graph throttling with `Retry-After` passed through, `502` provider failure

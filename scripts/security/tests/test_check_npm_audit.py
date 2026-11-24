@@ -249,6 +249,31 @@ class AllowlistTests(CheckTestCase):
         )
         self.assertNotIn("WARNING:", self.stdout)
 
+    def test_fail_on_stale_fails_on_an_entry_no_longer_reported(self) -> None:
+        self.report["vulnerabilities"] = {}
+        code, stderr = self.run_main("--fail-on-stale")
+        self.assertEqual(code, 1)
+        self.assertIn(f"FAIL: {ALLOWED}: allowlisted but no longer reported; remove its allowlist entry", stderr)
+        self.assertNotIn("WARNING", self.stdout)
+
+    def test_fail_on_stale_passes_an_entry_still_reported(self) -> None:
+        self.allowlist = {"allowlist": [entry(expires=None)]}
+        self.assertEqual(self.run_main("--fail-on-stale"), (0, ""))
+
+    def test_fail_on_stale_is_a_github_error_annotation_on_its_line(self) -> None:
+        self.github_actions = True
+        self.report["vulnerabilities"] = {}
+        code, stderr = self.run_main("--fail-on-stale")
+        self.assertEqual(code, 1)
+        self.assertIn(f"FAIL: {ALLOWED}: allowlisted but no longer reported", stderr)
+        self.assertRegex(
+            self.stdout,
+            r"(?m)^::error file=[^,\n]*allowlist\.json,line=4,title=Stale npm audit allowlist entry::"
+            + ALLOWED
+            + ": allowlisted but no longer reported; remove its allowlist entry$",
+        )
+        self.assertNotIn("::warning", self.stdout)
+
     def test_annotation_escapes_workflow_command_characters(self) -> None:
         # Not written: an unreadable allowlist still yields an annotation, just without a line.
         command = check.annotation("50% done\nnext", Path("C:/odd,100%.json"), ALLOWED)

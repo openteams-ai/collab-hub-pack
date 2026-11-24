@@ -1,5 +1,5 @@
 {
-  "$comment": "npm audit advisories CI accepts in the release tooling until each entry expires; checked by scripts/security/check_npm_audit.py in .github/workflows/security-npm.yaml. Add an entry only for an advisory with no usable fix whose code the release never runs, and remove it once a fix ships: the check warns on an entry no longer reported, and fails on one past its expiry. \"expires\": null means no expiry; the entry then lasts until it is removed, with a warning once its advisory is no longer reported. \"dev_only\" does not apply here: every package in this project is a production dependency of the tool.",
+  "$comment": "npm audit advisories CI accepts in the release tooling until each entry expires; checked by scripts/security/check_npm_audit.py in .github/workflows/security-npm.yaml. Add an entry only for an advisory with no usable fix whose code the release never runs, and remove it once a fix ships: the check warns on an entry no longer reported (the weekly run fails on one), and fails on one past its expiry. \"expires\": null means no expiry; the entry then lasts until it is removed, with a warning once its advisory is no longer reported. \"dev_only\" does not apply here: every package in this project is a production dependency of the tool.",
   "allowlist": [
     {
       "id": "GHSA-3g3m-2fjr-6pw4",

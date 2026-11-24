@@ -10,10 +10,15 @@ name: npm Dependency Audit
 # The audit reads package-lock.json only (--package-lock-only), so nothing is
 # installed and no dependency's code runs. It runs on every PR and merge
 # group, on pushes to main, and weekly, so a newly published advisory, or an
-# allowlist entry that has expired or gone stale, shows up on main even in a
-# week with no PRs. The release itself never audits (semantic-release.yml
-# installs with --no-audit), so an advisory in the release tooling fails PRs
-# here but never blocks a release.
+# allowlist entry that has expired or gone stale, fails a run on main even in
+# a week with no PRs. A stale entry (its advisory no longer reported) only
+# warns on other runs, as it follows from a change upstream, not from the PR;
+# the weekly run fails on it, so it is removed rather than left to cover the
+# advisory if it ever returns.
+#
+# The release itself never audits (semantic-release.yml installs with
+# --no-audit), so an advisory in the release tooling fails PRs here but never
+# blocks a release.
 
 on:
   pull_request: {}   # runs on every PR so it can be a required status check
@@ -64,10 +69,12 @@ jobs:
 
       # npm cannot ignore an advisory, and one with no patched release would
       # otherwise block CI until upstream ships one; hence the allowlist. The
-      # check also fails on an entry past its expiry, and annotates one no
-      # longer reported with a warning rather than failing: that follows from
-      # a fix or withdrawal upstream, not from the PR.
+      # check also fails on an entry past its expiry. One no longer reported
+      # gets a warning annotation, except on the weekly run, which fails on it
+      # (--fail-on-stale): no PR depends on that run, and a warning on a green
+      # run goes unseen.
       - name: Audit
         env:
           DIRECTORY: ${{ matrix.directory }}
-        run: python3 scripts/security/check_npm_audit.py "$DIRECTORY"
+          FAIL_ON_STALE: ${{ github.event_name == 'schedule' && '--fail-on-stale' || '' }}
+        run: python3 scripts/security/check_npm_audit.py "$DIRECTORY" $FAIL_ON_STALE

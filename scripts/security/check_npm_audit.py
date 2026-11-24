@@ -2,11 +2,13 @@
 """Fail on any npm audit advisory that an unexpired allowlist entry does not cover.
 
     python3 scripts/security/check_npm_audit.py DIRECTORY [--allowlist FILE] [--report FILE] [--level LEVEL]
+                                                [--fail-on-stale]
 
 Runs ``npm audit --json --package-lock-only`` in DIRECTORY (or reads a saved report with
 ``--report``), which audits DIRECTORY/package-lock.json, not whatever is installed, so nothing
-needs to be installed and no dependency's code runs. It then checks each advisory at or above LEVEL (default ``low``, as ``npm audit --audit-level=low``) against
-DIRECTORY/audit-allowlist.json. It fails on:
+needs to be installed and no dependency's code runs. It then checks each advisory at or above
+LEVEL (default ``low``, as ``npm audit --audit-level=low``) against DIRECTORY/audit-allowlist.json.
+It fails on:
 
 - an advisory at or above LEVEL whose GHSA ID no allowlist entry names;
 - an allowlist entry past its ``expires`` date (if it has one), whether or not its advisory is
@@ -19,7 +21,9 @@ It warns, without failing, on an unexpired allowlist entry no advisory in the re
 fixed or withdrawn advisory's exception is removed rather than left to cover a later recurrence.
 That is a warning because it follows from a change upstream (a fix, a withdrawn advisory, a
 narrowed range), not in this repo, and should not turn every open pull request red. Under GitHub
-Actions it is a ``::warning::`` annotation on the entry's line in the allowlist.
+Actions it is a ``::warning::`` annotation on the entry's line in the allowlist. With
+``--fail-on-stale`` it fails instead, with an ``::error::`` annotation there: for a run no pull
+request depends on, such as a scheduled one, where a warning on a green run would go unseen.
 
 It exists because ``npm audit`` cannot ignore an advisory, and an advisory with no patched release
 otherwise blocks CI until upstream ships one. audit-ci is not used: its last release (7.1.0)
@@ -246,8 +250,8 @@ def check(
     return lines, failures, warnings
 
 
-def annotation(message: str, allowlist_path: Path, advisory_id: str) -> str:
-    """Return a GitHub Actions ``::warning::`` command for ``message``, on the entry's line if found."""
+def annotation(message: str, allowlist_path: Path, advisory_id: str, level: str = "warning") -> str:
+    """Return a GitHub Actions ``::{level}::`` command for ``message``, on the entry's line if found."""
 
     def escape_data(value: str) -> str:
         return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
@@ -265,7 +269,7 @@ def annotation(message: str, allowlist_path: Path, advisory_id: str) -> str:
             properties.append(f"line={number}")
             break
     properties.append("title=Stale npm audit allowlist entry")
-    return f"::warning {','.join(properties)}::{escape_data(message)}"
+    return f"::{level} {','.join(properties)}::{escape_data(message)}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -276,6 +280,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--report", type=Path, help="read this saved `npm audit --json` report instead of running it")
     parser.add_argument("--level", choices=SEVERITIES[1:], default="low", help="lowest severity that fails")
+    parser.add_argument(
+        "--fail-on-stale",
+        action="store_true",
+        help="fail, rather than warn, on an allowlist entry whose advisory is no longer reported",
+    )
     parser.add_argument("--today", type=datetime.date.fromisoformat, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
@@ -296,9 +305,11 @@ def main(argv: list[str] | None = None) -> int:
     for advisory_id, warning in warnings.items():
         # GitHub reads workflow commands from stdout only.
         if in_github_actions:
-            print(annotation(warning, allowlist_path, advisory_id))
-        else:
+            print(annotation(warning, allowlist_path, advisory_id, "error" if args.fail_on_stale else "warning"))
+        elif not args.fail_on_stale:
             print(f"WARNING: {warning}")
+    if args.fail_on_stale:
+        failures.extend(warnings.values())
     sys.stdout.flush()
     for failure in failures:
         print(f"FAIL: {failure}", file=sys.stderr)

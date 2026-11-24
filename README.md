@@ -144,7 +144,8 @@ which fails on any advisory the project's `audit-allowlist.json`
 ([admin panel](api/admin-ui/audit-allowlist.json),
 [release tooling](scripts/release/semantic-release/audit-allowlist.json))
 doesn't list, or lists with an expiry that has passed. It warns on an entry
-whose advisory is no longer reported. The release itself never audits, so an
+whose advisory is no longer reported, and the weekly run fails on one, so it
+gets removed. The release itself never audits, so an
 advisory in the release tooling fails PRs but never blocks a release.
 
 ## Documentation

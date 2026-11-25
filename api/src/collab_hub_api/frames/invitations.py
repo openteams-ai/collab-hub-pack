@@ -1726,15 +1726,23 @@ class PostgresInvitationService:
         org_id = invitation.org_id
         if org_id is not None:
             # A retired self-service organization takes no new members (issue
-            # #365): its owner has left. FOR SHARE conflicts with the FOR
-            # UPDATE the move takes on that row, so an acceptance into it and
-            # its owner's move serialize; an invitation issued in the window
-            # before the move committed is refused here rather than seating
-            # someone in an organization with no owner.
-            destination = conn.execute(
-                "SELECT retired_at FROM collab_orgs WHERE id = %s FOR SHARE", (org_id,)
-            ).fetchone()
-            if destination is not None and destination["retired_at"] is not None:
+            # #365): its owner has left. The check is a no-op UPDATE rather
+            # than a locking read, on purpose. Under READ COMMITTED it waits
+            # behind the move's FOR UPDATE on the same row and then re-reads
+            # `retired_at`. Under REPEATABLE READ or SERIALIZABLE it writes a
+            # new row version, so a move whose snapshot predates this
+            # acceptance fails with a serialization error when it locks the
+            # row, and its retry sees this member and refuses. A lock alone
+            # would not do that: locking a row a concurrent transaction only
+            # locked raises nothing.
+            if (
+                conn.execute(
+                    "UPDATE collab_orgs SET retired_at = retired_at WHERE id = %s AND retired_at IS NULL RETURNING id",
+                    (org_id,),
+                ).fetchone()
+                is None
+                and conn.execute("SELECT 1 AS present FROM collab_orgs WHERE id = %s", (org_id,)).fetchone()
+            ):
                 raise OrgNotFoundError("Organization not found")
         if org_id is None:
             # The guard runs at issuance too, but acceptance is where the

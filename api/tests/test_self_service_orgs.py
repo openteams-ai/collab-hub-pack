@@ -503,12 +503,27 @@ def test_live_frames_follow_their_owner_and_become_private(live_db, tmp_path):
     # a write authorized against the old organization could still land.
     assert service.complete_frame_moves(frames, from_org_id=acceptance.moved_from_org_id) == 0
     assert _rows(live_db, "SELECT state, moved FROM collab_frame_moves") == [{"state": "pending", "moved": 3}]
+    with live_db.connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS frames_server_groups (
+                id text PRIMARY KEY, org_id text NOT NULL, visibility text NOT NULL DEFAULT 'private',
+                updated_at timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO frames_server_groups (id, org_id, visibility) VALUES ('late', %s, 'internal')", (personal,)
+        )
     late = frames.create_frame(
         personal, WORKSPACE_DEFAULT, ALICE, [ALICE], "Late", "", Visibility.internal, [], "# L\n"
     )
     _settle(live_db)
     assert service.complete_frame_moves(frames, from_org_id=acceptance.moved_from_org_id) == 1
     assert frames.get_frame(late.id).org_id == TEAM
+    assert _rows(live_db, "SELECT org_id, visibility FROM frames_server_groups WHERE id = 'late'") == [
+        {"org_id": TEAM, "visibility": "private"}
+    ]
 
     for frame in made:
         moved = frames.get_frame(frame.id)

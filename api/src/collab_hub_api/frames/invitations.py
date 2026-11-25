@@ -1724,6 +1724,18 @@ class PostgresInvitationService:
             )
 
         org_id = invitation.org_id
+        if org_id is not None:
+            # A retired self-service organization takes no new members (issue
+            # #365): its owner has left. FOR SHARE conflicts with the FOR
+            # UPDATE the move takes on that row, so an acceptance into it and
+            # its owner's move serialize; an invitation issued in the window
+            # before the move committed is refused here rather than seating
+            # someone in an organization with no owner.
+            destination = conn.execute(
+                "SELECT retired_at FROM collab_orgs WHERE id = %s FOR SHARE", (org_id,)
+            ).fetchone()
+            if destination is not None and destination["retired_at"] is not None:
+                raise OrgNotFoundError("Organization not found")
         if org_id is None:
             # The guard runs at issuance too, but acceptance is where the
             # organization row is actually created — and an org-creating

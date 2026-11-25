@@ -7,11 +7,19 @@ a ``collab_frame_moves`` row in its own transaction and this module performs
 the move afterwards: right after the acceptance commits, and again from a
 periodic sweep for any row a crash or an object-store error left ``pending``.
 
-Every step is idempotent. Re-homing a frame sets two metadata fields to fixed
-values, so a frame moved twice ends up exactly where a frame moved once does,
-and a row is marked ``done`` only after every frame still in the old
-organization has been moved. A frame that fails to move leaves the row
-``pending`` for the next attempt.
+Every step is idempotent. A frame moves only if it is still in the old
+organization (the store decides that on its own guarded write), so two movers
+working from overlapping listings move each frame once and never undo a change
+the owner made after the first move.
+
+A row is marked ``done`` only when a pass moved or found every frame, could
+read every record in the store, and ran at least :data:`SETTLE_SECONDS` after
+the acceptance. The last condition covers a frame write that was authorized
+against the old organization just before the acceptance and lands just after
+it: no request lives that long, so a pass after the window sees it. Until then
+the row stays ``pending`` and the sweep keeps coming back. ``moved`` counts
+frames this module moved; it is informational, and a crash between a move and
+the counter update leaves it short.
 
 Frame *groups* are not handled here: they live in the database and move inside
 the acceptance transaction.
@@ -31,62 +39,76 @@ one lists the frame store, so this is deliberately unhurried."""
 
 _SWEEP_BATCH = 20
 
+SETTLE_SECONDS = 900
+"""How long after the acceptance a move must keep looking before it can be
+``done``: longer than any request that could have been authorized against the
+old organization before it was retired."""
+
 
 def complete_frame_moves(db, frames_store, *, from_org_id: str | None = None) -> int:
     """Perform pending moves: one organization's, or up to a batch of any.
 
-    Returns how many moves this call finished. Raises nothing for a single
-    frame's failure (it is logged and the move stays pending); a database
-    failure propagates, since nothing can be decided without the queue.
+    Returns how many moves this call marked ``done``. A single frame's
+    failure is logged and leaves the move pending; a database failure
+    propagates, since nothing can be decided without the queue. The sweep
+    takes the least recently attempted moves first, so a move that cannot
+    finish (an unreadable record in the store) does not starve the others.
     """
 
+    columns = "from_org_id, to_org_id, (created_at <= now() - make_interval(secs => %s)) AS settled"
     with db.connection() as conn:
         if from_org_id is not None:
             rows = conn.execute(
-                "SELECT from_org_id, to_org_id FROM collab_frame_moves WHERE from_org_id = %s AND state = 'pending'",
-                (from_org_id,),
+                f"SELECT {columns} FROM collab_frame_moves WHERE from_org_id = %s AND state = 'pending'",
+                (SETTLE_SECONDS, from_org_id),
             ).fetchall()
         else:
             rows = conn.execute(
-                """
-                SELECT from_org_id, to_org_id FROM collab_frame_moves
-                WHERE state = 'pending' ORDER BY created_at LIMIT %s
+                f"""
+                SELECT {columns} FROM collab_frame_moves
+                WHERE state = 'pending' ORDER BY updated_at, created_at LIMIT %s
                 """,
-                (_SWEEP_BATCH,),
+                (SETTLE_SECONDS, _SWEEP_BATCH),
             ).fetchall()
     finished = 0
     for row in rows:
-        if _move_one(db, frames_store, from_org_id=row["from_org_id"], to_org_id=row["to_org_id"]):
+        if _move_one(
+            db, frames_store, from_org_id=row["from_org_id"], to_org_id=row["to_org_id"], settled=row["settled"]
+        ):
             finished += 1
     return finished
 
 
-def _move_one(db, frames_store, *, from_org_id: str, to_org_id: str) -> bool:
+def _move_one(db, frames_store, *, from_org_id: str, to_org_id: str, settled: bool) -> bool:
+    undecodable: list[str] = []
     try:
-        frames = frames_store.list_frames(from_org_id, WORKSPACE_DEFAULT)
+        frames = frames_store.list_frames(from_org_id, WORKSPACE_DEFAULT, undecodable=undecodable)
     except Exception:
         logger.exception("frame_move_list_failed", extra={"from_org": from_org_id})
-        return False
-    failed = 0
+        frames, undecodable = [], ["<listing failed>"]
+    moved = failed = 0
     for frame in frames:
         try:
-            frames_store.move_to_org(frame.id, to_org_id)
+            if frames_store.move_to_org(frame.id, from_org_id, to_org_id):
+                moved += 1
         except Exception:
             failed += 1
             logger.exception("frame_move_failed", extra={"from_org": from_org_id, "frame": frame.id})
+    if undecodable:
+        logger.warning(
+            "frame_move_incomplete_listing",
+            extra={"from_org": from_org_id, "unreadable": len(undecodable)},
+        )
+    complete = settled and not failed and not undecodable
     with db.connection() as conn:
-        if failed:
-            conn.execute(
-                "UPDATE collab_frame_moves SET moved = moved + %s, updated_at = now() WHERE from_org_id = %s",
-                (len(frames) - failed, from_org_id),
-            )
-            return False
         conn.execute(
             """
-            UPDATE collab_frame_moves SET state = 'done', moved = moved + %s, updated_at = now()
-            WHERE from_org_id = %s
+            UPDATE collab_frame_moves
+            SET state = CASE WHEN %s THEN 'done' ELSE state END, moved = moved + %s, updated_at = now()
+            WHERE from_org_id = %s AND state = 'pending'
             """,
-            (len(frames), from_org_id),
+            (complete, moved, from_org_id),
         )
-    logger.info("frame_move_done", extra={"from_org": from_org_id, "to_org": to_org_id, "frames": len(frames)})
-    return True
+    if complete:
+        logger.info("frame_move_done", extra={"from_org": from_org_id, "to_org": to_org_id})
+    return complete

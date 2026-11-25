@@ -29,7 +29,7 @@ from .org_source import (
     single_org_declaration,
 )
 from .orgs import OrgStore, OrgsUnavailableError
-from .self_service import SelfServicePolicy, admit_self_service, self_service_policy
+from .self_service import SelfServicePolicy, admit_self_service, is_service_token, self_service_policy
 
 auth_logger = logging.getLogger("frames_server.auth")
 
@@ -904,7 +904,8 @@ def auth_context_from_membership(
     With a *self_service* policy, a caller with **no membership row at all**
     whose token asserts a verified email gets an organization of their own,
     with themselves as ``owner`` (:func:`~.self_service.admit_self_service`).
-    The same boundaries hold: an existing row of any kind wins, a caller
+    A client-credentials token is never admitted
+    (:func:`~.self_service.is_service_token`). The same boundaries hold: an existing row of any kind wins, a caller
     without a verified email falls through to the outcomes above, and the
     write fails closed with the store.
     """
@@ -917,7 +918,7 @@ def auth_context_from_membership(
     display = display_identity_from_claims(claims)
     if membership is None and auto_admit is not None:
         membership = _auto_admit_member(claims, user, display, org_store, auto_admit)
-    if membership is None and self_service is not None:
+    if membership is None and self_service is not None and not is_service_token(claims):
         membership = admit_self_service(user, display, org_store, self_service)
     if membership is not None and membership.is_active:
         return AuthContext(

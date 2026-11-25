@@ -36,6 +36,10 @@ class SuggestionNotFoundError(KeyError):
     pass
 
 
+class _NotInOrganization(Exception):
+    """A conditional move found the Frame already out of its source organization."""
+
+
 class ConcurrentFrameUpdateError(RuntimeError):
     """Raised when a backend cannot safely commit a concurrent Frame update."""
 
@@ -131,6 +135,7 @@ class FrameStore(ABC):
         name: str | None = None,
         tags: list[str] | None = None,
         owner: str | None = None,
+        undecodable: list[str] | None = None,
     ) -> list[FrameMetadata]:
         """Return scoped metadata filtered by name, owner, and required tags."""
 
@@ -199,17 +204,22 @@ class FrameStore(ABC):
 
         raise NotImplementedError
 
-    def move_to_org(self, frame_id: str, org_id: str) -> Frame:
-        """Re-home a Frame to *org_id* with ``private`` visibility (issue #365).
+    def move_to_org(self, frame_id: str, from_org_id: str, to_org_id: str) -> bool:
+        """Re-home a Frame from *from_org_id* to *to_org_id* as ``private`` (issue #365).
 
         The move a retired self-service organization's frames get when an
         invitation takes their owner elsewhere. ``private`` keeps the owners and
         any explicit readers, and nobody else in the new organization sees the
-        Frame until an owner widens it. Idempotent: both fields are set to fixed
-        values. Implemented on each backend with its own guarded metadata write.
+        Frame until an owner widens it.
+
+        **Conditional on the Frame still being in *from_org_id*,** decided on
+        the backend's own guarded read-modify-write: a second mover working
+        from an older listing finds it already moved and changes nothing, so it
+        cannot reset a visibility the owner has since changed. Returns whether
+        this call moved it.
         """
 
-        return self._set_metadata_fields(frame_id, {"org_id": org_id, "visibility": Visibility.private})
+        raise NotImplementedError
 
     @abstractmethod
     def delete_frame(self, frame_id: str) -> None:
@@ -271,6 +281,7 @@ class LocalFsFrameStore(FrameStore):
         name: str | None = None,
         tags: list[str] | None = None,
         owner: str | None = None,
+        undecodable: list[str] | None = None,
     ) -> list[FrameMetadata]:
         """Return local metadata records matching scope and filters."""
 
@@ -286,6 +297,8 @@ class LocalFsFrameStore(FrameStore):
                 # One corrupt sidecar must not fail the whole list; a direct
                 # GET of it still surfaces the structured 500.
                 codec.undecodable_frame_log.skipped(exc, context="frame list")
+                if undecodable is not None:
+                    undecodable.append(path.name)
                 continue
             if not metadata_matches_filters(
                 item,
@@ -417,6 +430,18 @@ class LocalFsFrameStore(FrameStore):
             updated = current.model_copy(update={**fields, "updated_at": utc_now()})
             self._write_frame(updated)
             return updated
+
+    def move_to_org(self, frame_id: str, from_org_id: str, to_org_id: str) -> bool:
+        with self._frame_lock(frame_id):
+            current = self._read_frame(frame_id)
+            if current.org_id != from_org_id:
+                return False
+            self._write_frame(
+                current.model_copy(
+                    update={"org_id": to_org_id, "visibility": Visibility.private, "updated_at": utc_now()}
+                )
+            )
+            return True
 
     def delete_frame(self, frame_id: str) -> None:
         """Delete a local Frame directory and its sidecars."""
@@ -559,8 +584,14 @@ class S3FrameStore(FrameStore):
         name: str | None = None,
         tags: list[str] | None = None,
         owner: str | None = None,
+        undecodable: list[str] | None = None,
     ) -> list[FrameMetadata]:
-        """Return S3 metadata records matching scope and filters."""
+        """Return S3 metadata records matching scope and filters.
+
+        *undecodable*, when given, collects the ids of records skipped because
+        their metadata could not be decoded (whatever organization they are
+        in, which cannot be known).
+        """
 
         frame_ids = set()
         paginator = self.s3.get_paginator("list_objects_v2")
@@ -589,6 +620,8 @@ class S3FrameStore(FrameStore):
                 # One corrupt sidecar must not fail the whole list; a direct
                 # GET of it still surfaces the structured 500.
                 codec.undecodable_frame_log.skipped(exc, context="frame list")
+                if undecodable is not None:
+                    undecodable.append(frame_id)
                 return None
 
         ordered = sorted(frame_ids)
@@ -742,6 +775,20 @@ class S3FrameStore(FrameStore):
             lambda current: current.model_copy(update={**fields, "updated_at": utc_now()}),
             write_body=False,
         )
+
+    def move_to_org(self, frame_id: str, from_org_id: str, to_org_id: str) -> bool:
+        def mutate(current: Frame) -> Frame:
+            if current.org_id != from_org_id:
+                raise _NotInOrganization()
+            return current.model_copy(
+                update={"org_id": to_org_id, "visibility": Visibility.private, "updated_at": utc_now()}
+            )
+
+        try:
+            self._retry_metadata_update(frame_id, mutate, write_body=False)
+        except _NotInOrganization:
+            return False
+        return True
 
     def delete_frame(self, frame_id: str) -> None:
         """Delete S3 objects for a Frame body and metadata sidecar."""

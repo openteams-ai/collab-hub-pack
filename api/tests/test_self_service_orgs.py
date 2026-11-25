@@ -304,6 +304,13 @@ def _admit(database, user: str = ALICE, email: str = ALICE_EMAIL, groups=()):
     return PostgresOrgStore(database).provision_self_service_org(user, _display(email), service_groups=groups)
 
 
+def _settle(database) -> None:
+    """Age every queued move past the settle window."""
+
+    with database.connection() as conn:
+        conn.execute("UPDATE collab_frame_moves SET created_at = now() - interval '1 hour'")
+
+
 def _accept(service, user: str, secret: str, email: str):
     from collab_hub_api.frames.invitations import hash_invitation_secret
 
@@ -492,14 +499,23 @@ def test_live_frames_follow_their_owner_and_become_private(live_db, tmp_path):
     invitation = service.create(_ctx(TEAM_OWNER, TEAM, ROLE_OWNER), email=ALICE_EMAIL, org_id=TEAM)
     acceptance = _accept(service, ALICE, invitation.raw_secret.reveal(), ALICE_EMAIL)
 
+    # Inside the settle window every frame moves, but the row stays pending:
+    # a write authorized against the old organization could still land.
+    assert service.complete_frame_moves(frames, from_org_id=acceptance.moved_from_org_id) == 0
+    assert _rows(live_db, "SELECT state, moved FROM collab_frame_moves") == [{"state": "pending", "moved": 3}]
+    late = frames.create_frame(
+        personal, WORKSPACE_DEFAULT, ALICE, [ALICE], "Late", "", Visibility.internal, [], "# L\n"
+    )
+    _settle(live_db)
     assert service.complete_frame_moves(frames, from_org_id=acceptance.moved_from_org_id) == 1
+    assert frames.get_frame(late.id).org_id == TEAM
 
     for frame in made:
         moved = frames.get_frame(frame.id)
         assert moved.org_id == TEAM and moved.visibility == Visibility.private and moved.owners == [ALICE]
     assert frames.get_frame(elsewhere.id).visibility == Visibility.internal
     (move,) = _rows(live_db, "SELECT state, moved FROM collab_frame_moves")
-    assert move == {"state": "done", "moved": 3}
+    assert move == {"state": "done", "moved": 4}
     # Done is done: the sweep finds nothing left to do.
     assert service.complete_frame_moves(frames) == 0
 
@@ -513,10 +529,10 @@ def test_live_a_failed_frame_move_stays_pending_for_the_sweep(live_db, tmp_path)
     class Flaky(LocalFsFrameStore):
         fail = True
 
-        def move_to_org(self, frame_id, org_id):
+        def move_to_org(self, frame_id, from_org_id, to_org_id):
             if self.fail:
                 raise OSError("object store unavailable")
-            return super().move_to_org(frame_id, org_id)
+            return super().move_to_org(frame_id, from_org_id, to_org_id)
 
     frames = Flaky(tmp_path / "frames")
     service = PostgresInvitationService(live_db)
@@ -526,6 +542,7 @@ def test_live_a_failed_frame_move_stays_pending_for_the_sweep(live_db, tmp_path)
     )
     invitation = service.create(_ctx(TEAM_OWNER, TEAM, ROLE_OWNER), email=ALICE_EMAIL, org_id=TEAM)
     _accept(service, ALICE, invitation.raw_secret.reveal(), ALICE_EMAIL)
+    _settle(live_db)
 
     assert service.complete_frame_moves(frames) == 0
     assert _rows(live_db, "SELECT state FROM collab_frame_moves")[0]["state"] == "pending"
@@ -533,3 +550,69 @@ def test_live_a_failed_frame_move_stays_pending_for_the_sweep(live_db, tmp_path)
     frames.fail = False
     assert service.complete_frame_moves(frames) == 1
     assert frames.get_frame(frame.id).org_id == TEAM
+
+
+@live_postgres
+def test_live_an_unreadable_record_keeps_the_move_pending(live_db, tmp_path):
+    from collab_hub_api.frames.invitations import PostgresInvitationService
+    from collab_hub_api.frames.models import Visibility
+    from collab_hub_api.frames.store import LocalFsFrameStore
+
+    frames = LocalFsFrameStore(tmp_path / "frames")
+    service = PostgresInvitationService(live_db)
+    personal = _admit(live_db).membership.org_id
+    frames.create_frame(personal, WORKSPACE_DEFAULT, ALICE, [ALICE], "Mine", "", Visibility.internal, [], "# B\n")
+    corrupt = tmp_path / "frames" / ("f" * 32)
+    corrupt.mkdir()
+    (corrupt / "metadata.json").write_text("{not json")
+    invitation = service.create(_ctx(TEAM_OWNER, TEAM, ROLE_OWNER), email=ALICE_EMAIL, org_id=TEAM)
+    _accept(service, ALICE, invitation.raw_secret.reveal(), ALICE_EMAIL)
+    _settle(live_db)
+
+    assert service.complete_frame_moves(frames) == 0
+    assert _rows(live_db, "SELECT state, moved FROM collab_frame_moves") == [{"state": "pending", "moved": 1}]
+
+
+@live_postgres
+def test_live_a_retired_organization_takes_no_new_members(live_db):
+    from collab_hub_api.frames.invitations import OrgNotFoundError, PostgresInvitationService
+
+    service = PostgresInvitationService(live_db)
+    personal = _admit(live_db).membership.org_id
+    # Issued before the move (the window the move's revocation cannot see is
+    # modelled by issuing it and then putting it back to pending).
+    late = service.create(_ctx(ALICE, personal, ROLE_OWNER), email="friend@example.test", org_id=personal)
+    invitation = service.create(_ctx(TEAM_OWNER, TEAM, ROLE_OWNER), email=ALICE_EMAIL, org_id=TEAM)
+    _accept(service, ALICE, invitation.raw_secret.reveal(), ALICE_EMAIL)
+    with live_db.connection() as conn:
+        conn.execute(
+            "UPDATE collab_invitations SET status = 'pending', revoked_at = NULL, revoked_by = NULL WHERE id = %s",
+            (late.invitation.id,),
+        )
+
+    with pytest.raises(OrgNotFoundError):
+        _accept(service, BOB, late.raw_secret.reveal(), "friend@example.test")
+    assert _rows(live_db, "SELECT user_id FROM collab_org_members WHERE org_id = %s", (personal,)) == []
+
+
+def test_a_moved_frame_is_not_moved_back_by_a_stale_mover(tmp_path):
+    from collab_hub_api.frames.models import Visibility
+    from collab_hub_api.frames.store import LocalFsFrameStore
+
+    frames = LocalFsFrameStore(tmp_path)
+    frame = frames.create_frame("old", WORKSPACE_DEFAULT, ALICE, [ALICE], "Mine", "", Visibility.internal, [], "# B\n")
+    assert frames.move_to_org(frame.id, "old", "new") is True
+    frames.update_frame(frame.id, "Mine", "", Visibility.internal, [], "# B\n")
+    assert frames.move_to_org(frame.id, "old", "new") is False
+    assert frames.get_frame(frame.id).visibility == Visibility.internal
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"client_id": "usage-control"}, {"clientId": "usage-control"}, {"preferred_username": "service-account-x"}],
+)
+def test_a_client_credentials_token_is_never_admitted(extra):
+    store = InMemoryOrgStore()
+    with pytest.raises(NoOrganizationError):
+        auth_context_from_membership({**claims(ALICE), **extra}, store, self_service=SelfServicePolicy())
+    assert store.get_membership(ALICE) is None

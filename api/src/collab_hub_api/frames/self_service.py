@@ -280,6 +280,23 @@ def self_service_policy(app_state) -> SelfServicePolicy | None:
     return SelfServicePolicy(service_groups=owed, on_created=on_created)
 
 
+def is_service_token(claims: dict) -> bool:
+    """Whether *claims* belong to a client rather than a person.
+
+    A client-credentials token carries the client id in ``client_id``
+    (``clientId`` before Keycloak 25), and its subject is the client's service
+    account, whose username Keycloak prefixes ``service-account-``. Either is
+    enough to refuse admission: an organization is for a person.
+    """
+
+    from .service_callers import CLIENT_ID_CLAIMS
+
+    if any(claims.get(name) for name in CLIENT_ID_CLAIMS):
+        return True
+    username = claims.get("preferred_username")
+    return isinstance(username, str) and username.startswith("service-account-")
+
+
 def admit_self_service(
     user_id: str, display: DisplayIdentity, org_store, policy: SelfServicePolicy
 ) -> OrgMembership | None:

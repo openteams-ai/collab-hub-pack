@@ -742,6 +742,12 @@ indexer carries too: a publish source needs it, and a sweep reads it.) */}}
 - name: COLLAB_HUB_API__COGS__PUBLISH__MAX_PENDING_REPOSITORIES
   value: {{ .Values.cogs.publish.maxPendingRepositories | int64 | quote }}
 {{- end }}
+{{- /* Who may install on a hub without roles (issue #105). Rendered only
+when someone is named: the default, nobody, needs no variable. */}}
+{{- with .Values.cogs.install.allowedUsers }}
+- name: COLLAB_HUB_API__COGS__INSTALL__ALLOWED_USERS
+  value: {{ toJson . | quote }}
+{{- end }}
 {{- end }}
 {{- if .Values.cogs.registry.sources }}
 - name: COLLAB_HUB_API__COGS__REGISTRY_SOURCES

@@ -847,6 +847,16 @@ cogs:
     # outage. Publishing again to a pending name is never refused by it.
     maxPendingRepositories: 20
 
+  install:
+    # Who may install Cogs on a hub that resolves no roles. Installing runs the
+    # Cog's `resolve` and `check` with the hub's model key delivered. Where the
+    # Hub resolves organizations from membership, the organization's owners and
+    # platform operators install without being named here.
+    # -- User ids (the Hub's ACL principal) that may install and uninstall
+    # whatever their role. Under claims-sourced auth, the only users who may.
+    # Nobody, by default.
+    allowedUsers: []
+
 # The browser web surface (docs/web-surface.md). Enabling it -- the OIDC client,
 # its secret, the session secret -- goes through api.deployment.extraEnv, where
 # valueFrom is accepted; only the settings that are safe in a rendered manifest

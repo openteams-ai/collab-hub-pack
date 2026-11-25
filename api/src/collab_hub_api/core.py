@@ -396,6 +396,7 @@ def make_app(config: BaseConfig) -> FastAPI:
             app.state.cog_indexer = cog_indexing.indexer if cog_indexing is not None else None
             app.state.cog_registry_sources = cog_indexing.indexer.sources if cog_indexing is not None else []
             app.state.cog_registry_serving = cog_registry_serving
+            app.state.cog_install_users = frozenset(config.cogs.install.allowed_users)
             cog_index_task: asyncio.Task | None = None
             if cog_indexing is not None and cog_indexing.sweeps:
                 indexer = cog_indexing.indexer

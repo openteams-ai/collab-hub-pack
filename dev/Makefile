@@ -116,7 +116,8 @@ DEV_AUTH_ENV := \
   DEV_AUTH_ENABLED=true \
   DEV_AUTH_USER=dev-user \
   DEV_AUTH_ORG=dev-org \
-  DEV_AUTH_WORKSPACE=default
+  DEV_AUTH_WORKSPACE=default \
+  'COLLAB_HUB_API__COGS__INSTALL__ALLOWED_USERS=["dev-user"]'
 
 # Level 1 only: the Cog catalog in process memory, so the catalog read API
 # (/v1/cogs) answers 200 with no database. Every other level rides Postgres,

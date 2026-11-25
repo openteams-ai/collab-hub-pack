@@ -62,7 +62,8 @@ def config(tmp_path) -> Config:
             "storage": {"frames_path": str(tmp_path / "frames")},
             "frames": {"mcp_session_manager_enabled": False},
             "tasks": {"backend": "memory"},
-            "cogs": {"catalog": {"backend": "memory"}},
+            # Claims-sourced auth resolves no roles, so only the users named here install.
+            "cogs": {"catalog": {"backend": "memory"}, "install": {"allowed_users": ["alice", "bob"]}},
             "runs": {"track_path": str(tmp_path / "track.sqlite"), "packages": [str(tmp_path / "cogs")]},
         }
     )
@@ -372,6 +373,31 @@ async def test_on_a_hub_that_resolves_memberships_owners_and_operators_install_a
             ).status_code == 200  # reading is every member's
             operator_asked = await client.post("/v1/cogs/installs", json={"reference": reference}, headers=operator)
             assert operator_asked.status_code != 403
+
+
+async def test_on_a_hub_that_resolves_no_roles_only_the_named_users_install(api):
+    """Under claims-sourced auth nobody has a role. The gate fails closed: a member of the organization who is not
+    in `cogs.install.allowed_users` neither installs nor uninstalls, though they still read the installs."""
+    client, _, reference = api
+    carol = {"IdToken-test": _jwt({"preferred_username": "carol", "org_id": "org-a", "workspace_id": "workspace-a"})}
+    refused = await client.post("/v1/cogs/installs", json={"reference": str(reference)}, cookies=carol)
+    assert refused.status_code == 403 and refused.json()["error"]["code"] == "install_forbidden"
+    assert "cogs.install.allowed_users" in refused.json()["error"]["message"]
+    install = await client.post("/v1/cogs/installs", json={"reference": str(reference)})
+    assert install.status_code == 202
+    gone = await client.delete(f"/v1/cogs/installs/{install.json()['id']}", cookies=carol)
+    assert gone.status_code == 403
+    assert (await client.get("/v1/cogs/installs", cookies=carol)).status_code == 200
+
+
+def test_nobody_installs_on_a_hub_without_roles_by_default_and_the_list_is_checked(tmp_path):
+    from collab_hub_api.config import CogInstallConfig
+
+    assert CogInstallConfig().allowed_users == []
+    assert CogInstallConfig(allowed_users=[" dev-user "]).allowed_users == ["dev-user"]
+    for users in ([""], ["  "], ["a", "a"]):
+        with pytest.raises(ValueError):
+            CogInstallConfig(allowed_users=users)
 
 
 def test_the_install_routes_sit_under_the_cogs_prefix_and_before_the_catalogs_cog_id_route(config):

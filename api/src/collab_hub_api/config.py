@@ -1129,6 +1129,34 @@ class CogPublishConfig(BaseModel):
         return cleaned
 
 
+class CogInstallConfig(BaseModel):
+    """Who may install Cogs on a hub that resolves no roles (issue #105). Nobody, by default.
+
+    Installing runs the Cog's ``resolve`` and ``check`` with the hub's model
+    key delivered. Where the hub resolves organizations from membership, the
+    organization's owners and the platform operators install, and nothing here
+    is needed. Under claims-sourced auth nobody has a role, so nobody installs
+    unless named in ``allowed_users`` -- user ids, as the Hub's ACL principal.
+    A named user installs whatever their role.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allowed_users: list[str] = Field(default_factory=list)
+
+    @field_validator("allowed_users")
+    @classmethod
+    def _check_users(cls, value: list[str]) -> list[str]:
+        cleaned = [user.strip() for user in value]
+        if any(not user for user in cleaned):
+            raise ValueError("cogs.install.allowed_users entries must not be blank")
+        # As written, like the chart's uniqueItems: the two layers refuse the same lists.
+        for user in value:
+            if value.count(user) > 1:
+                raise ValueError(f"cogs.install.allowed_users lists {user!r} twice")
+        return cleaned
+
+
 COGS_SOURCE_SECRET_ENV_FIELDS: tuple[tuple[str, str, bool], ...] = (
     ("username_env", "username", False),
     ("password_env", "password", True),
@@ -1263,6 +1291,7 @@ class CogsConfig(BaseModel):
     catalog: CogCatalogConfig = Field(default_factory=CogCatalogConfig)
     serve: CogServeConfig = Field(default_factory=CogServeConfig)
     publish: CogPublishConfig = Field(default_factory=CogPublishConfig)
+    install: CogInstallConfig = Field(default_factory=CogInstallConfig)
 
     @field_validator("registry_sources", mode="before")
     @classmethod

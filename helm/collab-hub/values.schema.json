@@ -1093,6 +1093,20 @@
           },
           "additionalProperties": false
         },
+        "install": {
+          "type": "object",
+          "properties": {
+            "allowedUsers": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "\\S"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
         "serve": {
           "type": "object",
           "properties": {

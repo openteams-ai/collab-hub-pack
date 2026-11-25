@@ -54,3 +54,8 @@ frames:
 
 tasks:
   backend: memory
+
+# Dev auth resolves no roles, so the dev user is named to install Cogs.
+cogs:
+  install:
+    allowedUsers: [dev-user]

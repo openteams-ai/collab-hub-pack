@@ -223,7 +223,8 @@ combination, but not restating the list is the better habit.)
   ([runs.md](cog-execution/runs.md#the-run-controller-and-the-run-api)).
   `/v1/cogs/installs/**`, the installs, is the same, and installing or
   removing takes the organization's owner role, or the platform operator's,
-  where the hub resolves memberships: each route carries its
+  where the hub resolves memberships, or a user `cogs.install.allowedUsers`
+  names (on a claims-sourced hub, the only way; nobody by default): each route carries its
   own auth dependency and scopes installs to the caller's organization, so a
   `public` rule at `/v1/cogs` opens the catalog's discovery and never an
   install ([runs.md](cog-execution/runs.md#installing-a-cog-and-running-it-once)).

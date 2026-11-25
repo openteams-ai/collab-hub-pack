@@ -29,7 +29,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Path, Query, status
+from fastapi import APIRouter, Depends, Path, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -167,20 +167,32 @@ def _not_found(install_id: str) -> JSONResponse:
 
 
 INSTALL_ROLES = ("owner", "operator")
-"""Who installs and uninstalls: the organization's owners, and platform operators. An install runs the Cog's
-`resolve` and `check` with the hub's model key delivered, which is more than a member's read of the catalog. On
-a hub that resolves no memberships (the organization comes from the token's claims alone) there is no role to
-ask for, and every member of the organization installs."""
+"""Who installs and uninstalls: the organization's owners, platform operators, and the users
+`cogs.install.allowed_users` names. An install runs the Cog's `resolve` and `check` with the hub's model key
+delivered, which is more than a member's read of the catalog. On a hub that resolves no memberships (the
+organization comes from the token's claims alone) nobody has a role, so only the named users install: the gate
+fails closed rather than letting every member of the organization install."""
 
 
-def _may_install(auth: AuthContext) -> JSONResponse | None:
-    if auth.platform_role == "operator" or auth.org_role is None or auth.org_role in INSTALL_ROLES:
+def get_install_users(request: Request) -> frozenset[str]:
+    return getattr(request.app.state, "cog_install_users", frozenset())
+
+
+InstallUsersDep = Annotated[frozenset[str], Depends(get_install_users)]
+
+
+def _may_install(auth: AuthContext, allowed_users: frozenset[str]) -> JSONResponse | None:
+    if auth.platform_role == "operator" or auth.org_role in INSTALL_ROLES or auth.user in allowed_users:
         return None
-    return error_response(
-        status.HTTP_403_FORBIDDEN,
-        "install_forbidden",
-        f"Installing a Cog takes the organization's {' or '.join(INSTALL_ROLES)} role; the caller is a {auth.org_role}",
-    )
+    if auth.org_role is None:
+        message = (
+            "Installing a Cog takes the organization's owner role or the platform operator's; this hub resolves no "
+            "roles, so only the users cogs.install.allowed_users names install"
+        )
+    else:
+        roles = " or ".join(INSTALL_ROLES)
+        message = f"Installing a Cog takes the organization's {roles} role; the caller is a {auth.org_role}"
+    return error_response(status.HTTP_403_FORBIDDEN, "install_forbidden", message)
 
 
 def _location_key(row: CogArtifact) -> tuple:
@@ -235,12 +247,17 @@ def _from_catalog(
     responses=UNAVAILABLE,
 )
 def install_cog(
-    body: InstallRequest, auth: AuthDep, service: ServiceDep, catalog: CatalogDep, registry_host: RegistryHostDep
+    body: InstallRequest,
+    auth: AuthDep,
+    service: ServiceDep,
+    catalog: CatalogDep,
+    registry_host: RegistryHostDep,
+    allowed_users: InstallUsersDep,
 ) -> InstallStatus | JSONResponse:
     """Ask for a Cog to be installed on this hub: pinned by digest from the catalog, fetched, bound by its own
     `resolve` and checked by a run controller. Answers at once, `published`; `GET` shows what it reaches. The
-    organization's owners and platform operators install, where the hub resolves memberships."""
-    forbidden = _may_install(auth)
+    organization's owners and platform operators install, and the users `cogs.install.allowed_users` names."""
+    forbidden = _may_install(auth, allowed_users)
     if forbidden is not None:
         return forbidden
     if service.installs is None:
@@ -350,10 +367,12 @@ def get_install(install_id: InstallId, auth: AuthDep, service: ServiceDep) -> In
     summary="Uninstall a Cog",
     responses={**NOT_FOUND, **UNAVAILABLE},
 )
-def uninstall_cog(install_id: InstallId, auth: AuthDep, service: ServiceDep) -> InstallStatus | JSONResponse:
+def uninstall_cog(
+    install_id: InstallId, auth: AuthDep, service: ServiceDep, allowed_users: InstallUsersDep
+) -> InstallStatus | JSONResponse:
     """Ask for the install's removal: the controller removes every runtime resource it created and records it
     `uninstalled`. Answers 202 with the install as it stands."""
-    forbidden = _may_install(auth)
+    forbidden = _may_install(auth, allowed_users)
     if forbidden is not None:
         return forbidden
     row = _visible(service, install_id, auth)

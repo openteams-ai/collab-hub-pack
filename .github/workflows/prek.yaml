@@ -15,6 +15,12 @@ on:
 permissions:
   contents: read
 
+# Keep hook environments on uv-managed CPython builds, as every uv workflow here
+# does, so a hook never runs on a system Python without CPython's eMudhra ssl
+# denylist (#285). The Ruff hooks do no TLS from Python, but a later hook might.
+env:
+  UV_PYTHON_PREFERENCE: only-managed
+
 jobs:
   prek:
     runs-on: ubuntu-latest
@@ -23,18 +29,24 @@ jobs:
         with:
           persist-credentials: false
 
-      # prek installs each hook's tools with the first uv on PATH that is at
-      # least 0.7.0, which could be one that still trusts the compromised
-      # eMudhra intermediates (#285); put the version the repo pins there first.
+      # prek installs each hook's tools with uv: the first one on PATH that is
+      # at least 0.7.0, which could be one that still trusts the compromised
+      # eMudhra intermediates (#285), or else one it downloads itself, unpinned,
+      # from PyPI or a mirror. Put the version the repo pins on PATH first.
+      # No cache: prek points uv at its own cache, which prek-action saves.
       - name: Install uv
         uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           version-file: .github/uv.toml
           require-checksums: true
+          enable-cache: false
 
       # `latest-known` installs the newest prek in the action's own checksum
       # table and verifies the download against it, so prek's version moves
-      # only when Dependabot bumps the action.
+      # only when Dependabot bumps the action. PREK_UV_SOURCE=none makes prek
+      # fail rather than download a uv if it ever skips the one above.
       - uses: j178/prek-action@7b101f8338a08d2bd6fdb3625e4e7692428763a3 # v3.1.1
         with:
           prek-version: latest-known
+        env:
+          PREK_UV_SOURCE: none

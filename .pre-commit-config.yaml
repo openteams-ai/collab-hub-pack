@@ -1,0 +1,18 @@
+# Git hooks, run with prek (https://prek.j178.dev) or pre-commit; see
+# CONTRIBUTING.md. Ruff picks up its settings from the pyproject.toml nearest
+# each file, so these hooks apply the same rules as running it in api/.
+
+# Only the API is Ruff-formatted so far. Add another package's src and tests
+# here once it is formatted too.
+files: ^api/(src|tests)/
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Keep in step with the ruff version api/uv.lock pins.
+    rev: ef6cf06c079dd6b299dfc720b0f14400c9d168e1  # frozen: v0.17.5
+    hooks:
+      # Lint, fixing what Ruff safely can, before formatting: a fix can leave
+      # code the formatter then rewrites.
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format

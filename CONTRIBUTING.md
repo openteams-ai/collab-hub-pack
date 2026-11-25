@@ -92,8 +92,28 @@ Running the API by hand needs **all three** dev-auth switches —
 `DEV_AUTH_USER=<name>`. Setting only `DEV_AUTH_USER` authenticates nothing and
 every route answers 401, which is why `make api` is the easier path.
 
-Lint and format the API with the ruff version `uv.lock` pins. The `Ruff` CI
-check runs `ruff check` and `ruff format --check`:
+The API is linted and formatted with Ruff, at the version `uv.lock` pins.
+[`.pre-commit-config.yaml`](.pre-commit-config.yaml) runs it as Git hooks on
+the files you commit, fixing what it can, with the same settings as the `Ruff`
+CI check. Install [prek](https://prek.j178.dev/) (or pre-commit) and the hooks
+once in your clone:
+
+```sh
+uv tool install prek
+prek install                # run the hooks on every git commit
+```
+
+If a hook fixes or reformats a file, the commit stops; review the changes,
+stage them and commit again. To run the hooks yourself:
+
+```sh
+prek run                    # on staged files
+prek run --all-files        # on every file the hooks cover
+prek run ruff-format --all-files    # one hook only
+```
+
+The `Ruff` CI check runs `ruff check` and `ruff format --check` on the same
+files. To run Ruff directly instead:
 
 ```sh
 cd api

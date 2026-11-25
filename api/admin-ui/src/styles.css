@@ -216,9 +216,26 @@ code, .mono { font-family: var(--font-mono); }
   color: var(--ink-soft);
 }
 
-.main { padding: 2.5rem 2.5rem 4rem; max-width: 64rem; }
+.main { padding: 2.5rem 2.5rem 4rem; max-width: 64rem; min-width: 0; }
 .main h2 { font-size: 1.35rem; font-weight: 600; margin: 0 0 0.75rem; }
 .main p { color: var(--ink-soft); max-width: 44rem; margin: 0 0 1rem; }
+
+.table-scroll { max-width: 100%; overflow-x: auto; margin-bottom: 1rem; }
+.table-scroll table { margin-bottom: 0; }
+.users-table { min-width: 56rem; }
+.users-table td { overflow-wrap: anywhere; }
+.org-id, .role-source { display: block; color: var(--ink-soft); margin-top: 0.25rem; }
+
+@media (max-width: 48rem) {
+  .header { flex-wrap: wrap; padding: 1rem; gap: 1rem; }
+  .header-identity { width: 100%; }
+  .header-identity .who { flex: 1; }
+  .icon-button { flex: none; }
+  .shell { grid-template-columns: minmax(0, 1fr); }
+  .nav { border-right: 0; border-bottom: 1px solid var(--line); padding: 0.75rem 1rem; gap: 0.5rem; }
+  .nav ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .main { padding: 1.5rem 1rem; }
+}
 
 .notice {
   border-left: 3px solid var(--accent);

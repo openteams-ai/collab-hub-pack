@@ -291,6 +291,83 @@ async def test_users_are_listed_with_the_role_the_hub_actually_holds(tmp_path, i
 
 
 @pytest.mark.asyncio
+async def test_users_report_organization_standing_by_subject_without_mutating_it(tmp_path, idp: _StubIdp):
+    from collab_hub_api.user_directory import UserDirectoryUser
+
+    app = build_app(tmp_path, idp)
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        grant_operator(app, idp.sub)
+        store = app.state.org_store
+        store.set_org("org-a", "Alpha")
+        store.set_membership("owner", "org-a", role="owner")
+        store.set_membership("removed", "org-a", status="removed")
+        store.set_membership("member", "org-b")
+        subjects = ["owner", "removed", "member", "unassigned"]
+        # The directory email is deliberately identical: identity is the subject, not a label.
+        app.state.user_directory_client = StubDirectory(
+            [UserDirectoryUser(id=sub, username=sub, email="same@example.test") for sub in subjects]
+        )
+        before = [store.get_membership(sub) for sub in subjects]
+        await sign_in(client, idp, next_path="/web")
+        response = await client.get("/admin/api/users")
+        assert [store.get_membership(sub) for sub in subjects] == before
+
+    assert response.status_code == 200
+    rows = {row["id"]: row for row in response.json()["users"]}
+    assert rows["owner"]["organization"] == {"id": "org-a", "name": "Alpha", "role": "owner", "status": "active"}
+    assert rows["removed"]["organization"] == {"id": "org-a", "name": "Alpha", "role": "member", "status": "removed"}
+    assert rows["member"]["organization"] == {"id": "org-b", "name": None, "role": "member", "status": "active"}
+    assert rows["unassigned"]["organization"] is None
+    assert all(row["role"] is None for row in rows.values())
+
+
+@pytest.mark.asyncio
+async def test_users_batch_memberships_for_only_the_visible_page(tmp_path, idp: _StubIdp, monkeypatch):
+    from collab_hub_api.user_directory import UserDirectoryUser
+
+    app = build_app(tmp_path, idp)
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        grant_operator(app, idp.sub)
+        app.state.user_directory_client = StubDirectory(
+            [UserDirectoryUser(id=f"u-{i}", username=f"user-{i}", email=None) for i in range(4)]
+        )
+        store = app.state.org_store
+        calls = []
+        read = store.get_membership_rows
+
+        def record(ids):
+            calls.append(ids)
+            return read(ids)
+
+        monkeypatch.setattr(store, "get_membership_rows", record)
+        await sign_in(client, idp, next_path="/web")
+        response = await client.get("/admin/api/users?first=1&limit=2")
+    assert response.status_code == 200
+    assert calls == [["u-1", "u-2"]]
+    assert response.json()["next_first"] == 3
+
+
+@pytest.mark.asyncio
+async def test_users_do_not_misreport_unavailable_memberships_as_unassigned(tmp_path, idp: _StubIdp, monkeypatch):
+    from collab_hub_api.frames.orgs import OrgsUnavailableError
+    from collab_hub_api.user_directory import UserDirectoryUser
+
+    app = build_app(tmp_path, idp)
+    async with app.router.lifespan_context(app), web_client(app) as client:
+        grant_operator(app, idp.sub)
+        app.state.user_directory_client = StubDirectory([UserDirectoryUser(id="u-1", username="user", email=None)])
+
+        def unavailable(ids):
+            raise OrgsUnavailableError("unavailable")
+
+        monkeypatch.setattr(app.state.org_store, "get_membership_rows", unavailable)
+        await sign_in(client, idp, next_path="/web")
+        response = await client.get("/admin/api/users")
+    assert response.status_code == 503
+    assert response.json() == {"error": "organization_memberships_unavailable"}
+
+
+@pytest.mark.asyncio
 async def test_the_users_endpoint_refuses_a_non_operator(tmp_path, idp: _StubIdp):
     app = build_app(tmp_path, idp)
 

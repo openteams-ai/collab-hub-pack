@@ -19,7 +19,7 @@ export function Failure({ resource, subject }: { resource: Resource<unknown>; su
   if (resource.state === "unavailable") {
     return (
       <p className="bad">
-        This hub cannot show {subject}: it is not configured for it ({resource.reason}).
+        This hub cannot show {subject} right now ({resource.reason}).
       </p>
     );
   }
@@ -80,41 +80,49 @@ export function Models({ csrfToken }: { csrfToken: string }) {
       <p>
         These are the models this hub currently serves, read live from the serving layer.
       </p>
-      <p>
-        Some models are limited to a group in your identity provider. Select a group to see who is
-        in it, and to add or remove people.
-      </p>
-      <table>
-        <thead>
-          <tr>
-            <th>Model</th>
-            <th>Served by</th>
-            <th>Who can use it</th>
-          </tr>
-        </thead>
-        <tbody>
-          {models.map((model) => (
-            <tr key={model.id}>
-              <td>
-                <span className="named">
-                  <ModelIcon model={model.id} />
-                  <span className="mono">{model.id}</span>
-                </span>
-              </td>
-              <td>{model.owned_by ?? "—"}</td>
-              <td>
-                {model.group_path ? (
-                  <button type="button" className="link" onClick={() => setOpenGroup(model.group_path)}>
-                    People in the <span className="mono">{model.group_path}</span> group
-                  </button>
-                ) : (
-                  "Everyone who can sign in"
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <p>Group restrictions are separate from organization and billing requirements for inference.</p>
+      {!manageable && models.some((model) => model.group_path) && (
+        <p className="empty">Group membership unavailable: identity-provider access is not configured.</p>
+      )}
+      {models.length === 0 ? (
+        <p className="empty">No models reported by the serving layer.</p>
+      ) : (
+        <div className="table-scroll" role="region" aria-label="Models and group restrictions" tabIndex={0}>
+          <table>
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>Served by</th>
+                <th>Group restriction</th>
+              </tr>
+            </thead>
+            <tbody>
+              {models.map((model) => (
+                <tr key={model.id}>
+                  <td>
+                    <span className="named">
+                      <ModelIcon model={model.id} />
+                      <span className="mono">{model.id}</span>
+                    </span>
+                  </td>
+                  <td>{model.owned_by ?? "—"}</td>
+                  <td>
+                    {model.group_path && manageable ? (
+                      <button type="button" className="link" onClick={() => setOpenGroup(model.group_path)}>
+                        People in the <span className="mono">{model.group_path}</span> group
+                      </button>
+                    ) : (
+                      model.group_path ? (
+                        <span className="mono">{model.group_path}</span>
+                      ) : "No model-specific group"
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       {openGroup && <GroupMembers groupPath={openGroup} csrfToken={csrfToken} manageable={manageable} />}
     </>
   );
@@ -179,8 +187,8 @@ function GroupMembers({
       </h3>
       <p>
         <span className="mono">{groupPath}</span> is a group in your identity provider (Keycloak).
-        Anyone in it may use the models it gates. Adding or removing somebody here changes that
-        group directly.
+        Adding or removing somebody changes that group directly. Membership meets this model's
+        group restriction; organization and billing requirements still apply.
       </p>
       <p>
         The model serving gateway enforces it, so a change here takes effect wherever people make
@@ -258,6 +266,7 @@ interface UserRow {
   email: string | null;
   role: string | null;
   role_source: string | null;
+  organization?: { id: string; name: string | null; role: string; status: string } | null;
 }
 
 // Revokes the server refuses because nobody could administer the hub after.
@@ -302,7 +311,7 @@ export function Users({ csrfToken }: { csrfToken: string }) {
   return (
     <>
       <p>
-        Everyone this hub knows about, and whether they hold the administrator role here.
+        Everyone this hub knows about, their organization standing, and their separate Hub role.
       </p>
       <p>
         Administrator access normally comes from your identity provider group, re-checked at every
@@ -310,44 +319,71 @@ export function Users({ csrfToken }: { csrfToken: string }) {
         someone removes it here.
       </p>
       {problem && <p className="bad">{problem}</p>}
-      <table>
-        <thead>
-          <tr>
-            <th>Person</th>
-            <th>Username</th>
-            <th>Granted by</th>
-            <th>Role</th>
-          </tr>
-        </thead>
-        <tbody>
-          {users.map((user) => (
-            <tr key={user.id}>
-              <td>{user.email ?? user.id}</td>
-              <td className="mono">{user.username}</td>
-              <td>{ROLE_SOURCES[user.role_source ?? ""] ?? "Not an administrator"}</td>
-              <td>
-                {manageable ? (
-                  <label className="rolepick">
-                    <span className="visually-hidden">Role for {user.email ?? user.id}</span>
-                    <select
-                      value={user.role ? "operator" : "member"}
-                      disabled={busy}
-                      onChange={(event) =>
-                        changeRole(user, event.target.value === "operator" ? "grant" : "revoke")
-                      }
-                    >
-                      <option value="member">Member</option>
-                      <option value="operator">Administrator</option>
-                    </select>
-                  </label>
-                ) : (
-                  <span className="empty">{user.role ? "Administrator" : "Member"}</span>
-                )}
-              </td>
+      <div className="table-scroll" role="region" aria-label="Users and organization standing" tabIndex={0}>
+        <table className="users-table">
+          <thead>
+            <tr>
+              <th>Person</th>
+              <th>Username</th>
+              <th>Organization</th>
+              <th>Organization role</th>
+              <th>Membership</th>
+              <th>Hub role</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {users.map((user) => (
+              <tr key={user.id}>
+                <td>{user.email ?? user.id}</td>
+                <td className="mono">{user.username}</td>
+                <td>
+                  {user.organization ? (
+                    <>
+                      <span>{user.organization.name || "Unnamed organization"}</span>
+                      <small className="mono org-id">{user.organization.id}</small>
+                    </>
+                  ) : user.organization === null ? "No organization" : "Membership not reported"}
+                </td>
+                <td>
+                  {user.organization
+                    ? ({ owner: "Owner", member: "Member" }[user.organization.role] ?? user.organization.role)
+                    : "-"}
+                </td>
+                <td>
+                  {user.organization
+                    ? ({ active: "Active", removed: "Removed" }[user.organization.status] ?? user.organization.status)
+                    : "-"}
+                </td>
+                <td>
+                  {manageable ? (
+                    <label className="rolepick">
+                      <span className="visually-hidden">Hub role for {user.email ?? user.id}</span>
+                      <select
+                        value={user.role ? "operator" : "member"}
+                        disabled={busy}
+                        onChange={(event) =>
+                          changeRole(user, event.target.value === "operator" ? "grant" : "revoke")
+                        }
+                      >
+                        <option value="member">Not an administrator</option>
+                        <option value="operator">Administrator</option>
+                      </select>
+                    </label>
+                  ) : (
+                    <span>{user.role ? "Administrator" : "Not an administrator"}</span>
+                  )}
+                  {user.role && (
+                    <small className="role-source">
+                      {ROLE_SOURCES[user.role_source ?? ""] ?? "Grant source not reported"}
+                    </small>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {users.length === 0 && <p className="empty">No users reported by the directory.</p>}
       <p className="empty">
         Removing a role that came from your identity provider takes effect immediately. That person
         holds it again at their next sign-in while the group still lists them.

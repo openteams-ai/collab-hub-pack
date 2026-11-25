@@ -52,6 +52,7 @@ from ..frames.invitations import (
     effective_status,
 )
 from ..frames.model_catalog import ModelCatalogError
+from ..frames.orgs import OrgsUnavailableError
 from ..frames.platform_role_admin import PlatformRoleChangeRefused
 from ..frames.usage import UsageStore, UsageUnavailableError
 from ..user_directory import UserDirectoryClient, UserDirectoryUnavailableError
@@ -383,9 +384,8 @@ def make_router() -> APIRouter:
         apart, so a page that happens to end exactly at the last person does
         not offer an empty "next".
 
-        Two sources, joined here and nowhere else: the directory knows who
-        exists, and only this deployment knows who is an operator. Neither can
-        answer the panel's question alone.
+        The directory knows who exists; this deployment owns both organization
+        standing and platform roles. Join by subject id, never by email.
 
         ``role_source`` travels with the role because the two behave
         differently: a ``manual`` grant outlives the admin group, while an
@@ -402,6 +402,10 @@ def make_router() -> APIRouter:
         more = len(people) > limit
         people = people[:limit]
         roles = _active_role_rows(request, [person.id for person in people])
+        try:
+            memberships = request.app.state.org_store.get_membership_rows([person.id for person in people])
+        except OrgsUnavailableError:
+            return JSONResponse({"error": "organization_memberships_unavailable"}, status_code=503)
         return {
             "users": [
                 {
@@ -410,6 +414,7 @@ def make_router() -> APIRouter:
                     "email": person.email,
                     "role": roles.get(person.id, {}).get("role"),
                     "role_source": roles.get(person.id, {}).get("source"),
+                    "organization": memberships.get(person.id),
                 }
                 for person in people
             ],

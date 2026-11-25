@@ -202,6 +202,16 @@ class OrgStore(ABC):
     """The organization membership relation, as the auth path needs it."""
 
     @abstractmethod
+    def get_membership_rows(self, user_ids: Sequence[str]) -> dict[str, dict]:
+        """Organization id/name, role and status for a bounded page of subjects.
+
+        Removed rows are included; absent subjects have no row. An unavailable
+        backend raises rather than masquerading as an unassigned user.
+        """
+
+        raise NotImplementedError
+
+    @abstractmethod
     def get_membership(self, user_id: str) -> OrgMembership | None:
         """Return the login's home-organization row, or ``None`` if it has none.
 
@@ -299,6 +309,9 @@ class UnavailableOrgStore(OrgStore):
     it at runtime means app state was assembled outside ``make_app``.
     """
 
+    def get_membership_rows(self, user_ids: Sequence[str]) -> dict[str, dict]:
+        raise OrgsUnavailableError("Organization storage is not configured")
+
     def get_membership(self, user_id: str) -> OrgMembership | None:
         raise OrgsUnavailableError("Organization storage is not configured")
 
@@ -394,6 +407,19 @@ class InMemoryOrgStore(OrgStore):
     def get_membership(self, user_id: str) -> OrgMembership | None:
         with self._lock:
             return self._memberships.get(user_id)
+
+    def get_membership_rows(self, user_ids: Sequence[str]) -> dict[str, dict]:
+        with self._lock:
+            return {
+                user_id: {
+                    "id": row.org_id,
+                    "name": self._org_names.get(row.org_id),
+                    "role": row.role,
+                    "status": row.status,
+                }
+                for user_id in user_ids
+                if (row := self._memberships.get(user_id)) is not None
+            }
 
     def set_platform_role(
         self,
@@ -713,6 +739,25 @@ class PostgresOrgStore(OrgStore):
         except psycopg.errors.UndefinedTable as exc:
             raise self._missing_schema() from exc
         return {row["user_id"]: {"role": row["role"], "status": row["status"], "source": row["source"]} for row in rows}
+
+    def get_membership_rows(self, user_ids: Sequence[str]) -> dict[str, dict]:
+        import psycopg
+
+        if not user_ids:
+            return {}
+        try:
+            with self._db.connection() as conn:
+                rows = conn.execute(
+                    "SELECT m.user_id, m.org_id, o.name, m.role, m.status FROM collab_org_members m"
+                    " LEFT JOIN collab_orgs o ON o.id = m.org_id WHERE m.user_id = ANY(%s)",
+                    (list(user_ids),),
+                ).fetchall()
+        except psycopg.errors.UndefinedTable as exc:
+            raise self._missing_schema() from exc
+        return {
+            row["user_id"]: {"id": row["org_id"], "name": row["name"], "role": row["role"], "status": row["status"]}
+            for row in rows
+        }
 
     def _missing_schema(self) -> OrgSchemaMissingError:
         message = (

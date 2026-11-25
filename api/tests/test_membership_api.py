@@ -650,6 +650,44 @@ def test_postgres_roster_reads_map_a_missing_schema_onto_the_503_class():
             read(store)
 
 
+def test_membership_rows_include_removals_names_and_only_requested_subjects():
+    store = InMemoryOrgStore()
+    store.set_org(ORG_ONE, "Acme")
+    store.set_membership(ALICE, ORG_ONE, role=ROLE_OWNER)
+    store.set_membership(BOB, ORG_ONE, status="removed")
+    store.set_membership(CAROL, ORG_TWO)
+    assert store.get_membership_rows([ALICE, BOB, "unknown"]) == {
+        ALICE: {"id": ORG_ONE, "name": "Acme", "role": ROLE_OWNER, "status": "active"},
+        BOB: {"id": ORG_ONE, "name": "Acme", "role": ROLE_MEMBER, "status": "removed"},
+    }
+    assert store.get_membership_rows([]) == {}
+
+
+def test_postgres_membership_rows_use_one_bounded_subject_query():
+    connection = _RecordingConnection(
+        [{"user_id": ALICE, "org_id": ORG_ONE, "name": "Acme", "role": ROLE_OWNER, "status": "removed"}]
+    )
+    store = PostgresOrgStore(_StubDatabase(connection))
+    assert store.get_membership_rows([ALICE, "unknown"]) == {
+        ALICE: {"id": ORG_ONE, "name": "Acme", "role": ROLE_OWNER, "status": "removed"}
+    }
+    assert len(connection.statements) == 1
+    sql, params = connection.statements[0]
+    assert "m.user_id = ANY(%s)" in sql
+    assert "JOIN collab_orgs" in sql
+    assert params == ([ALICE, "unknown"],)
+    assert store.get_membership_rows([]) == {}
+    assert len(connection.statements) == 1
+
+
+def test_membership_rows_fail_closed_without_a_backend_or_schema():
+    with pytest.raises(OrgsUnavailableError):
+        UnavailableOrgStore().get_membership_rows([ALICE])
+    store = PostgresOrgStore(_StubDatabase(_RecordingConnection(error=psycopg.errors.UndefinedTable())))
+    with pytest.raises(OrgSchemaMissingError):
+        store.get_membership_rows([ALICE])
+
+
 # --------------------------------------------------------------------------
 # Against a real database (opt in with COLLAB_HUB_TEST_POSTGRES_URL)
 # --------------------------------------------------------------------------
@@ -723,6 +761,11 @@ def test_live_rosters_reflect_removal_and_ownership_on_the_next_read(migrated_da
     with migrated_database.connection() as conn:
         conn.execute("UPDATE collab_org_members SET role = 'owner' WHERE user_id = %s", (BOB,))
         conn.execute("UPDATE collab_org_members SET status = 'removed' WHERE user_id = %s", (ALICE,))
+    assert store.get_membership_rows([ALICE, BOB, CAROL, "unknown"]) == {
+        ALICE: {"id": ORG_ONE, "name": "Acme", "role": ROLE_OWNER, "status": "removed"},
+        BOB: {"id": ORG_ONE, "name": "Acme", "role": ROLE_OWNER, "status": "active"},
+        CAROL: {"id": ORG_TWO, "name": None, "role": ROLE_OWNER, "status": "active"},
+    }
     roster = store.get_roster(ORG_ONE)
     assert roster.members == (OrgMember(user_id=BOB, role=ROLE_OWNER, email=None, display_name=None),)
 

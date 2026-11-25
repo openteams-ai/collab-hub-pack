@@ -19,6 +19,8 @@ Statement ([#95], `/web/terms` and `/web/privacy`).
 [#146]: https://github.com/openteams-ai/collab-hub-pack/issues/146
 [#95]: https://github.com/openteams-ai/collab-hub-pack/issues/95
 
+The admin Users view reports organization standing separately from Hub administrator authority. Models reports group restrictions, not a person's complete inference entitlement. See [admin onboarding QA](admin-onboarding-qa.md) for the response contract, synthetic test cases and the separate invitation-to-membership acceptance sequence.
+
 ## Two auth axes, deliberately
 
 The API authenticates machines: bearer tokens from the desktop's public

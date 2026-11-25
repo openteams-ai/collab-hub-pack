@@ -1075,6 +1075,58 @@ COLLAB_SCHEMA_MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
             "CREATE INDEX IF NOT EXISTS collab_web_ended_sessions_ended_at ON collab_web_ended_sessions (ended_at)",
         ),
     ),
+    (
+        19,
+        (
+            # Self-service organizations (issue #365). `self_service` marks an
+            # organization the hub created for a login that had none, under
+            # orgSource=self_service; it is what makes that organization one a
+            # later invitation may move its owner out of. Default false, so
+            # every organization that exists when this runs keeps today's
+            # meaning.
+            "ALTER TABLE collab_orgs ADD COLUMN IF NOT EXISTS self_service boolean NOT NULL DEFAULT false",
+            # `name_generated` marks a name the hub chose (derived from the
+            # owner's address) rather than one a person gave. The owner page
+            # treats it like the placeholder: a real name is asked for before
+            # the first invitation, so the generated one is never shown to a
+            # second member. The audited rename clears it.
+            "ALTER TABLE collab_orgs ADD COLUMN IF NOT EXISTS name_generated boolean NOT NULL DEFAULT false",
+            # Generated names are unique, so an operator can tell personal
+            # organizations apart. Partial, because the names people give
+            # (and the many placeholder-named rows) are not unique and need
+            # not be. The insert relies on this index: a collision answers
+            # ON CONFLICT DO NOTHING and the next candidate is tried.
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS collab_orgs_generated_name_unique
+            ON collab_orgs (name) WHERE name_generated
+            """,
+            # A grant owed by a self-service admission has no invitation behind
+            # it. The column keeps its foreign key for the rows that do.
+            "ALTER TABLE collab_service_access_grants ALTER COLUMN invitation DROP NOT NULL",
+            # When an invitation moved the owner of a self-service organization
+            # into another organization, leaving it with no members. Kept, not
+            # deleted: its history, usage and audit rows still point at it.
+            "ALTER TABLE collab_orgs ADD COLUMN IF NOT EXISTS retired_at timestamptz",
+            # Frames owed a move by such an acceptance. Frames live in object
+            # storage and cannot commit with the database, so the acceptance
+            # writes this row in its own transaction and the move runs after
+            # commit, idempotently, until it is `done`. One row per retired
+            # organization: it is moved out of exactly once.
+            """
+            CREATE TABLE IF NOT EXISTS collab_frame_moves (
+                from_org_id text PRIMARY KEY REFERENCES collab_orgs(id),
+                to_org_id   text NOT NULL REFERENCES collab_orgs(id),
+                user_id     text NOT NULL,
+                state       text NOT NULL DEFAULT 'pending'
+                            CHECK (state IN ('pending', 'done')),
+                moved       integer NOT NULL DEFAULT 0,
+                created_at  timestamptz NOT NULL DEFAULT now(),
+                updated_at  timestamptz NOT NULL DEFAULT now()
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS collab_frame_moves_state ON collab_frame_moves (state, created_at)",
+        ),
+    ),
 )
 
 

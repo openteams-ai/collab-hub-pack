@@ -685,6 +685,7 @@ def redeem(
     display: DisplayIdentity,
     service_access: ServiceAccessGranter | None = None,
     granted_groups: Sequence[str] = (),
+    frames_store=None,
 ):
     """Redeem a validated accept body. **The one call both surfaces make.**
 
@@ -745,6 +746,15 @@ def redeem(
         record=service,
         display=display,
     )
+    if acceptance.moved_from_org_id is not None and frames_store is not None:
+        # The person left a self-service organization (issue #365); its frames
+        # are owed a move, recorded in the acceptance's transaction. Attempted
+        # now so they are where the person is on their next request; a failure
+        # is left for the periodic sweep and never fails the acceptance.
+        try:
+            service.complete_frame_moves(frames_store, from_org_id=acceptance.moved_from_org_id)
+        except Exception:
+            logger.exception("frame_move_after_acceptance_failed", extra={"invitation_id": acceptance.invitation_id})
     return acceptance
 
 
@@ -801,11 +811,14 @@ def grant_service_access(
     Note what is *not* checked here: whether the accepter deserves it. That was
     decided by the acceptance itself, which required the one-time secret and an
     identity-provider-verified address matching the invited one. This function
-    is reached only for somebody who cleared both — and it is the **only**
-    caller of ``granter.grant``, which is the structural reason a
-    self-registration that never redeemed a token can never be granted
-    anything (an internal issue, the behaviour this
-    replaced).
+    is reached only for somebody who cleared both — and outside the
+    ``self_service`` org source it is the **only** caller of ``granter.grant``,
+    which is the structural reason a self-registration that never redeemed a
+    token can never be granted anything (an internal issue, the behaviour this
+    replaced). Under ``self_service`` (#365) the operator has chosen open
+    sign-up, and :func:`~..frames.self_service.grant_owed_service_access`
+    grants the same groups to a verified login the hub has just given an
+    organization.
 
     None of the four skip paths writes an audit row. Nothing was attempted, and
     a row per non-event would bury the attempts that matter in noise
@@ -914,6 +927,7 @@ def _record_grant_attempt(
 
 @router.post("/invitations/accept")
 def accept_invitation(
+    request: Request,
     payload: InvitationAcceptRequest,
     identity: IdentityDep,
     service: ServiceDep,
@@ -952,6 +966,7 @@ def accept_invitation(
         display=identity.display,
         service_access=service_access,
         granted_groups=granted_groups,
+        frames_store=getattr(request.app.state, "frames_store", None),
     )
     return InvitationAcceptResponse(
         org_id=acceptance.org_id,

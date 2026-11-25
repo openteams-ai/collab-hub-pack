@@ -522,7 +522,8 @@
                 "",
                 "claims",
                 "membership",
-                "single"
+                "single",
+                "self_service"
               ]
             },
             "singleOrg": {

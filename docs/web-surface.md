@@ -15,6 +15,7 @@ Statement ([#95], `/web/terms` and `/web/privacy`).
 [#90]: https://github.com/openteams-ai/collab-hub-pack/issues/90
 [#91]: https://github.com/openteams-ai/collab-hub-pack/issues/91
 [#142]: https://github.com/openteams-ai/collab-hub-pack/issues/142
+[#365]: https://github.com/openteams-ai/collab-hub-pack/issues/365
 [#44]: https://github.com/openteams-ai/collab-hub-pack/issues/188
 [#146]: https://github.com/openteams-ai/collab-hub-pack/issues/146
 [#95]: https://github.com/openteams-ai/collab-hub-pack/issues/95
@@ -866,9 +867,27 @@ are asserted in `test_web_surface.py` so the claim and the code cannot drift.
 The page an invitation link points at. The one-time secret is delivered in the
 URL **fragment** (`…/invite/accept#token=…`), which browsers never transmit —
 so it appears in no request line, no `Referer`, and no access log. The page
-reads it in the browser, banks it in `sessionStorage` across the Keycloak
+reads it in the browser, banks it in `localStorage` across the Keycloak
 registration / sign-in round trip, and sends it to
 `POST /invite/accept/redeem` in a **JSON body**.
+
+`localStorage`, not `sessionStorage` ([#365]): with email verification on,
+Keycloak opens its verification link in a new tab, and a `sessionStorage` copy
+exists only in the tab that banked it. Every stored value carries its own
+expiry (the token: the invitation's 48-hour lifetime; a settled outcome: one
+hour), an expired value is dropped when read, and the token is still dropped
+at any settled outcome.
+
+Under `orgSource=self_service` an invitee may already own an organization the
+hub created for them (they used the app before accepting). Acceptance then
+moves them out of it, provided they are its `owner` and nobody else, current
+or removed, has ever been a member: the membership row moves to the invited
+organization, pending invitations issued from the old one are revoked, it is
+marked retired, its frame groups move with them as `private`, and its frames
+follow after commit (re-homed as `private`, retried by a periodic sweep until
+done). Anything else is still refused as `already_in_organization`. The
+acceptance page never gives anyone an organization itself: it reads identity,
+not membership.
 
 ### The one page that runs JavaScript
 
@@ -1253,6 +1272,16 @@ advisory lock (one live invitation per address, issued from this page),
 notices, no JavaScript, render-not-redirect on the POSTs, and the same
 mounting rule — claims-sourced deployments have no org roles, so the page is
 absent there rather than a page that refuses everyone.
+
+### Self-service organizations ([#365])
+
+Under `orgSource=self_service`, a signed-in person with a verified email and
+no membership row who reaches this page is given an organization of their
+own first, exactly as their first API request would (`require_org_owner`
+admits before it checks the role). The organization's generated name
+(`Personal: <email>`) is treated like the placeholder below: the page asks for
+a real name before the first invitation goes out, and the rename replaces the
+generated name once.
 
 ### The first-invite naming step ([#44])
 

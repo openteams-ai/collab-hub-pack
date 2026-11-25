@@ -1,4 +1,4 @@
-"""Where the auth choke point gets the caller's organization: claims, membership, or single.
+"""Where the auth choke point gets the caller's organization: claims, membership, single, or self_service.
 
 ``auth_context_from_claims`` historically read ``org_id``/``workspace_id`` from
 the token, with ``FRAMES_AUTH_DEFAULT_ORG``/``FRAMES_AUTH_DEFAULT_WORKSPACE``
@@ -24,6 +24,15 @@ on the server"**. Retiring it is issue #63.
   (active or removed, any organization) are authoritative and never rewritten,
   and every membership-mode precondition still applies. This is the mode's
   entire delta; it replaces the retired defaults, it does not revive them.
+- ``self_service`` (issue #365) — membership resolution plus a different
+  delta: a caller with **no membership row at all** whose token asserts a
+  verified email gets **an organization of their own**, with themselves as
+  ``owner``, created on their first authenticated request. It is the mode for
+  a hub where anyone may sign up because usage is paid for per person: the
+  no-organization state stops being a dead end. As under ``single``, rows stay
+  the single source of truth and an existing row of any kind is never
+  rewritten here (moving a person out of their own organization is
+  invitation acceptance's job, not resolution's).
 
 **Why auto-admission is gated on a declared identity source, not on
 authentication.** "Every authenticated user is a member" admits every door
@@ -70,6 +79,7 @@ ORG_SOURCE_ENV = "FRAMES_AUTH_ORG_SOURCE"
 ORG_SOURCE_CLAIMS = "claims"
 ORG_SOURCE_MEMBERSHIP = "membership"
 ORG_SOURCE_SINGLE = "single"
+ORG_SOURCE_SELF_SERVICE = "self_service"
 
 DEFAULT_ORG_ENV = "FRAMES_AUTH_DEFAULT_ORG"
 DEFAULT_WORKSPACE_ENV = "FRAMES_AUTH_DEFAULT_WORKSPACE"
@@ -121,13 +131,15 @@ def _org_source() -> str:
     mode = os.environ.get(ORG_SOURCE_ENV, "")
     if mode in ("", ORG_SOURCE_CLAIMS):
         return ORG_SOURCE_CLAIMS
-    if mode in (ORG_SOURCE_MEMBERSHIP, ORG_SOURCE_SINGLE):
+    if mode in (ORG_SOURCE_MEMBERSHIP, ORG_SOURCE_SINGLE, ORG_SOURCE_SELF_SERVICE):
         return mode
     raise RuntimeError(
         f"Unsupported {ORG_SOURCE_ENV} value {mode!r}: expected exactly "
         f"'{ORG_SOURCE_MEMBERSHIP}' (resolve the caller's organization from collab_org_members), "
         f"'{ORG_SOURCE_SINGLE}' (membership resolution plus auto-admission to one declared "
         f"organization for sign-ins from declared identity sources), "
+        f"'{ORG_SOURCE_SELF_SERVICE}' (membership resolution plus an organization of their own "
+        f"for every verified login without one), "
         f"or '{ORG_SOURCE_CLAIMS}' (org/workspace token claims with the "
         f"{DEFAULT_ORG_ENV}/{DEFAULT_WORKSPACE_ENV} fallbacks, the default)."
     )
@@ -136,9 +148,9 @@ def _org_source() -> str:
 def org_source_resolves_membership() -> bool:
     """Return whether org context is resolved from ``collab_org_members``.
 
-    True for both ``membership`` and ``single`` — the single-organization mode
-    *is* membership resolution, differing only in how a missing row can come to
-    exist. Everything conditioned on this — mounting invitations, requiring an
+    True for ``membership``, ``single`` and ``self_service`` — the latter two
+    *are* membership resolution, differing only in how a missing row can come
+    to exist. Everything conditioned on this — mounting invitations, requiring an
     organization store, the schema preflight, the ``collab_`` role axes —
     wants exactly that property, not the literal value.
 
@@ -153,6 +165,12 @@ def org_source_is_single() -> bool:
     """Return whether this deployment declares exactly one organization."""
 
     return _org_source() == ORG_SOURCE_SINGLE
+
+
+def org_source_is_self_service() -> bool:
+    """Return whether every verified login without a membership gets its own organization."""
+
+    return _org_source() == ORG_SOURCE_SELF_SERVICE
 
 
 def single_org_declaration() -> SingleOrgDeclaration | None:
@@ -205,9 +223,9 @@ def single_org_declaration() -> SingleOrgDeclaration | None:
 def enforce_membership_org_source_preconditions() -> None:
     """Refuse to start membership resolution with an unsafe surrounding config.
 
-    Applies to both membership-resolving sources (``membership`` and
-    ``single`` — the latter is the former plus auto-admission, so it inherits
-    every precondition). Checked from ``make_app``:
+    Applies to every membership-resolving source (``membership``, ``single``
+    and ``self_service`` — the latter two are the first plus a way for a
+    missing row to come to exist, so they inherit every precondition). Checked from ``make_app``:
 
     1. **The identity pin must be on.** ``collab_org_members.user_id`` is the
        OIDC subject, so resolving a membership for a legacy

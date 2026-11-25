@@ -73,7 +73,9 @@ class OutstandingGrant:
     user_id: str
     group_path: str
     state: str
-    invitation_id: str
+    invitation_id: str | None
+    """The invitation whose acceptance owes this grant, or ``None`` for a
+    self-service admission (issue #365), which has no invitation behind it."""
     created_at: datetime
     updated_at: datetime
 
@@ -90,7 +92,7 @@ class OutstandingGrant:
         return self.state == STATE_PENDING
 
 
-def claim_pending(conn, *, user_id: str, invitation_id: str, group_paths: Sequence[str]) -> None:
+def claim_pending(conn, *, user_id: str, invitation_id: str | None, group_paths: Sequence[str]) -> None:
     """Record, inside the caller's transaction, what this acceptance owes.
 
     ``conn`` must be the audited transaction's guarded connection. That is the
@@ -102,6 +104,9 @@ def claim_pending(conn, *, user_id: str, invitation_id: str, group_paths: Sequen
     ``pending`` would report somebody who holds their access, and re-granting
     is pointless — or already outstanding, in which case it is already going
     to be retried and the earlier invitation is the truer context for why.
+
+    ``invitation_id`` is ``None`` when the grant is owed by a self-service
+    admission (issue #365) rather than an acceptance.
     """
 
     if not group_paths:

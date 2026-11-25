@@ -657,6 +657,7 @@ live_postgres = pytest.mark.skipif(
 )
 
 COLLAB_TABLES = (
+    "collab_frame_moves",
     "collab_service_access_grants",
     "collab_provisioned_accounts",
     "collab_invitations",

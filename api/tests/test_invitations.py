@@ -1672,8 +1672,8 @@ def test_migrations_are_appended_and_shipped_versions_are_untouched():
     """
 
     versions = [version for version, _ in COLLAB_SCHEMA_MIGRATIONS]
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
-    assert LATEST_COLLAB_SCHEMA_VERSION == 18
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    assert LATEST_COLLAB_SCHEMA_VERSION == 19
 
     version_two = dict(COLLAB_SCHEMA_MIGRATIONS)[2]
     # v2 has shipped, so its statements are frozen text. If this ever fails,
@@ -2098,6 +2098,7 @@ live_postgres = pytest.mark.skipif(
 )
 
 COLLAB_TABLES = (
+    "collab_frame_moves",
     "collab_service_access_grants",
     "collab_provisioned_accounts",
     "collab_invitations",
@@ -3935,7 +3936,7 @@ def test_naming_is_one_audited_read_then_write_and_refuses_without_writing(monke
         def execute(self, sql, params=()):
             if sql.lstrip().startswith("SELECT"):
                 assert "FOR UPDATE" in sql
-                return _Result(None if self._current is missing else {"name": self._current})
+                return _Result(None if self._current is missing else {"name": self._current, "name_generated": False})
             self.updates.append(params)
             return _Result(None)
 

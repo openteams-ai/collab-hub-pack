@@ -6,7 +6,7 @@ authenticates. The tables are created by the versioned runner in
 needs — "which organization does this subject belong to, and in what role" —
 and nothing more.
 
-**Read-only, with one declared exception.** Organization and membership
+**Read-only, with two declared exceptions.** Organization and membership
 *writes* (create an org, invite, accept, remove, transfer ownership) are
 separate issues with their own policy decisions; adding speculative write
 methods here would bake in guesses about them. The one write that does live
@@ -17,7 +17,10 @@ belongs next to its readers. It is deliberately the narrowest write that
 works: insert-if-absent, never update, never delete, never resurrect a
 ``removed`` row. Platform-role *writes* are likewise absent on purpose — the
 bootstrap operator is a documented psql insert, and grant/revoke endpoints are
-built the second time they are needed.
+built the second time they are needed. The second exception is
+:meth:`OrgStore.provision_self_service_org` (issue #365), for the same reason:
+the ``self_service`` org source creates the caller's organization inside org
+resolution.
 
 Backend semantics mirror ``usage.py``/``history.py``: a relational feature
 riding the shared ``frames.postgres`` URL, with ``InMemory`` as a test/dev
@@ -266,6 +269,26 @@ class OrgStore(ABC):
 
         raise NotImplementedError
 
+    def provision_self_service_org(
+        self,
+        user_id: str,
+        display,
+        *,
+        service_groups: Sequence[str] = (),
+    ):
+        """Create an organization owned by *user_id*, unless they already hold a row (issue #365).
+
+        The ``self_service`` org source's write. Returns a
+        :class:`~.self_service.SelfServiceAdmission`: the row now standing and
+        whether this call created it. Like :meth:`provision_member` it never
+        updates or resurrects an existing row. *display* carries the verified
+        email the generated name is derived from; the caller has checked
+        ``display.email_verified``. Not abstract, so a store written for a
+        mode that never admits this way need not implement it.
+        """
+
+        raise NotImplementedError
+
     @abstractmethod
     def get_roster(self, org_id: str) -> OrgRoster | None:
         """Return *org_id* and its active members, or ``None`` if no such organization exists.
@@ -316,6 +339,9 @@ class UnavailableOrgStore(OrgStore):
     ) -> tuple[OrgMembership, bool]:
         raise OrgsUnavailableError("Organization storage is not configured")
 
+    def provision_self_service_org(self, user_id: str, display, *, service_groups: Sequence[str] = ()):
+        raise OrgsUnavailableError("Organization storage is not configured")
+
     def get_roster(self, org_id: str) -> OrgRoster | None:
         raise OrgsUnavailableError("Organization storage is not configured")
 
@@ -336,6 +362,11 @@ class InMemoryOrgStore(OrgStore):
         self._contacts: dict[str, tuple[str | None, str | None]] = {}
         self._org_names: dict[str, str | None] = {}
         self._platform_roles: dict[str, tuple[str, str, str]] = {}
+        self._generated_names: dict[str, str] = {}
+        self.self_service_orgs: set[str] = set()
+        """Organizations created by :meth:`provision_self_service_org`, for tests."""
+        self.owed_service_groups: dict[str, tuple[str, ...]] = {}
+        """What each self-service admission owed, for tests."""
 
     def set_membership(
         self,
@@ -474,6 +505,27 @@ class InMemoryOrgStore(OrgStore):
             self._contacts[user_id] = (email, display_name)
             self._org_names.setdefault(org_id, org_name)
             return membership, True
+
+    def provision_self_service_org(self, user_id: str, display, *, service_groups: Sequence[str] = ()):
+        from uuid import uuid4
+
+        from .self_service import SelfServiceAdmission, generated_name_candidates
+
+        with self._lock:
+            existing = self._memberships.get(user_id)
+            if existing is not None:
+                return SelfServiceAdmission(membership=existing, created=False)
+            taken = set(self._generated_names.values())
+            name = next(c for c in generated_name_candidates(display.email, user_id) if c not in taken)
+            org_id = uuid4().hex
+            membership = OrgMembership(user_id=user_id, org_id=org_id, role=ROLE_OWNER, status=MEMBERSHIP_ACTIVE)
+            self._memberships[user_id] = membership
+            self._contacts[user_id] = (display.email, display.name)
+            self._org_names[org_id] = name
+            self._generated_names[org_id] = name
+            self.self_service_orgs.add(org_id)
+            self.owed_service_groups[user_id] = tuple(service_groups)
+            return SelfServiceAdmission(membership=membership, created=True, service_groups=tuple(service_groups))
 
 
 class PostgresOrgStore(OrgStore):
@@ -630,6 +682,16 @@ class PostgresOrgStore(OrgStore):
                 extra={"user": user_id, "org": org_id},
             )
         return membership, created
+
+    def provision_self_service_org(self, user_id: str, display, *, service_groups: Sequence[str] = ()):
+        import psycopg
+
+        from .self_service import provision_self_service_org
+
+        try:
+            return provision_self_service_org(self._db, user_id=user_id, display=display, service_groups=service_groups)
+        except psycopg.errors.UndefinedTable as exc:
+            raise self._missing_schema() from exc
 
     def get_roster(self, org_id: str) -> OrgRoster | None:
         import psycopg

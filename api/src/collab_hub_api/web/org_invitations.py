@@ -355,7 +355,7 @@ def invitations_page(
         form = _issue_form(root_path, session.csrf)
     else:
         intro = escape(
-            "Your organization does not have a name yet. Give it one before"
+            "Your organization has not been named yet. Give it a name before"
             " inviting anyone, so that you can see which organization you are"
             f" inviting people into rather than \u201c{organization_name}\u201d. The"
             " name appears on this page and in your organization's records; it"

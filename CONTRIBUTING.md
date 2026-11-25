@@ -95,8 +95,10 @@ every route answers 401, which is why `make api` is the easier path.
 The API is linted and formatted with Ruff, at the version `uv.lock` pins.
 [`.pre-commit-config.yaml`](.pre-commit-config.yaml) runs it as Git hooks on
 the files you commit, fixing what it can, with the same settings as the `Ruff`
-CI check. Install [prek](https://prek.j178.dev/) (or pre-commit) and the hooks
-once in your clone:
+CI check. Dependabot bumps Ruff in both places on the same monthly run; if
+you bump it by hand, update the hook's `rev` and its `# frozen:` comment to
+match. Install [prek](https://prek.j178.dev/) (or pre-commit) and the hooks once
+in your clone:
 
 ```sh
 uv tool install prek

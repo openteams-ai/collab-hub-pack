@@ -8,7 +8,9 @@ files: ^api/(src|tests)/
 
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    # Keep in step with the ruff version api/uv.lock pins.
+    # Keep in step with the ruff version api/uv.lock pins; Dependabot bumps
+    # both on the same run. Keep the `# frozen:` comment, as Dependabot reads
+    # the version from it; without it, it would move rev to Ruff's main branch.
     rev: ef6cf06c079dd6b299dfc720b0f14400c9d168e1  # frozen: v0.17.5
     hooks:
       # Lint, fixing what Ruff safely can, before formatting: a fix can leave

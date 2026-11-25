@@ -63,6 +63,7 @@ from .frames.org_source import (
     ORG_SOURCE_MEMBERSHIP,
     ORG_SOURCE_SINGLE,
     enforce_membership_org_source_preconditions,
+    org_source_is_self_service,
     org_source_is_single,
     org_source_resolves_membership,
     single_org_declaration,
@@ -248,6 +249,23 @@ def build_membership_api_authenticator(config: BaseConfig) -> ServiceCallerAuthe
         )
     logger.info("membership_api_enabled", extra={"client_ids": sorted(settings.client_ids)})
     return ServiceCallerAuthenticator(settings.client_ids, audience=settings.audience or None)
+
+
+async def _sweep_frame_moves(invitation_service, frames_store) -> None:
+    """Every few minutes, finish frame moves left pending (issue #365).
+
+    Runs the blocking work in a thread. Every replica runs it; the work is
+    idempotent, so two replicas finishing the same move only repeat it.
+    """
+
+    from .frames.frame_moves import SWEEP_INTERVAL_SECONDS
+
+    while True:
+        await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+        try:
+            await asyncio.to_thread(invitation_service.complete_frame_moves, frames_store)
+        except Exception:
+            logger.exception("frame_move_sweep_failed")
 
 
 def _close_quietly(candidate: object) -> None:
@@ -500,9 +518,17 @@ def make_app(config: BaseConfig) -> FastAPI:
                 # checks are and, more importantly, what they are not.
                 verify_web_route_protection(app.routes)
                 enforce_web_surface_map_access(app.routes, config)
+            frame_move_task: asyncio.Task | None = None
+            if org_source_is_self_service() and getattr(invitation_service, "available", False):
+                # Retries frame moves an acceptance left pending (issue #365).
+                frame_move_task = asyncio.create_task(_sweep_frame_moves(invitation_service, frames_store))
             try:
                 yield
             finally:
+                if frame_move_task is not None:
+                    frame_move_task.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await frame_move_task
                 # First, before the pools close: a sweep in flight holds the
                 # lock connection and may be mid-write. Cancel, give it a
                 # moment to unwind (its finally submits the lock release,

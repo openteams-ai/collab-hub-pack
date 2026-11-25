@@ -261,12 +261,14 @@ leave a retired default in place where nothing reviews it.
 {{- end }}
 {{- end }}
 {{- $orgSource := toString .Values.frames.auth.orgSource }}
-{{- if or (eq $orgSource "membership") (eq $orgSource "single") }}
+{{- if or (eq $orgSource "membership") (eq $orgSource "single") (eq $orgSource "self_service") }}
 {{- /*
 Each of these mirrors a startup check in the app (frames.org_source and
 make_app), so the misconfiguration is caught at render time instead of by a
 crash-looping pod. "single" is membership resolution plus auto-admission
-(issue #91), so it inherits every membership precondition unchanged.
+(issue #91), and "self_service" is membership resolution plus an organization
+of their own for every verified login without one (issue #365), so both
+inherit every membership precondition unchanged.
 */}}
 {{- if ne .Values.frames.auth.identityClaim "sub" }}
 {{- fail (printf "frames.auth.orgSource=%s requires frames.auth.identityClaim=sub: membership rows are keyed by the OIDC subject, so a legacy (username/email) principal would be resolved against the wrong key." $orgSource) }}
@@ -284,8 +286,8 @@ collab_org_members, so it mirrors make_app's startup checks: organizations must
 come from membership rows, and service tokens must be verifiable.
 */}}
 {{- if (dig "membershipApi" "clientIds" list (.Values.frames | default dict)) }}
-{{- if not (or (eq $orgSource "membership") (eq $orgSource "single")) }}
-{{- fail "frames.membershipApi.clientIds requires frames.auth.orgSource=membership or single: under claims the hub does not read collab_org_members, so the membership API would describe a tenancy the hub does not enforce." }}
+{{- if not (or (eq $orgSource "membership") (eq $orgSource "single") (eq $orgSource "self_service")) }}
+{{- fail "frames.membershipApi.clientIds requires frames.auth.orgSource=membership, single or self_service: under claims the hub does not read collab_org_members, so the membership API would describe a tenancy the hub does not enforce." }}
 {{- end }}
 {{- if not .Values.frames.auth.bearer.jwksUrl }}
 {{- fail "frames.membershipApi.clientIds requires frames.auth.bearer.jwksUrl: add-on service tokens are verified against the realm's signing keys." }}

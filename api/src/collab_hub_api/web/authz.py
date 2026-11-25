@@ -711,10 +711,30 @@ def require_org_owner(request: Request, session: WebSession = Depends(require_we
     a quiet refusal and never a quiet grant.
     """
 
-    membership = _org_store(request).get_membership(session.user)
+    store = _org_store(request)
+    membership = store.get_membership(session.user)
+    if membership is None:
+        # Under orgSource=self_service (issue #365) a verified signed-in person
+        # with no row gets their own organization here too, so somebody who
+        # only uses the browser surface is not left without one. Only this
+        # dependency admits: the invitation acceptance page reads identity, not
+        # membership, so an invitee signing in to accept is never given an
+        # organization first.
+        membership = _admit_self_service(request, session, store)
     if membership is None or not membership.is_active or membership.role != ROLE_OWNER:
         raise WebForbidden(f"user {session.user!r} is not an active organization owner")
     return session
+
+
+def _admit_self_service(request: Request, session: WebSession, store: OrgStore):
+    from ..frames.auth import DisplayIdentity
+    from ..frames.self_service import admit_self_service, self_service_policy
+
+    policy = self_service_policy(request.app.state)
+    if policy is None:
+        return None
+    display = DisplayIdentity(name=session.name, email=session.email, email_verified=session.email_verified is True)
+    return admit_self_service(session.user, display, store, policy)
 
 
 async def require_csrf(request: Request, session: WebSession = Depends(require_web_session)) -> WebSession:

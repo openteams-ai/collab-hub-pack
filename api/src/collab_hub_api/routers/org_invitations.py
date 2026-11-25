@@ -94,7 +94,6 @@ from ..frames.invitations import (
     IssuedInvitation,
     LiveInvitationExists,
     OrganizationAlreadyNamedError,
-    is_placeholder_organization_name,
     validate_invited_email,
     validate_organization_name,
 )
@@ -298,7 +297,7 @@ def make_router() -> APIRouter:
         org_id = auth.org_id
         try:
             organization_name = service.organization_name(org_id)
-            organization_named = not is_placeholder_organization_name(organization_name)
+            organization_named = not service.organization_needs_name(org_id)
             page = service.list_for_org(org_id, limit=LISTING_LIMIT, offset=0)
             now = service.server_now()
         except InvitationsUnavailableError:
@@ -398,7 +397,7 @@ def make_router() -> APIRouter:
         # rather than locked into the send.
         try:
             organization_name = service.organization_name(auth.org_id)
-            if is_placeholder_organization_name(organization_name):
+            if service.organization_needs_name(auth.org_id):
                 return _render(
                     request,
                     session,

@@ -60,8 +60,17 @@ What the script is allowed to do with the token
 ------------------------------------------------
 The token is read from the fragment into a JavaScript variable, stripped
 from the address bar with ``history.replaceState`` immediately, kept in
-``sessionStorage`` so it survives the Keycloak registration / sign-in round
-trip in the same tab, and sent to the server in a **POST body**. It is never
+``localStorage`` so it survives the Keycloak registration / sign-in round
+trip, and sent to the server in a **POST body**.
+
+``localStorage`` rather than ``sessionStorage`` (issue #365): with email
+verification on, Keycloak's verification link opens in a new tab, and a
+``sessionStorage`` copy exists only in the tab that banked it, so the invitee
+finished signing up in a tab that had no token. ``localStorage`` is shared by
+the origin's tabs in that browser. What that costs is persistence, so every
+stored value carries its own expiry (:data:`TOKEN_STORAGE_TTL_MS`,
+:data:`OUTCOME_STORAGE_TTL_MS`), an expired one is dropped on read, and the
+token is dropped at any settled outcome exactly as before. It is never
 written into the DOM, never an element value or attribute, never a query
 parameter, never a form field, and never part of any URL this page
 constructs.
@@ -94,6 +103,7 @@ from base64 import b64encode
 from hashlib import sha256
 from urllib.parse import urlencode
 
+from ..frames.invitations import INVITATION_TTL
 from .data_statement import DATA_STATEMENT_TEXT
 from .pages import SECURITY_HEADERS, escape, render_page
 from .surface import DATA_STATEMENT_PATH
@@ -115,6 +125,15 @@ CONTAINER_ID = "accept"
 
 TOKEN_STORAGE_KEY = "nexus.invite.token"
 OUTCOME_STORAGE_KEY = "nexus.invite.outcome"
+
+TOKEN_STORAGE_TTL_MS = int(INVITATION_TTL.total_seconds() * 1000)
+"""How long the banked token is kept: the invitation's own lifetime, counted
+from when the page banked it. A token older than that is dead at the server
+anyway, so the browser drops it rather than holding it indefinitely."""
+
+OUTCOME_STORAGE_TTL_MS = 60 * 60 * 1000
+"""How long a settled outcome is remembered, so a reload shows it instead of
+re-posting. An hour is plenty for a reload; after that the page forgets it."""
 
 # --- Outcomes ---------------------------------------------------------------
 
@@ -186,6 +205,8 @@ ACCEPTANCE_SCRIPT = """\
   "use strict";
   var TOKEN_KEY = "__TOKEN_KEY__";
   var OUTCOME_KEY = "__OUTCOME_KEY__";
+  var TOKEN_TTL_MS = __TOKEN_TTL_MS__;
+  var OUTCOME_TTL_MS = __OUTCOME_TTL_MS__;
   var TOKEN_SHAPE = /^[A-Za-z0-9_-]{1,512}$/;
   var SETTLED = __SETTLED__;
   var root = document.getElementById("__CONTAINER__");
@@ -204,16 +225,21 @@ ACCEPTANCE_SCRIPT = """\
 
   function present(name) { if (!show(name)) { show("__ERROR__"); } }
 
-  function store() { try { return window.sessionStorage; } catch (e) { return null; } }
+  function store() { try { return window.localStorage; } catch (e) { return null; } }
   function read(key) {
     var s = store();
     if (!s) { return ""; }
-    try { return s.getItem(key) || ""; } catch (e) { return ""; }
+    var raw = "";
+    try { raw = s.getItem(key) || ""; } catch (e) { return ""; }
+    var cut = raw.indexOf(":");
+    var until = cut > 0 ? Number(raw.slice(0, cut)) : 0;
+    if (!(until > Date.now())) { drop(key); return ""; }
+    return raw.slice(cut + 1);
   }
-  function write(key, value) {
+  function write(key, value, ttl) {
     var s = store();
     if (!s) { return; }
-    try { s.setItem(key, value); } catch (e) { }
+    try { s.setItem(key, String(Date.now() + ttl) + ":" + value); } catch (e) { }
   }
   function drop(key) {
     var s = store();
@@ -235,7 +261,7 @@ ACCEPTANCE_SCRIPT = """\
   }
 
   var fresh = takeFragment();
-  if (fresh) { write(TOKEN_KEY, fresh); drop(OUTCOME_KEY); }
+  if (fresh) { write(TOKEN_KEY, fresh, TOKEN_TTL_MS); drop(OUTCOME_KEY); }
 
   var settled = read(OUTCOME_KEY);
   if (settled) { present(settled); return; }
@@ -267,7 +293,7 @@ ACCEPTANCE_SCRIPT = """\
         function () { return {}; }
       ).then(function (data) {
         var outcome = (data && typeof data.outcome === "string") ? data.outcome : "__ERROR__";
-        if (SETTLED.indexOf(outcome) !== -1) { drop(TOKEN_KEY); write(OUTCOME_KEY, outcome); }
+        if (SETTLED.indexOf(outcome) !== -1) { drop(TOKEN_KEY); write(OUTCOME_KEY, outcome, OUTCOME_TTL_MS); }
         present(outcome);
       });
     }).catch(function () { present("__ERROR__"); });
@@ -286,6 +312,8 @@ ACCEPTANCE_SCRIPT = """\
 for _placeholder, _value in (
     ("__TOKEN_KEY__", TOKEN_STORAGE_KEY),
     ("__OUTCOME_KEY__", OUTCOME_STORAGE_KEY),
+    ("__TOKEN_TTL_MS__", str(TOKEN_STORAGE_TTL_MS)),
+    ("__OUTCOME_TTL_MS__", str(OUTCOME_STORAGE_TTL_MS)),
     ("__CONTAINER__", CONTAINER_ID),
     ("__NO_TOKEN__", CLIENT_STATE_NO_TOKEN),
     ("__SIGNIN__", CLIENT_STATE_SIGNIN),
@@ -655,7 +683,7 @@ def signin_link(root_path: str, *, renew: bool = False, register: bool = False) 
     """Where the page sends someone who is not signed in — or not recently.
 
     ``next`` is the app-relative acceptance path, so the sign-in flow returns
-    them here — with the fragment already banked in ``sessionStorage``,
+    them here — with the fragment already banked in ``localStorage``,
     because the script ran before they followed this link. The fragment
     itself is deliberately **not** replayed through ``next``: it would then
     be a query parameter, on a request line, in every log between here and

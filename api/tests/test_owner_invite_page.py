@@ -231,6 +231,11 @@ class FakeInvitationService:
         assert org_id == ORG_ID, "the page may only name the caller's own organization"
         return self.name
 
+    def organization_needs_name(self, org_id: str) -> bool:
+        self._guard()
+        assert org_id == ORG_ID, "the page may only ask about the caller's own organization"
+        return is_placeholder_organization_name(self.name)
+
     def name_organization(self, ctx, *, org_id, name):
         self._guard()
         self.name_calls.append({"actor": ctx.user, "org_id": org_id, "name": name})
@@ -907,7 +912,7 @@ async def test_an_unnamed_organization_gets_the_naming_form_not_the_issue_form(t
     assert set(fields) == {"csrf_token", ORGANIZATION_NAME_FIELD}
     assert ORG_INVITATIONS_NAME_PATH in page.text
     assert "Invite someone to join" not in page.text
-    assert "does not have a name yet" in page.text
+    assert "has not been named yet" in page.text
 
 
 @pytest.mark.parametrize("stored", [NEUTRAL_ORG_NAME, "unnamed organization", "", "   "])
@@ -1052,6 +1057,7 @@ live_postgres = pytest.mark.skipif(
 )
 
 COLLAB_TABLES = (
+    "collab_frame_moves",
     "collab_service_access_grants",
     "collab_provisioned_accounts",
     "collab_invitations",

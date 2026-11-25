@@ -529,6 +529,9 @@ class InvitationAcceptance:
     """True when this login had already redeemed this same token: the same
     success is returned, nothing was created, and no new audit row was
     written. A reloaded acceptance page must not strand its invitee."""
+    moved_from_org_id: str | None = None
+    """The self-service organization this acceptance moved the person out of
+    (issue #365), whose frames are now owed a move; ``None`` otherwise."""
 
 
 SERVICE_ACCESS_GRANTED = "granted"
@@ -987,6 +990,12 @@ class UnavailableInvitationService:
     def name_organization(self, *args, **kwargs) -> str:
         raise self._unavailable()
 
+    def organization_needs_name(self, *args, **kwargs) -> bool:
+        raise self._unavailable()
+
+    def complete_frame_moves(self, *args, **kwargs) -> int:
+        raise self._unavailable()
+
     def record_service_access_grant(self, *args, **kwargs) -> None:
         raise self._unavailable()
 
@@ -1086,6 +1095,21 @@ class PostgresInvitationService:
 
     # --- Naming -------------------------------------------------------------
 
+    def organization_needs_name(self, org_id: str) -> bool:
+        """Whether the owner page must ask for a name before the first invitation.
+
+        True while the name is the neutral placeholder (#44), and while it is a
+        name the hub generated for a self-service organization (issue #365):
+        that one is derived from the owner's address, and a real name is asked
+        for before a second person can join.
+        """
+
+        with self._db.connection() as conn:
+            row = conn.execute("SELECT name, name_generated FROM collab_orgs WHERE id = %s", (org_id,)).fetchone()
+        if row is None:
+            return True
+        return bool(row["name_generated"]) or is_placeholder_organization_name(row["name"])
+
     def name_organization(self, ctx: AuthContext, *, org_id: str, name: str) -> str:
         """Give a placeholder-named organization its name, recorded as ``org.rename``.
 
@@ -1129,12 +1153,18 @@ class PostgresInvitationService:
             org_id=org_id,
             detail={"replaced_placeholder": True},
         ) as event:
-            row = event.conn.execute("SELECT name FROM collab_orgs WHERE id = %s FOR UPDATE", (org_id,)).fetchone()
+            row = event.conn.execute(
+                "SELECT name, name_generated FROM collab_orgs WHERE id = %s FOR UPDATE", (org_id,)
+            ).fetchone()
             if row is None:
                 raise OrgNotFoundError("Organization not found")
-            if not is_placeholder_organization_name(row["name"]):
+            # A generated self-service name (issue #365) is replaceable the
+            # same way the placeholder is; a name a person chose is not.
+            if not (row["name_generated"] or is_placeholder_organization_name(row["name"])):
                 raise OrganizationAlreadyNamedError("Organization already has a name")
-            event.conn.execute("UPDATE collab_orgs SET name = %s WHERE id = %s", (new_name, org_id))
+            event.conn.execute(
+                "UPDATE collab_orgs SET name = %s, name_generated = false WHERE id = %s", (new_name, org_id)
+            )
         return new_name
 
     def get(self, invitation_id: str) -> Invitation | None:
@@ -1618,6 +1648,11 @@ class PostgresInvitationService:
                     new_org_id=new_org_id,
                     service_groups=service_groups,
                 )
+                if acceptance.moved_from_org_id is not None:
+                    # One row records the move (issue #365): which
+                    # self-service organization the person left, and that it
+                    # was retired with its pending invitations revoked.
+                    event.detail = {**(event.detail or {}), "moved_from_org": acceptance.moved_from_org_id}
         except _NoAuditedChange as signal:
             return signal.outcome
         return acceptance
@@ -1674,11 +1709,19 @@ class PostgresInvitationService:
         # acceptance rules rather than hidden in an insert's failure mode.
         # The barrier that actually holds under concurrency is the primary
         # key, because this read cannot see an uncommitted row.
-        if conn.execute(
-            "SELECT 1 AS present FROM collab_org_members WHERE user_id = %s",
+        existing = conn.execute(
+            "SELECT org_id FROM collab_org_members WHERE user_id = %s FOR UPDATE",
             (user_id,),
-        ).fetchone():
-            raise AlreadyInOrganizationError(_ALREADY_IN_ORG_MESSAGE)
+        ).fetchone()
+        moved_from: str | None = None
+        if existing is not None:
+            # Under orgSource=self_service everyone already owns an
+            # organization, so a row is not by itself a refusal (issue #365):
+            # the owner of a self-service organization nobody else has joined
+            # is moved out of it. Anything else is refused as before.
+            moved_from = _move_out_of_self_service_org(
+                conn, user_id=user_id, org_id=existing["org_id"], invitation=invitation
+            )
 
         org_id = invitation.org_id
         if org_id is None:
@@ -1700,19 +1743,33 @@ class PostgresInvitationService:
                 (org_id, user_id),
             )
 
-        # ON CONFLICT rather than catching the violation: a raised
-        # UniqueViolation aborts the transaction before this method can
-        # decide what it means, and the answer here is a specific terminal
-        # state, not a database error.
-        member = conn.execute(
-            """
-            INSERT INTO collab_org_members (user_id, org_id, role, email, display_name)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (user_id) DO NOTHING
-            RETURNING user_id
-            """,
-            (user_id, org_id, invitation.granted_role, matched_email, display.name),
-        ).fetchone()
+        if moved_from is not None:
+            # The row was locked above, so this update cannot race another
+            # acceptance by the same login. `created_at` restarts: it is when
+            # the person's membership of *this* organization began.
+            member = conn.execute(
+                """
+                UPDATE collab_org_members
+                SET org_id = %s, role = %s, email = %s, display_name = %s, created_at = now()
+                WHERE user_id = %s
+                RETURNING user_id
+                """,
+                (org_id, invitation.granted_role, matched_email, display.name, user_id),
+            ).fetchone()
+        else:
+            # ON CONFLICT rather than catching the violation: a raised
+            # UniqueViolation aborts the transaction before this method can
+            # decide what it means, and the answer here is a specific terminal
+            # state, not a database error.
+            member = conn.execute(
+                """
+                INSERT INTO collab_org_members (user_id, org_id, role, email, display_name)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (user_id) DO NOTHING
+                RETURNING user_id
+                """,
+                (user_id, org_id, invitation.granted_role, matched_email, display.name),
+            ).fetchone()
         if member is None:
             # Lost the cross-token race on the membership primary key. The
             # whole transaction rolls back — including the organization
@@ -1762,11 +1819,14 @@ class PostgresInvitationService:
             invitation_id=invitation.id,
             group_paths=service_groups,
         )
+        if moved_from is not None:
+            _retire_self_service_org(conn, from_org_id=moved_from, to_org_id=org_id, user_id=user_id)
         return InvitationAcceptance(
             invitation_id=invitation.id,
             org_id=org_id,
             role=invitation.granted_role,
             org_created=invitation.creates_organization,
+            moved_from_org_id=moved_from,
         )
 
     # --- Service access granted by an acceptance (#180) ---------------------
@@ -1776,12 +1836,15 @@ class PostgresInvitationService:
         user_id: str,
         display: DisplayIdentity,
         *,
-        invitation_id: str,
+        invitation_id: str | None,
         org_id: str | None,
         group_path: str,
         granted: bool,
     ) -> None:
         """Record one attempt to grant a service group, in either outcome.
+
+        ``invitation_id`` is ``None`` for a grant owed by a self-service
+        admission (issue #365); ``detail.self_service`` says so on the row.
 
         **Why a row and not only a log line.** A log line is found only by
         somebody who already suspects; a row is found by a query. This is the
@@ -1836,6 +1899,7 @@ class PostgresInvitationService:
                 "invitation_id": invitation_id,
                 "group_path": group_path,
                 "outcome": SERVICE_ACCESS_GRANTED if granted else SERVICE_ACCESS_FAILED,
+                **({"self_service": True} if invitation_id is None else {}),
             },
         ):
             # Nothing. See the docstring: the recorded change happened at the
@@ -1855,6 +1919,17 @@ class PostgresInvitationService:
         """
 
         ServiceAccessStateStore(self._db).settle(user_id=user_id, group_path=group_path, granted=granted)
+
+    def complete_frame_moves(self, frames_store, *, from_org_id: str | None = None) -> int:
+        """Perform frame moves owed by acceptances that moved someone (issue #365).
+
+        See :mod:`.frame_moves`. Called right after such an acceptance commits,
+        and by the app's periodic sweep for moves left pending.
+        """
+
+        from .frame_moves import complete_frame_moves
+
+        return complete_frame_moves(self._db, frames_store, from_org_id=from_org_id)
 
     def outstanding_service_access_grants(self) -> list[OutstandingGrant]:
         """Grants this deployment owes and has not delivered.
@@ -1888,6 +1963,86 @@ _ALREADY_IN_ORG_MESSAGE = (
     "This login already belongs to an organization. Sign in with a different account to accept "
     "this invitation, or ask an owner of your organization for access."
 )
+
+
+def _move_out_of_self_service_org(conn, *, user_id: str, org_id: str, invitation: Invitation) -> str:
+    """Decide, on the locked membership row, whether this acceptance may move the person.
+
+    Returns the organization they are moved out of, or raises
+    :class:`AlreadyInOrganizationError`. Eligible only when the row is an
+    active ``owner`` of a ``self_service`` organization that nobody else has
+    ever joined, and the invitation joins a *different, existing*
+    organization. An org-creating invitation is not a move: the person
+    already owns an organization.
+
+    Order matters under concurrency. Pending invitations issued from the
+    organization are revoked **first**: that update waits on any invitation a
+    concurrent acceptance has locked, so by the time the "nobody else" check
+    runs, a newcomer who got in first is visible to it and the move is
+    refused (rolling the revocations back with it), and a newcomer who did
+    not finds their invitation revoked.
+    """
+
+    if invitation.org_id is None or invitation.org_id == org_id:
+        raise AlreadyInOrganizationError(_ALREADY_IN_ORG_MESSAGE)
+    org = conn.execute(
+        """
+        SELECT o.self_service, o.retired_at, m.role, m.status
+        FROM collab_orgs o JOIN collab_org_members m ON m.org_id = o.id AND m.user_id = %s
+        WHERE o.id = %s
+        FOR UPDATE OF o
+        """,
+        (user_id, org_id),
+    ).fetchone()
+    if org is None or not org["self_service"] or org["retired_at"] is not None:
+        raise AlreadyInOrganizationError(_ALREADY_IN_ORG_MESSAGE)
+    if org["status"] != "active" or org["role"] != "owner":
+        raise AlreadyInOrganizationError(_ALREADY_IN_ORG_MESSAGE)
+    conn.execute(
+        """
+        UPDATE collab_invitations
+        SET status = 'revoked', revoked_at = now(), revoked_by = %s
+        WHERE org_id = %s AND status = 'pending'
+        """,
+        (user_id, org_id),
+    )
+    if conn.execute(
+        "SELECT 1 AS present FROM collab_org_members WHERE org_id = %s AND user_id <> %s LIMIT 1",
+        (org_id, user_id),
+    ).fetchone():
+        raise AlreadyInOrganizationError(_ALREADY_IN_ORG_MESSAGE)
+    return org_id
+
+
+def _retire_self_service_org(conn, *, from_org_id: str, to_org_id: str, user_id: str) -> None:
+    """Retire the organization a person was moved out of, and queue its frames.
+
+    Frame groups live in this database, so they move here, in the acceptance
+    transaction, re-homed with ``private`` visibility like the frames.
+    Frames live in object storage, so a ``collab_frame_moves`` row is written
+    instead and :mod:`.frame_moves` performs the move after commit. A
+    deployment without the Postgres group store has no ``frames_server_groups``
+    table, which ``to_regclass`` answers without aborting the transaction.
+    """
+
+    conn.execute("UPDATE collab_orgs SET retired_at = now() WHERE id = %s", (from_org_id,))
+    if conn.execute("SELECT to_regclass('frames_server_groups') IS NOT NULL AS present").fetchone()["present"]:
+        conn.execute(
+            """
+            UPDATE frames_server_groups
+            SET org_id = %s, visibility = 'private', updated_at = now()
+            WHERE org_id = %s
+            """,
+            (to_org_id, from_org_id),
+        )
+    conn.execute(
+        """
+        INSERT INTO collab_frame_moves (from_org_id, to_org_id, user_id)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (from_org_id) DO NOTHING
+        """,
+        (from_org_id, to_org_id, user_id),
+    )
 
 
 def _accepter_context(user_id: str, display: DisplayIdentity) -> AuthContext:

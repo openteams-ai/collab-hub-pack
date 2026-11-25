@@ -29,6 +29,7 @@ from .org_source import (
     single_org_declaration,
 )
 from .orgs import OrgStore, OrgsUnavailableError
+from .self_service import SelfServicePolicy, admit_self_service, self_service_policy
 
 auth_logger = logging.getLogger("frames_server.auth")
 
@@ -829,6 +830,7 @@ def auth_context_from_membership(
     claims: dict,
     org_store: OrgStore,
     auto_admit: SingleOrgDeclaration | None = None,
+    self_service: SelfServicePolicy | None = None,
 ) -> AuthContext | None:
     """Resolve the caller's organization from their ``collab_org_members`` row.
 
@@ -897,6 +899,14 @@ def auth_context_from_membership(
     store, never best-effort. A platform operator signing in through a
     declared source is admitted like anyone else — membership and the platform
     axis remain independent.
+
+    **Self-service admission (the ``self_service`` org source, issue #365).**
+    With a *self_service* policy, a caller with **no membership row at all**
+    whose token asserts a verified email gets an organization of their own,
+    with themselves as ``owner`` (:func:`~.self_service.admit_self_service`).
+    The same boundaries hold: an existing row of any kind wins, a caller
+    without a verified email falls through to the outcomes above, and the
+    write fails closed with the store.
     """
 
     user = user_from_claims(claims)
@@ -907,6 +917,8 @@ def auth_context_from_membership(
     display = display_identity_from_claims(claims)
     if membership is None and auto_admit is not None:
         membership = _auto_admit_member(claims, user, display, org_store, auto_admit)
+    if membership is None and self_service is not None:
+        membership = admit_self_service(user, display, org_store, self_service)
     if membership is not None and membership.is_active:
         return AuthContext(
             user=user,
@@ -989,7 +1001,12 @@ def resolve_auth_context(request: Request, claims: dict) -> AuthContext | None:
     """Build the auth context for accepted claims via the configured org source."""
 
     if org_source_resolves_membership():
-        return auth_context_from_membership(claims, _request_org_store(request), auto_admit=single_org_declaration())
+        return auth_context_from_membership(
+            claims,
+            _request_org_store(request),
+            auto_admit=single_org_declaration(),
+            self_service=self_service_policy(getattr(request.app, "state", None)),
+        )
     return auth_context_from_claims(claims)
 
 

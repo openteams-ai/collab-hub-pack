@@ -384,7 +384,7 @@ frames:
     # Set it only for a realm whose desktop client has another id.
     cliClientId: ""
     # -- Where a caller's organization comes from: "" (same as "claims"),
-    # "membership", or "single".
+    # "membership", "single", or "self_service".
     #
     # "claims" is the historical behavior — org and workspace are read from the
     # token, falling back to defaults below. Since no identity provider mints an
@@ -415,6 +415,18 @@ frames:
     # read every "internal" Frame. Restrict each declared provider to your
     # organization (for a Google provider, hostedDomain) — an unrestricted
     # provider on this list admits anyone with an account there.
+    #
+    # "self_service" is membership resolution for a hub where anyone may sign
+    # up: a caller with no membership row whose token asserts a verified email
+    # gets an organization of their own, with themselves as owner, on their
+    # first authenticated request (also on the browser surface's owner page),
+    # plus the service groups frames.serviceAccess grants at acceptance. The
+    # organization gets a generated name ("Personal: <email>") that the owner
+    # replaces before inviting anyone. An invitation into another organization
+    # moves the person out of their own while nobody else has joined it. All
+    # the "membership" requirements apply unchanged. Turn on email
+    # verification at the identity provider first: an unverified login is not
+    # admitted, and a realm that never verifies admits nobody.
     #
     # Required (any value) whenever api.ingress.enabled: on a deployment
     # exposed on its own hostname, leaving this to a default is how everyone

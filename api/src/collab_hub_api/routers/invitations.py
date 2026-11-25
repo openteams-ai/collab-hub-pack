@@ -685,6 +685,7 @@ def redeem(
     display: DisplayIdentity,
     service_access: ServiceAccessGranter | None = None,
     granted_groups: Sequence[str] = (),
+    frames_store=None,
 ):
     """Redeem a validated accept body. **The one call both surfaces make.**
 
@@ -745,6 +746,15 @@ def redeem(
         record=service,
         display=display,
     )
+    if acceptance.moved_from_org_id is not None and frames_store is not None:
+        # The person left a self-service organization (issue #365); its frames
+        # are owed a move, recorded in the acceptance's transaction. Attempted
+        # now so they are where the person is on their next request; a failure
+        # is left for the periodic sweep and never fails the acceptance.
+        try:
+            service.complete_frame_moves(frames_store, from_org_id=acceptance.moved_from_org_id)
+        except Exception:
+            logger.exception("frame_move_after_acceptance_failed", extra={"invitation_id": acceptance.invitation_id})
     return acceptance
 
 
@@ -914,6 +924,7 @@ def _record_grant_attempt(
 
 @router.post("/invitations/accept")
 def accept_invitation(
+    request: Request,
     payload: InvitationAcceptRequest,
     identity: IdentityDep,
     service: ServiceDep,
@@ -952,6 +963,7 @@ def accept_invitation(
         display=identity.display,
         service_access=service_access,
         granted_groups=granted_groups,
+        frames_store=getattr(request.app.state, "frames_store", None),
     )
     return InvitationAcceptResponse(
         org_id=acceptance.org_id,

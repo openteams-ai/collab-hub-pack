@@ -199,6 +199,18 @@ class FrameStore(ABC):
 
         raise NotImplementedError
 
+    def move_to_org(self, frame_id: str, org_id: str) -> Frame:
+        """Re-home a Frame to *org_id* with ``private`` visibility (issue #365).
+
+        The move a retired self-service organization's frames get when an
+        invitation takes their owner elsewhere. ``private`` keeps the owners and
+        any explicit readers, and nobody else in the new organization sees the
+        Frame until an owner widens it. Idempotent: both fields are set to fixed
+        values. Implemented on each backend with its own guarded metadata write.
+        """
+
+        return self._set_metadata_fields(frame_id, {"org_id": org_id, "visibility": Visibility.private})
+
     @abstractmethod
     def delete_frame(self, frame_id: str) -> None:
         """Delete a Frame and all of its Suggestions."""

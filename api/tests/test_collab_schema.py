@@ -46,6 +46,7 @@ from collab_hub_api.frames.collab_schema import (  # noqa: E402
 )
 
 COLLAB_TABLES = (
+    "collab_frame_moves",
     "collab_web_ended_sessions",
     "collab_claims",
     "collab_track_runs",
@@ -461,7 +462,7 @@ def test_migration_creates_the_cog_publishing_schema():
         "org_id text",
     ):
         assert name not in earlier, name
-    assert LATEST_COLLAB_SCHEMA_VERSION == 18
+    assert LATEST_COLLAB_SCHEMA_VERSION == 19
 
 
 def test_migration_creates_the_source_activity_table():
@@ -573,6 +574,7 @@ PINNED_CHECKSUMS = {
     16: "b2140ce96b42c4e7e9daabbac44b8ee6828d3ce9b39cccd37ca7f818747ca33f",
     17: "b128d44c95c0c2719207bd1bdd880bd3dcce3777663ced40a1c58767b31929c4",
     18: "26d2060c0a71dadd374677fa80dd04cddc223528ab095914cd6c80ec1e3cfeb1",
+    19: "4da081f3ed6fde8a839e8849cc6c591d61fb8626071696d48ece5dcbe264ef52",
 }
 
 

@@ -476,6 +476,7 @@ def make_routers(*, memberships_enabled: bool, require_verified_email: bool) -> 
                 display=display,
                 service_access=service_access,
                 granted_groups=granted_groups,
+                frames_store=getattr(request.app.state, "frames_store", None),
             )
         except Exception as exc:
             resolved = outcome_for(exc)

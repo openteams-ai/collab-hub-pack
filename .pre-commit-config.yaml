@@ -1,0 +1,21 @@
+# Git hooks, run with prek (https://prek.j178.dev) or pre-commit; see
+# CONTRIBUTING.md. Ruff picks up its settings from the pyproject.toml nearest
+# each file, so these hooks apply the same rules as running it in api/.
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Keep in step with the ruff version api/uv.lock pins. Dependabot normally
+    # bumps both in the same monthly run, but in separate PRs, and nothing
+    # checks that they match, so merge them together. Keep the `# frozen:`
+    # comment: Dependabot reads the version from it, and without it would move
+    # rev to the head of ruff-pre-commit's default branch.
+    rev: ef6cf06c079dd6b299dfc720b0f14400c9d168e1  # frozen: v0.17.5
+    hooks:
+      # Lint, fixing what Ruff safely can, before formatting: a fix can leave
+      # code the formatter then rewrites. Only the API is Ruff-formatted so
+      # far; add another package's src and tests to `files` once it is too.
+      - id: ruff-check
+        args: [--fix]
+        files: &ruff-files ^api/(src|tests)/
+      - id: ruff-format
+        files: *ruff-files

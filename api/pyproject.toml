@@ -29,8 +29,9 @@ dependencies = [
 ]
 
 [dependency-groups]
-# uv.lock pins the exact version, so CI and a local `uv run --group lint` agree
-# on what ruff reports and a new ruff release cannot fail CI on its own.
+# uv.lock pins the exact version for a local `uv run --group lint`. CI runs the
+# ruff hook in ../.pre-commit-config.yaml instead, which pins the same version
+# by hand; keep the two in step (see the pre-commit entry in dependabot.yml).
 lint = [
     "ruff>=0.17.3",
 ]

@@ -74,3 +74,21 @@ updates:
       actions-minor-and-patch:
         applies-to: version-updates
         update-types: ["minor", "patch"]
+  # The Ruff hook in .pre-commit-config.yaml. It runs on the same monthly
+  # schedule as the /api uv entry, so the two normally bump Ruff to the same
+  # release, but in separate PRs (the uv one grouped with other packages), and
+  # nothing checks that they match: merge them together. CI's prek check runs
+  # the hook's Ruff; a local `uv run ruff` runs the lockfile's. The hook is
+  # pinned by SHA with a `# frozen: vX.Y.Z` comment, which Dependabot moves to
+  # the SHA of the new tag along with the comment.
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      pre-commit-minor-and-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]

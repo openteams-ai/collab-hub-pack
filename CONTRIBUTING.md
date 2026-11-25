@@ -92,8 +92,32 @@ Running the API by hand needs **all three** dev-auth switches —
 `DEV_AUTH_USER=<name>`. Setting only `DEV_AUTH_USER` authenticates nothing and
 every route answers 401, which is why `make api` is the easier path.
 
-Lint and format the API with the ruff version `uv.lock` pins. The `Ruff` CI
-check runs `ruff check` and `ruff format --check`:
+The API is linted and formatted with Ruff, which
+[`.pre-commit-config.yaml`](.pre-commit-config.yaml) runs as Git hooks on the
+files you commit, fixing what it can. The `prek` CI check runs the same hooks
+on every file they cover. The hook pins the same Ruff version as `uv.lock`.
+Dependabot normally bumps both in the same monthly run, in separate PRs that
+should be merged together, as nothing checks that the two match; if you bump
+Ruff by hand, update the hook's `rev` and its `# frozen:` comment to match.
+Install
+[prek](https://prek.j178.dev/) (or pre-commit) and the hooks once in your
+clone:
+
+```sh
+uv tool install prek
+prek install                # run the hooks on every git commit
+```
+
+If a hook fixes or reformats a file, the commit stops; review the changes,
+stage them and commit again. To run the hooks yourself:
+
+```sh
+prek run                    # on staged files
+prek run --all-files        # on every file the hooks cover, as CI does
+prek run ruff-format --all-files    # one hook only
+```
+
+To run Ruff directly instead, with the version `uv.lock` pins:
 
 ```sh
 cd api
@@ -126,7 +150,7 @@ and explain any that do not apply.
 
 - Open an issue first for anything non-trivial, and link it from the PR with a
   closing keyword (`Fixes #123`).
-- CI (`lint`, `test`, including the `admin-ui` job) must pass. Add tests with your change: unit tests for new
+- CI (`lint`, `test`, including the `admin-ui` job, and `prek`) must pass. Add tests with your change: unit tests for new
   functionality, regression tests for bug fixes.
 - A [code owner](.github/CODEOWNERS) must approve before merge. Take PRs out of
   draft before requesting code-owner review.

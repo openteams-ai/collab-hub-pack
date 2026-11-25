@@ -1094,9 +1094,12 @@ def test_the_script_sends_the_token_only_as_a_json_post_body():
         "document.cookie",
         "setAttribute",
         "eval(",
-        "localStorage",
     ):
         assert forbidden not in ACCEPTANCE_SCRIPT, forbidden
+    # localStorage is allowed since #365 (Keycloak's verification link opens a
+    # new tab), but only through the expiring helpers: every write carries a TTL.
+    assert ACCEPTANCE_SCRIPT.count("s.setItem(") == 1
+    assert 's.setItem(key, String(Date.now() + ttl) + ":" + value)' in ACCEPTANCE_SCRIPT
 
 
 def test_the_script_names_no_state_the_page_does_not_render():

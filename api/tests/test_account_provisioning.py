@@ -574,6 +574,13 @@ def test_the_grant_path_is_the_only_caller_of_the_granter():
     not "the accept route checks something" -- it is that no other code path
     can reach a group write at all. Asserted against the source tree, because
     a behavioural test can only cover the paths someone thought to write.
+
+    Since #365 there is exactly one other caller, deliberately:
+    ``frames/self_service.py`` grants the same groups to a verified login the
+    ``self_service`` org source has just given an organization, on a hub where
+    sign-up is open because usage is paid for. It is reachable only under that
+    org source, which is the operator's explicit choice. The list stays closed,
+    so a third path still fails here.
     """
 
     import pathlib
@@ -584,7 +591,7 @@ def test_the_grant_path_is_the_only_caller_of_the_granter():
         for path in src.rglob("*.py")
         if ".grant(" in path.read_text() and path.name != "keycloak_service_access.py"
     )
-    assert callers == ["routers/invitations.py"], callers
+    assert callers == ["frames/self_service.py", "routers/invitations.py"], callers
 
 
 def test_the_granter_and_the_provisioner_are_separate_seams():

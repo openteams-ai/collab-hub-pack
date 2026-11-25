@@ -811,11 +811,14 @@ def grant_service_access(
     Note what is *not* checked here: whether the accepter deserves it. That was
     decided by the acceptance itself, which required the one-time secret and an
     identity-provider-verified address matching the invited one. This function
-    is reached only for somebody who cleared both — and it is the **only**
-    caller of ``granter.grant``, which is the structural reason a
-    self-registration that never redeemed a token can never be granted
-    anything (an internal issue, the behaviour this
-    replaced).
+    is reached only for somebody who cleared both — and outside the
+    ``self_service`` org source it is the **only** caller of ``granter.grant``,
+    which is the structural reason a self-registration that never redeemed a
+    token can never be granted anything (an internal issue, the behaviour this
+    replaced). Under ``self_service`` (#365) the operator has chosen open
+    sign-up, and :func:`~..frames.self_service.grant_owed_service_access`
+    grants the same groups to a verified login the hub has just given an
+    organization.
 
     None of the four skip paths writes an audit row. Nothing was attempted, and
     a row per non-event would bury the attempts that matter in noise

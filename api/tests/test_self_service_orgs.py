@@ -531,8 +531,15 @@ def test_live_frames_follow_their_owner_and_become_private(live_db, tmp_path):
     assert frames.get_frame(elsewhere.id).visibility == Visibility.internal
     (move,) = _rows(live_db, "SELECT state, moved FROM collab_frame_moves")
     assert move == {"state": "done", "moved": 4}
-    # Done is done: the sweep finds nothing left to do.
+    # Done is done for frames; a group that arrives even later still follows.
+    with live_db.connection() as conn:
+        conn.execute(
+            "INSERT INTO frames_server_groups (id, org_id, visibility) VALUES ('later', %s, 'public')", (personal,)
+        )
     assert service.complete_frame_moves(frames) == 0
+    assert _rows(live_db, "SELECT org_id, visibility FROM frames_server_groups WHERE id = 'later'") == [
+        {"org_id": TEAM, "visibility": "private"}
+    ]
 
 
 @live_postgres

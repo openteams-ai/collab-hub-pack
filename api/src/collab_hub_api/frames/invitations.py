@@ -1735,13 +1735,21 @@ class PostgresInvitationService:
             # row, and its retry sees this member and refuses. A lock alone
             # would not do that: locking a row a concurrent transaction only
             # locked raises nothing.
+            #
+            # Only for a self-service destination: no other organization is
+            # ever retired, and writing a row version for every acceptance
+            # would make concurrent acceptances into one ordinary organization
+            # conflict under REPEATABLE READ. `self_service` never changes after
+            # creation, so reading it needs no lock.
+            destination = conn.execute("SELECT self_service FROM collab_orgs WHERE id = %s", (org_id,)).fetchone()
             if (
-                conn.execute(
+                destination is not None
+                and destination["self_service"]
+                and conn.execute(
                     "UPDATE collab_orgs SET retired_at = retired_at WHERE id = %s AND retired_at IS NULL RETURNING id",
                     (org_id,),
                 ).fetchone()
                 is None
-                and conn.execute("SELECT 1 AS present FROM collab_orgs WHERE id = %s", (org_id,)).fetchone()
             ):
                 raise OrgNotFoundError("Organization not found")
         if org_id is None:

@@ -862,7 +862,16 @@ def test_live_migration_creates_tables_constraints_and_index(clean_database):
                 " WHERE table_name = 'collab_orgs'"
             ).fetchall()
         }
-        assert set(orgs) == {"id", "name", "created_at", "created_by"}
+        # self_service, name_generated and retired_at arrived with v19 (#365).
+        assert set(orgs) == {
+            "id",
+            "name",
+            "created_at",
+            "created_by",
+            "self_service",
+            "name_generated",
+            "retired_at",
+        }
         assert orgs["id"][0] == "text" and orgs["id"][1] == "NO"
         assert orgs["name"][1] == "YES" and "Unnamed organization" in orgs["name"][2]
         assert orgs["created_by"][1] == "NO"

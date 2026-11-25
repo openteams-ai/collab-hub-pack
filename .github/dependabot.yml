@@ -77,8 +77,9 @@ updates:
   # The Ruff hook in .pre-commit-config.yaml. It runs on the same monthly
   # schedule as the /api uv entry, so both bump Ruff to the same release in the
   # same run; merge the two PRs together to keep the hook and api/uv.lock in
-  # step. The hook is pinned by SHA with a `# frozen: vX.Y.Z` comment, which
-  # Dependabot moves to the SHA of the new tag along with the comment.
+  # step, as CI's prek check runs the hook's Ruff and `uv run ruff` the
+  # lockfile's. The hook is pinned by SHA with a `# frozen: vX.Y.Z` comment,
+  # which Dependabot moves to the SHA of the new tag along with the comment.
   - package-ecosystem: pre-commit
     directory: /
     schedule:

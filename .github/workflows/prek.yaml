@@ -1,0 +1,40 @@
+name: prek
+
+# Runs the Git hooks in .pre-commit-config.yaml (Ruff lint and format on the
+# API, so far) over every file they cover, as `prek run --all-files` does
+# locally. Its own workflow with no path filter, so a hook added for another
+# directory runs here without touching this file. Fork-safe: no secrets,
+# read-only checkout.
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}   # runs on every PR so it can be a required status check
+  merge_group: {}    # and on each merge-queue group; a required check that never reports there blocks the queue
+
+permissions:
+  contents: read
+
+jobs:
+  prek:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # prek installs each hook's tools with the first uv on PATH that is at
+      # least 0.7.0, which could be one that still trusts the compromised
+      # eMudhra intermediates (#285); put the version the repo pins there first.
+      - name: Install uv
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          version-file: .github/uv.toml
+          require-checksums: true
+
+      # `latest-known` installs the newest prek in the action's own checksum
+      # table and verifies the download against it, so prek's version moves
+      # only when Dependabot bumps the action.
+      - uses: j178/prek-action@7b101f8338a08d2bd6fdb3625e4e7692428763a3 # v3.1.1
+        with:
+          prek-version: latest-known

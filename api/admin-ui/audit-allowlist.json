@@ -1,4 +1,0 @@
-{
-  "$comment": "npm audit advisories CI accepts, each until its entry expires; checked by scripts/security/check_npm_audit.py in .github/workflows/security-npm.yaml. Add an entry only for an advisory with no usable fix that does not reach production, and remove it once one ships. \"expires\" is required, at most 367 days away. An entry that expires within 7 days warns on every run. One that has expired, or whose advisory (or a package it names) is no longer reported, warns on pull requests and pushes and fails the weekly run, so it is reviewed or removed. \"dev_only\": true makes the check also fail if any vulnerable copy is not dev-only in package-lock.json; set it whenever the reason is that the advisory does not ship. \"package\" (a name, or a list of names) limits an entry to those packages, for an advisory reported in several.",
-  "allowlist": []
-}

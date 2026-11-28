@@ -138,15 +138,14 @@ A separate workflow,
 on the committed lockfile of every npm project: today the admin panel and the
 release tooling in
 [`scripts/release/semantic-release/`](scripts/release/semantic-release/). It
-finds them from the committed `package-lock.json` files, so a new npm project
-is audited without being listed anywhere; it needs a `.node-version` beside
-its lockfile. It runs on every PR, on pushes to `main`, and weekly. Each audit
-goes through
+runs on every PR, on pushes to `main`, and weekly. Each audit goes through
 [`scripts/security/check_npm_audit.py`](scripts/security/check_npm_audit.py),
-which fails on any advisory the project's `audit-allowlist.json`
-([admin panel](api/admin-ui/audit-allowlist.json),
-[release tooling](scripts/release/semantic-release/audit-allowlist.json))
-doesn't list. Every entry expires, at most 367 days out. An entry that expires
+which fails on any advisory at or above the project's level that
+[`scripts/security/npm-audit-exceptions.json`](scripts/security/npm-audit-exceptions.json)
+doesn't list. That file's `projects` names every npm project and its level,
+and CI fails unless they match the committed `package-lock.json` files, so a
+new npm project needs an entry there, and a `.node-version` beside its
+lockfile. Every exception expires, at most 367 days out. An entry that expires
 within 7 days warns on every run. One that has expired, or whose advisory (or
 a package it names) is no longer reported, warns on PRs and pushes and fails
 the weekly run, so it is reviewed or removed. GitHub emails a scheduled run's
@@ -160,10 +159,15 @@ internally consistent, an allowlist that repeats a key, and an `--allowlist`
 path that doesn't exist. The release itself never audits, so an advisory in
 the release tooling fails PRs but never blocks a release.
 
-To audit every npm project locally, as CI does, run
-`python3 scripts/security/check_npm_audit.py --all` from anywhere in the
-repository; it needs Python 3.9 or later, npm and Git. Give it a project's
-directory instead of `--all` to audit only that one.
+To audit every npm project locally, as CI does, run this from the repository
+root (it needs Python 3.9 or later, npm and Git):
+
+```sh
+python3 scripts/security/check_npm_audit.py --all --allowlist scripts/security/npm-audit-exceptions.json
+```
+
+Give it a project's directory, such as `api/admin-ui`, instead of `--all` to
+audit only that one.
 
 ## Documentation
 

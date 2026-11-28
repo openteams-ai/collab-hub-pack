@@ -1,14 +1,15 @@
 name: npm Dependency Audit
 
 # Audits the committed lockfile of every npm project with `npm audit`, through
-# scripts/security/check_npm_audit.py. The projects are found, not listed:
-# every directory with a committed package-lock.json (today the admin panel,
-# api/admin-ui, and the release tooling semantic-release.yml installs,
-# scripts/release/semantic-release), so a new one is audited without anyone
-# having to remember to add it. Each project's audit-allowlist.json lists the
-# advisories it accepts (and may set its failing levels); any other advisory,
-# at low or above by default, fails its check. Fork-safe: no secrets,
-# read-only checkout.
+# scripts/security/check_npm_audit.py: every directory with a committed
+# package-lock.json (today the admin panel, api/admin-ui, and the release
+# tooling semantic-release.yml installs, scripts/release/semantic-release).
+# scripts/security/npm-audit-exceptions.json lists those projects, with their
+# failing levels, and the advisories each accepts; any other advisory at or
+# above its project's level fails its check. A committed lockfile the file
+# does not list (or a listed project with none) fails the `npm projects` job,
+# so each project's level is chosen and reviewed, never a silent default.
+# Fork-safe: no secrets, read-only checkout.
 #
 # The audit reads package-lock.json only (--package-lock-only), so nothing is
 # installed and no dependency's code runs, and it pins every npm setting that
@@ -47,8 +48,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  ALLOWLIST: scripts/security/npm-audit-exceptions.json
+
 jobs:
-  # Every directory with a committed package-lock.json, as the matrix below.
+  # Every directory with a committed package-lock.json, as the matrix below;
+  # fails unless they are exactly the allowlist's projects.
   projects:
     name: npm projects
     runs-on: ubuntu-latest
@@ -63,7 +68,7 @@ jobs:
       - id: find
         name: Find the npm projects
         run: |
-          directories="$(python3 scripts/security/check_npm_audit.py --list-projects)"
+          directories="$(python3 scripts/security/check_npm_audit.py --list-projects --allowlist "$ALLOWLIST")"
           echo "${directories}"
           echo "directories=${directories}" >> "$GITHUB_OUTPUT"
 
@@ -105,7 +110,7 @@ jobs:
         env:
           DIRECTORY: ${{ matrix.directory }}
           STRICT: ${{ github.event_name == 'schedule' && '--strict' || '' }}
-        run: python3 scripts/security/check_npm_audit.py "$DIRECTORY" $STRICT
+        run: python3 scripts/security/check_npm_audit.py "$DIRECTORY" --allowlist "$ALLOWLIST" $STRICT
 
   # The one check to require. The audits' check names come from the projects
   # found, so a new project's could never already be required, and when

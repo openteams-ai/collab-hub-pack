@@ -1,19 +1,25 @@
 name: npm Dependency Audit
 
-# Audits the committed lockfile of each npm project with `npm audit`, through
-# scripts/security/check_npm_audit.py: the admin panel (api/admin-ui) and the
-# release tooling semantic-release.yml installs
-# (scripts/release/semantic-release). Each project's audit-allowlist.json
-# lists the advisories it accepts; any other advisory, at --audit-level=low or
-# above, fails its check. Fork-safe: no secrets, read-only checkout.
+# Audits the committed lockfile of every npm project with `npm audit`, through
+# scripts/security/check_npm_audit.py. The projects are found, not listed:
+# every directory with a committed package-lock.json (today the admin panel,
+# api/admin-ui, and the release tooling semantic-release.yml installs,
+# scripts/release/semantic-release), so a new one is audited without anyone
+# having to remember to add it. Each project's audit-allowlist.json lists the
+# advisories it accepts (and may set its failing levels); any other advisory,
+# at low or above by default, fails its check. Fork-safe: no secrets,
+# read-only checkout.
 #
 # The audit reads package-lock.json only (--package-lock-only), so nothing is
-# installed and no dependency's code runs. It runs on every PR and merge
-# group, on pushes to main, and weekly, so a newly published advisory, or an
-# allowlist entry that has expired or gone stale, fails a run on main even in
-# a week with no PRs. A stale entry (its advisory no longer reported) only
-# warns on other runs, as it follows from a change upstream, not from the PR;
-# the weekly run fails on it, so it is removed rather than left to cover the
+# installed and no dependency's code runs, and it pins every npm setting that
+# decides what is audited, so neither an .npmrc nor the environment can narrow
+# it. It runs on every PR and merge group, on pushes to main, and weekly, so a
+# newly published advisory fails a run on main even in a week with no PRs.
+#
+# An allowlist entry due for review (past its expiry, or covering an advisory
+# no longer reported) only warns on PRs and pushes, as it follows from the
+# calendar or a change upstream, not from the PR; the weekly run fails on it
+# (--strict), so it is reviewed or removed rather than left to cover the
 # advisory if it ever returns.
 #
 # The release itself never audits (semantic-release.yml installs with
@@ -37,44 +43,81 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Every directory with a committed package-lock.json, as the matrix below.
+  projects:
+    name: npm projects
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      directories: ${{ steps.find.outputs.directories }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: find
+        name: Find the npm projects
+        run: |
+          directories="$(python3 scripts/security/check_npm_audit.py --list-projects)"
+          echo "${directories}"
+          echo "directories=${directories}" >> "$GITHUB_OUTPUT"
+
   npm-audit:
     name: npm audit - ${{ matrix.directory }}
+    needs: projects
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
-      # One project's advisory should not hide the other's result.
+      # One project's advisory should not hide another's result.
       fail-fast: false
       matrix:
-        # Every npm project with a committed package-lock.json.
-        directory:
-          - api/admin-ui
-          - scripts/release/semantic-release
+        directory: ${{ fromJSON(needs.projects.outputs.directories) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       # The project's own Node, and the npm it bundles, so the audit runs the
-      # same npm as the project's install does.
+      # same npm as the project's install does. A project without a
+      # .node-version beside its lockfile fails here, by design.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: ${{ matrix.directory }}/.node-version
 
-      # The audit check's own refusals, on synthetic reports, so a regression
-      # in it can't wave an advisory through the audit below. In each matrix
-      # job rather than a job of its own that these depend on: a job skipped
-      # because a dependency failed counts as passing for a required check.
+      # The audit check's own refusals, on synthetic reports and against a
+      # registry on localhost, so a regression in it can't wave an advisory
+      # through the audit below. In each matrix job, so its real-npm tests run
+      # the npm this project's audit runs.
       - name: Test the audit check
         run: python3 -m unittest discover --start-directory scripts/security/tests --pattern test_check_npm_audit.py --verbose
 
       # npm cannot ignore an advisory, and one with no patched release would
-      # otherwise block CI until upstream ships one; hence the allowlist. The
-      # check also fails on an entry past its expiry. One no longer reported
-      # gets a warning annotation, except on the weekly run, which fails on it
-      # (--fail-on-stale): no PR depends on that run, and a warning on a green
-      # run goes unseen.
+      # otherwise block CI until upstream ships one; hence the allowlist. An
+      # entry due for review gets a warning annotation on its line, except on
+      # the weekly run, which fails on it (--strict): no PR depends on that
+      # run, and a warning on a green run goes unseen.
       - name: Audit
         env:
           DIRECTORY: ${{ matrix.directory }}
-          FAIL_ON_STALE: ${{ github.event_name == 'schedule' && '--fail-on-stale' || '' }}
-        run: python3 scripts/security/check_npm_audit.py "$DIRECTORY" $FAIL_ON_STALE
+          STRICT: ${{ github.event_name == 'schedule' && '--strict' || '' }}
+        run: python3 scripts/security/check_npm_audit.py "$DIRECTORY" $STRICT
+
+  # The one check to require. The audits' check names come from the projects
+  # found, so a new project's could never already be required, and when
+  # `projects` fails the audits are skipped, which a required check counts as
+  # passing. This fails unless both jobs succeeded, for every project.
+  # always(), not !cancelled(): a cancelled run must fail here, not skip.
+  result:
+    name: npm audit
+    needs: [projects, npm-audit]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every project's audit passed
+        env:
+          PROJECTS: ${{ needs.projects.result }}
+          AUDITS: ${{ needs.npm-audit.result }}
+        run: |
+          echo "npm projects: ${PROJECTS}; npm audits: ${AUDITS}"
+          [[ "${PROJECTS}" == success && "${AUDITS}" == success ]]

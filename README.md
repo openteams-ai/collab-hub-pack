@@ -135,18 +135,25 @@ build.
 
 A separate workflow,
 [`security-npm.yaml`](.github/workflows/security-npm.yaml), runs `npm audit`
-on the committed lockfile of each npm project: the admin panel and the release
-tooling in
+on the committed lockfile of every npm project: today the admin panel and the
+release tooling in
 [`scripts/release/semantic-release/`](scripts/release/semantic-release/). It
-runs on every PR, on pushes to `main`, and weekly. Each audit goes through
+finds them from the committed `package-lock.json` files, so a new npm project
+is audited without being listed anywhere; it needs a `.node-version` beside
+its lockfile. It runs on every PR, on pushes to `main`, and weekly. Each audit
+goes through
 [`scripts/security/check_npm_audit.py`](scripts/security/check_npm_audit.py),
 which fails on any advisory the project's `audit-allowlist.json`
 ([admin panel](api/admin-ui/audit-allowlist.json),
 [release tooling](scripts/release/semantic-release/audit-allowlist.json))
-doesn't list, or lists with an expiry that has passed. It warns on an entry
-whose advisory is no longer reported, and the weekly run fails on one, so it
-gets removed. The release itself never audits, so an
-advisory in the release tooling fails PRs but never blocks a release.
+doesn't list. Every entry expires, at most 367 days out. An entry that has
+expired, or whose advisory is no longer reported, warns on PRs and pushes and
+fails the weekly run, so it is reviewed or removed. The check pins the npm
+settings that decide what is audited, so neither an `.npmrc` nor the
+environment (`NODE_ENV=production`, offline mode) can narrow it, and it
+refuses an audit report that isn't internally consistent. The release itself
+never audits, so an advisory in the release tooling fails PRs but never blocks
+a release.
 
 ## Documentation
 

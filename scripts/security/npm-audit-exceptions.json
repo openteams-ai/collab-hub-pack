@@ -1,0 +1,25 @@
+{
+  "$comment": "npm audit advisories CI accepts, each until its entry expires; checked by scripts/security/check_npm_audit.py in .github/workflows/security-npm.yaml. \"projects\" lists every directory with a committed package-lock.json, and its failing levels: add a new npm project here, or CI fails. Add an entry only for an advisory with no usable fix that does not reach production (or, in the release tooling, whose code the release never runs), and remove it once one ships; each entry names its project's \"directory\". \"expires\" is required, at most 367 days away. An entry that expires within 7 days warns on every run. One that has expired, or whose advisory (or a package it names) is no longer reported, warns on pull requests and pushes and fails the weekly run, so it is reviewed or removed. \"dev_only\": true makes the check also fail if any vulnerable copy is not dev-only in the project's package-lock.json; set it whenever the reason is that the advisory does not ship (it does not apply to the release tooling, whose packages are all production dependencies of the tool). \"package\" (a name, or a list of names) limits an entry to those packages.",
+  "projects": {
+    "api/admin-ui": {"level": "low"},
+    "scripts/release/semantic-release": {"level": "low"}
+  },
+  "allowlist": [
+    {
+      "directory": "scripts/release/semantic-release",
+      "package": "glob",
+      "id": "GHSA-3g3m-2fjr-6pw4",
+      "expires": "2027-02-24",
+      "reason": "glob is bundled inside npm, which only @semantic-release/npm pulls in. .releaserc.json does not load that plugin, so the code never runs, and no npm release yet bundles a fixed glob (>= 14.0.2).",
+      "tracking": "https://github.com/openteams-ai/collab-hub-pack/issues/324"
+    },
+    {
+      "directory": "scripts/release/semantic-release",
+      "package": "minimatch",
+      "id": "GHSA-g3hv-75wg-m249",
+      "expires": "2027-02-24",
+      "reason": "minimatch is bundled inside npm, which only @semantic-release/npm pulls in. .releaserc.json does not load that plugin, so the code never runs, and no npm release yet bundles a fixed minimatch (>= 11.0.1).",
+      "tracking": "https://github.com/openteams-ai/collab-hub-pack/issues/324"
+    }
+  ]
+}

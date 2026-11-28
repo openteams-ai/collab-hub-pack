@@ -60,6 +60,9 @@ jobs:
 
       # Every package, transitive ones included, comes from the lockfile, so
       # an upstream release can't change what runs here between merges.
+      # `--no-audit`, and no audit step: security-npm.yaml audits this
+      # lockfile on PRs and weekly, so an advisory in the release tooling fails
+      # CI there but never blocks a release.
       - name: Install semantic-release
         run: npm ci --prefix scripts/release/semantic-release --ignore-scripts --no-audit --no-fund
 

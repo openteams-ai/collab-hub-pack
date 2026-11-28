@@ -130,11 +130,44 @@ npm ci --ignore-scripts && npm test          # the admin panel (Vitest)
 ```
 
 CI runs both: the `test` job runs pytest against a real Postgres service, and
-the `admin-ui` job runs `npm ci`, `npm audit` (through
-[`scripts/check_npm_audit.py`](scripts/check_npm_audit.py), which accepts only
-the advisories [`api/admin-ui/audit-allowlist.json`](api/admin-ui/audit-allowlist.json)
-lists, until each entry expires, and warns on an entry whose advisory is no
-longer reported), the typecheck, Vitest and the production build.
+the `admin-ui` job runs `npm ci`, the typecheck, Vitest and the production
+build.
+
+A separate workflow,
+[`security-npm.yaml`](.github/workflows/security-npm.yaml), runs `npm audit`
+on the committed lockfile of every npm project: today the admin panel and the
+release tooling in
+[`scripts/release/semantic-release/`](scripts/release/semantic-release/). It
+runs on every PR, on pushes to `main`, and weekly. Each audit goes through
+[`scripts/security/check_npm_audit.py`](scripts/security/check_npm_audit.py),
+which fails on any advisory at or above the project's level that
+[`scripts/security/npm-audit-exceptions.json`](scripts/security/npm-audit-exceptions.json)
+doesn't list. That file's `projects` names every npm project and its level,
+and CI fails unless they match the committed `package-lock.json` files, so a
+new npm project needs an entry there, and a `.node-version` beside its
+lockfile. Every exception expires, at most 367 days out. An entry that expires
+within 7 days warns on every run. One that has expired, or whose advisory (or
+a package it names) is no longer reported, warns on PRs and pushes and fails
+the weekly run, so it is reviewed or removed. GitHub emails a scheduled run's
+failure only to whoever last edited its `cron` line, so
+@CAM-Gerlach watches the
+[workflow's runs](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/security-npm.yaml)
+for the weekly one. The check pins the npm settings that decide what is
+audited, so neither an `.npmrc` nor the environment (`NODE_ENV=production`,
+offline mode) can narrow it, and it refuses an audit report that isn't
+internally consistent, an allowlist that repeats a key, and an `--allowlist`
+path that doesn't exist. The release itself never audits, so an advisory in
+the release tooling fails PRs but never blocks a release.
+
+To audit every npm project locally, as CI does, run this from the repository
+root (it needs Python 3.9 or later, npm and Git):
+
+```sh
+python3 scripts/security/check_npm_audit.py --all --allowlist scripts/security/npm-audit-exceptions.json
+```
+
+Give it a project's directory, such as `api/admin-ui`, instead of `--all` to
+audit only that one.
 
 ## Documentation
 

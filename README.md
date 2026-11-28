@@ -146,14 +146,24 @@ goes through
 which fails on any advisory the project's `audit-allowlist.json`
 ([admin panel](api/admin-ui/audit-allowlist.json),
 [release tooling](scripts/release/semantic-release/audit-allowlist.json))
-doesn't list. Every entry expires, at most 367 days out. An entry that has
-expired, or whose advisory is no longer reported, warns on PRs and pushes and
-fails the weekly run, so it is reviewed or removed. The check pins the npm
-settings that decide what is audited, so neither an `.npmrc` nor the
-environment (`NODE_ENV=production`, offline mode) can narrow it, and it
-refuses an audit report that isn't internally consistent. The release itself
-never audits, so an advisory in the release tooling fails PRs but never blocks
-a release.
+doesn't list. Every entry expires, at most 367 days out. An entry that expires
+within 7 days warns on every run. One that has expired, or whose advisory (or
+a package it names) is no longer reported, warns on PRs and pushes and fails
+the weekly run, so it is reviewed or removed. GitHub emails a scheduled run's
+failure only to whoever last edited its `cron` line, so
+@CAM-Gerlach watches the
+[workflow's runs](https://github.com/openteams-ai/collab-hub-pack/actions/workflows/security-npm.yaml)
+for the weekly one. The check pins the npm settings that decide what is
+audited, so neither an `.npmrc` nor the environment (`NODE_ENV=production`,
+offline mode) can narrow it, and it refuses an audit report that isn't
+internally consistent, an allowlist that repeats a key, and an `--allowlist`
+path that doesn't exist. The release itself never audits, so an advisory in
+the release tooling fails PRs but never blocks a release.
+
+To audit every npm project locally, as CI does, run
+`python3 scripts/security/check_npm_audit.py --all` from anywhere in the
+repository; it needs Python 3.9 or later, npm and Git. Give it a project's
+directory instead of `--all` to audit only that one.
 
 ## Documentation
 

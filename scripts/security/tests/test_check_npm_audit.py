@@ -150,6 +150,10 @@ class CheckTestCase(unittest.TestCase):
         # Whether the check runs as under GitHub Actions; these tests themselves run there in CI.
         self.github_actions = False
         self.stdout = ""
+        # The real shared allowlist sits next to the script; tests that want one name their own.
+        shared = mock.patch.object(check, "SHARED_ALLOWLIST", self.tmp / "no-shared-allowlist.json")
+        shared.start()
+        self.addCleanup(shared.stop)
 
     def write(self, name: str, data: object) -> Path:
         path = self.tmp / name
@@ -165,7 +169,11 @@ class CheckTestCase(unittest.TestCase):
     def call(self, *argv: str, environment: dict[str, str] | None = None) -> tuple[int, str]:
         """Run the check; return (exit code, stderr), and keep its stdout in ``self.stdout``."""
         stdout, stderr = io.StringIO(), io.StringIO()
-        environment = {"GITHUB_ACTIONS": "true" if self.github_actions else "", **(environment or {})}
+        environment = {
+            "GITHUB_ACTIONS": "true" if self.github_actions else "",
+            "GITHUB_WORKSPACE": "",
+            **(environment or {}),
+        }
         with (
             mock.patch.dict(os.environ, environment),
             contextlib.redirect_stdout(stdout),
@@ -209,10 +217,30 @@ class AdvisoryTests(CheckTestCase):
         self.allowlist = {"allowlist": []}
         self.assertEqual(self.run_main(), (0, ""))
 
-    def test_missing_allowlist_file_means_none(self) -> None:
-        code, stderr = self.run_main("--allowlist", str(self.tmp / "absent.json"))
+    def test_missing_default_allowlist_means_none(self) -> None:
+        self.write("package-lock.json", LOCKFILE)
+        report = self.write("report.json", REPORT)
+        code, stderr = self.call(str(self.tmp), "--report", str(report), "--today", TODAY)
         self.assertEqual(code, 1)
         self.assertIn(f"{ALLOWED} (high, picomatch) is not allowlisted", stderr)
+
+    def test_missing_explicit_allowlist_is_refused(self) -> None:
+        # A mistyped path would otherwise mean no exceptions and the default level, silently.
+        code, stderr = self.run_main("--allowlist", str(self.tmp / "absent.json"))
+        self.assertEqual(code, 2)
+        self.assertIn("absent.json: no such file", stderr)
+
+    def test_default_allowlist_is_the_shared_one_next_to_the_script(self) -> None:
+        # Ahead of the project's own file, which an older layout may have left behind.
+        shared = {"projects": {"frontend": {"level": "critical"}}, "allowlist": []}
+        self.enter(self.tmp)
+        self.write("frontend/package-lock.json", LOCKFILE)
+        self.write("frontend/audit-allowlist.json", {"allowlist": [entry()]})
+        report = self.write("report.json", REPORT)
+        with mock.patch.object(check, "SHARED_ALLOWLIST", self.write("shared.json", shared)):
+            code, stderr = self.call("frontend", "--report", str(report), "--today", TODAY)
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertIn("allowlisted: 0; failing at critical or above", self.stdout)
 
     def test_default_allowlist_is_the_projects_own(self) -> None:
         self.write("audit-allowlist.json", {"allowlist": [entry()]})
@@ -332,8 +360,72 @@ class ThresholdTests(CheckTestCase):
 class AllowlistTests(CheckTestCase):
     def test_entry_is_valid_through_its_expiry_day(self) -> None:
         self.allowlist = {"allowlist": [entry(expires=TODAY)]}
+        self.assertEqual(self.run_main("--strict"), (0, ""))
+        self.assertIn(f"allowlisted until {TODAY}", self.stdout)
+
+    def test_entry_expiring_soon_warns_even_when_strict(self) -> None:
+        # Seen on every pull request in the week before the weekly run fails on it, and never failing.
+        for expires, when in (
+            (TODAY, "today"),
+            ("2026-11-18", "tomorrow"),
+            ("2026-11-20", "in 3 days"),
+            ("2026-11-24", "in 7 days"),
+        ):
+            for strict in ((), ("--strict",)):
+                with self.subTest(expires=expires, strict=bool(strict)):
+                    self.allowlist = {"allowlist": [entry(expires=expires)]}
+                    self.assertEqual(self.run_main(*strict), (0, ""))
+                    self.assertIn(
+                        f"WARNING: {ALLOWED}: allowlist entry expires {when}, on {expires}; "
+                        "fix the advisory or review the entry before then",
+                        self.stdout,
+                    )
+
+    def test_entry_expiring_later_does_not_warn(self) -> None:
+        self.allowlist = {"allowlist": [entry(expires="2026-11-25")]}  # 8 days away
         self.assertEqual(self.run_main(), (0, ""))
         self.assertNotIn("WARNING", self.stdout)
+
+    def test_entry_expiring_soon_is_a_github_warning_on_its_line(self) -> None:
+        self.github_actions = True
+        self.allowlist = {"allowlist": [entry(expires="2026-11-20")]}
+        self.assertEqual(self.run_main("--strict"), (0, ""))
+        self.assertRegex(
+            self.stdout,
+            r"(?m)^::warning file=[^,\n]*allowlist\.json,line=4,title=npm audit allowlist entry expiring soon::"
+            + ALLOWED
+            + ": allowlist entry expires in 3 days",
+        )
+        self.assertNotIn("::error", self.stdout)
+
+    def test_annotation_names_the_file_relative_to_the_checkout(self) -> None:
+        self.github_actions = True
+        self.report["vulnerabilities"] = {}
+        self.assertEqual(self.run_main(), (0, ""))  # the allowlist is given as an absolute path
+        self.assertRegex(self.stdout, r"(?m)^::warning file=[^,\n]+allowlist\.json,")
+        code, _ = self.call(
+            str(self.tmp),
+            "--report",
+            str(self.tmp / "report.json"),
+            "--allowlist",
+            str(self.tmp / "allowlist.json"),
+            "--today",
+            TODAY,
+            environment={"GITHUB_WORKSPACE": str(self.tmp)},
+        )
+        self.assertEqual(code, 0)
+        self.assertRegex(self.stdout, r"(?m)^::warning file=allowlist\.json,line=4,")
+
+    def test_annotation_is_on_the_entrys_id_line(self) -> None:
+        # Not on an earlier mention of the same ID as a bare JSON string, here in a comment list.
+        self.github_actions = True
+        self.report["vulnerabilities"] = {}
+        self.allowlist = {"$comment": ["Remove once fixed:", ALLOWED], "allowlist": [entry()]}
+        self.assertEqual(self.run_main(), (0, ""))
+        lines = (self.tmp / "allowlist.json").read_text(encoding="utf-8").splitlines()
+        id_line = next(number for number, line in enumerate(lines, start=1) if f'"id": "{ALLOWED}"' in line)
+        self.assertGreater(id_line, 2)
+        self.assertIn(f",line={id_line},", self.stdout)
 
     def test_expired_entry_warns_and_still_covers(self) -> None:
         # The calendar, not the pull request, made it due: it must not fail every open pull request.
@@ -449,7 +541,20 @@ class AllowlistTests(CheckTestCase):
         not_a_list = 'expected an object with an "allowlist" list'
         wrong_keys = "expected the keys"
         bad_date = "expires must be a YYYY-MM-DD date"
+        bad_package = "package must be a package name or a non-empty list of different package names"
+        duplicate = "appears twice in one object, so which value counts is not clear"
         cases = {
+            # json.loads would keep the last of each, while a reviewer reads the first.
+            "repeated top-level key": ('{"allowlist": [], "allowlist": []}', f"the key 'allowlist' {duplicate}"),
+            "repeated entry key": (
+                '{"allowlist": [{"id": "' + ALLOWED + '", "expires": "2020-01-01", "expires": "' + EXPIRES + '", '
+                '"reason": "x", "tracking": "y"}]}',
+                f"the key 'expires' {duplicate}",
+            ),
+            "repeated project": (
+                '{"projects": {"frontend": {"level": "high"}, "frontend": {"level": "critical"}}, "allowlist": []}',
+                f"the key 'frontend' {duplicate}",
+            ),
             "not an object": ([], not_a_list),
             "no allowlist list": ({"allowlist": {}}, not_a_list),
             "missing key": ({"allowlist": [{"id": ALLOWED, "expires": EXPIRES, "reason": "x"}]}, wrong_keys),
@@ -466,7 +571,16 @@ class AllowlistTests(CheckTestCase):
             "null expiry": ({"allowlist": [entry(expires=None)]}, bad_date),
             "expiry omitted": ({"allowlist": [{"id": ALLOWED, "reason": "x", "tracking": "y"}]}, wrong_keys),
             "dev_only not a boolean": ({"allowlist": [entry(dev_only="yes")]}, "dev_only must be true or false"),
-            "empty package": ({"allowlist": [entry(package="")]}, "package must be a non-empty string"),
+            "empty package": ({"allowlist": [entry(package="")]}, bad_package),
+            "empty package list": ({"allowlist": [entry(package=[])]}, bad_package),
+            "package list with an empty name": ({"allowlist": [entry(package=["picomatch", " "])]}, bad_package),
+            "package list with a repeat": ({"allowlist": [entry(package=["picomatch", "picomatch"])]}, bad_package),
+            "package list with a non-string": ({"allowlist": [entry(package=["picomatch", 3])]}, bad_package),
+            "package not a name": ({"allowlist": [entry(package=3)]}, bad_package),
+            # Not "every package": that is what leaving the key out means.
+            "package null": ({"allowlist": [entry(package=None)]}, bad_package),
+            "padded package": ({"allowlist": [entry(package=" picomatch")]}, bad_package),
+            "padded package in a list": ({"allowlist": [entry(package=["picomatch", "fdir "])]}, bad_package),
             "directory outside a shared allowlist": (
                 {"allowlist": [entry(directory="frontend")]},
                 '"directory" belongs only in a shared allowlist',
@@ -505,6 +619,38 @@ class PackageTests(CheckTestCase):
         self.assertIn(f"{ALLOWED} (high, fdir) is not allowlisted; its allowlist entry covers only picomatch", stderr)
         self.allowlist = {"allowlist": [entry()]}
         self.assertEqual(self.run_main(), (0, ""))
+
+    def test_package_list_covers_each_package_named(self) -> None:
+        self.add_advisory("fdir", ALLOWED, "high")
+        self.allowlist = {"allowlist": [entry(package=["picomatch", "fdir"])]}
+        self.assertEqual(self.run_main("--strict"), (0, ""))
+        self.assertIn(f"allowlisted in fdir, picomatch until {EXPIRES}", self.stdout)
+
+    def test_package_list_leaves_others_uncovered(self) -> None:
+        self.add_advisory("fdir", ALLOWED, "high")
+        self.add_advisory("vite", ALLOWED, "high")
+        self.allowlist = {"allowlist": [entry(package=["picomatch", "fdir"])]}
+        code, stderr = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertIn(
+            f"{ALLOWED} (high, vite) is not allowlisted; its allowlist entry covers only fdir, picomatch", stderr
+        )
+
+    def test_package_no_longer_reported_in_a_list_is_due_for_review(self) -> None:
+        # fdir was fixed, but the entry still names it; it must not hide behind picomatch.
+        self.allowlist = {"allowlist": [entry(package=["picomatch", "fdir"])]}
+        message = f"{ALLOWED}: allowlisted in fdir, but no longer reported there; remove them from its package list"
+        self.assertEqual(self.run_main(), (0, ""))
+        self.assertIn(f"WARNING: {message}", self.stdout)
+        code, stderr = self.run_main("--strict")
+        self.assertEqual(code, 1)
+        self.assertIn(f"FAIL: {message}", stderr)
+
+    def test_package_list_no_longer_reported_anywhere_is_due_for_review(self) -> None:
+        self.report["vulnerabilities"] = {}
+        self.allowlist = {"allowlist": [entry(package=["picomatch", "fdir"])]}
+        self.assertEqual(self.run_main(), (0, ""))
+        self.assertIn(f"WARNING: {ALLOWED} in fdir, picomatch: allowlisted but no longer reported", self.stdout)
 
 
 class SharedAllowlistTests(CheckTestCase):
@@ -658,6 +804,38 @@ class ReportTests(CheckTestCase):
         code, stderr = self.run_main()
         self.assertEqual(code, 2)
         self.assertIn("npm audit failed", stderr)
+
+    def test_report_that_is_not_utf8_is_refused(self) -> None:
+        # What PowerShell 5's `npm audit --json > report.json` writes.
+        report = self.tmp / "report-utf16.json"
+        report.write_text(json.dumps(REPORT), encoding="utf-16")
+        code, stderr = self.call(str(self.tmp), "--report", str(report), "--today", TODAY)
+        self.assertEqual(code, 2)
+        self.assertIn("cannot read it as UTF-8 text", stderr)
+
+    def test_output_the_console_cannot_encode_is_escaped(self) -> None:
+        # As through a Windows pipe, whose code page lacks the character; run as its own process.
+        report = summarize(copy.deepcopy(REPORT))
+        report["vulnerabilities"]["picomatch"]["via"][0]["title"] = "picomatch → ReDoS"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                str(self.tmp),
+                "--report",
+                str(self.write("report.json", report)),
+                "--allowlist",
+                str(self.write("allowlist.json", {"allowlist": []})),
+                "--today",
+                TODAY,
+            ],
+            capture_output=True,
+            env={**os.environ, "PYTHONIOENCODING": "ascii", "GITHUB_ACTIONS": ""},
+            check=False,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(rb"picomatch \u2192 ReDoS", result.stdout)
+        self.assertNotIn(b"Traceback", result.stderr)
 
     def test_unrecognized_reports_are_refused(self) -> None:
         for label, report in {"v1 report": {"advisories": {}}, "not JSON": "", "not an object": []}.items():
@@ -862,10 +1040,125 @@ class ListProjectsTests(CheckTestCase):
         self.assertEqual(code, 2)
         self.assertIn("no committed package-lock.json", stderr)
 
+    def test_missing_explicit_allowlist_is_refused(self) -> None:
+        code, stderr = self.list_projects("--allowlist", str(self.tmp / "absent.json"))
+        self.assertEqual(code, 2)
+        self.assertIn("absent.json: no such file", stderr)
+
     def test_takes_no_directory_or_audit_options(self) -> None:
         self.assertEqual(self.call("--list-projects", ".")[0], 2)
         self.assertEqual(self.call("--list-projects", "--strict")[0], 2)
+        self.assertEqual(self.call("--list-projects", "--all")[0], 2)
         self.assertEqual(self.call()[0], 2)
+
+
+CLEAN_REPORT = json.dumps(
+    {
+        "auditReportVersion": 2,
+        "vulnerabilities": {},
+        "metadata": {"vulnerabilities": {**dict.fromkeys(SEVERITIES, 0), "total": 0}},
+    }
+)
+
+
+@unittest.skipUnless(shutil.which("git"), "needs git")
+class AllProjectsTests(CheckTestCase):
+    """--all, with npm replaced by a canned report per project."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        subprocess.run(
+            ["git", "init", "-q"], cwd=self.tmp, check=True, capture_output=True, env={**os.environ, **GIT_ENV}
+        )
+        for name in ("a", "b", "c"):
+            self.write(f"{name}/package-lock.json", LOCKFILE)
+        subprocess.run(
+            ["git", "add", "."], cwd=self.tmp, check=True, capture_output=True, env={**os.environ, **GIT_ENV}
+        )
+        self.enter(self.tmp)
+        # a passes, b has an advisory it does not allowlist, c's report cannot be trusted.
+        self.reports = {"a": CLEAN_REPORT, "b": json.dumps(summarize(copy.deepcopy(REPORT))), "c": "{"}
+
+    def audit_all(self, *argv: str) -> tuple[tuple[int, str], mock.MagicMock]:
+        def run_npm_audit(directory: Path) -> str:
+            return self.reports[directory.name]
+
+        with mock.patch.object(check, "run_npm_audit", side_effect=run_npm_audit) as run:
+            result = self.call("--all", *argv, environment=GIT_ENV)
+        return result, run
+
+    def test_runs_every_project_and_exits_with_the_worst(self) -> None:
+        (code, stderr), run = self.audit_all()
+        self.assertEqual(code, 2)
+        self.assertEqual([call.args[0].name for call in run.call_args_list], ["a", "b", "c"])
+        headings = [line for line in self.stdout.splitlines() if line.startswith("==> ")]
+        self.assertEqual(headings, ["==> npm audit: a", "==> npm audit: b", "==> npm audit: c"])
+        self.assertIn(f"{ALLOWED} (high, picomatch) is not allowlisted", stderr)
+        self.assertIn("error: npm audit report is not JSON", stderr)
+        self.assertIn("npm audit did not pass for: b (1), c (2)", stderr)
+
+    def test_failure_ranks_above_a_pass(self) -> None:
+        self.reports["c"] = CLEAN_REPORT
+        (code, stderr), _ = self.audit_all()
+        self.assertEqual(code, 1)
+        self.assertIn("npm audit did not pass for: b (1)", stderr)
+        self.reports["b"] = CLEAN_REPORT
+        self.assertEqual(self.audit_all()[0], (0, ""))
+
+    def test_uses_each_projects_own_allowlist(self) -> None:
+        self.write("b/audit-allowlist.json", {"allowlist": [entry()]})
+        self.reports["c"] = CLEAN_REPORT
+        self.assertEqual(self.audit_all()[0], (0, ""))
+
+    def test_uses_a_shared_allowlist_and_its_levels(self) -> None:
+        self.reports["c"] = CLEAN_REPORT
+        shared = {"projects": {"a": {}, "b": {"level": "critical"}, "c": {}}, "allowlist": []}
+        self.assertEqual(self.audit_all("--allowlist", str(self.write("shared.json", shared)))[0], (0, ""))
+        shared["projects"]["b"] = {}
+        self.assertEqual(self.audit_all("--allowlist", str(self.write("shared.json", shared)))[0][0], 1)
+
+    def test_uses_the_shared_allowlist_next_to_the_script_by_default(self) -> None:
+        self.reports["c"] = CLEAN_REPORT
+        shared = {"projects": {"a": {}, "b": {"level": "critical"}, "c": {}}, "allowlist": []}
+        with mock.patch.object(check, "SHARED_ALLOWLIST", self.write("shared.json", shared)):
+            self.assertEqual(self.audit_all()[0], (0, ""))
+            # Its projects are checked against the lockfiles up front, as an explicit one's are.
+            shared["projects"] = {"a": {}, "b": {}}
+            self.write("shared.json", shared)
+            (code, stderr), run = self.audit_all()
+            self.assertEqual(code, 2)
+            self.assertIn("committed but not in its projects: c", stderr)
+            run.assert_not_called()
+
+    def test_runs_from_anywhere_in_the_repository(self) -> None:
+        self.enter(self.tmp / "b")
+        (code, _), run = self.audit_all()
+        self.assertEqual(code, 2)
+        # Resolved: git gives the long form of a path Windows may hold in its short (8.3) form.
+        called = [call.args[0].resolve() for call in run.call_args_list]
+        self.assertEqual(called, [(self.tmp / name).resolve() for name in "abc"])
+
+    def test_a_bad_shared_allowlist_is_refused_before_any_audit(self) -> None:
+        for label, shared, message in (
+            ("projects that differ", {"projects": {"a": {}, "b": {}}, "allowlist": []}, "committed but not in"),
+            ("malformed", {"projects": {"a": {}, "b": {}, "c": {}}, "allowlist": [entry()]}, "directory must be"),
+            ("missing", None, "no such file"),
+        ):
+            with self.subTest(label):
+                path = self.tmp / "shared.json"
+                path.unlink(missing_ok=True)
+                if shared is not None:
+                    self.write("shared.json", shared)
+                (code, stderr), run = self.audit_all("--allowlist", str(path))
+                self.assertEqual(code, 2)
+                self.assertIn(message, stderr)
+                self.assertEqual(stderr.count("error:"), 1)
+                run.assert_not_called()
+
+    def test_takes_no_directory_report_or_date(self) -> None:
+        for argv in (("a",), ("--report", "r.json"), ("--report", "r.json", "--today", TODAY)):
+            with self.subTest(argv=argv):
+                self.assertEqual(self.audit_all(*argv)[0][0], 2)
 
 
 FIXTURE_PACKAGE = {
@@ -969,7 +1262,7 @@ class RealNpmTests(CheckTestCase):
             **settings,
         }
         self.server.asked.clear()
-        allowlist = str(self.tmp / "none.json")
+        allowlist = str(self.write("none.json", {"allowlist": []}))
         return self.call(str(self.project), "--allowlist", allowlist, *argv, environment=environment)
 
     def assert_audits_everything(self, code: int, stderr: str) -> None:

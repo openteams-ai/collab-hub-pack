@@ -17,10 +17,15 @@ name: npm Dependency Audit
 # newly published advisory fails a run on main even in a week with no PRs.
 #
 # An allowlist entry due for review (past its expiry, or covering an advisory
-# no longer reported) only warns on PRs and pushes, as it follows from the
-# calendar or a change upstream, not from the PR; the weekly run fails on it
-# (--strict), so it is reviewed or removed rather than left to cover the
-# advisory if it ever returns.
+# or a package no longer reported) only warns on PRs and pushes, as it follows
+# from the calendar or a change upstream, not from the PR; the weekly run fails
+# on it (--strict), so it is reviewed or removed rather than left to cover the
+# advisory if it ever returns. An entry expiring within 7 days warns on every
+# run, so the review is seen coming.
+#
+# GitHub emails a scheduled run's failure only to whoever last edited the cron
+# line below. The owner of the weekly run, who watches this workflow's runs in
+# the Actions tab, is @CAM-Gerlach; update this and README.md if that changes.
 #
 # The release itself never audits (semantic-release.yml installs with
 # --no-audit), so an advisory in the release tooling fails PRs here but never

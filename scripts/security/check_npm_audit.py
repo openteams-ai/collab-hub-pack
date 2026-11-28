@@ -3,7 +3,13 @@
 
     python3 scripts/security/check_npm_audit.py DIRECTORY [--allowlist FILE] [--level LEVEL]
                                                 [--prod-level LEVEL] [--strict] [--report FILE]
+    python3 scripts/security/check_npm_audit.py --all [--allowlist SHARED_FILE] [--level LEVEL]
+                                                [--prod-level LEVEL] [--strict]
     python3 scripts/security/check_npm_audit.py --list-projects [--allowlist SHARED_FILE]
+
+The canonical copy is openteams-ai/collab-hub-pack scripts/security/check_npm_audit.py and its
+tests, tests/test_check_npm_audit.py; other repositories vendor both unchanged, so change them
+there first.
 
 Runs ``npm audit`` on DIRECTORY/package-lock.json alone (``--package-lock-only``), so nothing needs
 to be installed and no dependency's code runs, or reads a saved ``npm audit --json`` report with
@@ -12,47 +18,55 @@ the environment and any .npmrc, so offline mode (which skips the advisory lookup
 nothing), NODE_ENV=production or ``omit=dev`` (which drop dependency groups) cannot make the audit
 report less than the lockfile holds.
 
-Each advisory is checked against the allowlist: DIRECTORY/audit-allowlist.json, or the file
-``--allowlist`` names (none if it is absent). The check fails (exit 1) on:
+Each advisory is checked against the allowlist: the file ``--allowlist`` names (which must exist);
+by default, the shared allowlist npm-audit-exceptions.json next to this script, if there is one;
+otherwise DIRECTORY/audit-allowlist.json (none if it is absent). The check fails (exit 1) on:
 
 - an advisory no allowlist entry covers, at or above LEVEL (default ``low``), or at or above the
   production level (``--prod-level``, default LEVEL) where it reaches a copy the lockfile does not
   mark ``dev``, so it ships;
 - a ``dev_only`` entry whose advisory reaches a copy the lockfile does not mark ``dev``;
-- with ``--strict``, an entry due for review: past its ``expires`` date, or covering an advisory
-  that is no longer reported.
+- with ``--strict``, an entry due for review: past its ``expires`` date, or covering an advisory,
+  or a package, that is no longer reported.
 
 Without ``--strict``, an entry due for review only warns, and an expired entry still covers its
 advisory. Both follow from the calendar or from a change upstream (a fix, a withdrawn advisory, a
 narrowed range), not from the pull request being checked, so they should not turn every open pull
-request red; the weekly scheduled run passes ``--strict``, so no review is missed. Under GitHub
-Actions each is an annotation (``::warning::``, or ``::error::`` with ``--strict``) on the entry's
-line in the allowlist.
+request red; the weekly scheduled run passes ``--strict``, so no review is missed. An entry that
+expires within 7 days warns on every run, ``--strict`` or not, and never fails, so the review is
+seen coming before the weekly run fails on it. Under GitHub Actions each is an annotation
+(``::warning::``, or ``::error::`` for a review with ``--strict``) on the entry's line in the
+allowlist.
 
 It refuses (exit 2) whatever it cannot trust: an npm run that ended abnormally or printed no report,
 a report npm could not produce (a registry error, say), a report that is not internally consistent
 (an entry no advisory stands behind, a package named in a ``via`` list that the report does not
-describe, a summary that disagrees with the entries), and a malformed allowlist. An advisory with an
-unknown severity counts as critical, and one without a GHSA URL cannot be allowlisted, so both fail
-rather than refuse the report.
+describe, a summary that disagrees with the entries), and a malformed allowlist, including one that
+repeats a key within an object, where a reviewer could read one value and the check use another. An
+advisory with an unknown severity counts as critical, and one without a GHSA URL cannot be
+allowlisted, so both fail rather than refuse the report.
 
 ``--list-projects`` prints, as a JSON list, the directory of every committed package-lock.json
-(``git ls-files``; ``.`` for the repository root), for a CI matrix that audits every npm project
-without anyone having to list them. Given a shared allowlist, it also refuses (exit 2) unless that
-allowlist's ``projects`` are exactly those directories.
+(``git ls-files``, relative to the repository root wherever it runs; ``.`` for the root), for a CI
+matrix that audits every npm project without anyone having to list them. Given a shared allowlist,
+it also refuses (exit 2) unless that allowlist's ``projects`` are exactly those directories.
+
+``--all`` audits every one of those directories in turn, each under a ``==> npm audit: DIRECTORY``
+heading, with the shared allowlist if there is one (checked up front, before any audit) or else
+each project's own; the other options apply to every project. It runs them all, whatever each one's result, and
+exits with the worst: 2 over 1 over 0.
 
 It exists because ``npm audit`` cannot ignore an advisory, and an advisory with no patched release
 otherwise blocks CI until upstream ships one. audit-ci is not used: its last release (7.1.0)
 silently passes an advisory on a transitive package whose ``via`` list starts with another
 vulnerable package (IBM/audit-ci#360), which is exactly the state allowlisting one package leaves
-its dependents in. Standard library only. Tested in tests/test_check_npm_audit.py, next to this
-script.
+its dependents in. Standard library only; runs on Python 3.9 and later.
 
 The allowlist is a JSON object whose ``allowlist`` list holds one entry per advisory::
 
     {"id": "GHSA-xxxx-xxxx-xxxx", "expires": "YYYY-MM-DD",
      "reason": "why it does not affect us", "tracking": "URL of the upstream fix or issue",
-     "dev_only": true, "package": "name"}
+     "dev_only": true, "package": "name" or ["name", ...]}
 
 An entry covers its advisory, wherever it appears in the dependency tree, through the end of its
 ``expires`` day (UTC). ``expires`` is required and at most 367 days after the day the check runs, so
@@ -62,8 +76,9 @@ every exception is reviewed at least yearly. ``dev_only`` and ``package`` are op
   audit reports is a devDependency-only node in the lockfile (``"dev": true``; a ``devOptional``
   node can install in production, so it does not count). Set it on any entry whose reason is that
   the advisory does not ship, so that reason is checked rather than assumed.
-- ``package``: the entry covers its advisory only in that package, for an advisory reported in more
-  than one.
+- ``package``: a package name, or a list of them; the entry covers its advisory only in those
+  packages, for an advisory reported in more than one. Each one named must still be reported, or
+  the entry is due for review.
 
 The object may also set ``level`` and ``prod_level``, the project's defaults for ``--level`` and
 ``--prod-level``; the command-line flags take precedence.
@@ -80,6 +95,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
 import datetime
 import json
 import os
@@ -91,6 +107,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 ALLOWLIST_NAME = "audit-allowlist.json"
+# The default allowlist, when it exists: a shared one next to this script, as both repositories keep it.
+SHARED_ALLOWLIST = Path(__file__).resolve().parent / "npm-audit-exceptions.json"
 LOCKFILE_NAME = "package-lock.json"
 SEVERITIES = ("info", "low", "moderate", "high", "critical")
 LEVELS = SEVERITIES[1:]
@@ -98,9 +116,13 @@ GHSA_ID = re.compile(r"GHSA(?:-[23456789cfghjmpqrvwx]{4}){3}")
 GHSA_URL = re.compile(r"https://github\.com/advisories/(" + GHSA_ID.pattern + r")")
 ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 MAX_EXPIRY_DAYS = 367
+# An entry expiring within this many days warns on every run, before the weekly run fails on it.
+DUE_SOON_DAYS = 7
 ENTRY_REQUIRED = frozenset({"id", "expires", "reason", "tracking"})
 ENTRY_OPTIONAL = frozenset({"dev_only", "package", "directory"})
 THRESHOLD_KEYS = frozenset({"level", "prod_level"})
+REVIEW_TITLE = "npm audit allowlist entry due for review"
+DUE_SOON_TITLE = "npm audit allowlist entry expiring soon"
 
 # npm also takes its settings from the environment and from .npmrc files, and some of them make the
 # audit report less than the lockfile holds: offline mode skips the advisory lookup and reports
@@ -128,6 +150,10 @@ class Refusal(Exception):
     """Something the check cannot trust, so it exits 2 rather than pass or fail on it."""
 
 
+class DuplicateKey(ValueError):
+    """A JSON object that repeats a key, which json.loads would otherwise resolve silently."""
+
+
 @dataclass
 class Advisory:
     id: str
@@ -145,7 +171,8 @@ class Entry:
     reason: str
     tracking: str
     dev_only: bool = False
-    package: str | None = None
+    # The packages it covers its advisory in; None for every package.
+    packages: frozenset[str] | None = None
     # Which of the file's entries with this ID it is, counting from 0, to find its line.
     ordinal: int = 0
 
@@ -169,6 +196,15 @@ def rank(severity: str) -> int:
     return SEVERITIES.index(severity)
 
 
+def refuse_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    obj: dict[str, object] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise DuplicateKey(f"the key {key!r} appears twice in one object")
+        obj[key] = value
+    return obj
+
+
 def read_thresholds(raw: object, where: str) -> tuple[str | None, str | None]:
     if not isinstance(raw, dict) or not set(raw) <= THRESHOLD_KEYS:
         raise Refusal(f"{where}: thresholds are an object with at most {sorted(THRESHOLD_KEYS)}")
@@ -181,14 +217,37 @@ def read_thresholds(raw: object, where: str) -> tuple[str | None, str | None]:
     return level, prod_level
 
 
-def load_allowlist(path: Path, today: datetime.date, directory: str | None) -> Allowlist:
-    """Read and check the whole allowlist, keeping the entries for ``directory`` (none if None)."""
+def read_packages(raw: object, where: str) -> frozenset[str]:
+    # A null or a padded name is refused, not read as "every package" or as a name nothing matches.
+    names = [raw] if isinstance(raw, str) else raw
+    if (
+        not isinstance(names, list)
+        or not names
+        or not all(isinstance(name, str) and name and name == name.strip() for name in names)
+        or len(set(names)) != len(names)
+    ):
+        raise Refusal(
+            f"{where}: package must be a package name or a non-empty list of different package names, "
+            f"each without surrounding spaces: {raw!r}"
+        )
+    return frozenset(names)
+
+
+def load_allowlist(path: Path, today: datetime.date, directory: str | None, required: bool = False) -> Allowlist:
+    """Read and check the whole allowlist, keeping the entries for ``directory`` (none if None).
+
+    A missing file means no allowlist, unless it is ``required`` (a path the user gave).
+    """
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=refuse_duplicate_keys)
     except FileNotFoundError:
+        if required:
+            raise Refusal(f"{path}: no such file") from None
         return Allowlist(path)
     except OSError as error:
         raise Refusal(f"{path}: {error}") from None
+    except DuplicateKey as error:
+        raise Refusal(f"{path}: {error}, so which value counts is not clear") from None
     except ValueError as error:
         raise Refusal(f"{path}: not valid JSON: {error}") from None
     if not isinstance(data, dict) or not isinstance(data.get("allowlist"), list):
@@ -247,9 +306,7 @@ def load_allowlist(path: Path, today: datetime.date, directory: str | None) -> A
         dev_only = raw.get("dev_only", False)
         if not isinstance(dev_only, bool):
             raise Refusal(f"{where}: dev_only must be true or false: {dev_only!r}")
-        package = raw.get("package")
-        if package is not None and not (isinstance(package, str) and package.strip()):
-            raise Refusal(f"{where}: package must be a non-empty string: {package!r}")
+        packages = read_packages(raw["package"], where) if "package" in raw else None
         entry_directory = raw.get("directory")
         if shared:
             if not isinstance(entry_directory, str) or entry_directory not in data["projects"]:
@@ -259,6 +316,7 @@ def load_allowlist(path: Path, today: datetime.date, directory: str | None) -> A
                 )
         elif entry_directory is not None:
             raise Refusal(f'{where}: "directory" belongs only in a shared allowlist, one with "projects"')
+        # One entry per advisory: a list of packages covers an advisory reported in several.
         if (entry_directory, raw["id"]) in seen:
             raise Refusal(f"{where}: {raw['id']} is listed twice" + (f" for {entry_directory}" if shared else ""))
         seen.add((entry_directory, raw["id"]))
@@ -267,7 +325,7 @@ def load_allowlist(path: Path, today: datetime.date, directory: str | None) -> A
         if directory is None or (shared and entry_directory != directory):
             continue
         allowlist.entries[raw["id"]] = Entry(
-            raw["id"], expires, raw["reason"], raw["tracking"], dev_only, package, ordinal
+            raw["id"], expires, raw["reason"], raw["tracking"], dev_only, packages, ordinal
         )
     return allowlist
 
@@ -430,6 +488,16 @@ def production_copies(nodes: set[str], lock_packages: dict[str, dict]) -> list[s
     )
 
 
+@dataclass
+class Result:
+    lines: list[str] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+    # Entries due for review, with why: warnings, or failures with --strict.
+    reviews: list[tuple[Entry, str]] = field(default_factory=list)
+    # Entries expiring soon, with why: warnings only, even with --strict.
+    notices: list[tuple[Entry, str]] = field(default_factory=list)
+
+
 def check(
     advisories: dict[str, Advisory],
     entries: dict[str, Entry],
@@ -437,15 +505,14 @@ def check(
     prod_level: str,
     today: datetime.date,
     lock_packages: dict[str, dict] | None = None,
-) -> tuple[list[str], list[str], list[tuple[Entry, str]]]:
-    """Return (report lines, failures, entries due for review with why).
+) -> Result:
+    """Check the advisories against the entries.
 
     ``lock_packages`` is required if any entry is dev_only, or ``prod_level`` is below ``level``.
     """
-    lines: list[str] = []
-    failures: list[str] = []
-    reviews: list[tuple[Entry, str]] = []
+    result = Result()
     lock = lock_packages or {}
+    covering: set[str] = set()
 
     def fails(severity: str, nodes: set[str]) -> bool:
         if rank(severity) >= rank(level):
@@ -453,51 +520,92 @@ def check(
         return rank(severity) >= rank(prod_level) and bool(production_copies(nodes, lock))
 
     for advisory in sorted(advisories.values(), key=lambda a: (-rank(a.severity), a.id)):
-        lines.append(
+        result.lines.append(
             f"{advisory.severity:<8} {advisory.id} in {', '.join(sorted(advisory.packages))}: {advisory.title}"
         )
         entry = entries.get(advisory.id)
         covered = {
             package: nodes
             for package, nodes in advisory.packages.items()
-            if entry is not None and entry.package in (None, package)
+            if entry is not None and (entry.packages is None or package in entry.packages)
         }
         uncovered = {package: nodes for package, nodes in advisory.packages.items() if package not in covered}
         if uncovered:
             names = ", ".join(sorted(uncovered))
             if fails(advisory.severity, set().union(*uncovered.values())):
-                only = f"; its allowlist entry covers only {entry.package}" if entry is not None else ""
-                failures.append(f"{advisory.id} ({advisory.severity}, {names}) is not allowlisted{only}")
+                only = ""
+                if entry is not None and entry.packages is not None:
+                    only = f"; its allowlist entry covers only {', '.join(sorted(entry.packages))}"
+                result.failures.append(f"{advisory.id} ({advisory.severity}, {names}) is not allowlisted{only}")
             else:
-                lines.append(f"         below the failing level in {names}, ignored")
+                result.lines.append(f"         below the failing level in {names}, ignored")
         if entry is None or not covered:
             continue
+        covering.add(entry.id)
         if entry.expires < today:
-            reviews.append(
+            result.reviews.append(
                 (entry, f"{entry.id}: allowlist entry expired on {entry.expires}; fix the advisory or review it again")
             )
         if entry.dev_only:
             shipped = production_copies(set().union(*covered.values()), lock)
             if shipped:
-                failures.append(
+                result.failures.append(
                     f"{advisory.id}: allowlisted as dev_only, but not dev-only in the lockfile: {', '.join(shipped)}"
                 )
                 continue
         scope = " (dev-only, checked)" if entry.dev_only else ""
-        where = f" in {entry.package}" if entry.package else ""
-        lines.append(f"         allowlisted{where}{scope} until {entry.expires}: {entry.reason} ({entry.tracking})")
+        where = f" in {', '.join(sorted(entry.packages))}" if entry.packages else ""
+        result.lines.append(
+            f"         allowlisted{where}{scope} until {entry.expires}: {entry.reason} ({entry.tracking})"
+        )
+
     for entry in entries.values():
         advisory = advisories.get(entry.id)
-        if advisory is not None and (entry.package is None or entry.package in advisory.packages):
+        reported = set(advisory.packages) if advisory is not None else set()
+        if entry.id not in covering:
+            # It covers nothing any more: the advisory, or every package it names, has gone.
+            target = f"{entry.id} in {', '.join(sorted(entry.packages))}" if entry.packages else entry.id
+            expired = f", and the entry expired on {entry.expires}" if entry.expires < today else ""
+            result.reviews.append(
+                (entry, f"{target}: allowlisted but no longer reported{expired}; remove its allowlist entry")
+            )
             continue
-        target = f"{entry.id} in {entry.package}" if entry.package else entry.id
-        expired = f", and the entry expired on {entry.expires}" if entry.expires < today else ""
-        reviews.append((entry, f"{target}: allowlisted but no longer reported{expired}; remove its allowlist entry"))
-    return lines, failures, reviews
+        # Still covering, but a package it names may have gone, which would otherwise hide in the list.
+        gone = sorted(entry.packages - reported) if entry.packages is not None else []
+        if gone:
+            result.reviews.append(
+                (
+                    entry,
+                    (
+                        f"{entry.id}: allowlisted in {', '.join(gone)}, but no longer reported there; "
+                        "remove them from its package list"
+                    ),
+                )
+            )
+        days = (entry.expires - today).days
+        if 0 <= days <= DUE_SOON_DAYS:
+            when = "today" if days == 0 else "tomorrow" if days == 1 else f"in {days} days"
+            result.notices.append(
+                (
+                    entry,
+                    (
+                        f"{entry.id}: allowlist entry expires {when}, on {entry.expires}; "
+                        "fix the advisory or review the entry before then"
+                    ),
+                )
+            )
+    return result
 
 
-def annotation(message: str, allowlist_path: Path, advisory_id: str, ordinal: int = 0, level: str = "warning") -> str:
-    """Return a GitHub Actions ``::{level}::`` command for ``message``, on the entry's line if found."""
+def annotation(
+    message: str,
+    allowlist_path: Path,
+    advisory_id: str,
+    ordinal: int = 0,
+    level: str = "warning",
+    title: str = REVIEW_TITLE,
+) -> str:
+    """Return a GitHub Actions ``::{level}::`` command for ``message``, on the entry's ``"id"`` line if found."""
 
     def escape_data(value: str) -> str:
         return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
@@ -505,38 +613,51 @@ def annotation(message: str, allowlist_path: Path, advisory_id: str, ordinal: in
     def escape_property(value: str) -> str:
         return escape_data(value).replace(":", "%3A").replace(",", "%2C")
 
-    properties = [f"file={escape_property(allowlist_path.as_posix())}"]
+    # GitHub attaches an annotation to a line only by its path relative to the checkout.
+    shown = allowlist_path.as_posix()
+    workspace = os.environ.get("GITHUB_WORKSPACE")
+    if workspace:
+        with contextlib.suppress(OSError, ValueError):  # not under the checkout: shown as given
+            shown = allowlist_path.resolve().relative_to(Path(workspace).resolve()).as_posix()
+    properties = [f"file={escape_property(shown)}"]
     try:
         text = allowlist_path.read_text(encoding="utf-8")
     except OSError:
         text = ""
-    matches = [number for number, line in enumerate(text.splitlines(), start=1) if f'"{advisory_id}"' in line]
+    # The entry's own "id" key, not any other mention of the ID (in a comment, say).
+    id_line = re.compile(r'"id"\s*:\s*"' + re.escape(advisory_id) + '"')
+    matches = [number for number, line in enumerate(text.splitlines(), start=1) if id_line.search(line)]
     if ordinal < len(matches):
         properties.append(f"line={matches[ordinal]}")
-    properties.append("title=npm audit allowlist entry due for review")
+    properties.append(f"title={escape_property(title)}")
     return f"::{level} {','.join(properties)}::{escape_data(message)}"
 
 
-def list_projects(allowlist_path: Path | None, today: datetime.date) -> int:
+def find_projects(allowlist_path: Path | None, today: datetime.date) -> tuple[Path, list[str]]:
+    """Return the repository root and the directory of every committed lockfile, relative to it.
+
+    Given a shared allowlist, refuse unless its projects are exactly those directories.
+    """
+
+    def git(*args: str) -> str:
+        try:
+            result = subprocess.run(
+                ["git", *args], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False
+            )
+        except OSError as error:
+            raise Refusal(f"could not run git: {error}") from None
+        if result.returncode != 0:
+            raise Refusal(f"git {args[0]} failed (not in a Git checkout?): {result.stderr.strip()}")
+        return result.stdout
+
+    root = Path(git("rev-parse", "--show-toplevel").strip())
     # Relative to the repository root, wherever this runs from, as a shared allowlist's projects are.
-    try:
-        result = subprocess.run(
-            ["git", "ls-files", "-z", "--full-name", "--", f":(top){LOCKFILE_NAME}", f":(top)*/{LOCKFILE_NAME}"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-    except OSError as error:
-        raise Refusal(f"could not run git: {error}") from None
-    if result.returncode != 0:
-        raise Refusal(f"git ls-files failed (not in a Git checkout?): {result.stderr.strip()}")
-    directories = sorted({project_name(PurePosixPath(path).parent) for path in result.stdout.split("\0") if path})
+    listed = git("ls-files", "-z", "--full-name", "--", f":(top){LOCKFILE_NAME}", f":(top)*/{LOCKFILE_NAME}")
+    directories = sorted({project_name(PurePosixPath(path).parent) for path in listed.split("\0") if path})
     if not directories:
         raise Refusal(f"no committed {LOCKFILE_NAME} found")
     if allowlist_path is not None:
-        allowlist = load_allowlist(allowlist_path, today, None)
+        allowlist = load_allowlist(allowlist_path, today, None, required=True)
         if allowlist.projects is None:
             raise Refusal(f'{allowlist_path}: not a shared allowlist (no "projects"), so there is nothing to compare')
         unlisted = sorted(set(directories) - set(allowlist.projects))
@@ -548,13 +669,13 @@ def list_projects(allowlist_path: Path | None, today: datetime.date) -> int:
             if uncommitted:
                 problems.append(f"in its projects but with no committed {LOCKFILE_NAME}: {', '.join(uncommitted)}")
             raise Refusal(f"{allowlist_path}: {'; '.join(problems)}")
-    print(json.dumps(directories))
-    return 0
+    return root, directories
 
 
-def audit(args: argparse.Namespace, today: datetime.date) -> int:
-    directory: Path = args.directory
-    allowlist = load_allowlist(args.allowlist or directory / ALLOWLIST_NAME, today, project_name(directory))
+def audit(args: argparse.Namespace, today: datetime.date, directory: Path, name: str) -> int:
+    """Audit one project: ``directory`` is where it is, ``name`` how a shared allowlist writes it."""
+    allowlist_path = args.allowlist or directory / ALLOWLIST_NAME
+    allowlist = load_allowlist(allowlist_path, today, name, required=args.allowlist is not None)
     level = args.level or allowlist.level or "low"
     # A production level above the overall one would never apply, so the lower of the two counts.
     prod_level = min(args.prod_level or allowlist.prod_level or level, level, key=rank)
@@ -564,46 +685,82 @@ def audit(args: argparse.Namespace, today: datetime.date) -> int:
     if args.report:
         try:
             text = args.report.read_text(encoding="utf-8")
-        except OSError as error:
-            raise Refusal(f"{args.report}: {error}") from None
+        except (OSError, ValueError) as error:
+            raise Refusal(f"{args.report}: cannot read it as UTF-8 text: {error}") from None
     else:
         text = run_npm_audit(directory)
     advisories = parse_report(text)
-    lines, failures, reviews = check(advisories, allowlist.entries, level, prod_level, today, lock_packages)
+    result = check(advisories, allowlist.entries, level, prod_level, today, lock_packages)
 
     production = f", or {prod_level} or above in production copies" if prod_level != level else ""
     print(
         f"Advisories reported: {len(advisories)}; allowlisted: {len(allowlist.entries)}; "
         f"failing at {level} or above{production}"
     )
-    for line in lines:
+    for line in result.lines:
         print(line)
     in_github_actions = os.environ.get("GITHUB_ACTIONS") == "true"
-    for entry, message in reviews:
+    warnings = [(entry, message, REVIEW_TITLE) for entry, message in result.reviews if not args.strict]
+    warnings += [(entry, message, DUE_SOON_TITLE) for entry, message in result.notices]
+    for entry, message, title in warnings:
         # GitHub reads workflow commands from stdout only.
         if in_github_actions:
-            level_name = "error" if args.strict else "warning"
-            print(annotation(message, allowlist.path, entry.id, entry.ordinal, level_name))
-        elif not args.strict:
+            print(annotation(message, allowlist.path, entry.id, entry.ordinal, "warning", title))
+        else:
             print(f"WARNING: {message}")
+    failures = result.failures
     if args.strict:
-        failures.extend(message for _, message in reviews)
+        for entry, message in result.reviews:
+            if in_github_actions:
+                print(annotation(message, allowlist.path, entry.id, entry.ordinal, "error"))
+            failures.append(message)
     sys.stdout.flush()
     for failure in failures:
         print(f"FAIL: {failure}", file=sys.stderr)
     return 1 if failures else 0
 
 
+def audit_all(args: argparse.Namespace, today: datetime.date) -> int:
+    # Refuses up front, once, a shared allowlist that is malformed or does not match the lockfiles.
+    root, directories = find_projects(args.allowlist, today)
+    statuses = {}
+    for name in directories:
+        print(f"==> npm audit: {name}", flush=True)
+        try:
+            statuses[name] = audit(args, today, root / name, name)
+        except Refusal as refusal:
+            sys.stdout.flush()
+            print(f"error: {refusal}", file=sys.stderr)
+            statuses[name] = 2
+    worst = max(statuses.values())
+    if worst:
+        failed = ", ".join(f"{name} ({status})" for name, status in statuses.items() if status)
+        print(f"npm audit did not pass for: {failed}", file=sys.stderr)
+    return worst
+
+
 def main(argv: list[str] | None = None) -> int:
+    # A console or pipe whose encoding lacks a character in a title or reason must not crash a run
+    # (Windows pipes use the locale's code page): it is printed escaped instead.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(errors="backslashreplace")
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("directory", type=Path, nargs="?", help="the npm project to audit (where package-lock.json is)")
+    parser.add_argument(
+        "--all", action="store_true", help="audit every project --list-projects prints, and exit with the worst result"
+    )
     parser.add_argument(
         "--list-projects",
         action="store_true",
         help="print the directories of every committed package-lock.json as a JSON list, and stop",
     )
     parser.add_argument(
-        "--allowlist", type=Path, help=f"allowlist file (default: DIRECTORY/{ALLOWLIST_NAME}; none if absent)"
+        "--allowlist",
+        type=Path,
+        help=f"allowlist file, which must exist (default: {SHARED_ALLOWLIST.name} next to this script if it exists, "
+        f"else DIRECTORY/{ALLOWLIST_NAME} if that does)",
     )
     parser.add_argument("--report", type=Path, help="read this saved `npm audit --json` report instead of running it")
     parser.add_argument("--level", choices=LEVELS, help="lowest severity that fails (default: the allowlist's, or low)")
@@ -620,10 +777,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--today", type=datetime.date.fromisoformat, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    if args.list_projects == (args.directory is not None):
-        parser.error("give either DIRECTORY or --list-projects")
+    if sum((args.directory is not None, args.all, args.list_projects)) != 1:
+        parser.error("give one of DIRECTORY, --all or --list-projects")
     if args.list_projects and (args.report or args.level or args.prod_level or args.strict or args.today):
         parser.error("--list-projects takes only --allowlist")
+    if args.all and (args.report or args.today):
+        parser.error("--all audits each project live, so it takes no --report or --today")
     if args.level and args.prod_level and rank(args.prod_level) > rank(args.level):
         parser.error(f"--prod-level {args.prod_level} is above --level {args.level}, so it would never apply")
     # The date is fixed only for a saved report, so a live audit cannot keep an expired entry alive.
@@ -631,10 +790,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--today applies only to a saved --report")
     # timezone.utc, not datetime.UTC (3.11+): this also runs on older system Pythons, such as macOS's 3.9.
     today = args.today or datetime.datetime.now(datetime.timezone.utc).date()  # noqa: UP017
+    if args.allowlist is None and SHARED_ALLOWLIST.is_file():
+        args.allowlist = SHARED_ALLOWLIST
     try:
         if args.list_projects:
-            return list_projects(args.allowlist, today)
-        return audit(args, today)
+            print(json.dumps(find_projects(args.allowlist, today)[1]))
+            return 0
+        if args.all:
+            return audit_all(args, today)
+        return audit(args, today, args.directory, project_name(args.directory))
     except Refusal as refusal:
         sys.stdout.flush()
         print(f"error: {refusal}", file=sys.stderr)
